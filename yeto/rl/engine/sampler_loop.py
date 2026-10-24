@@ -41,11 +41,15 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
 
 After the last round it marks the data end, so the trainer stops after reading
-the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
+the rest. ``num_rollouts`` None: no last round; the loop generates until
+``should_stop`` (a full-parameter synced group's sampler stops when its trainers
+ended, ``sample_roles`` module doc) and marks no data end. The loop is
+engine-neutral: ``generate(rollout_id)`` runs one round.
 """
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -59,7 +63,7 @@ DEFAULT_POLL_S = 5.0
 
 class SamplerLoop:
     def __init__(self, *, follower: PolicyFollower, buffer: Any,
-                 generate: Callable[[int], None], num_rollouts: int,
+                 generate: Callable[[int], None], num_rollouts: int | None,
                  max_backlog_groups: int, emit: Callable[..., None],
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
                  should_stop: Callable[[], bool] = lambda: False,
@@ -74,7 +78,7 @@ class SamplerLoop:
         self.follower = follower
         self.buffer = buffer
         self.generate = generate
-        self.num_rollouts = int(num_rollouts)
+        self.num_rollouts = None if num_rollouts is None else int(num_rollouts)
         self.max_backlog_groups = int(max_backlog_groups)
         self.emit = emit
         self.poll_s = float(poll_s)
@@ -199,9 +203,12 @@ class SamplerLoop:
             self.sleep(rest)
 
     def run(self, start: int = 0) -> int:
-        """Generate rounds ``start .. num_rollouts - 1``; returns the rounds generated."""
+        """Generate rounds ``start .. num_rollouts - 1`` (no end for None: until
+        ``should_stop``); returns the rounds generated."""
         done = 0
-        for rollout_id in range(int(start), self.num_rollouts):
+        rollout_ids = (itertools.count(int(start)) if self.num_rollouts is None
+                       else range(int(start), self.num_rollouts))
+        for rollout_id in rollout_ids:
             if self.should_stop() or not self._admit(rollout_id):
                 self.emit("rl_sampler_stopped", rollout_id=rollout_id, rounds=done)
                 return done
@@ -217,7 +224,7 @@ class SamplerLoop:
                       groups=len(self.buffer) - before, buffer_end=len(self.buffer),
                       generate_s=round(generate_s, 3))
             done += 1
-            self._throttle(started, last=rollout_id == self.num_rollouts - 1)
+            self._throttle(started, last=rollout_id == (self.num_rollouts or 0) - 1)
         self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done

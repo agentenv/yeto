@@ -399,6 +399,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from yeto.rl.engine.sampler_loop import SamplerLoop
     from yeto.rl.engine.sampler_resume import (
         RECLAIM_MARKER_ENV,
+        TRAINERS_ENDED_EVENT,
         ReclaimWatcher,
         SamplerMembership,
         acknowledge_reclaim,
@@ -407,6 +408,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         new_incarnation,
         reclaim_requested,
         resume_point,
+        stop_when_trainers_ended,
     )
 
     from . import LoopRunner
@@ -434,8 +436,11 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         install_marker_signals(env)
     buffer = open_buffer(env, sampler=True)
     resume = resume_point(buffer.entries(), sampler_id)
-    membership = SamplerMembership(store_for(config.store, environ=environ), sampler_id,
-                                   incarnation, resume, emit)
+    store = store_for(config.store, environ=environ)
+    membership = SamplerMembership(store, sampler_id, incarnation, resume, emit)
+    # a full-parameter synced group's sampler: no fixed rounds, until its trainers ended
+    until = int(config.until_trainers_end or 0)
+    trainers_ended = stop_when_trainers_ended(store, until)
     progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
@@ -496,9 +501,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         loop = SamplerLoop(
             follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
-            num_rollouts=int(miles_args.num_rollout),
+            num_rollouts=None if until else int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
-            min_round_s=config.min_round_s, require_release=lora, should_stop=reclaimed,
+            min_round_s=config.min_round_s, require_release=lora,
+            should_stop=lambda: reclaimed() or trainers_ended(),
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
                                    "probe": loader.last_probe,
                                    "load_timings": loader.last_timings,
@@ -506,7 +512,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         latest = follower.releases.latest()
         membership.join(latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
-        emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
+        emit("rl_sampler_start", store=config.store, num_rollouts=loop.num_rollouts,
+             until_trainers_end=until,
              max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights,
              start_rollout_id=resume.next_rollout_id)
         if buffer.data_ended:  # an earlier incarnation finished and marked the data end
@@ -517,6 +524,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             leave_reclaimed()  # the LEAVE is a no-op when the watcher already left
             _hold_until_stopped(sleep, LEAVE_HOLD_S)
         else:
+            if trainers_ended():
+                emit(TRAINERS_ENDED_EVENT, trainers=until, rounds=rounds)
             leave(LeaveReason.FINISHED)
         return rounds
     except BaseException as exc:
@@ -546,6 +555,27 @@ def _hold_until_stopped(sleep: Callable[[float], None], hold_s: float) -> None:
 
 
 # ---------------------------------------------------------------------- trainer side
+def mark_trainer_end(miles_args: Any, *, learner_id: int, environ: Any = None) -> bool:
+    """A trainer that reads the sample buffer ended its run normally: write its end
+    record into its store, so the samplers that run until their trainers end stop
+    (``sample_roles`` module doc). True when written; any other island writes
+    nothing. A failed write is printed, not raised: the run itself is done."""
+    config = _buffer_config(miles_args, TRAINER)
+    if config is None:
+        return False
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.engine.sampler_resume import write_trainer_end
+
+    try:
+        write_trainer_end(store_for(config.store, environ=environ),
+                          str(int(learner_id)))
+    except Exception as error:  # noqa: BLE001 - the samplers then stop at their own limits
+        print(f"[sampler-island] trainer end record not written: {type(error).__name__}: {error}",
+              flush=True)
+        return False
+    return True
+
+
 class ReleasingPublisher:
     """A publisher that also releases each published policy for the samplers.
 

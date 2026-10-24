@@ -512,6 +512,9 @@ _ISLAND = (
     # number of synced trainers (its buffer lane is learner id of that count)
     island_flag("--rl-sample-store", default=None, metavar="PATH"),
     island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
+    # S27 G-CA: a sampler of a full-parameter synced group runs until its trainers
+    # ended (sample_roles module doc); 0: the island's own rounds
+    island_flag("--rl-sampler-until-trainers-end", type=int, default=0, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
     island_flag(
         "--lora-targets",

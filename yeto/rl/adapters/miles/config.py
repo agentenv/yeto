@@ -442,7 +442,7 @@ LEAF_POLICY: dict[str, _Check] = {
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline",
-                    "release_delta_full_every")},
+                    "release_delta_full_every", "until_trainers_end")},
 }
 
 

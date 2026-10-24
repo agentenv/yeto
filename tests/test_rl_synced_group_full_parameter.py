@@ -105,7 +105,8 @@ def test_trainer_follow_binds_each_sampler_to_one_trainer_sub_store():
         assert sampler.rl_resume_store == substore
         assert sampler.rl_buffer_shards is None  # one sampler per trainer writes the index
         assert sampler.rl_sampler_data_slot == f"{k}/2"  # disjoint prompts over all samplers
-        assert sampler.global_rounds == 3  # its trainer's 3 rounds
+        # its share of K x --total-steps, unused: it runs until its trainer ended
+        assert sampler.global_rounds == 3 and sampler.rl_sampler_until_trainers_end == 1
     assert t0.syncer == t1.syncer == "10.0.0.1:29400"
 
 
@@ -177,3 +178,51 @@ def test_group_forwards_delta_releases_to_its_trainers_only():
     assert s0.rl_release_delta_full_every == s1.rl_release_delta_full_every == 0
     config = sample_roles.resolve(t1, groups_per_round=4)
     assert config.release_delta_full_every == 8 and config.store == f"{MOUNT}/trainer1"
+
+
+# ------------------------------------------------- how long the samplers run (S27 G-CA)
+@pytest.mark.parametrize(("follow", "trainers"), [("trainer", 1), ("merged", 2)])
+def test_samplers_run_until_the_trainers_they_feed_ended(capsys, follow, trainers):
+    # the trainers run asynchronous rounds until the syncer stops them (H=2 local
+    # rounds per fragment round here, more than --total-steps): a fixed share of
+    # K x --total-steps rounds would run the samplers dry first
+    args, plan = _plan(("--rl-sampler-follow", follow))
+    assert f"generate until {'its own trainer' if trainers == 1 else 'all 2 trainers'} ended" in (
+        capsys.readouterr().err)
+    for island, parsed in _islands(plan):
+        config = sample_roles.resolve(parsed, groups_per_round=4)
+        if island["sample_role"] == "sampler":
+            assert island["sampler_until_trainers_end"] == trainers
+            assert f"--rl-sampler-until-trainers-end {trainers}" in island["learner_command"]
+            assert config.until_trainers_end == trainers
+        else:
+            assert "sampler_until_trainers_end" not in island
+            assert "--rl-sampler-until-trainers-end" not in island["learner_command"]
+            assert config.until_trainers_end == 0
+    assert sample_roles.sampler_stop_trainers(args, 4) == {2: trainers, 3: trainers}
+
+
+def test_samplers_outside_a_full_parameter_group_keep_their_rounds():
+    pair = _ns(rl_island_sample_role=["0:sampler", "1:trainer"])
+    assert sample_roles.sampler_stop_trainers(pair, 2) == {}
+    assert sample_roles.describe_sampler_stop(pair, 2) is None
+
+
+def test_a_trainer_marks_its_end_and_its_samplers_stop(tmp_path):
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.sampler_island import mark_trainer_end
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sampler_resume import stop_when_trainers_ended, trainers_ended
+
+    store = CheckpointStore(tmp_path)
+    stop_one, stop_two = stop_when_trainers_ended(store, 1), stop_when_trainers_ended(store, 2)
+    assert not stop_when_trainers_ended(store, 0)() and not stop_one()
+    trainer = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(role="trainer",
+                                                                                    store=str(tmp_path)))
+    sampler = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(role="sampler",
+                                                                                    store=str(tmp_path)))
+    assert not mark_trainer_end(sampler, learner_id=0) and trainers_ended(store) == 0
+    assert mark_trainer_end(trainer, learner_id=0) and stop_one() and not stop_two()
+    assert mark_trainer_end(trainer, learner_id=0) and trainers_ended(store) == 1  # one record each
+    assert mark_trainer_end(trainer, learner_id=1) and stop_two()

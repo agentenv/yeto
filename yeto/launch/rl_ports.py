@@ -506,6 +506,8 @@ def _check_ports_infra_switches(args) -> None:
         if not sample_roles.is_synced_group(args):
             sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
     sample_roles.check_sampler_follow(args, rl_island_count(args))
+    if (stop := sample_roles.describe_sampler_stop(args, rl_island_count(args))) is not None:
+        print(f"[launcher] {stop}", file=sys.stderr, flush=True)
     if getattr(args, "rl_sampler_spot", False) and not sample_roles.is_pair(args):
         raise ValueError("--rl-sampler-spot needs --rl-island-sample-role (it bills the sampler "
                          "islands of a pair as spot)")

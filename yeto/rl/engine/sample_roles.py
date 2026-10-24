@@ -46,6 +46,17 @@ releases), the trainer reads that whole buffer (its own lane, 0 of 1) and
 releases every local policy version for its samplers
 (``merged_release`` module doc). The trainers still merge through the syncer.
 
+How long a full-parameter synced group's samplers run (Miles): its trainers
+run asynchronous rounds until the syncer stops them, so their round count is
+not known before the launch (``run_config.resolve_lr_schedule``). Its samplers
+therefore have no fixed round count: each generates until every trainer that
+reads its store has ended (island flag ``--rl-sampler-until-trainers-end N``:
+1 when the samplers follow their own trainer, K otherwise;
+:func:`sampler_stop_trainers`). A trainer writes its end record when its run
+ends normally (the syncer's final, or the samplers' data end;
+``sampler_resume.write_trainer_end``). Other synced groups keep their split of
+``K x --total-steps`` rounds.
+
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
 """
@@ -88,7 +99,10 @@ class SampleBufferConfig:
     the training critical path instead of staging it on local disk and uploading
     it in the background (``--rl-release-inline``; ``sampler_island`` module doc);
     ``release_delta_full_every``: trainer, upload staged full releases as bf16
-    deltas, every N-th one full (``--rl-release-delta-full-every``; 0: off)."""
+    deltas, every N-th one full (``--rl-release-delta-full-every``; 0: off);
+    ``until_trainers_end``: sampler, generate until this many trainers that read
+    the store have ended, with no fixed round count (module doc; 0: the
+    island's own rounds)."""
 
     role: str
     store: str
@@ -99,6 +113,7 @@ class SampleBufferConfig:
     release_legacy: bool = False
     release_inline: bool = False
     release_delta_full_every: int = 0
+    until_trainers_end: int = 0
 
 
 def sample_role(args: Any) -> str:
@@ -320,6 +335,27 @@ def substore_uri(store: str, name: str) -> str:
     return f"{str(store).rstrip('/')}/{name}"
 
 
+def sampler_stop_trainers(args: Any, num_islands: int) -> dict[int, int]:
+    """Sampler island -> how many trainers' ends stop it, for the samplers of a
+    full-parameter synced group on Miles (module doc); empty for every other launch."""
+    if (not is_synced_group(args) or getattr(args, "rl_sync_preset", None) != FULL_PARAMETER_SYNC_PRESET
+            or (getattr(args, "rl_backend", None) or "miles") != "miles"):
+        return {}
+    trainers = 1 if sampler_bindings(args, num_islands) else len(synced_group_learners(args, num_islands))
+    return {island: trainers for island in sampler_islands(args, num_islands)}
+
+
+def describe_sampler_stop(args: Any, num_islands: int) -> str | None:
+    """The launcher's line about :func:`sampler_stop_trainers` (None: no such samplers)."""
+    stops = sampler_stop_trainers(args, num_islands)
+    if not stops:
+        return None
+    trainers = set(stops.values()).pop()
+    whose = "its own trainer" if trainers == 1 else f"all {trainers} trainers"
+    return (f"synced group: sampler islands {', '.join(map(str, sorted(stops)))} generate until "
+            f"{whose} ended (no fixed round count; the trainers run until the syncer stops them)")
+
+
 def check_sampler_follow(args: Any, num_islands: int) -> None:
     """Launch checks of ``--rl-sampler-follow trainer``: a synced group on Miles
     whose samplers split evenly over its trainers."""
@@ -418,6 +454,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         out.rl_sampler_min_round_seconds = None
         return out
     out.rl_release_delta_full_every = 0
+    out.rl_sampler_until_trainers_end = sampler_stop_trainers(args, num_islands).get(island, 0)
     if out.rl_sample_substore is not None:
         out.rl_checkpoint_store = substore_uri(args.rl_checkpoint_store, out.rl_sample_substore)
         out.rl_sample_substore = None  # a sampler's store is its trainer's sub-store
@@ -670,7 +707,9 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         and bool(getattr(args, "rl_release_reload_latest", False)),
         release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)),
         release_delta_full_every=(int(getattr(args, "rl_release_delta_full_every", 0) or 0)
-                                  if role == TRAINER else 0))
+                                  if role == TRAINER else 0),
+        until_trainers_end=(int(getattr(args, "rl_sampler_until_trainers_end", 0) or 0)
+                            if role == SAMPLER else 0))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -714,5 +753,7 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-buffer-shards {','.join(args.rl_buffer_shards)}"
     if getattr(args, "rl_sampler_data_slot", None):
         flags += f" --rl-sampler-data-slot {args.rl_sampler_data_slot}"
+    if role == SAMPLER and int(getattr(args, "rl_sampler_until_trainers_end", 0) or 0):
+        flags += f" --rl-sampler-until-trainers-end {int(args.rl_sampler_until_trainers_end)}"
     return flags
 

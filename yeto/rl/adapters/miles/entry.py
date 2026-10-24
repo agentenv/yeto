@@ -2254,7 +2254,11 @@ def run_ports_island(
 
         if trainer_remote.commanded():  # rl-trainer-start-stop L5.3c: the head starts/stops us
             return run_commanded_trainer(driver)
-        return driver.run()
+        state = driver.run()
+        from .sampler_island import mark_trainer_end
+
+        mark_trainer_end(miles_args, learner_id=learner_id)  # its samplers may stop now
+        return state
     except BaseException as exc:
         error = exc
         raise

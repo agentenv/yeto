@@ -1046,6 +1046,8 @@ def dry_run_plan(args) -> dict:
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
                 entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
+            if learner_id in (stops := sample_roles.sampler_stop_trainers(args, len(specs))):
+                entry["sampler_until_trainers_end"] = stops[learner_id]  # no fixed round count
             if learner_id == trainer_loop.held_island(args):
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:
