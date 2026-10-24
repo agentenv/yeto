@@ -130,9 +130,9 @@ _DIGEST_CHUNK = 1 << 20
 DEFAULT_CACHE_DIR = "~/.cache/yeto/policy-releases"
 # a delta larger than this share of the full release is not worth it: release in full
 MAX_DELTA_RATIO = 0.5
-# a sampler stops after this many delta rebuilds in a row fail their digest check
-# (PolicyFollower): the first from its mirror, the next ones from the full release
-# in the store, downloaded again
+# a sampler stops after this many releases in a row fail their digest checks
+# (PolicyFollower: a delta rebuilt from its mirror, then rebuilt again from the full
+# release in the store, downloaded again; a full release's file_sha256)
 MAX_REBUILD_FAILURES = 3
 DIGEST_WORKERS = 8  # files hashed at a time (file_digests)
 
@@ -834,8 +834,9 @@ class FollowerCounters:
     is loaded); ``lineage_resets``: loaded releases whose version is below the
     served one (a trainer restored from an older cut); ``deferred_in_flight``:
     refreshes refused because a round was generating on engines that cannot
-    update their weights mid-generation; ``rebuild_failures``: delta releases
-    whose rebuilt files were not the released ones (nothing is loaded)."""
+    update their weights mid-generation; ``rebuild_failures``: tries whose
+    rebuilt (delta) or downloaded (full, ``file_sha256``) files were not the
+    released ones (nothing is loaded)."""
 
     loaded: int = 0
     superseded: int = 0
