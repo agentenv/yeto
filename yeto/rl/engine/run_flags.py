@@ -616,6 +616,14 @@ _RESUME = (
     shared_flag("--rl-stop-after-rounds", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
                 "with a final cut (our own stop; the next launch resumes)"),
+    # S27 closing-run evaluation (yeto.rl.engine.hf_export)
+    shared_flag("--rl-export-hf-rounds", default=None, metavar="R[,R...][,final]",
+                help="with --rl-checkpoint-store (full parameter, no --rl-elastic): at "
+                "the sync boundary of round R (the island's R-th trained round; final: the "
+                "round that stops the island, before its final ACK), write the island's own "
+                "model as an HF directory to <store>/hf/island<k>/round-R (k = learner id; "
+                "complete when it holds .complete; <store>/hf/island<k>/final.json names the "
+                "final one); tape event rl_hf_export. Off by default"),
     # rl-trainer-start-stop L4.6: sampler / trainer islands over the durable sample buffer
     shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer", "convertible"),
                 default="both",

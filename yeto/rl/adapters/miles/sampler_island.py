@@ -103,7 +103,7 @@ from .publish import (
     read_engine_checksums,
     weight_view_digest,
 )
-from .release_plugin import WRITE_FULL_CHECKPOINT, WRITE_LORA_ADAPTER
+from .release_plugin import WRITE_LORA_ADAPTER, full_checkpoint_writer
 
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
@@ -771,14 +771,14 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     staged = config.role == TRAINER and not lora and not config.release_inline
     all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"
 
+    # local disk: every rank writes a share of the files
+    write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write)
+
     def export(version: int, directory: Path) -> None:
         if lora:
             runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
-        elif all_ranks_write:  # local disk: every rank writes a share of the files
-            runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
-                "path": str(directory), "rollout_id": int(version)}))
         else:
-            runner.run(actor_model.export_hf(rollout_id=int(version), path=str(directory)))
+            write_full(version, directory)
 
     staging = None
     if staged:

@@ -198,6 +198,7 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     _check_resume_switches(args)
+    _check_hf_exports(args)
     _check_sample_store(args)
     if not getattr(args, "rl_elastic", False):
         if given:
@@ -284,6 +285,33 @@ def _check_island_cut_store(args) -> None:
                              "(the syncer is authoritative)")
 
 
+def _check_hf_exports(args) -> None:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``): the launcher sends it
+    with ``--rl-export-hf-store`` to islands that generate and train."""
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if bool(rounds) != bool(getattr(args, "rl_export_hf_store", None)):
+        raise ValueError(f"{EXPORT_HF_FLAG} and --rl-export-hf-store go together")
+    if rounds and getattr(args, "rl_elastic", False):
+        raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
+    if rounds and sample_roles.sample_role(args) != sample_roles.BOTH:
+        raise ValueError(f"{EXPORT_HF_FLAG} needs an island that generates and trains (sample role both)")
+
+
+def hf_export_config(args) -> dict[str, Any] | None:
+    """The island's ``--rl-export-hf-rounds``: ``{"rounds"`` (the flag's canonical
+    text), ``"store"`` (its own export store)``}``, None when off."""
+    from yeto.rl.engine.hf_export import ExportRounds, export_store_path
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if not rounds:
+        return None
+    return {"rounds": str(rounds),
+            "store": export_store_path(str(args.rl_export_hf_store), learner_id=int(args.learner_id))}
+
+
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
     return tuple(c.strip() for c in (value or "").split(",") if c.strip())
 
@@ -353,6 +381,9 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
             check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     apply_sample_role(args, miles_args, environ)
+    exports = hf_export_config(args)
+    if exports is not None:  # read by entry.hf_exports_for
+        miles_args.yeto_rl_hf_exports = exports
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True

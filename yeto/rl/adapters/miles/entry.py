@@ -24,6 +24,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -668,6 +669,32 @@ def data_position_log_for(miles_args: Any, sync: Any, *, learner_id: int) -> Any
 
     return data_position_log(str(store), learner_id=int(learner_id),
                              slot=getattr(miles_args, "yeto_rl_data_slot", None))
+
+
+HF_EXPORT_STAGING = "yeto-hf-export"  # under the system temp dir (local disk)
+
+
+def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
+                   environ: Mapping[str, str] | None = None) -> Any:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``): the island's
+    ``HfRoundExports``, None when off. With the trainer on one node every rank
+    writes a share of the files into the local staging directory; across nodes
+    Miles' ``export_hf`` writes them on rank 0."""
+    config = getattr(miles_args, "yeto_rl_hf_exports", None)
+    if not config:
+        return None
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds, HfRoundExports
+    from yeto.rl.engine.resume import store_for
+
+    from .publish import lora_mode
+    from .release_plugin import full_checkpoint_writer
+
+    if lora_mode(miles_args):
+        raise ValueError(f"{EXPORT_HF_FLAG} writes full weights; a LoRA island has no full export")
+    one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
+    return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
+                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node),
+                          staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
 
 
 def _is_full_parameter_sync(sync: Any) -> bool:
@@ -2194,6 +2221,7 @@ def run_ports_island(
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
             driver.data_slot = getattr(miles_args, "yeto_rl_data_slot", None)
             driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
+            driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
             driver.start_phases = start_phases  # L0: first_step_done

@@ -23,13 +23,29 @@ trainer is asleep when it publishes; see :func:`_awake_process_groups`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 WRITE_LORA_ADAPTER = "yeto.rl.adapters.miles.release_plugin.write_lora_adapter"
 WRITE_FULL_CHECKPOINT = "yeto.rl.adapters.miles.release_plugin.write_full_checkpoint"
+
+
+def full_checkpoint_writer(actor_model: Any, runner: Any, *, all_ranks: bool) -> Callable[[int, Path], None]:
+    """Driver side: ``write(rollout_id, directory)`` puts the actor's full weights
+    into ``directory`` as an HF checkpoint. ``all_ranks``: every rank writes a
+    share of the files (:func:`write_full_checkpoint`; ``directory`` must be on a
+    disk every trainer rank sees); else Miles' ``export_hf`` (rank 0 writes)."""
+
+    def write(rollout_id: int, directory: Path) -> None:
+        if all_ranks:
+            runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
+                "path": str(directory), "rollout_id": int(rollout_id)}))
+        else:
+            runner.run(actor_model.export_hf(rollout_id=int(rollout_id), path=str(directory)))
+
+    return write
 
 
 def write_full_checkpoint(actor: Any, *, path: str, rollout_id: int) -> dict[str, Any]:

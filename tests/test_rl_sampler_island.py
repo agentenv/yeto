@@ -15,6 +15,7 @@ import pytest
 from tests.buffer_rollout_procs import sample
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.miles import sampler_island as si
+from yeto.rl.adapters.miles.release_plugin import WRITE_FULL_CHECKPOINT
 from yeto.rl.engine import sample_roles
 from yeto.rl.engine.policy_release import (
     LATEST,
@@ -715,7 +716,7 @@ def test_a_trainer_island_stages_full_releases_and_uploads_them_in_the_backgroun
 
     wired.releases.release_staged = slow_release
     wired.publish(_State(1, "h1"))
-    assert plugin_calls == [(si.WRITE_FULL_CHECKPOINT, 1)]
+    assert plugin_calls == [(WRITE_FULL_CHECKPOINT, 1)]
     assert wired.releaser.busy and not (store / RELEASE_DIR / "LATEST.json").exists()
     read_from_thread = []
     wired.read_position_from_thread = lambda: read_from_thread.append(1) or 64

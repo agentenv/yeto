@@ -280,6 +280,62 @@ def island_cut_store(store_path: str) -> str:
     return f"{store_path.rstrip('/')}/island-cuts"
 
 
+def hf_exports_requested(args) -> bool:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``) names a round."""
+    from ..rl.engine.hf_export import ExportRounds
+
+    return bool(ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None)))
+
+
+def _synced_launch_uses_store(args) -> bool:
+    """A synced launch (no ``--rl-elastic``, no ``--rl-single-island-no-sync``) keeps
+    something in ``--rl-checkpoint-store``: the buffer and releases of synced
+    trainers, island round cuts, peer snapshots or HF exports."""
+    from ..rl.engine.sample_roles import is_synced_trainer
+
+    return (is_synced_trainer(args) or island_cuts_requested(args)
+            or bool(getattr(args, "rl_peer_recovery", False)) or hf_exports_requested(args))
+
+
+def _check_hf_export_launch_flags(args) -> None:
+    """``--rl-export-hf-rounds``: Miles training islands with a checkpoint store.
+    A round past the expected local rounds of an island (``--total-steps`` x
+    ``--local-rl-rounds-per-sync``) is a warning: an asynchronous island may
+    train more rounds than that, a strict one never reaches it."""
+    from ..rl.engine import sample_roles
+    from ..rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if not rounds:
+        return
+    if not getattr(args, "rl_checkpoint_store", None):
+        raise ValueError(f"{EXPORT_HF_FLAG} needs --rl-checkpoint-store (the exports go to <store>/hf)")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles only")
+    if getattr(args, "rl_elastic", False):
+        raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
+    if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)
+            or sample_roles.is_convertible_pool(args)):
+        raise ValueError(f"{EXPORT_HF_FLAG} needs islands that generate and train (sample role both)")
+    expected = int(args.total_steps) * int(getattr(args, "local_rl_rounds_per_sync", 1) or 1)
+    late = [r for r in rounds.numbers if r > expected]
+    if late:
+        print(f"[launcher] WARNING: {EXPORT_HF_FLAG}: rounds {late} are past the {expected} rounds "
+              "an island is expected to train (--total-steps x --local-rl-rounds-per-sync); "
+              "an island that stops earlier exports nothing for them")
+
+
+def hf_export_flags(args) -> str:
+    """The island flags of ``--rl-export-hf-rounds`` ("" when off)."""
+    if not hf_exports_requested(args):
+        return ""
+    from ..rl.engine.hf_export import HF_EXPORT_DIR, ExportRounds
+
+    rounds = ExportRounds.parse(args.rl_export_hf_rounds)
+    store = f"{rl_checkpoint_store_plan(args)[0].rstrip('/')}/{HF_EXPORT_DIR}"
+    return f" --rl-export-hf-rounds {rounds} --rl-export-hf-store {shlex.quote(store)}"
+
+
 def _check_resume_launch_flags(args) -> bool:
     """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
     resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
@@ -298,8 +354,6 @@ def _check_resume_launch_flags(args) -> bool:
     cut_interval_for(every=getattr(args, "rl_cut_every", None),
                      auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
                      max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
-    from ..rl.engine.sample_roles import is_synced_trainer
-
     if store and not elastic and not getattr(args, "rl_single_island_no_sync", False):
         # S25 C3: the store holds the sample buffer and the releases of synced trainers
         # (forwarded as --rl-sample-store). S27 R-2: with a cut interval every synced
@@ -311,11 +365,10 @@ def _check_resume_launch_flags(args) -> bool:
                 raise ValueError(f"{flag}: a synced launch does not resume from round cuts (the "
                                  "syncer is authoritative; multi-island resume: rl-resume-from-checkpoint 3.3)")
         # S27 E-3: --rl-peer-recovery keeps its peer snapshots in the store
-        if not (is_synced_trainer(args) or island_cuts_requested(args)
-                or getattr(args, "rl_peer_recovery", False)):
+        if not _synced_launch_uses_store(args):
             raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-single-island-no-sync, "
                              "synced trainers, a cut interval (--rl-cut-every / --rl-cut-auto-mtbf-s: "
-                             "island round cuts) or --rl-peer-recovery")
+                             "island round cuts), HF exports (--rl-export-hf-rounds) or --rl-peer-recovery")
         if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
             raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
         if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
@@ -469,9 +522,9 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
     resume_store = _check_resume_launch_flags(args)
+    _check_hf_export_launch_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and not resume_store \
-            and not sample_roles.is_synced_trainer(args) and not island_cuts_requested(args) \
-            and not getattr(args, "rl_peer_recovery", False):  # S27 E-3: peer snapshots
+            and not _synced_launch_uses_store(args):
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
@@ -643,6 +696,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
             if getattr(args, name, None) is not None:
                 flags += f" {flag} {int(getattr(args, name))}"
+    flags += hf_export_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_cut_every", None) is not None:
         flags += f" --rl-cut-every {int(args.rl_cut_every)}"
     for name, flag in (("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),

@@ -488,6 +488,9 @@ _ISLAND = (
     # (the syncer stays authoritative at start): the island's cuts go to
     # <PATH>/island<learner id>; the launcher forwards it from --rl-checkpoint-store
     island_flag("--rl-island-cut-store", default=None, metavar="PATH"),
+    # --rl-export-hf-rounds (yeto.rl.engine.hf_export): <--rl-checkpoint-store>/hf on the
+    # island; the island exports to <PATH>/island<learner id>/round-<r>
+    island_flag("--rl-export-hf-store", default=None, metavar="PATH"),
     # S27 E-3: this trainer lost its state and recovers from a peer snapshot (the
     # launcher sets YETO_RL_PEER_RECOVER=1 on a relaunch instead); local staging
     # directory of object-store snapshot transfers (node-shared on a multi-node island)

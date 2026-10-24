@@ -526,6 +526,9 @@ class IslandDriver:
         # (full parameter) keeps its data position in the run store
         # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
         self.data_positions: Any = None
+        # --rl-export-hf-rounds: the model of chosen rounds as HF directories in the
+        # store (``hf_export.HfRoundExports``, set by the adapter entry); None: off.
+        self.hf_exports: Any = None
         # S27 L11: () -> ((version, policy hash), ...) published before this process
         # started (e.g. the store's policy releases); None: none to restore.
         self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
@@ -1714,6 +1717,7 @@ class IslandDriver:
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._record_data_position(rollout_id)
+        self._export_hf_round(rollout_id, boundary)
         self._join_eval()
         if self.colocated and self.publish_offloaded:
             # E1: a round cut due at the next safe point writes the trainer state now,
@@ -2038,6 +2042,20 @@ class IslandDriver:
         if log is None or not callable(read):
             return
         self._write_data_position(log.record, rollout_id, read())
+
+    def _export_hf_round(self, rollout_id: int, boundary: SyncBoundary) -> None:
+        """--rl-export-hf-rounds: this round's model as an HF directory in the store
+        (``hf_export`` module doc), before the next publication; ``final`` is the
+        round whose boundary stops the island (before its final ACK)."""
+        exports = self.hf_exports
+        if exports is None or not exports.due(rollout_id, final=boundary.stop):
+            return
+        from .hf_export import HF_EXPORT_EVENT
+
+        self.phase("hf_export", rollout_id=rollout_id)
+        record = exports.export(rollout_id, policy_version=boundary.state.policy_version,
+                                final=boundary.stop)
+        self.emit(HF_EXPORT_EVENT, rollout_id=rollout_id, t=self.clock(), **record)
 
     def _write_data_position(self, write: Callable[..., None], *fields: Any) -> None:
         """A record the store refuses costs a relaunch some rows read again, never
