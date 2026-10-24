@@ -740,11 +740,12 @@ def translate_run_config(
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
+        RECIPE_NEMOTRON_H,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
     )
     from .lr_schedule import lr_schedule_argv
-    from .models import glm5_next
+    from .models import glm5_next, nemotron_h
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
 
     geometry = config.geometry
@@ -1116,6 +1117,8 @@ def translate_run_config(
             )
     # recipe-owned model flags read from the provider (nemotron_h: router, latent MoE)
     values.extend(getattr(recipe, "model_flags", ()))
+    if recipe.name == RECIPE_NEMOTRON_H:
+        values.extend(_nemotron_h_train_flags(nemotron_h, config))
     if geometry.multi_latent_attention:
         values.append("--multi-latent-attention")
         for name, value in geometry.mla_dims:
@@ -1204,7 +1207,29 @@ TRAIN_EXTRA_FLAGS = frozenset({
     "--recompute-granularity", "--recompute-modules", "--recompute-method",
     "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
     "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
+    "--moe-flex-dispatcher-backend",
 })
+
+
+def _nemotron_h_train_flags(recipe_module: Any, config: Any) -> tuple[str, ...]:
+    """Nemotron-H training defaults (``models.nemotron_h.train_flags``); prints its launch warnings."""
+
+    memory, parallel = config.train_memory, config.parallel
+    for warning in recipe_module.train_warnings(
+        samples_per_step=config.batch.global_batch,
+        optimizer_offload_fraction=float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0),
+        trainer_gpus=parallel.actor_num_nodes * parallel.actor_num_gpus_per_node,
+    ):
+        print(f"[rl] WARNING: {warning}", flush=True)
+    return recipe_module.train_flags(
+        tuple(getattr(config.model_recipe, "model_flags", ())),
+        activation_recompute=bool(memory.activation_recompute),
+        max_tokens_per_gpu=memory.max_tokens_per_gpu,
+        tensor_parallel=int(parallel.tensor_parallel),
+        context_parallel=int(getattr(parallel, "context_parallel", 1) or 1),
+        seq_len=int(config.batch.seq_len),
+        deepep=recipe_module.deepep_available(),
+    )
 
 
 def train_extra_argv(recipe_name: str, raw: str) -> tuple[str, ...]:
