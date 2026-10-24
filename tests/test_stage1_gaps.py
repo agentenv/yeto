@@ -138,12 +138,15 @@ def test_island_parser_takes_the_recipe_and_transformer_impl():
     assert (args.rl_model_recipe, args.rl_transformer_impl) == ("glm5_next", "local")
 
 
-def test_full_parameter_layout_rule_is_shared():
-    # Engines on the island (Milestone 1): one node, DP 1, dedicated engines.
-    assert "requires DP=1" in full_parameter_layout_problem(
-        data_parallel=2, actor_num_nodes=3, rollout_gpus=0, rollout_gpus_per_engine=1)
+def test_full_parameter_layout_rule_is_shared(monkeypatch):
+    from yeto.rl.adapters.miles import pins
+
+    # Engines on the island (Milestone 1): dedicated engines on one node or on a
+    # multi-node island; DP>1 needs a Miles pin with data-parallel replicas.
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=1, rollout_gpus=8,
                                          rollout_gpus_per_engine=8) is None
+    assert "one node (or a multi-node island" in full_parameter_layout_problem(
+        data_parallel=2, actor_num_nodes=3, rollout_gpus=0, rollout_gpus_per_engine=1)
     # Samples from the store: any node count and DP, but no engine on the island.
     assert full_parameter_layout_problem(data_parallel=2, actor_num_nodes=3, rollout_gpus=0,
                                          rollout_gpus_per_engine=1, sample_role="trainer") is None
@@ -151,11 +154,16 @@ def test_full_parameter_layout_rule_is_shared():
         data_parallel=2, actor_num_nodes=3, rollout_gpus=8, rollout_gpus_per_engine=8,
         sample_role="trainer")
     # A multi-node island (--rl-island-gpus-per-node): the trainer rectangle spans
-    # nodes, engines stay dedicated; still DP 1 (120B Nemotron: 4 trainer nodes + 1 engine node).
+    # nodes, engines stay dedicated (120B Nemotron: 4 trainer nodes + 1 engine node;
+    # S27 closing: 1 trainer node at DP 8 + 2 engine nodes).
     assert "one node (or a multi-node island" in full_parameter_layout_problem(
         data_parallel=1, actor_num_nodes=4, rollout_gpus=8, rollout_gpus_per_engine=4)
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=4, rollout_gpus=8,
                                          rollout_gpus_per_engine=4, island_gpus_per_node=8) is None
+    assert full_parameter_layout_problem(data_parallel=8, actor_num_nodes=1, rollout_gpus=16,
+                                         rollout_gpus_per_engine=8, island_gpus_per_node=8) is None
+    # A Miles pin without data-parallel replicas (8edea35a7) keeps engines-on-island at DP 1.
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
     assert "requires DP=1" in full_parameter_layout_problem(
         data_parallel=2, actor_num_nodes=4, rollout_gpus=8, rollout_gpus_per_engine=4,
         island_gpus_per_node=8)
