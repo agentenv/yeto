@@ -1896,6 +1896,27 @@ class SyncerClient:
                     )
                 self._final_cond.wait(min(remaining, 0.5))
 
+    def wait_for_final_manifest(self, timeout: float | None = None) -> FinalManifest:
+        """Wait for the final version manifest only (a syncer that runs
+        ``--final-cut-payload manifest`` sends no final fragments).
+
+        The manifest names the final version of every fragment; the final
+        parameters stay with the syncer. :meth:`acknowledge_finalization`
+        then confirms this exact manifest."""
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        with self._final_cond:
+            while True:
+                self.check_health()
+                if self._final_manifest is not None:
+                    return self._final_manifest
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"finalization timed out after {timeout:.1f}s: manifest not received"
+                    )
+                self._final_cond.wait(min(remaining, 0.5))
+
     def acknowledge_finalization(
         self, manifest: FinalManifest, timeout: float | None = None
     ) -> None:

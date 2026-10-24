@@ -728,8 +728,12 @@ deployment-level durability gap.
 ## Finalization and Export
 
 At `T=N*P`, the syncer stops ordinary pulls, persists the quiescent cut, and
-sends all f32 final fragments plus an exact manifest. At the next safe
-boundary, each island:
+sends all f32 final fragments plus an exact manifest. (Full-parameter
+asynchronous rounds send the manifest only unless islands evaluate or
+`--rl-sync-final-cut download` is set: each island then drains its pushes and
+ACKs the manifest without applying a final cut; the final parameters stay in
+the syncer checkpoint. See PROTOCOL.md, "Manifest-only final cut".) At the
+next safe boundary, each island:
 
 1. stops ordinary fragment submission;
 2. assembles and applies the complete final cut;

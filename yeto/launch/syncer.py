@@ -252,6 +252,32 @@ def rl_sao_streaming(args) -> bool:
             and getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET)
 
 
+def rl_full_parameter_final_cut(args) -> str:
+    """What the islands of a full-parameter run take from the final cut
+    (``--rl-sync-final-cut``; RoleStreamConfig.final_cut).
+
+    "ack": the version manifest only. An island ACKs once its pushes have
+    drained; the final parameters stay in the syncer's checkpoint, so no
+    island downloads the f32 model (about 4 bytes per parameter per island).
+    "download": every f32 fragment, applied to the trainer before the ACK.
+    "auto" (default) is "ack" for asynchronous rounds in ``--rl-sync-mode
+    async`` unless islands evaluate the policy (``--rl-eval-interval``: the
+    final eval and the eval exports need the final parameters on the
+    island); "download" for the strict sweep and in ``--rl-sync-mode
+    strict`` (the control keeps its commands). Other presets keep their
+    final cut ("download")."""
+    if not rl_dense_sweep(args):
+        return "download"
+    choice = getattr(args, "rl_sync_final_cut", "auto") or "auto"
+    if choice != "auto":
+        return choice
+    if (not rl_full_parameter_async(args)
+            or getattr(args, "rl_sync_mode_effective", "strict") != "async"
+            or getattr(args, "rl_eval_interval", None) is not None):
+        return "download"
+    return "ack"
+
+
 def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
@@ -293,6 +319,7 @@ def rl_syncer_profile(args, num_learners: int):
     return SyncerSemanticProfile.from_mapping({
         **({"outer_delayed_nesterov_period": period} if period else {}),
         **({"expert_token_weights": True} if _rl_expert_token_weights(args) else {}),
+        **({"final_cut_manifest_only": True} if rl_full_parameter_final_cut(args) == "ack" else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -607,6 +634,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
         f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"
+        f"{' --final-cut-payload manifest' if rl_full_parameter_final_cut(args) == 'ack' else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f"{_syncer_profile_record(args)}"

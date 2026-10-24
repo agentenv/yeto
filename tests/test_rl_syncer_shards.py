@@ -47,9 +47,10 @@ def _hmac_key(monkeypatch):
 
 
 def _async_args(shards: int, total_steps: int, *extra: str):
+    # These tests compare the shards' final f32 cut with one syncer's.
     return _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
                               "--total-steps", str(total_steps),
-                              "--syncer-shards", str(shards), *extra))
+                              "--syncer-shards", str(shards), "--rl-sync-final-cut", "download", *extra))
 
 
 def _free_ports(count: int) -> list[int]:

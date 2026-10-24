@@ -417,6 +417,26 @@ FINAL_MANIFEST and FINAL_ACK carry `FINALIZATION_REVISION=1`; mismatches are
 fatal. A learner also rejects SHUTDOWN before it has applied and initiated the
 ACK for the exact manifest.
 
+### Manifest-only final cut
+
+`--final-cut-payload manifest` (default `full`) sends FINAL_MANIFEST alone: no
+FINAL_FRAGMENT. A learner of such a syncer waits for the manifest
+(`SyncerClient.wait_for_final_manifest`), checks the final step and versions,
+lets its queued pushes drain, and sends FINAL_ACK without applying anything:
+its trainer keeps its local weights. The final parameters exist only in the
+syncer's final checkpoint (and `--final-state`). The ACK, membership,
+generation and grace rules above are unchanged. A learner must know the mode
+in advance, so it is part of the semantic profile hash: the domain
+`yeto-syncer-final-cut-manifest-only-v1\0` is appended when it is on (off
+keeps every existing hash). The launcher selects it for the full-parameter
+preset with `--rl-sync-final-cut ack`, the default for asynchronous rounds
+in `--rl-sync-mode async` unless islands evaluate (`--rl-eval-interval`; the
+strict sweep and `--rl-sync-mode strict` keep the full cut by default); `--rl-sync-final-cut download` keeps the full cut,
+for example to evaluate the final policy on an island or to compare island
+and syncer parameters bit for bit. For a 30B-parameter model the full cut is
+about 120 GB of f32 per island; the coordinator sends it to one island after
+another.
+
 ## Learner-budget cutoff and consolidation restart
 
 `BUDGET_DONE` is benchmark-only and is accepted only when the syncer and every
@@ -615,8 +635,8 @@ to the current versions. Per preset:
   restarted island starts with a fresh optimizer state (peer recovery,
   `--rl-peer-recovery`, restores it where available). At the end the island
   ACKs the final cut like a strict
-island; a push that races the end ends the island normally (`elastic_finished`
-on its tape).
+island (by default the manifest only, see "Manifest-only final cut"); a push
+that races the end ends the island normally (`elastic_finished` on its tape).
 
 With a pool the syncer also writes island-pool records on its event tape
 (`{"kind": ..., "syncer_epoch": ..., "time_unix": ...}`):

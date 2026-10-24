@@ -1197,6 +1197,17 @@ _SYNC = (
         "--rl-sync-mode async, equal in strict)",
     ),
     cli_flag(
+        "--rl-sync-final-cut",
+        choices=("auto", "ack", "download"),
+        default="auto",
+        help="full-parameter preset: what islands take from the final cut. ack = the final "
+        "version manifest only (an island ACKs once its pushes drained; the final parameters "
+        "stay in the syncer checkpoint, no island downloads the f32 model); download = every "
+        "f32 fragment, applied to the trainer before the ACK (island-side eval or a bitwise "
+        "check). auto (default) = ack for --rl-sync-full-parameter-rounds async in "
+        "--rl-sync-mode async without --rl-eval-interval, else download",
+    ),
+    cli_flag(
         "--rl-sync-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE models only: weight each expert's tensors in the "

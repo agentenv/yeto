@@ -46,6 +46,7 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
     defer_capture_supported,
+    lazy_capture_supported,
     optimizer_proof_without_model_check_supported,
     timed_group,
 )
@@ -91,6 +92,48 @@ def _never_materialize(_policy_version: int):
 
 
 TERMINAL_RETIRE_ENV = "YETO_FULL_PARAMETER_TERMINAL_RETIRE"
+
+# RoleStreamConfig.final_cut
+FINAL_CUT_MODES = ("download", "ack")
+
+# The first push of a fragment from an anchor every fragment shares (stream
+# start, peer recovery) waits ``fragment_id * H // P`` more local rounds, so
+# the fragments that become pushable together at round H spread over H
+# rounds (``first_push_phase``). "0" turns it off.
+STAGGER_FIRST_PUSH_ENV = "YETO_FULL_PARAMETER_STAGGER_FIRST_PUSH"
+
+
+def first_push_phase(fragment_id: int, fragments: int, horizon: int) -> int:
+    """Extra local rounds before fragment ``fragment_id``'s first push.
+
+    Every fragment is anchored at the same round when a stream starts, so with
+    H > 1 all fragments with a PULL become pushable at round H together (the
+    syncer opens its whole pipeline at once). Phase ``p * H // P`` in [0, H)
+    staggers them by fragment index, the order of the syncer's rounds
+    (fragment ``(t - 1) mod P`` at step t): about P / H fragments become
+    pushable per round. Later pushes keep the H gate unchanged, so every
+    fragment still syncs every H local rounds."""
+
+    if horizon <= 1 or fragments <= 1:
+        return 0
+    return fragment_id * horizon // fragments
+
+
+# Lazy capture: every N-th local round still captures with content hashes
+# and the whole-model model/master check (0: never).
+FULL_CHECK_EVERY_ENV = "YETO_FULL_PARAMETER_FULL_CHECK_EVERY"
+DEFAULT_FULL_CHECK_EVERY = 16
+
+
+def full_check_every() -> int:
+    raw = os.environ.get(FULL_CHECK_EVERY_ENV, str(DEFAULT_FULL_CHECK_EVERY))
+    try:
+        every = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{FULL_CHECK_EVERY_ENV} must be an integer, got {raw!r}") from error
+    if every < 0:
+        raise ValueError(f"{FULL_CHECK_EVERY_ENV} must be >= 0, got {every}")
+    return every
 
 
 def require_sha256(name: str, value: object) -> str:
@@ -192,6 +235,13 @@ class RoleStreamConfig:
     # the broadcast of learner 0's INIT. Not part of the session contract: it
     # changes which bytes travel at startup, never the version-0 values.
     local_init: bool = False
+    # What the island needs from the final cut. "download": every final f32
+    # fragment, applied to the trainer, then the ACK (the island holds the
+    # final parameters, e.g. to evaluate them). "ack": the final version
+    # manifest only; the island ACKs once its pushes have drained and the
+    # final parameters stay with the syncer (syncer --final-cut-payload
+    # manifest). Must match the syncer, whose profile hash binds it.
+    final_cut: str = "download"
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -223,6 +273,8 @@ class RoleStreamConfig:
     def __post_init__(self) -> None:
         if not self.algorithm.isidentifier():
             raise ValueError("role-stream algorithm name is invalid")
+        if self.final_cut not in FINAL_CUT_MODES:
+            raise ValueError(f"role-stream final cut must be one of {FINAL_CUT_MODES}")
         if self.role not in {"actor", "critic"} or self.component.role != self.role:
             raise ValueError("role-stream component identity changed")
         for host, port in (self.syncer_addr, *self.syncer_shards):
@@ -380,6 +432,9 @@ class RoleSubmissionCandidate:
     anchor: StoredAuthoritativeFragment
     # Expert token weights: per-tensor routed-token tags of this push.
     expert_tags: tuple[tuple[int, int, int], ...] | None = None
+    # Lazy capture: the content descriptor of the submission row (whose own
+    # descriptor is a label); the push reads the local chunks through it.
+    local_descriptor: Any = None
 
     @property
     def logical_key(self) -> tuple[int, int, int]:
@@ -438,6 +493,10 @@ class PoolFinishedBeforeJoin(RuntimeError):
     """A (re)started island reached the pool after its final cut."""
 
 
+def _local_descriptor_kwargs(candidate: RoleSubmissionCandidate) -> dict[str, Any]:
+    return {} if candidate.local_descriptor is None else {"local_descriptor": candidate.local_descriptor}
+
+
 def _is_set(event) -> bool:
     return bool(event is not None and callable(getattr(event, "is_set", None)) and event.is_set())
 
@@ -464,6 +523,9 @@ class MilesFullParameterRoleStream:
         # step, even if a partial broadcast has relabelled ``current`` as
         # generation zero in the meantime.
         self.submission_cut: ReferencedPolicyCut | None = None
+        # Lazy capture: content descriptors of the submission cut's
+        # materialized rows (its own rows carry labels).
+        self._submission_descriptors: dict[int, Any] = {}
         self.submission_fragment_versions: tuple[int, ...] | None = None
         self.submission_rounds = 0
         self.submission_tokens = 0
@@ -474,6 +536,10 @@ class MilesFullParameterRoleStream:
         # Decided once the trainer group is known (``_defers_capture``,
         # ``_proof_kwargs``).
         self._defer_capture: bool | None = None
+        self._lazy_capture: bool | None = None
+        self._full_check_every = full_check_every()
+        # Whether the last local round's capture was lazy (round event).
+        self.last_capture_lazy = False
         self._proof_without_model_check: bool | None = None
         self.local_generation = 0
         self.local_rounds = 0
@@ -481,6 +547,9 @@ class MilesFullParameterRoleStream:
         self._anchors: list[StoredAuthoritativeFragment | None] = []
         self._fragment_versions: list[int | None] = []
         self._rounds_at_anchor: list[int] = []
+        # Extra local rounds before a fragment's first push from the shared
+        # start anchor (first_push_phase); 0 once its anchor moved.
+        self._first_push_phase: list[int] = []
         self._tokens_at_anchor: list[int] = []
         # Expert token weights: cumulative routed-token counts, kept like the
         # token counters above (empty when the option is off).
@@ -506,6 +575,9 @@ class MilesFullParameterRoleStream:
         self._routed_at_base = RoutedTokens()
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
+        # The final cut is reached (no more training or pushes); with
+        # final_cut "download" the trainer then also holds it (final_applied).
+        self.final_reached = False
         self.final_applied = False
         # int4 error feedback: per-fragment residuals, empty for every new
         # stream (fresh start or cut resume); never checkpointed.
@@ -693,6 +765,24 @@ class MilesFullParameterRoleStream:
                 file=sys.stderr,
                 flush=True,
             )
+        self._first_push_phase = self._start_phases(count)
+
+    def _first_push_extra(self, fragment_id: int) -> int:
+        """Local rounds a fragment waits beyond H (no phases: none)."""
+        return self._first_push_phase[fragment_id] if self._first_push_phase else 0
+
+    def _clear_first_push_phase(self, fragment_id: int) -> None:
+        # Empty while the stream initializes (the start phases come after).
+        if self._first_push_phase:
+            self._first_push_phase[fragment_id] = 0
+
+    def _start_phases(self, count: int) -> list[int]:
+        """First-push phases of a stream whose fragments all share one anchor
+        round (asynchronous rounds with H > 1; see first_push_phase)."""
+
+        if not self.config.partial_quorum or os.environ.get(STAGGER_FIRST_PUSH_ENV, "1") == "0":
+            return [0] * count
+        return [first_push_phase(fragment_id, count, self.config.local_horizon) for fragment_id in range(count)]
 
     async def _install_routed_token_counter(self, group, adapter) -> None:
         if check_expert_partition(adapter.layout.specs) is None:
@@ -778,6 +868,7 @@ class MilesFullParameterRoleStream:
             self._routed_at_anchor = [RoutedTokens()] * count
             resent, island.resent = dict(island.resent), {}
             await self._apply_authoritative(resent, optimizer_proof=False)
+            self._first_push_phase = self._start_phases(count)
         except BaseException:
             if heartbeat is not None:
                 heartbeat.stop()
@@ -970,10 +1061,11 @@ class MilesFullParameterRoleStream:
             or self.current is None
             or self.group is None
             or self.client is None
-            or self.final_applied
+            or self.final_reached
         ):
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is not trainable")
         expected_generation = self.local_generation + 1
+        lazy = self._captures_lazily(self.local_rounds + 1)
         receipt = await self.adapter.record_local_round(
             self.group,
             anchor=self.current,
@@ -984,13 +1076,16 @@ class MilesFullParameterRoleStream:
             role=self.config.role,
             expected_local_step_generation=expected_generation,
             expected_optimizer_steps=self.config.optimizer_steps_per_round,
+            **({"check_model": False} if lazy else {}),
         )
         local = await self.adapter.capture(
             self.group,
             policy_version=self.transport_version,
             local_step_generation=expected_generation,
             defer_payload=self._defers_capture(),
+            **({"lazy": True} if lazy else {}),
         )
+        self.last_capture_lazy = lazy
         await report_rank_stats(self.group, "export", self.config.role)
         previous = self.current
         previous_submission = self.submission_cut
@@ -1006,6 +1101,7 @@ class MilesFullParameterRoleStream:
             self._release_cuts(previous, keep=(local, self._round_base, previous_submission))
         else:
             self.submission_cut = local
+            self._submission_descriptors = {}
             self.submission_fragment_versions = self.fragment_versions
             self.submission_rounds = self.local_rounds
             self.submission_tokens = self.action_tokens
@@ -1040,20 +1136,40 @@ class MilesFullParameterRoleStream:
             )
         return self._defer_capture
 
+    def _captures_lazily(self, local_round: int) -> bool:
+        """Lazy capture of local round ``local_round`` (1-based): only with a
+        deferred capture whose Miles supports it, and not on every
+        ``YETO_FULL_PARAMETER_FULL_CHECK_EVERY``-th round, which still hashes
+        every fragment and compares the whole model with its masters."""
+
+        if self._lazy_capture is None:
+            self._lazy_capture = bool(
+                self._defers_capture() and self.group is not None and lazy_capture_supported(self.group))
+        if not self._lazy_capture:
+            return False
+        every = self._full_check_every
+        return not (every and local_round % every == 0)
+
     async def materialize_submission(self, fragment_ids: Sequence[int]) -> tuple[int, ...]:
         """Store the deferred fragments ``fragment_ids`` of the submission cut.
 
         Called by the pairing before it pushes them, while the trainer still
         holds their bytes (no local step since the capture, and an apply
         never writes a fragment this island still has to push from this
-        cut: such a fragment's version would move past the submission's)."""
+        cut: such a fragment's version would move past the submission's).
+        With lazy capture Miles also returns each fragment's content
+        descriptor; its push reads the stored chunks through it."""
 
         if self.adapter is None or self.group is None or self.submission_cut is None:
             return ()
-        stored = await self.adapter.materialize(self.group, self.submission_cut, fragment_ids)
+        describe = bool(self._lazy_capture)
+        stored = await self.adapter.materialize(
+            self.group, self.submission_cut, fragment_ids, **({"describe": True} if describe else {}))
+        if describe:
+            self._submission_descriptors.update(stored)
         if stored:
             await report_rank_stats(self.group, "materialize", self.config.role)
-        return stored
+        return tuple(stored)
 
     def _proof_kwargs(self) -> dict[str, bool]:
         """The optimizer proofs around an apply skip their whole-model
@@ -1256,6 +1372,7 @@ class MilesFullParameterRoleStream:
         self._anchors[fragment_id] = stored
         self._fragment_versions[fragment_id] = stored.version
         self._rounds_at_anchor[fragment_id] = self.local_rounds
+        self._clear_first_push_phase(fragment_id)
         self._tokens_at_anchor[fragment_id] = self.action_tokens
         self._routed_at_anchor[fragment_id] = self.action_routed
         self.retired_fragments.add(fragment_id)
@@ -1273,6 +1390,7 @@ class MilesFullParameterRoleStream:
         previous_submission = self.submission_cut
         self.submission_cut = self.adapter.relabel_local_progress(
             self.current, local_rounds=self.local_rounds - self._rounds_at_base)
+        self._submission_descriptors = {}
         self.submission_fragment_versions = self.fragment_versions
         self.submission_rounds = self.local_rounds
         self.submission_tokens = self.action_tokens
@@ -1353,6 +1471,7 @@ class MilesFullParameterRoleStream:
             self._anchors[fragment_id] = stored
             self._fragment_versions[fragment_id] = stored.version
             self._rounds_at_anchor[fragment_id] = rounds
+            self._clear_first_push_phase(fragment_id)
             self._tokens_at_anchor[fragment_id] = tokens
             self._routed_at_anchor[fragment_id] = routed
 
@@ -1393,7 +1512,7 @@ class MilesFullParameterRoleStream:
             or self.adapter is None
             or self.submission_cut is None
             or self.submission_fragment_versions is None
-            or self.final_applied
+            or self.final_reached
         ):
             return ()
         self.client.check_health()
@@ -1416,7 +1535,7 @@ class MilesFullParameterRoleStream:
             ):
                 continue
             c_steps = self.submission_rounds - self._rounds_at_anchor[fragment_id]
-            if c_steps < self.config.local_horizon:
+            if c_steps < self.config.local_horizon + self._first_push_extra(fragment_id):
                 continue
             c_tokens = self.submission_tokens - self._tokens_at_anchor[fragment_id]
             if c_tokens < 1:
@@ -1426,6 +1545,11 @@ class MilesFullParameterRoleStream:
                 raise RuntimeError(
                     "role-stream fragment has no authoritative anchor"
                 )
+            local_descriptor = self._submission_descriptors.get(fragment_id)
+            if self._lazy_capture and local_descriptor is None and not include_deferred:
+                # Not materialized through this stream: no content descriptor
+                # to check its chunks against.
+                continue
             fragment = self.adapter.layout.fragments.fragments[fragment_id]
             expert_tags = None
             if self.config.expert_token_weights:
@@ -1445,6 +1569,7 @@ class MilesFullParameterRoleStream:
                     self.submission_cut,
                     anchor,
                     expert_tags,
+                    local_descriptor,
                 )
             )
         return tuple(candidates)
@@ -1478,7 +1603,7 @@ class MilesFullParameterRoleStream:
     ) -> RoleSubmissionCandidate | None:
         """Rebind an exact retained operand to a reconnect's newer PULL attempt."""
 
-        if self.client is None or self.final_applied:
+        if self.client is None or self.final_reached:
             return None
         self.client.check_health()
         self._queue_pulls()
@@ -1517,6 +1642,7 @@ class MilesFullParameterRoleStream:
         started = time.monotonic()
         parts = timed_parts(self.adapter.delta_parts_from_authoritative(
             candidate.anchor, candidate.submission_cut, fragment_id, ray_module=self.ray_module,
+            **_local_descriptor_kwargs(candidate),
         )(), timings, "delta_s")
         encoded = self.client.encode_push_parts(fragment_id, parts, timings=timings)
         timings["prepare_s"] = time.monotonic() - started
@@ -1549,6 +1675,7 @@ class MilesFullParameterRoleStream:
             candidate.submission_cut,
             fragment_id,
             ray_module=self.ray_module,
+            **_local_descriptor_kwargs(candidate),
         )(), timings, "delta_s")
         if self.error_feedback is not None:
             parts = timed_parts(self.error_feedback.parts(
@@ -1617,7 +1744,7 @@ class MilesFullParameterRoleStream:
             candidate.role != self.config.role
             or self.client is None
             or self.adapter is None
-            or self.final_applied
+            or self.final_reached
             or id(candidate.submission_cut) not in self._pinned_cuts
             or id(candidate.anchor) not in self._pinned_anchors
         ):
@@ -1801,48 +1928,60 @@ class MilesFullParameterRoleStream:
             raise RuntimeError("role-stream received an invalid fragment version")
 
     async def wait_and_apply_final(self) -> None:
-        if self.final_applied:
+        """Reach the final cut: wait for the syncer's final manifest and, with
+        final_cut "download", every final f32 fragment, which the trainer
+        then applies. With final_cut "ack" the trainer keeps its local
+        weights: the final parameters stay with the syncer."""
+
+        if self.final_reached:
             return
         if self.client is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} client is unavailable")
-        manifest, fragments = await asyncio.to_thread(
-            self.client.wait_for_final_fragments,
-            self.config.wait_timeout,
-        )
         expected = tuple(
             range(
                 self.config.total_fragment_steps - self.config.expected_fragments + 1,
                 self.config.total_fragment_steps + 1,
             )
         )
+        if self.config.final_cut == "ack":
+            manifest = await asyncio.to_thread(self.client.wait_for_final_manifest, self.config.wait_timeout)
+            fragments = None
+        else:
+            manifest, fragments = await asyncio.to_thread(
+                self.client.wait_for_final_fragments,
+                self.config.wait_timeout,
+            )
         if (
             manifest.global_step != self.config.total_fragment_steps
             or manifest.versions != expected
-            or [fragment.fragment_id for fragment in fragments]
-            != list(range(self.config.expected_fragments))
+            or (fragments is not None and [fragment.fragment_id for fragment in fragments]
+                != list(range(self.config.expected_fragments)))
         ):
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} final cut is incomplete")
-        selected = {}
-        for fragment in fragments:
-            stored = self._stored_update(fragment)
-            if stored.version != manifest.versions[stored.fragment_id]:
-                raise RuntimeError("role-stream final fragment differs from its manifest")
-            selected[stored.fragment_id] = stored
-        await self._apply_authoritative(selected)
+        if fragments is not None:
+            selected = {}
+            for fragment in fragments:
+                stored = self._stored_update(fragment)
+                if stored.version != manifest.versions[stored.fragment_id]:
+                    raise RuntimeError("role-stream final fragment differs from its manifest")
+                selected[stored.fragment_id] = stored
+            await self._apply_authoritative(selected)
+            self.final_applied = True
         self._staged.clear()
         self.terminal_manifest = manifest
-        self.final_applied = True
+        self.final_reached = True
         self._release_cuts(
             self.submission_cut,
             keep=(self.current,),
         )
         self.submission_cut = None
+        self._submission_descriptors = {}
         self.submission_fragment_versions = None
 
     def acknowledge_final(self, manifest: FinalManifest | None = None) -> None:
         manifest = self.terminal_manifest if manifest is None else manifest
         if (
-            not self.final_applied
+            not self.final_reached
             or manifest is None
             or manifest != self.terminal_manifest
             or self.client is None
@@ -1863,6 +2002,7 @@ class MilesFullParameterRoleStream:
             keep=(self.current,),
         )
         self.submission_cut = None
+        self._submission_descriptors = {}
         self.submission_fragment_versions = None
 
     def close(self) -> None:
@@ -1880,6 +2020,7 @@ class MilesFullParameterRoleStream:
         self._round_base = None
         self.current = None
         self.submission_cut = None
+        self._submission_descriptors = {}
         self.submission_fragment_versions = None
 
     @staticmethod
