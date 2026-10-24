@@ -156,7 +156,7 @@ def make_miles_island_task(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
-    island_data, island_data_sha256, data_mounts = island_task_data(args, learner_id)
+    island_data, island_data_flags, data_mounts = island_task_data(args, learner_id)
     check_compaction_launch(args)
     # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
     island = rl_island_spec(args, spec)
@@ -174,7 +174,7 @@ def make_miles_island_task(
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
         )
-        + f" --data {shlex.quote(island_data)}{island_data_sha256}"
+        + f" --data {shlex.quote(island_data)}{island_data_flags}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)

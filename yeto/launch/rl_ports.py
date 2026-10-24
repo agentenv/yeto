@@ -15,9 +15,9 @@ from ..rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pa
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
 from .topology import rl_island_count, rl_island_placement_args
-from .syncer import island_lease_s, island_pool, island_syncer_epoch
+from .syncer import island_lease_s, island_pool, island_syncer_epoch, rl_dense_sweep
 from .storage import ELASTIC_ISLAND_STATE_DIR, rl_checkpoint_store_plan
-from .island_tasks import _check_island_tasks
+from .island_tasks import _check_data_split, _check_island_tasks
 
 
 def _prepare_ports_algorithm(args) -> None:
@@ -260,6 +260,21 @@ def island_cuts_requested(args) -> bool:
             and any(getattr(args, name, None) is not None for name in _ISLAND_CUT_TRIGGERS))
 
 
+def data_positions_kept(args) -> bool:
+    """S27 task assignment (``yeto.rl.engine.data_position``): a synced
+    full-parameter island that generates and trains keeps its data position in
+    ``--rl-checkpoint-store`` (forwarded as ``--rl-data-position-store``), so a
+    relaunched island continues at its next row. Its round counter restarts at 0
+    in every process, so nothing else tells it where it was."""
+    from ..rl.engine import sample_roles
+
+    return (bool(getattr(args, "rl_checkpoint_store", None))
+            and rl_dense_sweep(args)
+            and not getattr(args, "rl_elastic", False)
+            and not getattr(args, "rl_single_island_no_sync", False)
+            and sample_roles.sample_role(args) == sample_roles.BOTH)
+
+
 def island_cut_store(store_path: str) -> str:
     """Where the islands of a synced launch keep their round cuts (one subdir each)."""
     return f"{store_path.rstrip('/')}/island-cuts"
@@ -398,6 +413,7 @@ def _check_ports_infra_switches(args) -> None:
     _check_test_tool_delay(args)
     eval_interval = _check_ports_eval(args)
     _check_island_tasks(args, eval_interval)
+    _check_data_split(args)
     if getattr(args, "rl_overlap_eval", False):
         # Same check the island's execution profile applies, run before any
         # resource is provisioned, on the values the launcher really forwards:
@@ -607,6 +623,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     resume_store = (rl_checkpoint_store_plan(args)
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)
+    if resume_store is not None and data_positions_kept(args):
+        # S27 task assignment: a relaunched full-parameter island continues at its row
+        flags += f" --rl-data-position-store {shlex.quote(resume_store[0])}"
     if resume_store is not None and island_cuts_requested(args):
         # S27 R-2: every synced island writes its round cuts (island<learner id> below)
         flags += f" --rl-island-cut-store {shlex.quote(island_cut_store(resume_store[0]))}"

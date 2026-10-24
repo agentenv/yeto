@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .rl_backend import _miles_overlay
 from .topology import rl_island_placement_records
-from .island_tasks import island_task_plan
+from .island_tasks import data_split_plan, island_task_plan
 
 
 def _miles_overlay_manifest(args) -> dict:
@@ -27,6 +27,14 @@ def _island_tasks_manifest(args) -> dict:
     if plan is None:
         return {}
     return {"island_tasks": {str(island): data.record() for island, data in sorted(plan.items())}}
+
+
+def _data_split_manifest(args) -> dict:
+    """``data_split`` for the run manifest when several training islands read
+    ``--data`` without task lists (split by row or shared); absent otherwise."""
+
+    plan = data_split_plan(args)
+    return {"data_split": plan.record()} if plan.several_islands else {}
 
 
 def _code_identity_manifest(args) -> dict:
@@ -68,6 +76,7 @@ def _write_run_manifest(args) -> dict | None:
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args),
         **_island_tasks_manifest(args),
+        **_data_split_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "island_placements": rl_island_placement_records(args),

@@ -34,6 +34,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from yeto.rl.engine.backends import DEFAULT_BACKEND, KNOWN_BACKENDS
+from yeto.rl.engine.data_split import AUTO, DATA_SPLITS
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
     RL_MATRIX_MERGES,
@@ -807,6 +808,23 @@ _SCHEDULING = (
              "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
              "every training island needs a list; eval runs on the eval island only; a JSON "
              "spec file path must not contain '='"),
+    # S27 task assignment (P1): which training island reads which rows of --data.
+    cli_flag("--rl-data-split", choices=DATA_SPLITS, default=AUTO,
+             help="which rows of --data each training island reads (islands that generate "
+             "and train; samplers always read their own slots). auto (default): with N >= 2 "
+             "such islands, the island with learner id k reads the rows i with i %% N == k, "
+             "in data order; after its last row it starts the next pass over its own rows, "
+             "reshuffled; a relaunched island keeps its rows. --rl-island-tasks replaces this. "
+             "stride: the same as auto, and refused where auto would not split. shared: "
+             "every island reads every row in the same order (the old behaviour; controlled "
+             "experiments only, the launch warns)"),
+    shared_flag("--rl-data-slot", default=None, metavar="I/N",
+                help="this training island reads only the rows i of --data with i %% N == I "
+                "(set by the launcher from --rl-data-split; not a launch option)"),
+    shared_flag("--rl-data-position-store", default=None, metavar="PATH",
+                help="full-parameter island: keep the data position after every round under "
+                "PATH, so a relaunched island continues at its next row (set by the launcher "
+                "with --rl-checkpoint-store; not a launch option)"),
 )
 
 _EVAL = (
