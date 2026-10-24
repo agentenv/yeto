@@ -551,3 +551,18 @@ def test_only_a_full_parameter_island_keeps_a_data_position_log(tmp_path, monkey
     assert entry.data_position_log_for(args, "lora-pool", learner_id=1) is None
     args.yeto_rl_data_position_store = None
     assert entry.data_position_log_for(args, "full", learner_id=1) is None
+
+
+def test_trajectory_reward_records_carry_the_data_row():
+    from yeto.rl.adapters.miles.rollout_meta_hook import trajectory_reward_records
+    from yeto.rl.engine.timeline import TRAJECTORY_REWARD_OPTIONAL
+
+    def sample(meta):
+        return SimpleNamespace(index=0, group_index=0, metadata=meta, reward=1.0, status="completed",
+                               rollout_id=None)
+
+    args = SimpleNamespace(yeto_rl_max_policy_age=0, rl_max_policy_age=0)
+    split, whole = trajectory_reward_records(
+        args, [[sample({DATA_ROW_KEY: 7, "task_id": "t7"})], [sample({"task_id": "t8"})]], limit=8)
+    assert split["data_row"] == 7 and split["task_id"] == "t7" and "data_row" not in whole
+    assert TRAJECTORY_REWARD_OPTIONAL["data_row"] == (int,)

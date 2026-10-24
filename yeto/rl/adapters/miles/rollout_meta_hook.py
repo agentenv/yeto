@@ -697,6 +697,7 @@ def trajectory_reward_records(
                 "reward": float(reward) if math.isfinite(reward) else None,
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
+                **_data_row(meta),
                 **trajectory_diagnostics(meta),
                 **(_carry.trajectory_fields(s, carry_round)
                    if _carry.max_policy_age(args) > 0 else {}),
@@ -706,6 +707,15 @@ def trajectory_reward_records(
 
 _DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",
                         "max_seq_len_hit", "timed_out")
+
+
+def _data_row(meta: dict[str, Any]) -> dict[str, int]:
+    """S27 task assignment: ``{"data_row": n}`` when the island reads a row slot
+    (the row's number in the unsplit data); {} otherwise."""
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
+
+    row = meta.get(DATA_ROW_KEY)
+    return {"data_row": row} if isinstance(row, int) and not isinstance(row, bool) else {}
 
 
 def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
