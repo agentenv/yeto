@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -366,6 +367,7 @@ def build_manifest(context: CutContext, results: Sequence[Mapping[str, Any]], *,
         ledger=context.ledger, outer=context.outer,
         in_flight=tuple(context.in_flight or ()),
         resume=cut_resume_manifest(context, results).to_dict(),
+        created_unix=time.time(),
         files=tuple(CutFile(r["path"], r["sha256"], int(r["bytes"]), dict(r["coord"]))
                     for r in sorted(results, key=lambda r: r["path"])),
         rank_summaries=tuple(sorted(summaries, key=lambda r: r["path"])),

@@ -95,6 +95,8 @@ def test_yeto_arms_use_the_same_policy_age_and_partition():
     every = spec.get_spec(SPEC.name, checkpoint="every-round")
     assert "--rl-cut-every 1 " in spec.yeto_miles_launcher_args(every, "async", "r1")
     assert spec.control_fingerprint(every) == spec.control_fingerprint(SPEC)  # bare arms unchanged
+    default = spec.get_spec(SPEC.name, checkpoint="default")
+    assert "--rl-cut-every" not in spec.yeto_miles_launcher_args(default, "async", "r1")
     with pytest.raises(ValueError):
         spec.cut_every(spec.get_spec(SPEC.name, checkpoint="never"))
 
@@ -460,7 +462,7 @@ def test_e11_arms_read_one_row_set():
     assert f"--rl-allow-local-data --data {spec.YETO_TASK_FILE}" in single and "--gpu modal:4xh100" in single
     multi = spec.yeto_miles_islands_launcher_args(e11, 2, "e11-y", data="t.jsonl", island_tasks="t.json")
     assert "--gpu modal:2xh100,modal:2xh100" in multi and "--rollout-batch-size 16" in multi
-    assert "--rl-rollout-gpus 1" in multi and "--controller head" in multi and "--rl-island-scheduling elastic" in multi
+    assert "--rl-rollout-gpus 1" in multi and "--controller head" in multi and "--rl-sync-quorum-theta 0.75" in multi and "--rl-sync-island-lease-s 150" in multi
     split = spec.island_task_split(e11.groups_per_round, e11.rounds, 2)
     ids = sorted(int(t[3:]) for v in split.values() for t in v)
     assert ids == list(range(1, e11.train_rows + 1))

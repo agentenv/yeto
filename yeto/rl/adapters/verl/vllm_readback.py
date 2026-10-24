@@ -33,7 +33,16 @@ def _registered_lora_model(worker, lora_int_id: int):
     return model
 
 
-def canonical_tensors_from_lora_model(lora_model) -> tuple[dict, dict]:
+def _hf_prefixes(worker) -> dict[str, str]:
+    """The served model's vLLM -> HF module prefixes ({} when the model renames none)."""
+    from .param_names import hf_prefixes_from_mapper
+
+    runner = worker.model_runner
+    model = runner.get_model() if hasattr(runner, "get_model") else getattr(runner, "model", None)
+    return hf_prefixes_from_mapper(getattr(model, "hf_to_vllm_mapper", None))
+
+
+def canonical_tensors_from_lora_model(lora_model, hf_prefixes: dict[str, str] | None = None) -> tuple[dict, dict]:
     """{canonical name: tensor} from a vLLM ``LoRAModel`` (+ a note dict)."""
     from .param_names import vllm_to_canonical
 
@@ -45,8 +54,8 @@ def canonical_tensors_from_lora_model(lora_model) -> tuple[dict, dict]:
         else:
             pairs = [(None, a, b)]
         for slot, la, lb in pairs:
-            out[vllm_to_canonical(module_name, "A", slot)] = la
-            out[vllm_to_canonical(module_name, "B", slot)] = lb
+            out[vllm_to_canonical(module_name, "A", slot, hf_prefixes)] = la
+            out[vllm_to_canonical(module_name, "B", slot, hf_prefixes)] = lb
     return out, {"entries": len(lora_model.loras), "transposed": transposed}
 
 
@@ -68,7 +77,8 @@ def after_add_lora(worker, lora_int_id: int, expected_shapes: dict | None = None
     try:
         from .publish import lora_checksum
 
-        tensors, note = canonical_tensors_from_lora_model(_registered_lora_model(worker, lora_int_id))
+        tensors, note = canonical_tensors_from_lora_model(_registered_lora_model(worker, lora_int_id),
+                                                          _hf_prefixes(worker))
         if expected_shapes:
             # vLLM may keep lora_a as (in, rank) on some versions; record, do not guess silently.
             for name, tensor in list(tensors.items()):

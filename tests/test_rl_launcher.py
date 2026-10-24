@@ -73,6 +73,8 @@ def _args(extra=()):
             "--reward-function",
             "pkg.reward:score",
             "--trust-remote-code",
+            "--rl-sync-mode",  # these tests pin the strict control
+            "strict",
             *extra,
         ]
     )
@@ -837,6 +839,24 @@ def test_experimental_rl_sync_preserves_generic_sync_settings():
         assert value in command
 
 
+@pytest.mark.parametrize(("period", "flag"), [
+    (None, None),
+    ("1", None),  # N = 1 is plain Nesterov: no flag, unchanged profile hash
+    ("4", "--outer-delayed-nesterov-period 4"),
+])
+def test_outer_delayed_nesterov_period_is_forwarded_only_when_set(period, flag):
+    extra = ("--experimental-rl-sync", "--fragments", "1", "--pipeline", "1", "--merge-alpha", "0",
+             "--wire-dtype", "f32")
+    if period is not None:
+        extra += ("--outer-delayed-nesterov-period", period)
+    args = _args(extra)
+    _prepare_rl_args(args)
+    command = syncer_command(args, 2, binary="syncer")
+    assert ("--outer-delayed-nesterov-period" in command) == (flag is not None)
+    if flag is not None:
+        assert flag in command
+
+
 @pytest.mark.parametrize(
     "extra,match",
     [
@@ -948,6 +968,42 @@ def test_miles_tasks_mount_the_same_attested_initial_adapter(
         assert (
             f"--initial-adapter-sha256 {directory_sha256(adapter)}" in task.run
         )
+
+
+def test_island_ray_object_store_and_spill_dir_reach_ray_start():
+    import json
+    import shlex
+
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--gpu", "aws:2x4xa100@us-east-1",
+                  "--rl-island-ray-object-store-gib", "200",
+                  "--rl-island-ray-spill-dir", "/mnt/big disk/spill"))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    _assert_island_ray_is_private(run)
+    store = f"--object-store-memory={200 << 30}"
+    head = run[run.index("ray start --head"):].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    assert store in head and store in worker
+    # The spill dir is a cluster setting: head only, created before Ray starts.
+    (config,) = [word.split("=", 1)[1] for word in shlex.split(head)
+                 if word.startswith("--system-config=")]
+    assert "--system-config" not in worker
+    spilling = json.loads(json.loads(config)["object_spilling_config"])
+    assert spilling == {"type": "filesystem", "params": {"directory_path": "/mnt/big disk/spill"}}
+    assert run.index("mkdir -p '/mnt/big disk/spill'") < run.index("ray start --head")
+
+    plain = _args(("--gpu", "aws:2x4xa100@us-east-1"))
+    plain.model_revision, plain.data_revision = "a" * 40, "b" * 40
+    plain.source_sha256, plain.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(plain)
+    run = make_miles_island_task(plain, parse_gpu_spec(plain.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    assert "--object-store-memory" not in run and "--system-config" not in run
 
 
 def _assert_island_ray_is_private(run: str) -> None:

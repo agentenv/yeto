@@ -55,7 +55,7 @@ MAX_COLLECT_BYTES = 32 << 20
 # then stop STOPPED), printed island environment as JSON (S25 C4 modal_c4.py)
 COMMAND_WRITER = (
     "import json, sys\n"
-    "from yeto.rl.elastic_client import LeaveReason\n"
+    "from yeto.rl.pool_client import LeaveReason\n"
     "from yeto.rl.engine import trainer_remote as t\n"
     "from yeto.rl.engine.resume import store_for\n"
     "w = t.CommandWriter(t.LocalStoreFiles(store_for(sys.argv[1])), 0)\n"
@@ -131,9 +131,10 @@ def syncer(run: str, cfg: dict) -> dict:
     began = time.time()
     argv = ["/opt/yeto-syncer", "--port", str(SYNCER_PORT), "--learners", str(cfg["learners"]),
             "--total-steps", str(cfg["rounds"]), "--event-tape", "/tmp/syncer-tape.jsonl",
-            "--island-scheduling-mode", "elastic", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
-            "--soft-deadline-s", "600", "--q-min", "1", "--max-carry-lag", "2", "--syncer-epoch", "0",
-            "--island-lease-s", "150.0", "--final-grace-s", "300"]
+            "--quorum", "1", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
+            "--soft-deadline-s", "600", "--q-min", "1", "--max-base-lag", "2", "--syncer-epoch", "0",
+            "--island-lease-s", "150.0", "--final-grace-s", "300", "--pipeline", "1",
+            "--learner-weight", "tokens2-over-steps"]
     meta: dict[str, Any] = {"argv": argv, "container": os.environ.get("MODAL_TASK_ID")}
     try:
         with modal.forward(SYNCER_PORT, unencrypted=True) as tunnel, (out / "syncer.log").open("w") as log:
@@ -306,8 +307,8 @@ def trainer(run: str, cfg: dict, learner_id: int) -> dict:
                 time.sleep(2.0)
             if not address:
                 raise RuntimeError("no syncer address within 1200 s")
-            argv += ["--syncer", address, "--rl-island-scheduling", "elastic", "--rl-syncer-epoch", "0",
-                     "--rl-island-lease-s", "150.0", "--rl-sample-store", f"{STORE}/{run}",
+            argv += ["--syncer", address, "--rl-island-pool", "--rl-syncer-epoch", "0",
+                     "--rl-sync-island-lease-s", "150.0", "--rl-sample-store", f"{STORE}/{run}",
                      "--rl-sample-lanes", str(cfg["learners"])]
         else:
             argv += ["--rl-single-island-no-sync", "--rl-resume-store", f"{STORE}/{run}"]

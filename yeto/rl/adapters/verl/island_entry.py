@@ -64,9 +64,9 @@ def parse_args(argv):
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
     p.add_argument("--rl-algorithm-spec", default=None)
-    p.add_argument("--rl-island-scheduling", default="legacy")
+    p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
-    p.add_argument("--rl-island-lease-s", type=float, default=None)
+    p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
     # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
@@ -329,8 +329,8 @@ def main(argv=None) -> int:
     ]
     if args.rl_single_island_no_sync:
         sync = "none"
-    elif args.rl_island_scheduling == "elastic":
-        sync = "elastic"
+    elif args.rl_island_pool:
+        sync = "pool"
     else:
         sync = "strict"
     if sync != "none" and not args.syncer:
@@ -362,7 +362,7 @@ def main(argv=None) -> int:
         "bcast_delta": bool(args.bcast_delta),
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
                            _threshold_card(manifest)],
-        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_island_lease_s,
+        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},

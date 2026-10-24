@@ -86,3 +86,39 @@ def test_hostmem_cgroup_v2_and_v1_and_rss(tmp_path):
     assert mr._proc_rss_sum(str(proc)) == 2048 * 1024
     rec = mr._host_mem_used_bytes()  # this machine: at least one memory source is non-null
     assert rec["proc_rss_sum"] and (rec["cgroup_current"] is not None or rec["meminfo_used"])
+
+
+def test_full_parameter_island_disk_scales_with_the_model(monkeypatch):
+    import argparse
+
+    import pytest
+
+    from yeto.launch import modal_islands
+
+    def args(**kw):
+        base = dict(training_mode="rl", rl_sync_preset="full-parameter",
+                    model="qwen36-27b", modal_ephemeral_disk_gib=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    # 27B: 54 GB bf16 -> 5 f32 copies + the snapshot + margin.
+    assert modal_islands.modal_ephemeral_disk_gib(args()) == 618
+    assert modal_islands.modal_ephemeral_disk_gib(args(model="qwen3-8b")) == 512  # floor
+    assert modal_islands.modal_ephemeral_disk_gib(args(model="deepseek4flash")) == 3072  # cap
+    assert modal_islands.modal_ephemeral_disk_gib(args(modal_ephemeral_disk_gib=900)) == 900
+    assert modal_islands.modal_ephemeral_disk_gib(args(rl_sync_preset="lora")) is None
+    with pytest.raises(ValueError):
+        modal_islands.modal_ephemeral_disk_gib(args(modal_ephemeral_disk_gib=0))
+
+    def unknown(*_a, **_k):
+        raise ValueError("offline")
+
+    monkeypatch.setattr("yeto.shape.memory.model_weights_gb", unknown)
+    assert modal_islands.modal_ephemeral_disk_gib(args()) is None  # Modal's default
+
+
+def test_ephemeral_disk_validates():
+    import pytest
+
+    with pytest.raises(ValueError):
+        _cfg(ephemeral_disk_gib=0).validate()

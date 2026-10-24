@@ -264,6 +264,9 @@ class CutManifest:
     # serialized only when non-empty. Restoring a cut without it is refused
     # by the backends that write it.
     resume: Mapping[str, Any] = field(default_factory=dict)
+    # S27 R-5: wall clock (epoch seconds) when the writer built the manifest;
+    # serialized only when set (manifests without it keep their bytes).
+    created_unix: float | None = None
 
     def body(self) -> dict[str, Any]:
         return {
@@ -281,6 +284,7 @@ class CutManifest:
             **({"backend_state": _jsonable(self.backend_state)} if self.backend_state else {}),
             **({"in_flight": [_jsonable(t) for t in self.in_flight]} if self.in_flight else {}),
             **({"resume": _jsonable(self.resume)} if self.resume else {}),
+            **({"created_unix": float(self.created_unix)} if self.created_unix is not None else {}),
         }
 
     def digest(self) -> str:
@@ -315,6 +319,7 @@ class CutManifest:
                 backend_state=raw.get("backend_state") or {},
                 in_flight=tuple(raw.get("in_flight") or ()),
                 resume=raw.get("resume") or {},
+                created_unix=None if raw.get("created_unix") is None else float(raw["created_unix"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CutError(f"malformed cut manifest: {exc}") from exc

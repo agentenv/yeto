@@ -122,12 +122,15 @@ def fake_aws_env(monkeypatch, tmp_path):
 
 
 def test_launch_args_json_roundtrip():
+    from yeto.rl.engine.selection import plain
+
     ns = cli.parse_args(LAUNCH_ARGS + ["--cluster-prefix", "rt", "--max-rows", "100"])
     payload = json.dumps(cli._serializable_args(ns))
     rebuilt = argparse.Namespace(**json.loads(payload))
     for key, value in vars(ns).items():
         assert getattr(rebuilt, key) == value, key
-        assert type(getattr(rebuilt, key)) is type(value), key  # int/float/bool survive
+        # int/float/bool survive; a --rl-sync-mode default arrives as its plain value
+        assert type(getattr(rebuilt, key)) is type(plain(value)), key
     assert rebuilt.controller == "head"
 
 

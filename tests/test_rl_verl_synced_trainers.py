@@ -4,7 +4,7 @@ merged releases.
 
 The trainers are the verl buffer trainer of test_rl_verl_buffer_trainer.py
 (fake trainer actor; real driver, fully_async rollout port, feed, publisher,
-merged checkpoint) over one lane each of one buffer, with ``ElasticAvgSync``.
+merged checkpoint) over one lane each of one buffer, with ``PoolAvgSync``.
 The sampler is the real engine sampler island (fake engine) in a thread.
 
 Checks (the same as the GPU run's, SESSION25/gpu-review/T-C3V.md):
@@ -15,7 +15,7 @@ Checks (the same as the GPU run's, SESSION25/gpu-review/T-C3V.md):
 3. the two lanes are disjoint and no buffer position is trained twice;
 4. the syncer ran R OuterSteps.
 
-Runs when YETO_TEST_ELASTIC_SYNCER points to a syncer binary (as
+Runs when YETO_TEST_SYNCER points to a syncer binary (as
 test_rl_synced_trainers_sampler.py)."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from test_rl_inter_island_ports import _free_port
+from test_rl_island_pool_e2e import _free_port
 from test_rl_verl_buffer_trainer import NAMES, FakeBufferActor, _base
 from yeto.rl.adapters.sampler_engines.fake import FakeEngine
 from yeto.rl.adapters.verl import buffer_feed as bf
@@ -62,8 +62,7 @@ def _island(out: Path, store_root: Path, base: Path, learner_id: int, port: int,
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
     from yeto.rl.bridge import BridgeConfig
     from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
-    from yeto.rl.elastic_client import ElasticClientConfig, ElasticIslandClient
-    from yeto.rl.engine.bridges import ElasticAvgSync
+    from yeto.rl.engine.bridges import PoolAvgSync
     from yeto.rl.engine.driver import EventTape, IslandDriver
 
     specs = (CanonicalTensorSpec(NAMES[0], (2, 4), "float32", 8),
@@ -86,35 +85,34 @@ def _island(out: Path, store_root: Path, base: Path, learner_id: int, port: int,
                           groups_per_round=GROUPS, samples_per_group=2, local_optimizer_steps=1,
                           expected_specs=specs, base_model_revision="a" * 40, lora_config_hash="b" * 64,
                           layout_hash=canonical_layout_hash(specs), event_tape=str(out / f"bridge-{learner_id}.jsonl"),
-                          wan_streams=0)
-    client = ElasticIslandClient(ElasticClientConfig(("127.0.0.1", port), learner_id, lease_s=6.0,
-                                                     syncer_epoch=5), key.encode())
+                          wan_streams=1)
     profile = far.execution_profile_for(TOLERANT, MAX_POLICY_AGE, groups_per_round=GROUPS, samples_per_group=2,
                                         sync="elastic")
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
         capabilities=verl_capabilities("sha256:" + "0" * 64, fully_async_limit=MAX_POLICY_AGE),
-        algorithm=TOLERANT, sync=ElasticAvgSync(bridge, client=client, base_wait_s=30.0, syncer_epoch=5),
+        algorithm=TOLERANT, sync=PoolAvgSync(bridge, base_wait_s=30.0, syncer_epoch=5, lease_s=6.0),
         events=tape, profile=profile)
     publisher.bind(driver)
     return driver, island
 
 
-@pytest.mark.skipif(not os.environ.get("YETO_TEST_ELASTIC_SYNCER"),
-                    reason="needs YETO_TEST_ELASTIC_SYNCER (syncer binary with elastic mode)")
-def test_two_synced_verl_trainers_feed_one_engine_sampler(tmp_path):
+@pytest.mark.skipif(not os.environ.get("YETO_TEST_SYNCER"),
+                    reason="needs YETO_TEST_SYNCER (syncer binary)")
+def test_two_synced_verl_trainers_feed_one_engine_sampler(tmp_path, monkeypatch):
     port, key = _free_port(), "c3v-e2e"
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", key)  # the islands sign their HELLO
     out = tmp_path
     store_root = out / "store"
     store = CheckpointStore(store_root)
     base, _ = _base(tmp_path, dtype=torch.float32)
     syncer = subprocess.Popen(
-        [os.environ["YETO_TEST_ELASTIC_SYNCER"], "--port", str(port), "--learners", "2",
+        [os.environ["YETO_TEST_SYNCER"], "--port", str(port), "--learners", "2",
          "--total-steps", str(ROUNDS), "--event-tape", str(out / "syncer-tape.jsonl"),
-         "--island-scheduling-mode", "elastic", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
-         "--soft-deadline-s", "30", "--q-min", "1", "--max-carry-lag", "2",
-         "--island-lease-s", "6", "--syncer-epoch", "5"],
+         "--quorum", "1", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
+         "--soft-deadline-s", "30", "--q-min", "1", "--max-base-lag", "2", "--pipeline", "1",
+         "--learner-weight", "tokens2-over-steps", "--island-lease-s", "6", "--syncer-epoch", "5"],
         env=dict(os.environ, YETO_ISLAND_HMAC_KEY=key),
         stdout=open(out / "syncer.log", "w"), stderr=subprocess.STDOUT)
     done, sampler_events = threading.Event(), []

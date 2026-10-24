@@ -40,9 +40,9 @@ from .rl.event_echo import TapeCollector as EventCollector
 from .launch.rl_backend import _rl_backend_module
 from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
-    SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
-    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, syncer_event_tape,
-    syncer_status_reader,
+    SYNCER_PORT, island_pool, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
+    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, role_syncer_shards,
+    syncer_event_tape, syncer_shard_addrs, syncer_status_reader,
 )
 from .launch.storage import (
     droppable_rejoins_in_new_container, resumes_in_new_container,
@@ -63,6 +63,7 @@ from .launch.modal_islands import (
     container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
     require_modal_for_gpu_exact, wan_probe_relaunches,
 )
+from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
     RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT,
@@ -94,7 +95,8 @@ from .launch.syncer import (  # noqa: F401
     RL_SYNCER_EVENT_TAPE, ROLE_SYNCERS, SYNCER_EVENT_TAPE, SYNCER_REMOTE_BUILD,
     _syncer_expected_contract, _syncer_quorum_timeout, build_syncer_binary, critic_syncer_address,
     elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret, probe_listener_command,
-    rl_syncer_profile, syncer_command, syncer_ports, syncer_tape_sidecar, tcp_probe, ufw_setup,
+    rl_syncer_profile, syncer_command, syncer_disk_resources, syncer_ports, syncer_tape_sidecar, tcp_probe,
+    ufw_setup,
 )
 from .launch.loss import PICKLED_LOSS_PREFIX, pickled_loss_path, resolve_loss_function  # noqa: F401
 from .launch.credentials import (  # noqa: F401
@@ -333,7 +335,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print("[launcher] --rl-single-island-no-sync: no syncer, no outer sync")
         elif head_mode:
             syncer_task = syncer_job = None
-            syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(os.environ['SYNCER_PUBLIC_IP'], args)
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
             if getattr(args, "wandb", False):
@@ -346,10 +348,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
             syncer_job, syncer_handle = sky.stream_and_get(rid)
             clusters.append(syncer_cluster)
-            syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(str(syncer_handle.head_ip), args)
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, str(syncer_handle.head_ip))
-        if not no_sync and island_scheduling_mode(args) == "elastic" \
+        if not no_sync and island_pool(args) \
                 and getattr(args, "rl_syncer_epoch", None) is None:
             # 0.17: the islands JOIN with the term the syncer actually runs.
             resolve_island_syncer_epoch(args, syncer_status_reader(
@@ -614,7 +616,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
-        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
+        def attributed_containers() -> dict:
+            # container id -> (island, rank) from each island's first container line
+            return {cid: key for g in list(container_guards)
+                    for key, cid in dict(getattr(g, "first", None) or {}).items()}
+
+        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change,
+                                                    attributed=attributed_containers)
         if container_poller is not None:
             container_guards.append(container_poller)
 
@@ -658,13 +666,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
                 if echo_names else None
             ),
-            elastic=island_scheduling_mode(args) == "elastic",
+            elastic=island_pool(args),
             no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
             wan_reject_probe=(
                 (lambda name: event_collectors[name].wan_rejects if name in event_collectors else 0)
                 if echo_names else None
             ),
             wan_probe_relaunches=wan_probe_relaunches(args),
+            island_relaunch_envs=peer_recovery_relaunch_envs(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -733,7 +742,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         drain_tapes()
         if container_changed():
             return CONTAINER_CHANGED_EXIT
-        if (no_sync_incomplete and head_mode and island_scheduling_mode(args) == "elastic"):
+        if (no_sync_incomplete and head_mode and island_pool(args)):
             # S16 §6.6: an island the syncer removed from the pool for an excused
             # reason (finished, stopped, preempted, lease expiry) owes no
             # rl_learner_finalized; report it, do not exit 3. Failure codes still fail.
@@ -932,8 +941,9 @@ NO_SYNC_INCOMPLETE_EXIT = 3
 
 def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
     commands = role_syncer_commands(args, num_learners)
-    return [
-        {
+    plans = []
+    for syncer in rl_role_syncers(args):
+        plan = {
             "role": syncer.role,
             "port": syncer.port,
             "address": syncer.address,
@@ -942,8 +952,12 @@ def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
             "checkpoint": syncer.checkpoint,
             "event_tape": syncer.event_tape,
         }
-        for syncer in rl_role_syncers(args)
-    ]
+        shards = role_syncer_shards(args, syncer)
+        if len(shards) > 1:
+            plan["shards"] = [{"port": shard.port, "checkpoint": shard.checkpoint,
+                               "event_tape": shard.event_tape} for shard in shards]
+        plans.append(plan)
+    return plans
 
 
 def dry_run_plan(args) -> dict:

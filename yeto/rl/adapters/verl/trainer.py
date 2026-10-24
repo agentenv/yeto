@@ -167,8 +167,8 @@ def publish_selftest(island, publisher, policy_state, specs) -> dict:
 
 def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str,
                compat_group: str | None = None):
-    """Outer sync of the island plan: none / strict / elastic (both trainer paths)."""
-    from yeto.rl.engine.bridges import ElasticAvgSync, LocalOnlySync, StrictAvgSync
+    """Outer sync of the island plan: none / strict / pool (both trainer paths)."""
+    from yeto.rl.engine.bridges import LocalOnlySync, PoolAvgSync, StrictAvgSync
 
     learner_id = int(plan["learner_id"])
     mode = plan["sync"]
@@ -190,8 +190,8 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
             bcast_delta=bool(plan.get("bcast_delta", False)))
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
-        elif mode == "elastic":
-            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)),
+        elif mode == "pool":
+            sync = PoolAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)),
                                   lease_s=plan.get("island_lease_s"))
         else:
             raise ValueError(f"unknown sync mode {mode!r}")

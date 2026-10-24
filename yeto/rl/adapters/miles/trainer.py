@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import math
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -896,6 +897,7 @@ class MilesTrainerGroup:
             outer=context.outer,
             in_flight=tuple(getattr(context, "in_flight", ()) or ()),
             resume=resume.to_dict(),
+            created_unix=time.time(),
             files=tuple(
                 CutFile(s["path"], s["sha256"], int(s["bytes"]), s["coord"]) for s in summaries
             ),

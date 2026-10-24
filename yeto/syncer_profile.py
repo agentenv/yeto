@@ -45,18 +45,14 @@ _FIELDS = {
     "learner_weight",
     "require_profile_binding",
 }
-# rl-inter-island-scheduling: optional. Absent or "legacy" = the old encoding
-# (byte-identical hash); "elastic" appends the island-scheduling block that the
-# syncer's elastic.rs::encode_contract appends.
-_ISLAND_SCHEDULING_FIELDS = {
-    "island_scheduling_mode",
-    "quorum_theta",
-    "carry_gamma",
-    "soft_deadline_s",
-    "q_min",
-    "max_carry_lag",
-}
-_ISLAND_SCHEDULING_DOMAIN = b"yeto-syncer-island-scheduling-v1\0"
+# Optional. Absent = plain Nesterov (byte-identical hash); a period N >= 2
+# appends the block that the syncer's server.rs::semantic_profile_hash appends.
+_DELAYED_NESTEROV_FIELD = "outer_delayed_nesterov_period"
+_DELAYED_NESTEROV_DOMAIN = b"yeto-syncer-delayed-nesterov-v1\0"
+# Optional. Absent or false = no expert token weights (byte-identical hash);
+# true appends the domain that server.rs::semantic_profile_hash appends.
+_EXPERT_TOKEN_WEIGHTS_FIELD = "expert_token_weights"
+_EXPERT_TOKEN_WEIGHTS_DOMAIN = b"yeto-syncer-expert-token-weights-v1\0"
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -137,45 +133,18 @@ class SyncerSemanticProfile:
     max_base_lag: int | None
     learner_weight: str
     require_profile_binding: bool
-    island_scheduling_mode: str = "legacy"
-    quorum_theta: float | None = None
-    carry_gamma: float | None = None
-    soft_deadline_s: int | None = None
-    q_min: int | None = None
-    max_carry_lag: int | None = None
+    outer_delayed_nesterov_period: int | None = None
+    expert_token_weights: bool = False
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
-            _FIELDS <= set(raw) <= _FIELDS | _ISLAND_SCHEDULING_FIELDS
+            _FIELDS <= set(raw)
+            <= _FIELDS | {_DELAYED_NESTEROV_FIELD, _EXPERT_TOKEN_WEIGHTS_FIELD}
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
             )
-        mode = raw.get("island_scheduling_mode", "legacy")
-        params = _ISLAND_SCHEDULING_FIELDS - {"island_scheduling_mode"}
-        if mode == "legacy":
-            if params & set(raw):
-                raise ValueError("island scheduling parameters need island_scheduling_mode=elastic")
-            scheduling: dict = {}
-        elif mode == "elastic":
-            if not params <= set(raw):
-                raise ValueError("elastic island scheduling needs " + ", ".join(sorted(params)))
-            theta = _number("quorum_theta", raw["quorum_theta"])
-            gamma = _number("carry_gamma", raw["carry_gamma"])
-            if not 0.0 < theta <= 1.0 or not 0.0 <= gamma <= 1.0:
-                raise ValueError("quorum_theta must be in (0,1] and carry_gamma in [0,1]")
-            scheduling = {
-                "island_scheduling_mode": "elastic",
-                "quorum_theta": theta,
-                "carry_gamma": gamma,
-                "soft_deadline_s": _integer("soft_deadline_s", raw["soft_deadline_s"],
-                                            bits=64, minimum=1),
-                "q_min": _integer("q_min", raw["q_min"], bits=32, minimum=1),
-                "max_carry_lag": _integer("max_carry_lag", raw["max_carry_lag"], bits=32),
-            }
-        else:
-            raise ValueError("syncer profile island_scheduling_mode must be legacy|elastic")
         if raw["schema"] != SYNCER_SEMANTIC_PROFILE_SCHEMA:
             raise ValueError("unsupported syncer semantic profile schema")
         delta_correction = raw["delta_correction"]
@@ -239,7 +208,12 @@ class SyncerSemanticProfile:
             require_profile_binding=_boolean(
                 "require_profile_binding", raw["require_profile_binding"]
             ),
-            **scheduling,
+            outer_delayed_nesterov_period=_optional_integer(
+                _DELAYED_NESTEROV_FIELD, raw.get(_DELAYED_NESTEROV_FIELD), bits=32, minimum=2
+            ),
+            expert_token_weights=_boolean(
+                _EXPERT_TOKEN_WEIGHTS_FIELD, raw.get(_EXPERT_TOKEN_WEIGHTS_FIELD, False)
+            ),
         )
         profile._validate_general()
         return profile
@@ -318,14 +292,11 @@ class SyncerSemanticProfile:
         _encode_optional(encoded, self.max_base_lag, "<Q")
         encoded.append(0 if self.learner_weight == "tokens2-over-steps" else 1)
         encoded.append(self.require_profile_binding)
-        if self.island_scheduling_mode == "elastic":
-            encoded.extend(_ISLAND_SCHEDULING_DOMAIN)
-            for text in (b"island_scheduling_mode", b"elastic"):
-                encoded.append(len(text))
-                encoded.extend(text)
-            encoded.extend(struct.pack("<dd", self.quorum_theta, self.carry_gamma))
-            encoded.extend(struct.pack("<QII", self.soft_deadline_s, self.q_min,
-                                       self.max_carry_lag))
+        if self.outer_delayed_nesterov_period is not None:
+            encoded.extend(_DELAYED_NESTEROV_DOMAIN)
+            encoded.extend(struct.pack("<I", self.outer_delayed_nesterov_period))
+        if self.expert_token_weights:
+            encoded.extend(_EXPERT_TOKEN_WEIGHTS_DOMAIN)
         return bytes(encoded)
 
     @property

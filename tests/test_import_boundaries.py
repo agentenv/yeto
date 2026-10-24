@@ -54,6 +54,7 @@ CORE_EXCLUDED_DIRS: tuple[str, ...] = ()
 CORE_FILES = (
     # rewards / filters (audit R1-R3)
     "yeto/rl/math_reward.py", "yeto/rl/gsm8k_reward.py", "yeto/rl/length_reward.py",
+    "yeto/rl/numeric_answer_reward.py",
     "yeto/rl/filters.py",
     # algorithm extensions living beside the package (audit A1, A3, A5)
     "yeto/rl/critic_warmup.py", "yeto/rl/teacher_forcing.py", "yeto/rl/grad_audit.py",

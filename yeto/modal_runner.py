@@ -168,8 +168,9 @@ def resolve_syncer_for_modal(syncer_addr: str, public_override: str | None) -> s
     reachable from Modal and no `--syncer-public-addr` was given."""
     if public_override:
         return public_override
-    host = syncer_addr.rsplit(":", 1)[0].strip("[]")
-    if is_public_address(host):
+    # a sharded head (--syncer-shards N) is a comma-separated list, one address per shard
+    hosts = [addr.rsplit(":", 1)[0].strip("[]") for addr in syncer_addr.split(",")]
+    if all(is_public_address(host) for host in hosts):
         return syncer_addr
     raise ValueError(
         f"syncer at {syncer_addr} is not reachable from Modal (private or unresolvable "
@@ -248,6 +249,9 @@ class ModalIslandConfig:
     # Host resource overrides (None = per-GPU defaults below).
     cpu_override: int | None = None
     memory_gib_override: int | None = None
+    # Container disk in GiB (None = Modal's default). Ray spills its object
+    # store here (see yeto.launch.modal_islands.modal_ephemeral_disk_gib).
+    ephemeral_disk_gib: int | None = None
 
     @property
     def function_name(self) -> str:
@@ -272,6 +276,8 @@ class ModalIslandConfig:
 
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
+        if self.ephemeral_disk_gib is not None and self.ephemeral_disk_gib < 1:
+            raise ValueError("ephemeral_disk_gib must be >= 1")
         if self.training_mode == "rl":
             if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
                                           or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
@@ -449,7 +455,7 @@ class TapeSync:
         # names its copies "<stem>.inc<k><suffix>" (k = 0 keeps the old names).
         self.incarnation: int | None = None
 
-    def _claim_incarnation(self) -> int:
+    def claim_incarnation(self) -> int:
         if self.incarnation is None:
             self.dst.mkdir(parents=True, exist_ok=True)
             taken = sorted(self.dst.glob("INCARNATION-*.txt"))
@@ -462,7 +468,7 @@ class TapeSync:
         return self.incarnation
 
     def _target_name(self, name: str) -> str:
-        k = self._claim_incarnation()
+        k = self.claim_incarnation()
         if k == 0:
             return name
         for suffix in TAPE_SUFFIXES:
@@ -472,7 +478,7 @@ class TapeSync:
 
     def sync_once(self) -> int:
         self.dst.mkdir(parents=True, exist_ok=True)
-        self._claim_incarnation()
+        self.claim_incarnation()
         for name, text in list(self.extra.items()):
             (self.dst / self._target_name(name)).write_text(text, encoding="utf-8")
             del self.extra[name]
@@ -872,6 +878,9 @@ def island_main(cfg_json: str) -> int:
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
             _volume_commit(cfg.tape_volume_name), mirror_globs=TAPE_MIRROR_GLOBS,
         )
+        # 0 for the island's first container, k for its k-th re-run (test-only
+        # fault injection exits only in the first one).
+        env["YETO_MODAL_INCARNATION"] = str(tape.claim_incarnation())
     hostmem = None
     interval = hostmem_interval_s(cfg)
     if interval is not None:
@@ -1079,6 +1088,8 @@ class ModalOps:
         )
         if cfg.region:
             kwargs["region"] = cfg.region
+        if cfg.ephemeral_disk_gib is not None:
+            kwargs["ephemeral_disk"] = cfg.ephemeral_disk_gib * 1024  # MiB
         volumes = {}
         if cfg.volume_name and cfg.volume_mount:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
@@ -1162,15 +1173,19 @@ class ModalOps:
         return None
 
     def list_container_ids(self) -> set[str] | None:
-        """Running container ids of this run's app (``modal container list --json``);
-        None when the list cannot be read."""
+        """Started container ids of this run's app (``modal container list --json``);
+        None when the list cannot be read.
+
+        A row whose start time is "Pending" (a task queued for a GPU, no code runs and
+        nothing is billed yet) is left out; a row without a start-time field counts."""
         proc = subprocess.run([sys.executable, "-m", "modal", "container", "list", "--json"],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             return None
         rows = json.loads(proc.stdout or "[]")
         return {str(r.get("Container ID") or r.get("container_id")) for r in rows
-                if (r.get("App Name") or r.get("app_name")) == self.app_name}
+                if (r.get("App Name") or r.get("app_name")) == self.app_name
+                and not _pending_start(r)}
 
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
@@ -1212,6 +1227,16 @@ class ModalOps:
         modal = self._modal()
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
+
+
+def _pending_start(row: dict) -> bool:
+    """True when a ``modal container list --json`` row has a start-time field that is
+    empty or "Pending" (the task was not started)."""
+    for key in ("Start Time", "start_time"):
+        if key in row:
+            value = row[key]
+            return value is None or str(value).strip().lower() in ("", "pending")
+    return False
 
 
 CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
@@ -1256,15 +1281,25 @@ class ContainerSetPoller:
     and the function-call log stream never delivered the new container's lines, so
     :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
 
-    Every ``interval_s`` it lists the app's running containers. Once ``expected``
-    distinct ids were seen (all islands up), that set is the baseline; any later id
-    outside it trips the guard and calls ``on_change(message)`` once. A failed list
-    is skipped (never trips)."""
+    ``modal container list`` does not say which function (island) a container runs.
+    The island itself says so: its first log line ``[modal-island N] rank R container
+    ta-...`` (``attributed()`` returns those first ids, container id -> (island, rank)).
 
-    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0) -> None:
+    Every ``interval_s`` it lists the app's started containers. ``expected`` is the
+    number of (island, rank) slots. A slot is taken once a container printed its line
+    for it. A listed container that no island claimed yet may be the late first
+    container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
+    that is not a change. The guard trips (``on_change(message)`` once) when the
+    listed unclaimed containers outnumber the free slots, so at least one of them
+    must be a second container of a taken slot. An unclaimed container that left the
+    list never ran island code (as far as the logs show) and is not counted. A failed
+    list is skipped (never trips)."""
+
+    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
+                 attributed=None) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
-        self.baseline: set[str] | None = None
+        self.attributed = attributed if attributed is not None else dict
         self.seen: set[str] = set()
         self.changes: list[str] = []
         self.expected = False  # launcher.container_changed(): a change here is never expected
@@ -1283,15 +1318,21 @@ class ContainerSetPoller:
         if ids is None:
             return
         ids = set(ids)
-        if self.baseline is None:
-            self.seen |= ids
-            if len(self.seen) >= self.expected_count:
-                self.baseline = set(self.seen)
-            return
-        new = sorted(ids - self.baseline)
-        if new and not self.changes:
-            msg = (f"Modal app has a new container {', '.join(new)} besides "
-                   f"{', '.join(sorted(self.baseline))} (an island was rescheduled)")
+        self.seen |= ids
+        try:
+            claimed = dict(self.attributed() or {})
+        except Exception as exc:  # noqa: BLE001 - no attribution: every slot stays free
+            print(f"[launcher] container attribution failed: {exc}", flush=True)
+            claimed = {}
+        taken = set(claimed.values())
+        free = max(0, self.expected_count - len(taken))
+        unclaimed = sorted(ids - set(claimed))
+        if len(unclaimed) > free and not self.changes:
+            owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
+                               for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
+            msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
+                   f"claimed, with {free} of {self.expected_count} island slot(s) still free "
+                   f"(claimed: {owners}) (an island was rescheduled)")
             self.changes.append(msg)
             if self.on_change is not None:
                 self.on_change(msg)

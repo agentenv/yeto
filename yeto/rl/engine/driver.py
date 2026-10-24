@@ -61,8 +61,9 @@ import dataclasses
 import json
 from contextlib import contextmanager
 import math
+import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,8 +73,9 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
+from . import phase_profile
 from .algorithm import AlgorithmSpec
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
@@ -131,14 +133,21 @@ _PHASE_TASK = {"sync": "outer_sync"}
 
 FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
 FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+# Set by the Modal runner: 0 for an island's first container, k for its k-th re-run.
+MODAL_INCARNATION_ENV = "YETO_MODAL_INCARNATION"
 
 
-def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
 
     Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
     ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
-    frozen code snapshot). Keys: ``publish_delay_s``.
+    frozen code snapshot). Keys: ``publish_delay_s``; ``round_delay_s`` (sleep
+    before each round's rollout, to emulate a slow island) with optional
+    ``round_delay_islands`` (learner ids it applies to; default every island).
+    ``exit_at_round`` and ``exit_islands`` (the island process exits with
+    code 137 before that rollout, only in its first Modal container, so a
+    re-run of the island is a fresh process that rejoins).
     """
     import os
 
@@ -148,13 +157,34 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     if not candidate.is_file():
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"publish_delay_s"})
+    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
+                              "exit_at_round", "exit_islands"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
-    delay = float(raw.get("publish_delay_s", 0.0))
-    if not math.isfinite(delay) or delay < 0:
-        raise ValueError("publish_delay_s must be a non-negative number")
-    return {"publish_delay_s": delay} if delay else {}
+    out: dict[str, Any] = {}
+    for key in ("publish_delay_s", "round_delay_s"):
+        delay = float(raw.get(key, 0.0))
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError(f"{key} must be a non-negative number")
+        if delay:
+            out[key] = delay
+    if "round_delay_islands" in raw:
+        islands = raw["round_delay_islands"]
+        if not isinstance(islands, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in islands):
+            raise ValueError("round_delay_islands must be a list of learner ids")
+        if "round_delay_s" in out:
+            out["round_delay_islands"] = sorted(set(islands))
+    if "exit_at_round" in raw:
+        round_id, islands = raw["exit_at_round"], raw.get("exit_islands")
+        if type(round_id) is not int or round_id < 1:
+            raise ValueError("exit_at_round must be a positive rollout id")
+        if not isinstance(islands, list) or not islands or not all(type(i) is int for i in islands):
+            raise ValueError("exit_at_round needs exit_islands, a list of learner ids")
+        out["exit_at_round"] = round_id
+        out["exit_islands"] = sorted(set(islands))
+    elif "exit_islands" in raw:
+        raise ValueError("exit_islands needs exit_at_round")
+    return out
 
 
 class DriverError(RuntimeError):
@@ -380,6 +410,29 @@ def defer_digest(driver: Any) -> bool:
             and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
 
 
+def verify_publication(driver: Any, version: int) -> bool:
+    """E1: does the publication of policy ``version`` hash the policy and read the
+    engine weight checksums back? Yes on the first publication, on a round whose safe
+    point keeps a round cut (resume relies on its policy hash), on every K-th version
+    (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
+    round cuts, or with a policy state that cannot skip it, every round is verified.
+    The other rounds still check that the trainer holds the policy (weights version)."""
+    if bool(getattr(driver, "verify_every_round", False)):
+        return True
+    if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
+        return True
+    cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    every = int(getattr(cuts, "every", 0) or 0)
+    if cuts is None or every <= 1:
+        return True
+    if getattr(driver, "published_version", None) is None:
+        return True
+    cut_due = getattr(driver.sync, "cut_due", None)
+    if callable(cut_due) and cut_due(int(version)):
+        return True
+    return int(version) % every == 0
+
+
 class IslandDriver:
     def __init__(
         self,
@@ -464,6 +517,13 @@ class IslandDriver:
         self.published_state: TrainableState | None = None
         # P0-S: published versions within the policy-age window (version -> hash)
         self.published_policies = PublishedPolicies()
+        # S27 L11: where a restarted island's data position comes from when it is not
+        # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
+        # log); None: the data source cursor is restored (_restore_data_cursor).
+        self.data_position_owner: str | None = None
+        # S27 L11: () -> ((version, policy hash), ...) published before this process
+        # started (e.g. the store's policy releases); None: none to restore.
+        self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
         self.at_safe_point = False
         self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
@@ -480,6 +540,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -699,6 +760,10 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if not verify_publication(self, int(policy_version)):
+            state = self.policy_state.export_identity(policy_version=int(policy_version))
+            if state is not None:
+                return state
         if defer_digest(self):
             return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))
@@ -753,6 +818,9 @@ class IslandDriver:
             policy_version=rollout_id,
             **{
                 "rl/policy_token": self.expected_token,
+                # E1: only on a round whose policy content was not hashed (recorded tapes
+                # of verified rounds stay byte-identical)
+                **({"sync/publication_verified": False} if getattr(state, "verified", True) is False else {}),
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),
@@ -773,6 +841,30 @@ class IslandDriver:
         if callable(setter):
             setter(self.published_policies)
 
+    def _restore_published_policies(self, start_rollout_id: int) -> None:
+        """S27 L11: a restarted island learns the versions published before it
+        started, so groups the samplers generated with them pass the policy-age
+        check. Only versions below the start version within the policy-age window
+        are restored; the start version and later ones are published again."""
+        history = getattr(self, "published_policy_history", None)
+        if start_rollout_id <= 0 or not callable(history):
+            return
+        oldest = start_rollout_id - self._max_policy_age()
+        restored = {}
+        for version, policy_hash in history():
+            version = int(version)
+            if oldest <= version < start_rollout_id and policy_hash:
+                restored[version] = str(policy_hash)
+        if not restored:
+            return
+        for version, policy_hash in sorted(restored.items()):
+            self.published_policies.record(version, policy_hash)
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
+                  versions=sorted(restored))
+
     def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """P0-S: name every group's generating policy by its label.
 
@@ -789,6 +881,19 @@ class IslandDriver:
             for label, g in zip(labels, batch.groups)
         )
         return dataclasses.replace(batch, groups=groups)
+
+    def _inject_exit(self, rollout_id: int) -> None:
+        """Test-only: kill this island process (first Modal container only)."""
+        import os
+
+        if (self.fault_injection.get("exit_at_round") != rollout_id
+                or self.learner_id not in self.fault_injection.get("exit_islands", ())
+                or os.environ.get(MODAL_INCARNATION_ENV, "0") != "0"):
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(137)
 
     def _refuse_if_recovery_required(self) -> None:
         """3.7 (recovery-design.md F13): an island that opened in RECOVERY_REQUIRED
@@ -1442,6 +1547,7 @@ class IslandDriver:
             raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         self._probe_nodes(rollout_id)
         started = time.monotonic()
+        self._inject_round_delay(rollout_id)
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
         if self.ledger is not None:
@@ -1458,6 +1564,15 @@ class IslandDriver:
         self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
                   round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
         return boundary
+
+    def _inject_round_delay(self, rollout_id: int) -> None:
+        """Test-only slow island: sleep before the rollout, inside the round wall time."""
+        delay = self.fault_injection.get("round_delay_s")
+        islands = self.fault_injection.get("round_delay_islands")
+        if not delay or (islands is not None and self.learner_id not in islands):
+            return
+        self.emit("rl_fault_injected", kind="round_delay", seconds=delay, rollout_id=rollout_id)
+        time.sleep(delay)
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
                      rollout_seconds: float) -> SyncBoundary:
@@ -1794,6 +1909,12 @@ class IslandDriver:
         pool that reports cursors -> DriverError (no silent re-training)."""
         if start_rollout_id <= 0:
             return
+        owner = getattr(self, "data_position_owner", None)
+        if owner is not None:
+            # S27 L11: the island reads no data source (a synced trainer reads its
+            # buffer lane, whose cursor log resumes it); no data cursor to restore.
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=owner)
+            return
         seek = getattr(self.rollout, "seek_data_cursor", None)
         from_cut = getattr(self.sync, "resume_data_cursor", None)
         cut_cursor = from_cut() if callable(from_cut) else None
@@ -1894,6 +2015,7 @@ class IslandDriver:
                 start = None
                 try:
                     start = self.sync.start(self)
+                    self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)
@@ -1918,6 +2040,7 @@ class IslandDriver:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
                     self.safe_point(rollout_id)
+                    self._inject_exit(rollout_id)
                     boundary = self.run_round(rollout_id)
                     state = boundary.state
                     rollout_id += 1

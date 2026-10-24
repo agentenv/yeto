@@ -178,7 +178,7 @@ def test_island_entry_accepts_the_sao_island_command(tmp_path):
 @pytest.mark.parametrize(
     ("extra", "message"),
     (
-        (("--rl-island-scheduling", "elastic"), "elastic"),
+        (("--rl-sync-island-lease-s", "30"), "island pool"),
         (("--experimental-rl-sync",), "experimental"),
     ),
 )

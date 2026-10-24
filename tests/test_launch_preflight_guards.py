@@ -406,7 +406,7 @@ def test_island_task_env_only_for_negative_runs():
     t = launcher._island_task(factory, args, None, 0, 2, "x", {})
     assert t.envs == {"A": "1"} and seen[0] is args
     args = SimpleNamespace(rl_negative_test_run=True, rl_lr_schedule="auto", rl_max_policy_age=0,
-                           rl_island_scheduling="legacy", training_mode="rl", rl_engine="ports")
+                           training_mode="rl", rl_engine="ports")
     ov = {1: {"identity_test_salt": "s1"}}
     t0 = launcher._island_task(factory, args, None, 0, 2, "x", ov)
     t1 = launcher._island_task(factory, args, None, 1, 2, "x", ov)
@@ -426,7 +426,7 @@ def test_override_validation():
     assert io_.overrides_of(a, 2) == {1: {"rl_lr_schedule": "constant"}}
     for item, msg in [("2:rl_lr_schedule=constant", "out of range"),
                       ("1:model_revision=abc", "allowed"),
-                      ("1:rl_max_carry_lag=3", "syncer"),
+                      ("1:rl_sync_max_base_lag=3", "syncer"),
                       ("1:rl_lr_schedule=cosine", "must be one of"),
                       ("x:rl_lr_schedule=constant", "ISLAND:KEY=VALUE"),
                       ("1:rl_max_policy_age=-1", ">= 0")]:
@@ -455,7 +455,7 @@ def test_identity_salt_changes_contract_only_when_given():
 # --- 3.4 manifest fields and island tape ---------------------------------------------
 def test_manifest_fields_and_tape_event(tmp_path, capsys):
     args = SimpleNamespace(rl_negative_test_run=True, rl_lr_schedule="auto",
-                           rl_island_scheduling="elastic", rl_checkpoint_store=None)
+                           rl_sync_island_lease_s=30, rl_checkpoint_store=None)
     ov = {1: {"rl_lr_schedule": "linear"}}
     m = io_.manifest_fields(args, ov)
     assert m["negative_test"] is True

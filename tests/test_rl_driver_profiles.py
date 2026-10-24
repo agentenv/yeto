@@ -318,3 +318,61 @@ def test_observed_events_carry_labels_and_feed_load_windows(tmp_path):
                          profile=_profile("colocated-serial"), observe=False)
     driver2.run()
     assert load_windows(_events(tmp_path / "off.jsonl"), 1.0) == []
+
+
+def test_round_delay_applies_only_to_named_islands(tmp_path, monkeypatch):
+    from yeto.rl.engine import driver as drv
+
+    cfg = tmp_path / "fi.json"
+    cfg.write_text('{"round_delay_s": 0.01, "round_delay_islands": [1]}')
+    assert drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(cfg)}) == {
+        "round_delay_s": 0.01, "round_delay_islands": [1]}
+    monkeypatch.setenv(drv.FAULT_INJECTION_ENV, str(cfg))
+    engine = _engine(placement_kind="fixed-partition")
+    driver, _ = _driver(engine, tmp_path, profile=_profile("partitioned-serial"))
+    driver.run()  # learner 0: not named, no delay
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert "round_delay" not in kinds
+    driver.fault_injection = {"round_delay_s": 0.01}  # every island
+    driver._inject_round_delay(7)
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert kinds.count("round_delay") == 1
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"round_delay_s": 1, "round_delay_islands": "1"}')
+    with pytest.raises(ValueError):
+        drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
+
+
+def test_fault_injection_process_exit_keys(tmp_path):
+    from yeto.rl.engine.driver import FAULT_INJECTION_ENV, load_fault_injection
+
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"exit_at_round": 3, "exit_islands": [1, 1]}))
+    assert load_fault_injection({FAULT_INJECTION_ENV: str(path)}) == {
+        "exit_at_round": 3, "exit_islands": [1]}
+    for bad in ({"exit_at_round": 0, "exit_islands": [1]}, {"exit_at_round": 2},
+                {"exit_islands": [1]}):
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            load_fault_injection({FAULT_INJECTION_ENV: str(path)})
+
+
+@pytest.mark.parametrize(("learner", "incarnation", "exits"),
+                         [(1, None, True), (1, "0", True), (1, "1", False), (0, None, False)])
+def test_fault_injection_exits_only_the_first_container(monkeypatch, learner, incarnation, exits):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import driver as module
+
+    exited = []
+    monkeypatch.setattr("os._exit", exited.append)
+    if incarnation is None:
+        monkeypatch.delenv(module.MODAL_INCARNATION_ENV, raising=False)
+    else:
+        monkeypatch.setenv(module.MODAL_INCARNATION_ENV, incarnation)
+    events = []
+    fake = SimpleNamespace(fault_injection={"exit_at_round": 2, "exit_islands": [1]},
+                           learner_id=learner, emit=lambda *a, **k: events.append(a))
+    module.IslandDriver._inject_exit(fake, 1)
+    module.IslandDriver._inject_exit(fake, 2)
+    assert exited == ([137] if exits else [])

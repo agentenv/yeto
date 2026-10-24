@@ -11,6 +11,7 @@ import time
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
 from .code_pack import code_pack_island_flag, code_workdir
+from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
@@ -18,11 +19,12 @@ from .remote_setup import (
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
-    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_spec, rl_trainer_shape,
+    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_spill_dir_prelude,
+    rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
 )
 from .syncer import (
     critic_syncer_address, elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret,
-    rl_dense_sweep, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
+    rl_dense_sweep, rl_full_parameter_async, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
 )
 from .credentials import registry_login_for, split_secret_envs
 from .storage import (
@@ -79,6 +81,13 @@ def _wan_transport_flags(args) -> str:
     return flags
 
 
+def _rl_matrix_merge_flag(args) -> str:
+    """S27 P1: decoupled islands build their fragment layout with the syncer's
+    merge modes; omitted at the default so the island command is unchanged."""
+    merge = getattr(args, "rl_sync_matrix_merge", "avg")
+    return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -100,12 +109,34 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if rl_full_parameter_async(args):
+        sweep += " --full-parameter-rounds async"
+    if getattr(args, "rl_sync_expert_token_weights", False):
+        sweep += " --sweep-expert-token-weights"
+    if getattr(args, "rl_sync_init_mode", "auto") != "auto":
+        sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):
         sweep += " --sweep-overlap"
+    if getattr(args, "rl_sync_push_no_tensor_blocks", False):
+        sweep += " --sweep-push-no-tensor-blocks"
+    if getattr(args, "rl_sync_max_local_rounds_ahead", None) is not None:
+        sweep += f" --sweep-max-local-rounds-ahead {int(args.rl_sync_max_local_rounds_ahead)}"
+    if float(getattr(args, "rl_sync_wait_timeout_s", 900.0)) != 900.0:
+        sweep += f" --sweep-wait-timeout-s {float(args.rl_sync_wait_timeout_s):g}"
+    if getattr(args, "rl_sync_fragment_max_bytes", 2 << 30) != 2 << 30:
+        sweep += f" --sweep-fragment-max-bytes {int(args.rl_sync_fragment_max_bytes)}"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
         sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
+    if getattr(args, "rl_sync_push_dtype", "f32") == "int4":
+        sweep += f" --sweep-push-int4-block {int(getattr(args, 'rl_sync_push_int4_block', 128))}"
+        if getattr(args, "rl_sync_push_int4_stochastic", False):
+            sweep += " --sweep-push-int4-stochastic"
+        error_feedback = getattr(args, "rl_sync_push_int4_error_feedback", "off")
+        if error_feedback != "off":
+            sweep += f" --sweep-push-int4-error-feedback {error_feedback}"
+    sweep += peer_recovery_island_flags(args)
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep
@@ -185,6 +216,7 @@ def make_miles_island_task(
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
+        + _rl_matrix_merge_flag(args)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
@@ -244,6 +276,8 @@ def make_miles_island_task(
     flags += algorithm_flags
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
+    if int(getattr(args, "context_parallel", 1) or 1) > 1:
+        flags += f" --context-parallel {int(args.context_parallel)}"
     for flag, name in (
         ("--rl-prompt-column", "rl_prompt_column"),
         ("--rl-label-column", "rl_label_column"),
@@ -260,6 +294,10 @@ def make_miles_island_task(
             flags += f" {flag} {shlex.quote(str(value))}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
+    if getattr(args, "observe_training_entropy", False):
+        flags += " --observe-training-entropy"
+    if getattr(args, "mamba_training_ssm_states_dtype", None):
+        flags += f" --mamba-training-ssm-states-dtype {args.mamba_training_ssm_states_dtype}"
     if getattr(args, "apply_chat_template_kwargs", None):
         chat_kwargs = json.dumps(
             args.apply_chat_template_kwargs, sort_keys=True, separators=(",", ":")
@@ -501,6 +539,7 @@ def make_miles_island_task(
             # command line, so pkill by that path never touches sky's.
             f"{rl_island_gpu_env(args, spec)}"
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
+            f"{rl_island_ray_spill_dir_prelude(args)}"
             # Same escalation as `ray stop --force` (TERM, short grace, KILL)
             # but scoped to this dir: gcs_server, raylet and the autoscaler
             # monitor ignore a bare SIGTERM for 30 s or more.
@@ -524,6 +563,7 @@ def make_miles_island_task(
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
+            + rl_island_ray_storage(args, head=True)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -552,7 +592,7 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"

@@ -10,7 +10,7 @@ import re
 import shlex
 from pathlib import PurePosixPath
 
-from .syncer import island_scheduling_mode
+from .syncer import island_pool
 
 
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
@@ -52,10 +52,10 @@ def resumes_in_new_container(args) -> bool:
 
 
 def droppable_rejoins_in_new_container(args, modal_cfg) -> bool:
-    """rl-spot-cost-saving 5.2: on an elastic run a Modal re-run of a droppable island
+    """rl-spot-cost-saving 5.2: on an island-pool run a Modal re-run of a droppable island
     (reclaim / ``modal container stop``) is expected: it rejoins from the syncer base.
     Every other island keeps the fail-closed container guard."""
-    if island_scheduling_mode(args) != "elastic":
+    if not island_pool(args):
         return False
     from ..cloud import droppable
 

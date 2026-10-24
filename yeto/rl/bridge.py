@@ -808,26 +808,6 @@ class StrictRlBridge:
 
 
 # ----------------------------------------------------------------------------- elastic
-def flatten_state(state: CanonicalLoraState, specs) -> list[float]:
-    """Flat f32 vector in canonical spec order (elastic wire format)."""
-    parts = [state.tensors[spec.name].detach().to(torch.float32).reshape(-1) for spec in specs]
-    return torch.cat(parts).tolist() if parts else []
-
-
-def unflatten_state(values, version: int, template: CanonicalLoraState, specs) -> CanonicalLoraState:
-    flat = torch.tensor(values, dtype=torch.float32)
-    tensors, off = {}, 0
-    for spec in specs:
-        tensors[spec.name] = flat[off:off + spec.numel].reshape(spec.shape).clone()
-        off += spec.numel
-    if off != flat.numel():
-        raise StrictRlInvariantError("layout_hash_mismatch",
-                                     f"elastic base has {flat.numel()} values, layout needs {off}")
-    return canonical_state(version, tensors, base_model_revision=template.base_model_revision,
-                           lora_config_hash=template.lora_config_hash,
-                           layout_hash=template.layout_hash, expected_specs=specs)
-
-
 def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     """HELLO session contract (decoupling 6.2): layout fingerprint bound to the backend identity."""
     if identity_sha256 is None:

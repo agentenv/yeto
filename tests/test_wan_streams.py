@@ -200,6 +200,21 @@ def test_watchdog_notices_an_inbound_message_that_stops_growing():
     assert client._stalled_stream() is None
 
 
+def test_meter_stall_clock_starts_at_the_enqueue_of_an_idle_stream():
+    # s27-gh-a: a stream idle for 2206 s got a chunk; the watchdog read it
+    # before the sender thread picked it up and dropped the group as stalled.
+    clock = _Clock()
+    meter = StreamMeter(clock)
+    clock.now += 2206
+    meter.enqueued(10)
+    assert meter.stalled_for() == 0.0
+    clock.now += 4
+    assert meter.stalled_for() == pytest.approx(4)
+    # Bytes already waiting keep their clock: more bytes are no progress.
+    meter.enqueued(10)
+    assert meter.stalled_for() == pytest.approx(4)
+
+
 def test_stall_timeout_sets_tcp_user_timeout():
     if not hasattr(socket, "TCP_USER_TIMEOUT"):
         pytest.skip("Linux-only socket option")

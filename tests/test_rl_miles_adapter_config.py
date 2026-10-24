@@ -275,11 +275,25 @@ def test_no_sync_full_parameter_trainer_keeps_the_distributed_optimizer():
     mc.validate_parsed_args(_parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1)
 
 
-def test_optimizer_offload_with_the_full_parameter_sync_is_refused():
+def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader(monkeypatch):
+    # S27 G-B: Miles reads DP=1 distributed-optimizer masters (incl. the
+    # HybridDeviceOptimizer's offloaded FP32 copies) from 56190a5a8 on; an
+    # older pinned image is refused before launch.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=0.5))
-    with pytest.raises(mc.MilesConfigError, match="needs the distributed optimizer"):
+    monkeypatch.setattr(mc, "MILES_NEXT_COMMIT", "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b")
+    with pytest.raises(mc.MilesConfigError, match="56190a5a8 or later"):
         mc.translate_run_config(cfg, AlgorithmSpec())
+
+
+def test_optimizer_offload_with_the_full_parameter_sync_keeps_the_distributed_optimizer():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    assert "use_distributed_optimizer" not in launch.runtime_attrs
+    assert ("--use-distributed-optimizer --use-precision-aware-optimizer --optimizer-cpu-offload "
+            "--overlap-cpu-optimizer-d2h-h2d --optimizer-offload-fraction 1.0") in " ".join(launch.argv)
+    mc.validate_parsed_args(_parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1)
 
 
 def test_build_ports_launch_marks_a_no_sync_trainer_island(monkeypatch):
@@ -684,6 +698,18 @@ def test_elastic_island_lr_schedule_is_constant():
                                   island_scheduling="legacy") == rc.LrSchedule("linear", 6)
 
 
+def test_async_full_parameter_island_lr_schedule_is_constant():
+    """An asynchronous full-parameter island trains until the syncer stops it
+    (H local rounds per fragment round, more when it is fast under a partial
+    quorum), so a linear horizon of global_rounds could decay the LR to 0
+    while it still trains. The strict sweep keeps the linear schedule."""
+    args = _schedule_args(sync_preset="full-parameter", global_rounds=6)
+    assert rc.resolve_lr_schedule(**args, full_parameter_async=True) == rc.LrSchedule("constant", 6)
+    assert rc.resolve_lr_schedule(**args) == rc.LrSchedule("linear", 6)
+    with pytest.raises(ValueError, match="asynchronous full-parameter"):
+        rc.resolve_lr_schedule(**args, full_parameter_async=True, requested="linear")
+
+
 @pytest.mark.parametrize("preset,scheduling", [("strict-avg", "legacy"), ("decoupled", "legacy"),
                                                ("strict-avg", "elastic")])
 def test_rl_lr_schedule_constant_in_every_mode(preset, scheduling):
@@ -813,3 +839,21 @@ def test_generic_recipe_trains_without_dropout():
         cfg = sub(cfg, "model_recipe", name=rc.RECIPE_GENERIC)
     joined = " ".join(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     assert "--attention-dropout 0.0 --hidden-dropout 0.0" in joined
+
+
+def test_observe_training_entropy_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--observe-training-entropy" not in plain
+    cfg = sub(make_config(), "algorithm", observe_training_entropy=True)
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert argv.count("--observe-training-entropy") == 1
+    assert [value for value in argv if value != "--observe-training-entropy"] == plain
+
+
+def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--mamba-training-ssm-states-dtype" not in plain
+    cfg = sub(make_config(), "algorithm", mamba_training_ssm_states_dtype="fp32")
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    at = argv.index("--mamba-training-ssm-states-dtype")
+    assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain

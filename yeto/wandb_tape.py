@@ -121,6 +121,13 @@ def tape_metrics(rec: dict) -> dict:
         if value is not None:
             metrics[f"sync/{optional}"] = float(value)
 
+    # Late deltas of earlier rounds merged here (async rounds).
+    carried = rec.get("carried") or []
+    metrics["sync/carried"] = float(len(carried))
+    if carried:
+        metrics["sync/carried_lag_max"] = max(float(c.get("lag", 0)) for c in carried)
+        metrics["sync/carried_missed_step_min"] = min(float(c.get("missed_step", 0)) for c in carried)
+
     stalenesses = [float(r.get("staleness", 0)) for r in responders]
     if stalenesses:
         metrics["sync/staleness_max"] = max(stalenesses)

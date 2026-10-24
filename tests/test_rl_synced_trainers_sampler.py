@@ -14,10 +14,12 @@ Checks (the same as the GPU run's, SESSION25/gpu-review/T-C3.md):
 3. the two lanes are disjoint and no buffer position is trained twice;
 4. the syncer ran R OuterSteps.
 
-Runs when YETO_TEST_ELASTIC_SYNCER points to a syncer binary (as
-test_rl_inter_island_ports.py)."""
+Runs when YETO_TEST_SYNCER points to a syncer binary (as
+test_rl_island_pool_e2e.py)."""
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import asyncio
 import json
@@ -32,11 +34,10 @@ import pytest
 import torch
 
 from test_rl_engine_driver import NAME, _driver, _engine, _strict_config
-from test_rl_inter_island_ports import _free_port
+from test_rl_island_pool_e2e import _free_port
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.miles.sampler_island import wire_policy_releases
-from yeto.rl.elastic_client import ElasticClientConfig, ElasticIslandClient
-from yeto.rl.engine.bridges import ElasticAvgSync
+from yeto.rl.engine.bridges import PoolAvgSync
 from yeto.rl.engine.merged_release import BufferLane
 from yeto.rl.engine.policy_release import PolicyFollower, PolicyReleaseStore
 from yeto.rl.engine.resume import CheckpointStore
@@ -109,10 +110,11 @@ def _events(path: Path, kind: str) -> list[dict]:
             if r.get("event") == kind]
 
 
-@pytest.mark.skipif(not os.environ.get("YETO_TEST_ELASTIC_SYNCER"),
-                    reason="needs YETO_TEST_ELASTIC_SYNCER (syncer binary with elastic mode)")
-def test_two_synced_trainers_feed_one_sampler_through_merged_releases(tmp_path):
+@pytest.mark.skipif(not os.environ.get("YETO_TEST_SYNCER"),
+                    reason="needs YETO_TEST_SYNCER (syncer binary)")
+def test_two_synced_trainers_feed_one_sampler_through_merged_releases(tmp_path, monkeypatch):
     port, key = _free_port(), "c3-e2e"
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", key)  # the islands sign their HELLO
     out = Path(os.environ.get("YETO_TEST_ELASTIC_OUT", tmp_path))
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("*.jsonl"):
@@ -120,11 +122,11 @@ def test_two_synced_trainers_feed_one_sampler_through_merged_releases(tmp_path):
     store_root = out / "store"
     store_root.mkdir(exist_ok=True)
     syncer = subprocess.Popen(
-        [os.environ["YETO_TEST_ELASTIC_SYNCER"], "--port", str(port), "--learners", "2",
+        [os.environ["YETO_TEST_SYNCER"], "--port", str(port), "--learners", "2",
          "--total-steps", str(ROUNDS), "--event-tape", str(out / "syncer-tape.jsonl"),
-         "--island-scheduling-mode", "elastic", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
-         "--soft-deadline-s", "30", "--q-min", "1", "--max-carry-lag", "2",
-         "--island-lease-s", "6", "--syncer-epoch", "5"],
+         "--quorum", "1", "--quorum-theta", "0.75", "--carry-gamma", "0.5",
+         "--soft-deadline-s", "30", "--q-min", "1", "--max-base-lag", "2", "--pipeline", "1",
+         "--learner-weight", "tokens2-over-steps", "--island-lease-s", "6", "--syncer-epoch", "5"],
         env=dict(os.environ, YETO_ISLAND_HMAC_KEY=key),
         stdout=open(out / "syncer.log", "w"), stderr=subprocess.STDOUT)
     stop, loads = threading.Event(), []
@@ -136,10 +138,10 @@ def test_two_synced_trainers_feed_one_sampler_through_merged_releases(tmp_path):
         sampler.start()
         drivers, rollouts = [], []
         for i, engine in enumerate(engines):
-            client = ElasticIslandClient(ElasticClientConfig(("127.0.0.1", port), i, lease_s=6.0,
-                                                             syncer_epoch=5), key.encode())
-            cfg = _strict_config(out, engine, learner_id=i, rounds=ROUNDS, tape=f"island-{i}.jsonl")
-            driver = _driver(engine, ElasticAvgSync(cfg, client=client, base_wait_s=30.0), out,
+            cfg = replace(_strict_config(out, engine, learner_id=i, rounds=ROUNDS, tape=f"island-{i}.jsonl"),
+                          syncer_addr=("127.0.0.1", port), wan_streams=1)
+            sync = PoolAvgSync(cfg, base_wait_s=30.0, syncer_epoch=5, lease_s=6.0)
+            driver = _driver(engine, sync, out,
                              name=f"events-{i}.jsonl", learner_id=i)
             lane = BufferLane(i, 2)
             buffer = FileSampleBuffer(CheckpointStore(store_root), batch_size=engine.groups, lane=lane)

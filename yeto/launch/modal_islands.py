@@ -5,6 +5,7 @@ container-set poller.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -14,7 +15,7 @@ from ..gpu_spec import ClusterSpec
 from . import REPO_ROOT
 from .code_pack import code_workdir
 from .remote_setup import HF_TOKEN_PATH
-from .syncer import critic_syncer_address, island_hmac_secret
+from .syncer import critic_syncer_address, island_hmac_secret, rl_dense_sweep
 from .credentials import SECRET_ENV_NAMES, _secret_value, registry_login_for
 from .storage import (
     MODAL_CHECKPOINT_STORE_MOUNT, MODEL_STORE_MOUNT, _rl_checkpoint_mount,
@@ -124,6 +125,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
         cpu_override=getattr(args, "modal_cpu", None),
         memory_gib_override=getattr(args, "modal_memory_gib", None),
+        ephemeral_disk_gib=modal_ephemeral_disk_gib(args) if rl else getattr(
+            args, "modal_ephemeral_disk_gib", None),
         tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
                      if getattr(args, "modal_tape_volume", None) else None),
         workdir=code_workdir(args),
@@ -141,6 +144,41 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         **({"timeout_s": int(args.modal_timeout_s)}
            if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
+
+
+# A full-parameter island holds whole-model f32 cuts as Ray objects: its
+# anchors, the current cut, the overlap round base, staged broadcasts and a
+# reconnect catch-up. What does not fit in the object store spills to the
+# container disk; s27-gh-a (27B, Modal's default disk) spilled 318 GB and
+# failed with ENOSPC. Size the disk for this many f32 copies.
+FULL_PARAMETER_SPILL_COPIES = 5
+MODAL_EPHEMERAL_DISK_MARGIN_GIB = 64
+MODAL_EPHEMERAL_DISK_MIN_GIB = 512
+MODAL_EPHEMERAL_DISK_MAX_GIB = 3072
+
+
+def modal_ephemeral_disk_gib(args) -> int | None:
+    """Container disk of a Modal RL island: ``--modal-ephemeral-disk-gib``, or
+    for full-parameter sync a size scaled to the model; None keeps Modal's
+    default (other modes, or a model whose size is unknown)."""
+    explicit = getattr(args, "modal_ephemeral_disk_gib", None)
+    if explicit is not None:
+        if int(explicit) < 1:
+            raise ValueError("--modal-ephemeral-disk-gib must be >= 1")
+        return int(explicit)
+    if not rl_dense_sweep(args):
+        return None
+    from ..shape.memory import model_weights_gb
+
+    try:
+        bf16_gb = model_weights_gb(args.model, getattr(args, "weights_gb", None))
+    except ValueError as exc:
+        print(f"[yeto] Modal island disk: model size unknown ({exc}); keeping Modal's "
+              "default disk, pass --modal-ephemeral-disk-gib to size it", file=sys.stderr)
+        return None
+    bf16_gib = bf16_gb * 1e9 / (1 << 30)
+    need = (FULL_PARAMETER_SPILL_COPIES * 2 + 1) * bf16_gib + MODAL_EPHEMERAL_DISK_MARGIN_GIB
+    return min(max(math.ceil(need), MODAL_EPHEMERAL_DISK_MIN_GIB), MODAL_EPHEMERAL_DISK_MAX_GIB)
 
 
 def modal_tape_subdir(cluster_prefix: str, learner_id: int) -> str:
@@ -284,10 +322,12 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
-def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True):
+def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True,
+                             attributed=None):
     """The log-independent container guard (modal_runner.ContainerSetPoller), only when
     a new container is never expected: no launcher relaunch, no checkpoint-store resume
-    and no droppable island. None otherwise."""
+    and no droppable island. None otherwise. ``attributed()`` returns the container ids
+    the islands printed (container id -> (island, rank))."""
     if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
         return None
     if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
@@ -297,7 +337,8 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
     from ..modal_runner import ContainerSetPoller
 
     expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
-    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change)
+    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change,
+                                attributed=attributed)
     return poller.start() if start else poller
 
 

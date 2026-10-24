@@ -152,13 +152,14 @@ def test_island_contract_binds_algorithm_spec():
         island_contract_sha256(sha, lr, "not-a-hash")
 
 
-def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
+def test_bridge_configs_bind_lr_schedule_into_hello(monkeypatch):
     from types import SimpleNamespace
 
-    import yeto.rl.elastic_client as ec
+    import yeto.rl.pool_client as pc
     from yeto.rl import bridge, decoupled
+    from yeto.rl.core import CanonicalTensorSpec, build_avg_layout
     from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
-    from yeto.rl.engine.bridges import ElasticAvgSync
+    from yeto.rl.engine.bridges import PoolAvgSync
 
     for cls in (bridge.BridgeConfig, decoupled.DecoupledBridgeConfig):
         assert {"lr_schedule_sha256", "algorithm_semantic_sha256", "code_pack_digest"} <= {
@@ -168,14 +169,18 @@ def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     seen = []
 
     class Spy:
-        def __init__(self, config, key, **kw):
-            seen.append(config.backend_identity_sha256)
+        def __init__(self, config, layout, **kw):
+            seen.append((config.session_contract_hash, layout))
 
-    monkeypatch.setattr(ec, "ElasticIslandClient", Spy)
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
+    monkeypatch.setattr(pc, "PoolIslandClient", Spy)
+    spec = CanonicalTensorSpec("base_model.model.layer.lora_A.weight", (1, 2), "float32", 2)
     cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=sha,
                           lr_schedule_sha256=lr, algorithm_semantic_sha256="e" * 64,
-                          code_pack_digest="f" * 64,
-                          expected_specs=(), global_rounds=1, local_optimizer_steps=1)
-    ElasticAvgSync(cfg)._client()
-    assert seen == [island_contract_sha256(sha, lr, "e" * 64, "f" * 64)]
+                          code_pack_digest="f" * 64, wan_streams=1,
+                          expected_specs=(spec,), global_rounds=1, local_optimizer_steps=1)
+    sync = PoolAvgSync(cfg)
+    sync.specs = (spec,)
+    sync._client()
+    layout = build_avg_layout((spec,))
+    contract = island_contract_sha256(sha, lr, "e" * 64, "f" * 64)
+    assert seen == [(bridge._session_contract(layout, contract), seen[0][1])]

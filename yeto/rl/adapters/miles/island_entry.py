@@ -18,7 +18,14 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
-from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
+from yeto.rl.engine.run_flags import (
+    FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+    FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
+    ISLAND,
+    add_rl_flags,
+    rl_option_pairs,
+)
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.adapters.miles.revision import verify_miles_revision
@@ -218,25 +225,39 @@ def _check_sample_store(args) -> None:
     check_sample_store(args)
 
 
+_CUT_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+              ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+              ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+              ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"))
+
+
 def _check_resume_switches(args) -> None:
     """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync;
-    the cut cadence flags need a store (elastic or resume)."""
+    ``--rl-island-cut-store`` (S27 R-2) is a synced island's; the cut cadence flags
+    need a store (elastic, resume or island cuts)."""
+    from yeto.rl.engine.cut_interval import cut_interval_for
+
     store = getattr(args, "rl_resume_store", None)
-    has_store = bool(store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
-    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+    island_store = getattr(args, "rl_island_cut_store", None)
+    has_store = bool(store) or bool(island_store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
+    for name, flag in _CUT_FLAGS:
         value = getattr(args, name, None)
-        if value is not None and not int(value) >= 1:
-            raise ValueError(f"{flag} must be >= 1")
-    given = [f for n, f in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                            ("rl_stop_after_rounds", "--rl-stop-after-rounds"))
-             if getattr(args, n, None) is not None]
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive" if isinstance(value, float) else f"{flag} must be >= 1")
+    cut_interval_for(every=getattr(args, "rl_cut_every", None),
+                     auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
+                     max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
+    given = [f for n, f in _CUT_FLAGS if getattr(args, n, None) is not None]
     if getattr(args, "rl_resume_allow_config_change", False):
         given.append("--rl-resume-allow-config-change")
     if given and not has_store:
-        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store)")
-    if getattr(args, "rl_cut_keep", None) is not None and not store:
-        raise ValueError("--rl-cut-keep applies to --rl-resume-store (the elastic store keeps every cut)")
+        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store "
+                         "or --rl-island-cut-store)")
+    if getattr(args, "rl_cut_keep", None) is not None and not (store or island_store):
+        raise ValueError("--rl-cut-keep applies to --rl-resume-store or --rl-island-cut-store "
+                         "(the elastic store keeps every cut)")
+    if island_store:
+        _check_island_cut_store(args)
     if getattr(args, "rl_stop_after_rounds", None) is not None and not store:
         raise ValueError("--rl-stop-after-rounds needs --rl-resume-store")
     if not store:
@@ -247,6 +268,21 @@ def _check_resume_switches(args) -> None:
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "is not implemented yet: rl-resume-from-checkpoint 3.3)")
+
+
+def _check_island_cut_store(args) -> None:
+    """S27 R-2: island round cuts belong to a synced island (a syncer, no elastic store,
+    no resume store); its cuts are written only, so the resume switches do not apply."""
+    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-island-cut-store is a synced island's (no --rl-single-island-no-sync, "
+                         "no --rl-elastic)")
+    if getattr(args, "rl_resume_store", None):
+        raise ValueError("--rl-island-cut-store and --rl-resume-store exclude each other")
+    for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                       ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
+        if getattr(args, name, None):
+            raise ValueError(f"{flag}: a synced island does not resume from its round cuts "
+                             "(the syncer is authoritative)")
 
 
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
@@ -276,12 +312,28 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
 
 
+def _cut_auto(args) -> dict[str, float]:
+    """The timed cut interval flags (empty: every N rounds)."""
+    mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)
+    if mtbf is None:
+        return {}
+    cap = getattr(args, "rl_cut_max_interval_s", None)
+    return {"auto_mtbf_s": float(mtbf), **({} if cap is None else {"max_interval_s": float(cap)})}
+
+
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
     process starts. Without them nothing is set (default path unchanged)."""
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+        miles_args.yeto_rl_verify_every_round = True
+    if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
+        miles_args.yeto_rl_profile_trainer = True
+        from yeto.rl.engine import phase_profile
+
+        phase_profile.enable()  # samples the thread that drives the phases
     if getattr(args, "rl_debug_dump", False):
         out = os.path.dirname(os.path.abspath(os.path.expanduser(
             getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
@@ -324,15 +376,24 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
-    if getattr(args, "rl_resume_store", None):
+    auto = _cut_auto(args)
+    if auto:
+        miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
+    island_store = getattr(args, "rl_island_cut_store", None)
+    if getattr(args, "rl_resume_store", None) or island_store:
+        every = getattr(args, "rl_cut_every", None)
         miles_args.yeto_rl_resume = {
-            "store": str(args.rl_resume_store),
+            "store": (str(args.rl_resume_store) if not island_store
+                      else f"{str(island_store).rstrip('/')}/island{int(args.learner_id)}"),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            "every": None if auto else int(every or DEFAULT_CUT_EVERY),
+            **auto,
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
                            else int(args.rl_stop_after_rounds)),
+            # S27 R-2: a synced island writes its cuts only (no resume from them)
+            **({"write_only": True} if island_store else {}),
         }
         from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 
@@ -358,7 +419,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["accept_rebind"] = True
     if getattr(args, "rl_elastic_checkpoint_store", None):
         miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
-    if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
+    if getattr(args, "rl_island_pool", False):
         miles_args.yeto_rl_elastic["island_scheduling"] = "elastic"
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
@@ -556,7 +617,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
-        island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
+        island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
         extra_argv=tuple(extra_argv),
     )
 
@@ -744,11 +805,29 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
     """
 
     _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
-    if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
+    if _full_parameter_async(args):
+        # S27 P2 asynchronous rounds: H local rounds per fragment push, at
+        # most FULL_PARAMETER_ASYNC_MAX_PIPELINE fragment rounds in flight;
+        # no sweep-only options.
+        if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) < 1:
+            raise ValueError("dense full-parameter asynchronous rounds need H >= 1 "
+                             "and one optimizer step")
+        if not 1 <= getattr(args, "pipeline", 1) <= min(FULL_PARAMETER_ASYNC_MAX_PIPELINE, args.fragments):
+            raise ValueError("dense full-parameter asynchronous rounds need --pipeline "
+                             f"1..min({FULL_PARAMETER_ASYNC_MAX_PIPELINE}, P)")
+        if getattr(args, "sweep_overlap", False):
+            raise ValueError("--sweep-overlap needs the strict sweep")
+    elif args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
-        # The sweep publishes whole rounds in lockstep with the syncer; rollout
-        # running ahead of training is a separate profile, not part of P0-S.
+    elif getattr(args, "rl_sync_matrix_merge", "avg") != "avg":
+        raise ValueError("the dense full-parameter strict sweep merges by plain averaging")
+    elif getattr(args, "sweep_expert_token_weights", False):
+        raise ValueError("--sweep-expert-token-weights needs asynchronous rounds "
+                         "(the strict sweep merges with equal weights)")
+    elif int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The sweep publishes whole rounds in lockstep with the syncer. The
+        # asynchronous rounds take a policy-age limit counted in local
+        # publications (yeto.rl.engine.full_parameter_sync module doc).
         raise ValueError("the dense full-parameter strict sweep requires --rl-max-policy-age 0")
     if (
         type(args.global_rounds) is not int
@@ -806,15 +885,31 @@ def _roster_generations(args) -> tuple[int, ...]:
     return tuple(generations)
 
 
+def _full_parameter_async(args) -> bool:
+    """S27 P2: ``--full-parameter-rounds async`` (asynchronous sharded rounds)."""
+    return getattr(args, "full_parameter_rounds", "sweep") == "async"
+
+
+def _local_init(args, async_rounds: bool) -> bool:
+    """Local init (S27): every island launched by one run loads the same base
+    checkpoint, so async rounds keep it as version 0 by default; the syncer
+    refuses the run if the islands' fragment digests disagree."""
+    mode = getattr(args, "init_mode", "auto")
+    return mode == "local" or (mode == "auto" and async_rounds)
+
+
 def _dense_full_sync_config(
     args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
-    """The dense strict sweep as a one-role :class:`FullParameterSyncConfig`."""
+    """The dense full-parameter sync as a one-role :class:`FullParameterSyncConfig`:
+    the strict sweep, or (S27 P2) the streaming profile with a partial quorum."""
 
     from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
     from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
     from yeto.rl.local_learner import ComponentIdentity
 
+    async_rounds = _full_parameter_async(args)
+    syncers = _syncer_addresses(args.syncer) if async_rounds else [_syncer_address(args.syncer)]
     actor = RoleStreamConfig(
         algorithm="grpo",
         role="actor",
@@ -823,30 +918,110 @@ def _dense_full_sync_config(
             model_revision=args.model_revision.lower(),
             config_hash=model_config_sha256,
         ),
-        syncer_addr=_syncer_address(args.syncer),
+        syncer_addr=syncers[0],
+        syncer_shards=tuple(syncers) if len(syncers) > 1 else (),
         learner_id=args.learner_id,
         learner_generation=int(getattr(args, "learner_generation", 0)),
         learner_generations=_roster_generations(args),
         total_fragment_steps=args.total_fragment_steps,
         expected_fragments=args.fragments,
         expected_layout_hash=args.parameter_layout_sha256,
-        local_horizon=1,
+        local_horizon=int(args.local_horizon) if async_rounds else 1,
         optimizer_steps_per_round=args.optimizer_steps,
         training_contract_hash=training_contract_sha256,
         syncer_profile_hash=args.syncer_profile_sha256,
-        pipeline_depth=1,
+        pipeline_depth=int(args.pipeline) if async_rounds else 1,
         algorithm_spec_sha256=algorithm_spec_sha256,
+        wait_timeout=_sweep_wait_timeout_s(args),
         wan_streams=args.wan_streams,
         wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
         wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
         push_dtype=getattr(args, "sweep_push_dtype", "f32"),
         push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
+        max_fragment_bytes=int(getattr(args, "sweep_fragment_max_bytes", 2 << 30)),
+        push_int4_block=int(getattr(args, "sweep_push_int4_block", 128)),
+        push_tensor_blocks=not getattr(args, "sweep_push_no_tensor_blocks", False),
+        push_int4_stochastic=bool(getattr(args, "sweep_push_int4_stochastic", False)),
+        push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
+        expert_token_weights=bool(getattr(args, "sweep_expert_token_weights", False)),
         bcast_delta=bool(getattr(args, "bcast_delta", False)),
         # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
         # overlap's outer-step lag is bound into the session contract.
         overlap=bool(getattr(args, "sweep_overlap", False)),
+        partial_quorum=async_rounds,
+        local_init=_local_init(args, async_rounds),
+        matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
+        peer_recovery=peer_recovery_options(args),
+        # an island pool sets the epoch (and lease); else peer recovery may
+        **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
     )
-    return FullParameterSyncConfig((actor,), sweep=True)
+    return FullParameterSyncConfig((actor,), sweep=not async_rounds,
+                                   max_local_rounds_ahead=_max_local_rounds_ahead(args, async_rounds))
+
+
+def _max_local_rounds_ahead(args, async_rounds: bool) -> int | None:
+    """``--sweep-max-local-rounds-ahead`` (launcher ``--rl-sync-max-local-rounds-ahead``):
+    the S27 G-AG lead cap of the asynchronous rounds; None (off) by default."""
+    value = getattr(args, "sweep_max_local_rounds_ahead", None)
+    if value is None:
+        return None
+    if not async_rounds:
+        raise ValueError("--sweep-max-local-rounds-ahead needs --full-parameter-rounds async")
+    if type(value) is not int or not 1 <= value <= MAX_LOCAL_ROUNDS_AHEAD:
+        raise ValueError(f"--sweep-max-local-rounds-ahead must be an integer within 1..{MAX_LOCAL_ROUNDS_AHEAD}")
+    return value
+
+
+def _sweep_wait_timeout_s(args) -> float:
+    """``--sweep-wait-timeout-s`` (launcher ``--rl-sync-wait-timeout-s``); 900 s by default."""
+    value = float(getattr(args, "sweep_wait_timeout_s", 900.0) or 900.0)
+    if not 0 < value <= 7 * 86400:
+        raise ValueError("--sweep-wait-timeout-s must be within (0, 604800] seconds")
+    return value
+
+
+PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"  # "1": the launcher relaunched this island (launch.peer_recovery)
+
+
+def _island_syncer_epoch(args) -> int | None:
+    """S27 E-3: the HELLO carries the syncer epoch only when the launcher sent one."""
+    value = getattr(args, "rl_syncer_epoch", None)
+    return None if value is None or getattr(args, "rl_peer_recovery_store", None) is None else int(value)
+
+
+def peer_recovery_options(args, environ=None):
+    """S27 E-3: peer recovery of a full-parameter island, or None without
+    ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
+    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`)."""
+    from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
+
+    store = getattr(args, "rl_peer_recovery_store", None)
+    env = os.environ if environ is None else environ
+    recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
+    if store is None:
+        if recover or getattr(args, "rl_peer_recovery_staging", None):
+            raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
+        return None
+    ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
+    return PeerRecoveryOptions(
+        store=str(store),
+        recover=recover,
+        ttl_s=3600.0 if ttl is None else float(ttl),
+        staging=getattr(args, "rl_peer_recovery_staging", None),
+    )
+
+
+def _island_pool_membership(args) -> dict:
+    """Island pool (``--rl-island-pool``, set by the launcher with any
+    --rl-sync-* membership option): the syncer lease the session heartbeats
+    for and the syncer epoch of its HELLO. {} for a fixed roster."""
+    if not getattr(args, "rl_island_pool", False):
+        return {}
+    from yeto.rl.pool_client import DEFAULT_ISLAND_LEASE_S
+
+    lease = getattr(args, "rl_sync_island_lease_s", None)
+    return {"island_lease_s": DEFAULT_ISLAND_LEASE_S if lease is None else float(lease),
+            "syncer_epoch": int(getattr(args, "rl_syncer_epoch", 0) or 0)}
 
 
 def _load_sao_streaming_runtime(args):
@@ -1598,10 +1773,20 @@ def _island_compat_group(args) -> str:
 
 
 def _syncer_address(value: str) -> tuple[str, int]:
+    """One ``HOST:PORT``; a sharded head's list is only for
+    :func:`_syncer_addresses` (asynchronous full-parameter rounds)."""
+    if "," in value:
+        raise ValueError("a sharded syncer head (comma-separated --syncer) needs "
+                         "--full-parameter-rounds async")
     host, separator, port = value.rpartition(":")
     if not separator or not host:
         raise ValueError("--syncer must be HOST:PORT")
     return host, int(port)
+
+
+def _syncer_addresses(value: str) -> list[tuple[str, int]]:
+    """``HOST:PORT[,HOST:PORT...]``: one syncer, or every shard in shard order."""
+    return [_syncer_address(item.strip()) for item in value.split(",")]
 
 
 def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
@@ -1613,8 +1798,8 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     import socket
 
     connect = connect or socket.create_connection
-    addrs = [_syncer_address(v) for v in (getattr(args, "syncer", None),
-                                          getattr(args, "critic_syncer", None)) if v]
+    addrs = [addr for v in (getattr(args, "syncer", None), getattr(args, "critic_syncer", None))
+             if v for addr in _syncer_addresses(v)]
     for host, port in addrs:
         last = "not tried"
         for i in range(max(1, attempts)):
@@ -1644,7 +1829,7 @@ def probe_wan_link(args, *, probe=None) -> None:
     from yeto.wan_probe import EXIT_SLOW_LINK, PROBE_EVENT, PROBE_MARKER, probe_link
 
     result = (probe or probe_link)(
-        _syncer_address(args.syncer),
+        _syncer_addresses(args.syncer)[0],  # shard 0 of a sharded head
         streams=max(1, int(args.wan_streams)),
         bytes_per_direction=int(getattr(args, "wan_probe_mib", 256)) << 20,
         key=island_hmac_key_from_env(),
@@ -2086,7 +2271,10 @@ def run_miles(
                 raise ValueError(
                     "decoupled RL total fragment steps must equal sweeps*fragments"
                 )
-            layout = build_rl_fragment_layout(specs, args.fragments)
+            matrix_merge = getattr(args, "rl_sync_matrix_merge", "avg")
+            layout = build_rl_fragment_layout(
+                specs, args.fragments, matrix_merge=matrix_merge
+            )
             sync_fingerprint = layout_fingerprint(layout).hex()
             miles_args.yeto_rl_num_fragments = args.fragments
             miles_args.yeto_rl_pipeline = args.pipeline
@@ -2117,6 +2305,8 @@ def run_miles(
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
                 code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                matrix_merge=matrix_merge,
+                **_island_pool_membership(args),
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(
@@ -2141,11 +2331,11 @@ def run_miles(
                 compat_group=_island_compat_group(args),
                 bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )
-            if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
-                # rl-inter-island-scheduling 0.15 (legacy sets nothing)
-                miles_args.yeto_rl_island_scheduling = "elastic"
+            if getattr(args, "rl_island_pool", False):
+                # a fixed roster sets nothing
+                miles_args.yeto_rl_island_pool = True
                 miles_args.yeto_rl_syncer_epoch = int(getattr(args, "rl_syncer_epoch", 0))
-                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_island_lease_s", None)
+                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_sync_island_lease_s", None)
             # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
             # the critic specs/layout, built by build_sync once Miles created it.
             miles_args.yeto_rl_critic_syncer_addr = (
@@ -2523,7 +2713,7 @@ if __name__ == "__main__":
     except BaseException as error:  # noqa: BLE001
         if _rejoin_exhausted(error):
             # 0.22: the island gave up re-joining the elastic pool (not 4/6).
-            from yeto.rl.elastic_client import ELASTIC_REJOIN_FAILED_EXIT
+            from yeto.rl.pool_client import ELASTIC_REJOIN_FAILED_EXIT
 
             print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
             raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error

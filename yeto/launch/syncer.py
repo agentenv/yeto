@@ -94,12 +94,42 @@ def rl_role_syncers(args) -> tuple[RoleSyncer, ...]:
     return tuple(ROLE_SYNCERS[role] for role in rl_trainable_roles(args))
 
 
+def role_syncer_shards(args, syncer: RoleSyncer) -> tuple[RoleSyncer, ...]:
+    """The processes of one role's syncer: itself, or one per head shard.
+
+    Shard 0 keeps the role's port, checkpoint and tape; shard i>0 listens on
+    ``port + i`` and writes ``<stem>.shard<i><suffix>``. Only the actor is
+    sharded (``syncer_shard_count`` refuses a critic), so the ports never
+    collide with the critic syncer."""
+    count = syncer_shard_count(args)
+    if count == 1:
+        return (syncer,)
+    return tuple(
+        RoleSyncer(syncer.role, syncer.port + index, syncer.address,
+                   _shard_path(syncer.checkpoint, index), _shard_path(syncer.event_tape, index))
+        for index in range(count)
+    )
+
+
 def role_syncer_commands(args, num_learners: int,
                          binary: str = "~/yeto-syncer") -> dict[str, str]:
     """One strict RL syncer invocation per trainable role (rounds, quorum and
-    outer optimizer shared), each on its own port, checkpoint and tape."""
-    return {syncer.role: _rl_role_syncer_command(args, num_learners, binary, syncer)
-            for syncer in rl_role_syncers(args)}
+    outer optimizer shared), each on its own port, checkpoint and tape.
+
+    With ``--syncer-shards N`` a role's command runs its N shard processes
+    under one supervisor that fails as soon as any shard fails."""
+    commands = {}
+    for syncer in rl_role_syncers(args):
+        shards = role_syncer_shards(args, syncer)
+        if len(shards) == 1:
+            commands[syncer.role] = _rl_role_syncer_command(args, num_learners, binary, syncer)
+        else:
+            commands[syncer.role] = _sharded_supervisor([
+                _rl_role_syncer_command(args, num_learners, binary, shard,
+                                        shard_plan=(index, len(shards)))
+                for index, shard in enumerate(shards)
+            ])
+    return commands
 
 
 def syncer_event_tape(args) -> str:
@@ -140,14 +170,49 @@ def _rl_quorum_timeout_s(args) -> int | None:
 
 def _syncer_quorum_timeout(args) -> str:
     """The syncer's --quorum-timeout-s, the same value the island's pause
-    budget uses; "" by default (syncer 900 s)."""
+    budget uses; "" by default (syncer 900 s).  A full-parameter
+    ``--rl-sync-wait-timeout-s`` other than 900 also sets --final-ack-timeout-s."""
     value = _rl_quorum_timeout_s(args)
-    return "" if value is None else f" --quorum-timeout-s {value}"
+    final_ack = _rl_final_ack_timeout_s(args)
+    return (("" if value is None else f" --quorum-timeout-s {value}")
+            + ("" if final_ack is None else f" --final-ack-timeout-s {final_ack}"))
+
+
+def _rl_final_ack_timeout_s(args) -> int | None:
+    """The full-parameter syncer's final-ACK wait: ``--rl-sync-wait-timeout-s``
+    when set (the islands wait as long for FINAL and apply it before they ACK);
+    None keeps the syncer default (its quorum timeout)."""
+    if not rl_dense_sweep(args):
+        return None
+    value = float(getattr(args, "rl_sync_wait_timeout_s", SYNCER_DEFAULT_QUORUM_TIMEOUT_S))
+    if value == SYNCER_DEFAULT_QUORUM_TIMEOUT_S:
+        return None
+    if value != int(value):
+        raise ValueError("--rl-sync-wait-timeout-s must be whole seconds (syncer u64)")
+    return int(value)
 
 
 def _syncer_checkpoint_every(args) -> int:
-    """Per-round checkpoints (1) unless the full-parameter preset sets an interval."""
+    """Per-round checkpoints (1) unless the full-parameter sweep sets an interval
+    (asynchronous rounds keep 1, checked by rl_args)."""
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
+
+
+def outer_delayed_nesterov_period(args) -> int | None:
+    """The syncer's Delayed Nesterov period; None (unset or 1) is plain Nesterov."""
+    period = getattr(args, "outer_delayed_nesterov_period", None)
+    if period is None:
+        return None
+    if period < 1:
+        raise ValueError("--outer-delayed-nesterov-period must be >= 1")
+    return period if period > 1 else None
+
+
+def _syncer_outer_optimizer(args) -> str:
+    period = outer_delayed_nesterov_period(args)
+    return (f" --outer-lr {args.outer_lr}"
+            f" --outer-momentum {args.outer_momentum}"
+            + (f" --outer-delayed-nesterov-period {period}" if period else ""))
 
 
 def _syncer_bcast_delta(args) -> str:
@@ -161,6 +226,27 @@ def rl_dense_sweep(args) -> bool:
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
+def syncer_disk_resources(args) -> dict:
+    """``sky.Resources`` keywords of the syncer/head VM set by ``--syncer-disk-gib``,
+    ``--syncer-disk-tier`` and ``--syncer-instance-type`` (unset keeps the default)."""
+    resources = {}
+    if getattr(args, "syncer_disk_gib", None) is not None:
+        if int(args.syncer_disk_gib) < 1:
+            raise ValueError("--syncer-disk-gib must be >= 1")
+        resources["disk_size"] = int(args.syncer_disk_gib)
+    if getattr(args, "syncer_disk_tier", None) is not None:
+        resources["disk_tier"] = args.syncer_disk_tier
+    if getattr(args, "syncer_instance_type", None):
+        resources["instance_type"] = args.syncer_instance_type
+    return resources
+
+
+def rl_full_parameter_async(args) -> bool:
+    """S27 P2: the full-parameter preset runs asynchronous sharded rounds, not
+    the strict policy sweep (``--rl-sync-full-parameter-rounds async``)."""
+    return rl_dense_sweep(args) and getattr(args, "rl_sync_full_parameter_rounds", "sweep") == "async"
+
+
 def rl_sao_streaming(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
             and getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET)
@@ -169,8 +255,11 @@ def rl_sao_streaming(args) -> bool:
 def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
-    full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
-    frozen contract's timeouts and the publishable final checkpoint."""
+    full-parameter adds strict P-fragment policy sweeps (asynchronous rounds,
+    S27 P2, add none); sao-streaming-full adds the frozen contract's timeouts and
+    the publishable final checkpoint."""
+    if rl_full_parameter_async(args):
+        return " --require-profile-binding"
     if rl_dense_sweep(args):
         async_checkpoint = " --async-checkpoint" if getattr(args, "rl_sync_async_checkpoint", False) else ""
         return f" --policy-sweep-fragments {args.fragments} --require-profile-binding{async_checkpoint}"
@@ -191,15 +280,19 @@ def rl_syncer_profile(args, num_learners: int):
 
     if rl_dense_sweep(args):
         quorum_timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
-        final_ack_timeout = quorum_timeout
-        sweep_fragments, mark_final = args.fragments, False
+        final_ack_timeout = _rl_final_ack_timeout_s(args) or quorum_timeout
+        sweep_fragments = None if rl_full_parameter_async(args) else args.fragments
+        mark_final = False
     elif rl_sao_streaming(args):
         frozen = args.rl_sao_manifest.profile
         quorum_timeout, final_ack_timeout = frozen.quorum_timeout_s, frozen.final_ack_timeout_s
         sweep_fragments, mark_final = None, True
     else:
         raise ValueError("only full-parameter syncers are bound to a semantic profile")
+    period = outer_delayed_nesterov_period(args)
     return SyncerSemanticProfile.from_mapping({
+        **({"outer_delayed_nesterov_period": period} if period else {}),
+        **({"expert_token_weights": True} if _rl_expert_token_weights(args) else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -221,15 +314,19 @@ def rl_syncer_profile(args, num_learners: int):
         "resume": False,  # not hashed (v2): fresh start and restart agree
         "mark_final_checkpoint": mark_final,
         "learner_budget_steps": None,
-        "max_base_lag": 0,
-        "learner_weight": "equal",
+        "max_base_lag": _rl_max_base_lag(args),
+        "learner_weight": _rl_learner_weight(args),
         "require_profile_binding": True,
     })
 
 
-_ISLAND_SCHEDULING_PARAMS = rl_option_pairs(
-    "rl_quorum_theta", "rl_carry_gamma", "rl_soft_deadline_s", "rl_q_min", "rl_max_carry_lag",
-    "rl_syncer_epoch", "rl_island_lease_s", "rl_final_grace_s",
+# Membership options (--rl-sync-*): they put the RL islands in a pool with
+# dynamic fragment-round syncer membership (leases and re-JOIN, capacity
+# quorum, soft deadline, carry discount, admitted island ids, final grace
+# window). None set = fixed roster.
+_ISLAND_POOL_PARAMS = rl_option_pairs(
+    "rl_sync_quorum_theta", "rl_sync_carry_gamma", "rl_sync_soft_deadline_s", "rl_sync_q_min",
+    "rl_sync_island_lease_s", "rl_sync_max_learners", "rl_sync_final_grace_s",
     layer=CLI,
 )
 
@@ -237,14 +334,14 @@ ELASTIC_DEBUG_DELAY_ENV = "YETO_RL_ELASTIC_DEBUG_DELAY"
 
 
 def elastic_debug_delay_env(args) -> dict[str, str]:
-    """0.25 test switch: islands delay each DELTA_TENSOR (soft deadline / carried_over
-    on real hardware). Elastic only; {} by default."""
+    """0.25 test switch: islands delay each delta push (soft deadline / carried_over
+    on real hardware). Island pool only; {} by default."""
     spec = getattr(args, "rl_elastic_debug_delay_s", None)
     if not spec:
         return {}
-    if island_scheduling_mode(args) != "elastic":
-        raise ValueError("--rl-elastic-debug-delay-s needs --rl-island-scheduling elastic")
-    from ..rl.elastic_client import parse_elastic_debug_delay
+    if not island_pool(args):
+        raise ValueError("--rl-elastic-debug-delay-s needs island pool options (e.g. --rl-sync-island-lease-s)")
+    from ..rl.pool_client import parse_elastic_debug_delay
 
     parse_elastic_debug_delay(spec)
     return {ELASTIC_DEBUG_DELAY_ENV: str(spec)}
@@ -257,13 +354,13 @@ def elastic_debug_pause_env(args) -> dict[str, str]:
     """Test switch: the given island's link to the syncer goes silent (no heartbeat,
     sends/receives held) for S seconds after base AFTER_V; the process keeps running.
     Used to exercise lease expiry -> "rejoin required" -> automatic re-JOIN on real
-    hardware. Elastic only; {} by default."""
+    hardware. Island pool only; {} by default."""
     spec = getattr(args, "rl_elastic_debug_pause", None)
     if not spec:
         return {}
-    if island_scheduling_mode(args) != "elastic":
-        raise ValueError("--rl-elastic-debug-pause needs --rl-island-scheduling elastic")
-    from ..rl.elastic_client import parse_elastic_debug_pause
+    if not island_pool(args):
+        raise ValueError("--rl-elastic-debug-pause needs island pool options (e.g. --rl-sync-island-lease-s)")
+    from ..rl.pool_client import parse_elastic_debug_pause
 
     parse_elastic_debug_pause(spec)
     return {ELASTIC_DEBUG_PAUSE_ENV: str(spec)}
@@ -273,10 +370,10 @@ DEFAULT_ISLAND_LEASE_S = 150.0  # passed to the syncer and to every island (hear
 
 
 def island_lease_s(args) -> float:
-    value = getattr(args, "rl_island_lease_s", None)
+    value = getattr(args, "rl_sync_island_lease_s", None)
     value = DEFAULT_ISLAND_LEASE_S if value is None else float(value)
     if not value > 0:
-        raise ValueError("--rl-island-lease-s must be > 0")
+        raise ValueError("--rl-sync-island-lease-s must be > 0")
     return value
 
 
@@ -289,9 +386,9 @@ def island_syncer_epoch(args) -> int:
 
 
 def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None = None):
-    """0.17: a zero-argument reader of the elastic syncer's status.json (next to its
-    --event-tape): a local file on a head node, else ``ssh <syncer cluster> cat``.
-    Returns the parsed snapshot, or None when absent / not the elastic schema."""
+    """0.17: a zero-argument reader of the syncer's island-pool status.json (next to
+    its --event-tape): a local file on a head node, else ``ssh <syncer cluster> cat``.
+    Returns the parsed snapshot, or None when absent / not the status schema."""
     from ..rl.engine.island_status import read_syncer_status, STATUS_SCHEMA
 
     if local_tape is not None:
@@ -312,11 +409,11 @@ def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None 
 
 def resolve_island_syncer_epoch(args, read_status, *, timeout_s: float = 120.0,
                                 poll_s: float = 2.0, sleep=time.sleep, clock=time.monotonic) -> int:
-    """0.17: elastic without an explicit --rl-syncer-epoch takes the term the running
-    syncer reports in status.json (and records it on ``args`` so every island
-    command carries it). Unreadable within ``timeout_s``: keep 0 with a warning.
-    Legacy, or an explicit value: unchanged, nothing is read."""
-    if island_scheduling_mode(args) != "elastic" or getattr(args, "rl_syncer_epoch", None) is not None:
+    """0.17: an island pool without an explicit --rl-syncer-epoch takes the term the
+    running syncer reports in status.json (and records it on ``args`` so every
+    island command carries it). Unreadable within ``timeout_s``: keep 0 with a
+    warning. A fixed roster, or an explicit value: unchanged, nothing is read."""
+    if not island_pool(args) or getattr(args, "rl_syncer_epoch", None) is not None:
         return island_syncer_epoch(args)
     deadline = clock() + timeout_s
     while True:
@@ -333,17 +430,11 @@ def resolve_island_syncer_epoch(args, read_status, *, timeout_s: float = 120.0,
         sleep(poll_s)
 
 
-def island_scheduling_mode(args) -> str:
-    """``--rl-island-scheduling`` (rl-inter-island-scheduling 0.13); legacy unless
-    elastic is given explicitly. Elastic-only parameters with legacy are refused."""
-    mode = getattr(args, "rl_island_scheduling", None) or "legacy"
-    if mode not in ("legacy", "elastic"):
-        raise ValueError(f"--rl-island-scheduling must be legacy|elastic, got {mode!r}")
-    if mode == "legacy":
-        given = [f for n, f in _ISLAND_SCHEDULING_PARAMS if getattr(args, n, None) is not None]
-        if given:
-            raise ValueError(", ".join(given) + " need --rl-island-scheduling elastic")
-    return mode
+def island_pool(args) -> bool:
+    """True when any island pool option is set: the RL islands then join the
+    syncer's dynamic membership (leases and re-JOIN, capacity quorum, soft
+    deadline, carry discount, final grace); otherwise the roster is fixed."""
+    return any(getattr(args, name, None) is not None for name, _ in _ISLAND_POOL_PARAMS)
 
 
 ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
@@ -354,19 +445,15 @@ def island_hmac_secret(args) -> dict[str, str]:
     ``secrets=``, Modal ``cfg.envs`` which becomes a ``modal.Secret``) -- never
     spliced into a command line, log or process list.
 
-    elastic: the key must come from the launching environment (unchanged).
-    legacy (secret-handling-hardening): the legacy syncer also requires the key
-    (HELLO HMAC). Without one in the environment the launcher generates a
-    random per-run key once and keeps it in ``os.environ`` so the syncer task,
-    the head job and every island receive the same value. SFT: ``{}`` (its
+    secret-handling-hardening: the syncer requires the key (HELLO HMAC).
+    Without one in the environment the launcher generates a random per-run key
+    once and keeps it in ``os.environ`` so the syncer task, the head job and
+    every island receive the same value. SFT: ``{}`` (its
     syncer runs with --allow-unauthenticated-islands, see design.md)."""
     if getattr(args, "training_mode", "sft") != "rl":
         return {}
     key = os.environ.get(ISLAND_HMAC_KEY_ENV, "")
     if not key:
-        if island_scheduling_mode(args) != "legacy":
-            raise ValueError(f"--rl-island-scheduling elastic needs {ISLAND_HMAC_KEY_ENV} "
-                             "in the launching environment (island message HMAC key)")
         import secrets as _secrets
 
         key = os.environ[ISLAND_HMAC_KEY_ENV] = _secrets.token_hex(32)
@@ -389,54 +476,114 @@ def _syncer_expected_contract(args) -> str:
     return f" --expected-island-contract {pinned}" if pinned else ""
 
 
-def _syncer_island_scheduling(args) -> str:
-    """Syncer flags for the island-scheduling mode: "" in legacy, so the legacy
-    command line is byte-for-byte the previous one. The syncer folds these into
-    its session contract hash (the Python side does not compute that hash)."""
-    if island_scheduling_mode(args) == "legacy":
+def _syncer_island_pool(args) -> str:
+    """Syncer membership flags of an island pool; "" for a fixed roster, so
+    that command line is byte-for-byte the previous one. Each option maps to
+    the syncer flag of the same name; unset options keep the syncer default."""
+    if not island_pool(args):
+        if getattr(args, "rl_syncer_epoch", None) is not None and not getattr(args, "rl_peer_recovery", False):
+            raise ValueError("--rl-syncer-epoch needs island pool options (e.g. --rl-sync-island-lease-s)")
         return ""
-    from ..rl.engine.island_ledger import (DEFAULT_GAMMA, DEFAULT_MAX_CARRY_LAG,
-                                          DEFAULT_QUORUM_MIN, DEFAULT_THETA)
+    theta = getattr(args, "rl_sync_quorum_theta", None)
+    gamma = getattr(args, "rl_sync_carry_gamma", None)
+    soft = getattr(args, "rl_sync_soft_deadline_s", None)
+    q_min = getattr(args, "rl_sync_q_min", None)
+    max_learners = getattr(args, "rl_sync_max_learners", None)
+    if theta is not None and not 0.0 < float(theta) <= 1.0:
+        raise ValueError("--rl-sync-quorum-theta must be in (0, 1]")
+    if gamma is not None and not 0.0 < float(gamma) <= 1.0:
+        raise ValueError("--rl-sync-carry-gamma must be in (0, 1]")
+    if q_min is not None and int(q_min) < 1:
+        raise ValueError("--rl-sync-q-min must be >= 1")
+    if soft is not None and (float(soft) != int(soft) or int(soft) <= 0):
+        raise ValueError("--rl-sync-soft-deadline-s must be positive whole seconds")
+    if max_learners is not None and int(max_learners) < 1:
+        raise ValueError("--rl-sync-max-learners must be >= 1")
+    flags = ""
+    if theta is not None:
+        flags += f" --quorum-theta {float(theta)!r}"
+    if q_min is not None:
+        flags += f" --q-min {int(q_min)}"
+    if gamma is not None:
+        flags += f" --carry-gamma {float(gamma)!r}"
+    if soft is not None:
+        flags += f" --soft-deadline-s {int(soft)}"
+    flags += f" --island-lease-s {island_lease_s(args)!r}"
+    if max_learners is not None:
+        flags += f" --max-learners {int(max_learners)}"
+    flags += f" --syncer-epoch {island_syncer_epoch(args)}"
+    grace = _final_grace_s(args)
+    if grace is not None:
+        flags += f" --final-grace-s {grace}"
+    return flags
 
-    theta = getattr(args, "rl_quorum_theta", None)
-    gamma = getattr(args, "rl_carry_gamma", None)
-    soft = getattr(args, "rl_soft_deadline_s", None)
-    if soft is None:
-        soft = getattr(args, "rl_elastic_quorum_timeout_s", None) or 900
-    q_min = getattr(args, "rl_q_min", None)
-    lag = getattr(args, "rl_max_carry_lag", None)
-    theta = DEFAULT_THETA if theta is None else float(theta)
-    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
-    q_min = DEFAULT_QUORUM_MIN if q_min is None else int(q_min)
-    lag = DEFAULT_MAX_CARRY_LAG if lag is None else int(lag)
-    if not 0.0 < theta <= 1.0 or not 0.0 <= gamma <= 1.0 or q_min < 1 or lag < 0:
-        raise ValueError("--rl-quorum-theta in (0,1], --rl-carry-gamma in [0,1], "
-                         "--rl-q-min >= 1, --rl-max-carry-lag >= 0")
-    if float(soft) != int(soft) or int(soft) <= 0:
-        raise ValueError("--rl-soft-deadline-s must be positive whole seconds")
-    return (" --island-scheduling-mode elastic"
-            f" --quorum-theta {theta!r}"
-            f" --carry-gamma {gamma!r}"
-            f" --soft-deadline-s {int(soft)}"
-            f" --q-min {q_min}"
-            f" --max-carry-lag {lag}"
-            f" --syncer-epoch {island_syncer_epoch(args)}"
-            f" --island-lease-s {island_lease_s(args)!r}"
-            f" --final-grace-s {_final_grace_s(args, int(soft))}")
+
+def peer_recovery_syncer_flags(args) -> str:
+    """S27 E-3 ``--rl-peer-recovery``: the role syncer's epoch and recovery
+    options (checked by ``launch.peer_recovery``); "" when recovery is off."""
+    if not getattr(args, "rl_peer_recovery", False):
+        return ""
+    # An island pool already passes the epoch with its membership flags.
+    flags = "" if island_pool(args) else f" --syncer-epoch {island_syncer_epoch(args)}"
+    for dest, flag in (("rl_recovery_bound_steps", "--recovery-bound-steps"),
+                       ("rl_recovery_max_donor_tries", "--recovery-max-donor-tries"),
+                       ("rl_recovery_donor_timeout_s", "--recovery-donor-timeout-s")):
+        value = getattr(args, dest, None)
+        if value is not None:
+            flags += f" {flag} {int(value)}"
+    return flags
 
 
-def _final_grace_s(args, soft_deadline_s: int) -> int:
-    """0.26: the syncer's FINISHED window (whole seconds); default the soft deadline."""
-    value = getattr(args, "rl_final_grace_s", None)
-    value = soft_deadline_s if value is None else int(value)
-    if value < 0:
-        raise ValueError("--rl-final-grace-s must be >= 0")
-    return value
+
+def _final_grace_s(args) -> int | None:
+    """0.26: the syncer's final grace window (whole seconds); default the soft deadline."""
+    value = getattr(args, "rl_sync_final_grace_s", None)
+    if value is None:
+        value = getattr(args, "rl_sync_soft_deadline_s", None)
+    if value is None:
+        return None
+    if int(value) < 0:
+        raise ValueError("--rl-sync-final-grace-s must be >= 0")
+    return int(value)
+
+
+def _rl_max_base_lag(args) -> int:
+    """The syncer's --max-base-lag for --rl-sync-max-base-lag (checked by rl_args).
+
+    The RL option counts fragment rounds; the syncer counts versions (global
+    steps), and one round of P fragments is P versions. 0 refuses late pushes.
+    """
+    rounds = int(getattr(args, "rl_sync_max_base_lag", 0))
+    return rounds * max(int(getattr(args, "fragments", 1)), 1)
+
+
+def _rl_learner_weight(args) -> str:
+    """S27 P1 --rl-sync-learner-weight (checked by rl_args); RL defaults to equal."""
+    return getattr(args, "rl_sync_learner_weight", "equal")
+
+
+def _rl_expert_token_weights(args) -> bool:
+    """--rl-sync-expert-token-weights (full-parameter async, checked by rl_args)."""
+    return bool(getattr(args, "rl_sync_expert_token_weights", False))
+
+
+def _syncer_profile_record(args) -> str:
+    """--rl-sync-mode async: the syncer resumes a checkpoint only when the
+    checkpoint's recorded semantic profile matches its own, so a session
+    started with other sync settings (e.g. before the async defaults) is
+    refused with the flags to pass instead of resuming under new ones. The
+    strict mode omits the flag, which keeps its command unchanged."""
+    async_mode = getattr(args, "rl_sync_mode_effective", "strict") == "async"
+    return " --require-profile-record" if async_mode else ""
 
 
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
-                            syncer: RoleSyncer) -> str:
-    """One role's strict RL syncer; --resume only once its checkpoint exists."""
+                            syncer: RoleSyncer,
+                            shard_plan: tuple[int, int] | None = None) -> str:
+    """One role's strict RL syncer; --resume only once its checkpoint exists.
+    ``shard_plan=(index, count)`` makes it one shard of a sharded head."""
+    shard_flags = (f" --shard-index {shard_plan[0]} --shard-count {shard_plan[1]}"
+                   if shard_plan else "")
     total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
     return (
         f"{binary}"
@@ -451,17 +598,104 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {total_steps}"
         f"{_syncer_quorum_timeout(args)}"
-        f"{_syncer_island_scheduling(args)}"
+        f"{_syncer_island_pool(args)}"
         f"{_syncer_expected_contract(args)}"
         f"{_syncer_profile_binding(args)}"
         f"{_syncer_bcast_delta(args)}"
-        f" --outer-lr {args.outer_lr}"
-        f" --outer-momentum {args.outer_momentum}"
-        " --max-base-lag 0 --learner-weight equal"
+        f"{_syncer_outer_optimizer(args)}"
+        f"{peer_recovery_syncer_flags(args)}"
+        f" --max-base-lag {_rl_max_base_lag(args)}"
+        f" --learner-weight {_rl_learner_weight(args)}"
+        f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
+        f"{_syncer_profile_record(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
+        f"{_syncer_weighted_fold(args)}"
+        f"{shard_flags}"
+    )
+
+
+def syncer_shard_count(args) -> int:
+    """``--syncer-shards`` (S27 P4b): syncer processes the head is split
+    into by fragment range. 1 (default) is the single unsharded syncer.
+
+    Sharding needs fragment-round scheduling and a learner that routes per
+    fragment: the torch causal-LM learner (yeto.learner) in SFT, and in RL
+    the full-parameter preset with asynchronous rounds (the actor role
+    stream). Strict policy sweeps, island pools, critics and the other RL
+    presets are refused."""
+    count = getattr(args, "syncer_shards", None)
+    count = 1 if count is None else int(count)
+    if count < 1:
+        raise ValueError("--syncer-shards must be >= 1")
+    if count == 1:
+        return 1
+    fragments = int(getattr(args, "fragments", count))
+    if fragments < count:
+        raise ValueError(f"--syncer-shards {count} needs --fragments >= {count}")
+    if getattr(args, "training_mode", "sft") == "rl":
+        if not rl_full_parameter_async(args):
+            raise ValueError("--syncer-shards > 1 with --training-mode rl needs --rl-sync-preset "
+                             f"{FULL_PARAMETER_SYNC_PRESET} --rl-sync-full-parameter-rounds async")
+        if island_pool(args):
+            raise ValueError("--syncer-shards > 1 does not take island pool options yet")
+        if rl_needs_critic(args):
+            raise ValueError("--syncer-shards > 1 supports actor-only algorithms")
+        return count
+    if getattr(args, "island_backend", "torch") != "torch":
+        raise ValueError("--syncer-shards > 1 needs --island-backend torch")
+    from ..models import resolve_model_kind
+
+    if resolve_model_kind(args.model, getattr(args, "model_kind", "auto")) != "causal-lm":
+        raise ValueError("--syncer-shards > 1 supports causal-lm learners only")
+    return count
+
+
+def syncer_shard_ports(args) -> list[int]:
+    """One port per syncer shard, from SYNCER_PORT upward (shard order)."""
+    return [SYNCER_PORT + index for index in range(syncer_shard_count(args))]
+
+
+def syncer_shard_addrs(host: str, args) -> str:
+    """The island ``--syncer`` value: ``host:port`` unsharded, else the
+    comma-separated shard addresses in shard order."""
+    return ",".join(f"{host}:{port}" for port in syncer_shard_ports(args))
+
+
+def _shard_path(path: str, index: int) -> str:
+    """Shard 0 keeps the unsharded path (W&B tape forwarder, strict-failure
+    reader); shard i>0 writes ``<stem>.shard<i><suffix>``."""
+    if index == 0:
+        return path
+    stem, dot, suffix = path.rpartition(".")
+    return f"{stem}.shard{index}.{suffix}" if dot else f"{path}.shard{index}"
+
+
+def _syncer_weighted_fold(args) -> str:
+    """S27 P4b: "" keeps the buffered merge of partial-quorum / token-weighted
+    rounds (default, historical bits); streaming folds pushes on arrival."""
+    mode = getattr(args, "syncer_weighted_fold", None) or "buffered"
+    if mode not in ("buffered", "streaming"):
+        raise ValueError("--syncer-weighted-fold must be buffered or streaming")
+    return "" if mode == "buffered" else f" --weighted-fold {mode}"
+
+
+def _sharded_supervisor(commands: list[str]) -> str:
+    """Run every shard in the background and exit with the first failure.
+
+    The job stays alive until all shards exit 0; the first shard that fails
+    stops the others, so the job's exit status still reports head health."""
+    starts = "".join(f'{{ {command} & }} && pids="$pids $!" && ' for command in commands)
+    # Poll instead of `wait -n`: shards that exited before the loop are
+    # still reported (wait -n may return 127 for them on older bash).
+    return (
+        'pids="" && ' + starts
+        + 'while [ -n "$pids" ]; do left=""; for p in $pids; do '
+        + 'if kill -0 $p 2>/dev/null; then left="$left $p"; '
+        + 'else wait $p || { rc=$?; kill $pids 2>/dev/null; exit $rc; }; fi; done; '
+        + 'pids=$left; [ -z "$pids" ] || sleep 1; done'
     )
 
 
@@ -482,11 +716,27 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             + "".join(f"{{ {command} & }} && " for command in commands.values())
             + actor
         )
-    if island_scheduling_mode(args) != "legacy":
-        raise ValueError("--rl-island-scheduling elastic only applies to --training-mode rl")
+    if island_pool(args):
+        raise ValueError("island pool options only apply to --training-mode rl")
+    ports = syncer_shard_ports(args)
+    if len(ports) == 1:
+        return _sft_syncer_command(args, num_learners, binary)
+    return _sharded_supervisor([
+        _sft_syncer_command(args, num_learners, binary, shard=(index, len(ports)))
+        for index in range(len(ports))
+    ])
+
+
+def _sft_syncer_command(args, num_learners: int, binary: str,
+                        shard: tuple[int, int] | None = None) -> str:
+    """The generic (SFT) syncer; ``shard=(index, count)`` makes it one shard
+    of a fragment-sharded head with its own port, checkpoint and tape."""
+    index, count = shard or (0, 1)
+    checkpoint = _shard_path("~/yeto-state.ckpt", index)
+    shard_flags = f" --shard-index {index} --shard-count {count}" if shard else ""
     return (
         f"{binary}"
-        f" --port {SYNCER_PORT}"
+        f" --port {SYNCER_PORT + index}"
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
         f" --grace-ms {args.grace_ms}"
@@ -496,12 +746,13 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --sync-interval-steps {getattr(args, 'sync_interval_steps', 24.0)}"
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {args.total_steps}"
-        f" --outer-lr {args.outer_lr}"
-        f" --outer-momentum {args.outer_momentum}"
-        " --checkpoint-path ~/yeto-state.ckpt"
-        f" {_resume_if_exists('~/yeto-state.ckpt')}"
+        f"{_syncer_outer_optimizer(args)}"
+        f" --checkpoint-path {checkpoint}"
+        f" {_resume_if_exists(checkpoint)}"
         f" --mark-final-checkpoint"
-        f" --event-tape {SYNCER_EVENT_TAPE}"
+        f" --event-tape {_shard_path(SYNCER_EVENT_TAPE, index)}"
+        f"{_syncer_weighted_fold(args)}"
+        f"{shard_flags}"
         # secret-handling-hardening: SFT islands do not get the HMAC key yet
         # (known gap in design.md); the opt-out is explicit, never implicit.
         " --allow-unauthenticated-islands"
@@ -594,20 +845,27 @@ def syncer_ports(args) -> list[int] | None:
     """`ports=` for the syncer/head resources; None where sky can't open them."""
     if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS:
         return None
+    return _head_ports(args)
+
+
+def _head_ports(args) -> list[int]:
+    """Every port the head listens on: one per RL role, or one per shard."""
+    if syncer_shard_count(args) > 1:
+        return syncer_shard_ports(args)
     return [syncer.port for syncer in rl_role_syncers(args)]
 
 
-def ufw_setup(port: int = SYNCER_PORT) -> str:
+def ufw_setup(port: int = SYNCER_PORT, *more_ports: int) -> str:
     """In-VM firewall for a public syncer on a cloud without security
-    groups: deny inbound except SSH and the syncer port."""
+    groups: deny inbound except SSH and the syncer port(s)."""
     return (
         'SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo\n'
         "command -v ufw >/dev/null || { $SUDO apt-get update -qq && $SUDO apt-get install -y -qq ufw; }\n"
         "$SUDO ufw default deny incoming\n"
         "$SUDO ufw default allow outgoing\n"
         "$SUDO ufw allow 22/tcp\n"
-        f"$SUDO ufw allow {int(port)}/tcp\n"
-        "$SUDO ufw --force enable\n"
+        + "".join(f"$SUDO ufw allow {int(p)}/tcp\n" for p in (port, *more_ports))
+        + "$SUDO ufw --force enable\n"
         "$SUDO ufw status verbose"
     )
 
@@ -664,7 +922,7 @@ def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     connection. A pass here does not prove the islands' egress (Modal), only
     that the head side is open."""
     probe = probe or tcp_probe
-    ports = [syncer.port for syncer in rl_role_syncers(args)]
+    ports = _head_ports(args)
     details = []
     for port in ports:
         ok, detail = probe(host, port)
@@ -703,10 +961,11 @@ def make_syncer_task(args, num_learners: int):
                 memory=f"{args.syncer_memory}+",
                 ports=syncer_ports(args),
                 use_spot=False,
+                **syncer_disk_resources(args),
             )
         )
         if syncer_ports(args) is None:
-            task.setup = ufw_setup() + "\n" + (task.setup or "")
+            task.setup = ufw_setup(*syncer_shard_ports(args)) + "\n" + (task.setup or "")
         return task
 
     binary = build_syncer_binary()
@@ -733,8 +992,9 @@ def make_syncer_task(args, num_learners: int):
             memory=f"{args.syncer_memory}+",
             ports=syncer_ports(args),
             use_spot=False,
+            **syncer_disk_resources(args),
         )
     )
     if syncer_ports(args) is None:
-        task.setup = ufw_setup() + "\n" + (task.setup or "")
+        task.setup = ufw_setup(*syncer_shard_ports(args)) + "\n" + (task.setup or "")
     return task

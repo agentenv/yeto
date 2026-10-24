@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
 _E = "yeto.rl.engine."
 
@@ -33,7 +33,6 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
         (_E + "controller", "TransactionFailed"),
         (_E + "controller", "RebuildRefused"),
         (_E + "trainer_transition", "TrainerTransitionFailed"),
-        ("yeto.rl.elastic_client", "ElasticRejoinError"),
         # storage / resume state (D7 Q4)
         (_E + "cut", "CutError"),
         (_E + "journal", "JournalError"),
@@ -51,7 +50,6 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
         (_E + "multinode", "TopologyError"),
         (_E + "backends", "UnknownBackend"),
         (_E + "trainable_state", "UnsupportedLayoutError"),
-        ("yeto.rl.elastic_client", "ElasticJoinRefused"),  # tape only: never a member (D7 Q6)
     )),
     (LeaveReason.TRAINING_FAILED, (
         (_E + "driver", "DriverError"),  # Publication/PolicyIdentity/RoundFailed and checks

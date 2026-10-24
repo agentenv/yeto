@@ -26,6 +26,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     SECRLENV_GROUP_CHECK_FILTER,
@@ -643,13 +644,13 @@ def build_sync(
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
-    if getattr(miles_args, "yeto_rl_island_scheduling", "legacy") == "elastic":
-        # rl-inter-island-scheduling 0.15: absent attribute = legacy (unchanged below).
-        from yeto.rl.engine.bridges import ElasticAvgSync
+    if getattr(miles_args, "yeto_rl_island_pool", False):
+        # Dynamic island pool; absent attribute = fixed roster (unchanged below).
+        from yeto.rl.engine.bridges import PoolAvgSync
 
         if getattr(miles_args, "use_critic", False):
-            raise ValueError("--rl-island-scheduling elastic does not support a critic yet")
-        return ElasticAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
+            raise ValueError("island pool options do not support a critic yet")
+        return PoolAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
                               syncer_epoch=int(getattr(miles_args, "yeto_rl_syncer_epoch", 0)),
                               lease_s=getattr(miles_args, "yeto_rl_island_lease_s", None),
                               groups_per_round=int(getattr(miles_args, "rollout_batch_size", 0) or 0) or None,
@@ -830,6 +831,8 @@ def compose_island(
         ),
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
+    # E1: publication checks on every round (default: cut, first and every-K rounds)
+    driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 
@@ -880,7 +883,8 @@ def compose_island(
         if observe:
             elastic.controller.set_event_sink(driver.emit, journal=True)
     if resume is not None:
-        sync.stop_after = resume.stop_after
+        if resume.stop_after is not None:
+            sync.stop_after = resume.stop_after
         from yeto.rl.engine.resume import install_preempt_handler
 
         install_preempt_handler(resume.controller, emit=driver.emit)
@@ -910,7 +914,7 @@ def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
         return None
 
     def leave() -> bool:
-        from yeto.rl.elastic_client import LeaveReason
+        from yeto.rl.pool_client import LeaveReason
 
         return sync.leave(LeaveReason.PREEMPTED)  # once per process; the driver's close won't resend
 
@@ -985,24 +989,32 @@ def next_lr_for(miles_args: Any):
 
 class ResumeWiring:
     """The round-cut controller + batch ledger of a run with ``--rl-resume-store`` and
-    no ``--rl-elastic`` (same attribute names as ElasticWiring for _wire_round_cuts)."""
+    no ``--rl-elastic`` (same attribute names as ElasticWiring for _wire_round_cuts).
+    ``interval``: when a cut is due (:mod:`yeto.rl.engine.cut_interval`)."""
 
     def __init__(self, *, controller: Any, ledger: Any, every: int, stop_after: int | None,
-                 allow_config_change: bool) -> None:
+                 allow_config_change: bool, interval: Any = None) -> None:
         self.controller = controller
         self.ledger = ledger
         self.every = every
         self.stop_after = stop_after
         self.allow_config_change = allow_config_change
+        self.interval = interval
 
 
 def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> ResumeWiring | None:
     config = getattr(miles_args, "yeto_rl_resume", None)
     if not config:
         return None
-    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.bridges import LocalOnlySync, RoundCutHooks
+    from yeto.rl.engine.cut_interval import cut_interval_for
 
-    if not isinstance(sync, LocalOnlySync):
+    if config.get("write_only"):
+        # S27 R-2: a synced island writes round cuts; its syncer stays authoritative
+        if isinstance(sync, LocalOnlySync) or not isinstance(sync, RoundCutHooks):
+            raise ValueError(f"--rl-island-cut-store: {type(sync).__name__} takes no island round cuts "
+                             "(strict, decoupled or full-parameter outer sync only)")
+    elif not isinstance(sync, LocalOnlySync):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")
     from yeto.rl.engine.ledger import BatchLedger
@@ -1014,9 +1026,12 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
     controller = ResumeController(state_dir=config["state_dir"], store=store,
                                   runtime_fingerprint=str(config.get("runtime_fingerprint") or ""),
                                   keep=int(config.get("keep", 2)))
+    interval = cut_interval_for(every=config.get("every"), auto_mtbf_s=config.get("auto_mtbf_s"),
+                                max_interval_s=config.get("max_interval_s"))
     return ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir),
-                        every=int(config.get("every", 1)), stop_after=config.get("stop_after"),
-                        allow_config_change=bool(config.get("allow_config_change", False)))
+                        every=interval.every, stop_after=config.get("stop_after"),
+                        allow_config_change=bool(config.get("allow_config_change", False)),
+                        interval=interval)
 
 
 def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
@@ -1040,12 +1055,41 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
     checkpoint = wire_round_cuts(
         driver, controller=controller, source=source,
         every=int(getattr(elastic, "every", None) or config.get("every")
-                  or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+                  or getattr(miles_args, "yeto_rl_resume_every", None) or DEFAULT_CUT_EVERY),
         fingerprint=run_fingerprint_of(miles_args, algorithm),
         allow_config_change=bool(getattr(elastic, "allow_config_change", False)
                                  or config.get("allow_config_change", False)),
-        next_lr=next_lr_for(miles_args))
+        next_lr=next_lr_for(miles_args), interval=_cut_interval_of(elastic, miles_args))
+    if config.get("write_only"):
+        # S27 R-2: a synced trainer's buffer lane keeps its own position (S25 C3)
+        _commit_cuts_inline_for_buffer_reader(checkpoint, miles_args=miles_args)
+        return
     _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -> None:
+    """A write-only cut store on a trainer that reads the sample buffer: commit
+    each cut inline. A deferred cut holds the store writer guard until the next
+    cut, so the buffer reader skips every Volume reload in between, never sees
+    the sampler's new groups and fails the round (S27 L11 s27-gle9-b: "0/32
+    groups after 900 s")."""
+    from .buffer_rollout import READER_FUNCTION_PATHS
+
+    if checkpoint is not None and getattr(miles_args, "rollout_function_path", None) in READER_FUNCTION_PATHS:
+        checkpoint.background_commit = False
+
+
+def _cut_interval_of(wiring: Any, miles_args: Any) -> Any:
+    """The resume wiring's interval, else a timed one (``--rl-cut-auto-mtbf-s`` on an
+    ``--rl-elastic`` run), else None (every N rounds)."""
+    interval = getattr(wiring, "interval", None)
+    auto = getattr(miles_args, "yeto_rl_cut_auto", None)
+    if interval is not None or not auto:
+        return interval
+    from yeto.rl.engine.cut_interval import cut_interval_for
+
+    return cut_interval_for(every=None, auto_mtbf_s=auto["auto_mtbf_s"],
+                            max_interval_s=auto.get("max_interval_s"))
 
 
 def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:

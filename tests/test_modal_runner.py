@@ -235,6 +235,7 @@ def test_define_builds_the_function_from_the_config(monkeypatch):
     # step after it (this order failed the first live Modal deploy).
     assert names == ["debian_slim", "pip_install", "env", "add_local_dir"]
     assert img.calls[names.index("add_local_dir")][1][1] == mr.CONTAINER_WORKDIR
+    assert "ephemeral_disk" not in kwargs  # Modal's default disk
     # Unpinned single-container island: no region kwarg, no clustered.
     state2 = fake_modal(monkeypatch)
     mr.ModalOps("yeto-run").define(_cfg(learner_id=2))
@@ -635,3 +636,20 @@ def test_container_change_exit_code_is_registered_and_unique():
     codes = [launcher.ISLAND_FAILED_EXIT, launcher.TEARDOWN_UNVERIFIED_EXIT,
              launcher.RUN_STALLED_EXIT, launcher.NO_SYNC_INCOMPLETE_EXIT]
     assert launcher.CONTAINER_CHANGED_EXIT == 7 and 7 not in codes
+
+
+def test_resolve_syncer_for_modal_sharded_head_list():
+    from yeto.modal_runner import resolve_syncer_for_modal
+
+    assert resolve_syncer_for_modal("3.231.26.103:29400,3.231.26.103:29401", None) == \
+        "3.231.26.103:29400,3.231.26.103:29401"
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_syncer_for_modal("3.231.26.103:29400,10.0.0.1:29401", None)
+
+
+def test_define_sizes_the_container_disk_in_mib(monkeypatch):
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("yeto-run").define(_cfg(ephemeral_disk_gib=634))
+    _fn, kwargs = state["functions"]["island-1"]
+    assert kwargs["ephemeral_disk"] == 634 * 1024

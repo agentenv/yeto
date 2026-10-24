@@ -15,7 +15,7 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``sampling``: :class:`~.sampler_engine.SamplingParams` fields;
 * ``num_rollouts``, ``max_backlog_groups``, ``max_prompt_tokens``;
   optional ``base_version`` (0), ``base_dir`` (the engine's base weights),
-  ``min_round_s``, ``poll_s``, ``max_consecutive_load_failures``;
+  ``min_round_s``, ``poll_s``, ``live_poll_s``, ``max_consecutive_load_failures``;
 * ``store``: the run's checkpoint store (``store_for``; an ``oss://`` store
   needs the store environment of :mod:`yeto.cloud.oss_store`);
   ``release_dir``: the release directory the sampler follows (optional,
@@ -241,6 +241,7 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
         sampling=SamplingParams(**sampling), max_prompt_tokens=int(_require(spec, "max_prompt_tokens")),
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
+        live_poll_s=None if spec.get("live_poll_s") is None else float(spec["live_poll_s"]),
         max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)))
 
 
@@ -257,7 +258,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     **fields)`` sees every tape record after it is written."""
     import os  # noqa: PLC0415
 
-    from yeto.rl.elastic_client import LeaveReason  # noqa: PLC0415
+    from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .sampler_resume import (  # noqa: PLC0415
         RECLAIM_MARKER_ENV,

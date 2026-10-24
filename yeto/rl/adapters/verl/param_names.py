@@ -34,6 +34,9 @@ PARAM_MAP = {
     "train_rule": "drop '.<adapter>' before '.weight' in '.lora_{A,B}.<adapter>.weight'",
     "adapter": ADAPTER_NAME,
     "infer_rule": "prefix 'base_model.model.'; unpack vLLM packed modules in listed order",
+    # vLLM renames HF module prefixes for some models (Qwen3.5 VL: 'model.language_model.'
+    # -> 'language_model.model.'); the readback undoes the model's own mapper (E10)
+    "infer_prefix_rule": "invert the vLLM model's hf_to_vllm_mapper orig_to_new_prefix",
     "vllm_packed_modules": {k: list(v) for k, v in VLLM_PACKED_MODULES.items()},
 }
 
@@ -68,11 +71,28 @@ def canonical_to_train(name: str) -> str:
     return f"{CANONICAL_PREFIX}{match['module']}.lora_{match['ab']}.{ADAPTER_NAME}.weight"
 
 
-def vllm_to_canonical(module_name: str, ab: str, packed_index: int | None = None) -> str:
-    """vLLM ``LoRAModel`` entry (module, A/B, slot in a packed module) -> canonical name."""
+def hf_prefixes_from_mapper(mapper) -> dict[str, str]:
+    """{vLLM prefix: HF prefix} from a vLLM ``WeightsMapper`` (its ``orig_to_new_prefix``
+    inverted; prefixes vLLM drops map to None there and are skipped)."""
+    prefixes = getattr(mapper, "orig_to_new_prefix", None) or {}
+    return {new: orig for orig, new in prefixes.items() if new}
+
+
+def vllm_to_hf_module(module_name: str, hf_prefixes: dict[str, str] | None) -> str:
+    """Undo vLLM's prefix renaming (longest matching vLLM prefix wins)."""
+    for new in sorted(hf_prefixes or {}, key=len, reverse=True):
+        if module_name.startswith(new):
+            return hf_prefixes[new] + module_name[len(new):]
+    return module_name
+
+
+def vllm_to_canonical(module_name: str, ab: str, packed_index: int | None = None,
+                      hf_prefixes: dict[str, str] | None = None) -> str:
+    """vLLM ``LoRAModel`` entry (module, A/B, slot in a packed module) -> canonical name.
+    ``hf_prefixes`` (:func:`hf_prefixes_from_mapper`) maps vLLM module prefixes back to HF."""
     if ab not in ("A", "B"):
         raise ParamNameError(f"lora side must be A or B, got {ab!r}")
-    module_name = module_name.removeprefix(CANONICAL_PREFIX)
+    module_name = vllm_to_hf_module(module_name.removeprefix(CANONICAL_PREFIX), hf_prefixes)
     parent, _, leaf = module_name.rpartition(".")
     if leaf in VLLM_PACKED_MODULES:
         if packed_index is None:
