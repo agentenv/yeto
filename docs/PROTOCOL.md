@@ -557,6 +557,7 @@ always take the strict values.
 | `--rl-sync-full-parameter-rounds` (full-parameter) | `async`, at most 2 fragment rounds in flight | `sweep` |
 | `--rl-sync-quorum` | 1 | every island |
 | `--rl-sync-grace-ms` | 300000: cap of the adaptive grace window | 0 (no grace) |
+| `--rl-sync-terminal-grace-ms` (full-parameter) | 120000: the last round of each fragment waits up to this long for every island | off |
 | `--rl-sync-max-base-lag` | 1 round | 0 |
 | `--rl-sync-learner-weight` | `tokens2-over-steps` | `equal` |
 | `--rl-sync-matrix-merge` (decoupled, full-parameter) | `rda` (embedding fragments stay averaged) | `avg` |
@@ -566,7 +567,20 @@ always take the strict values.
 
 The grace window adapts to the islands' measured step time through the
 syncer's `--grace-gamma` and `--grace-tau`, which keep their defaults; no
-value of gamma is prescribed, the cap only bounds a slow round. The
+value of gamma is prescribed, the cap only bounds a slow round.
+With a deep fragment pipeline a round opens long before its first push, so
+the adaptive window can shrink to a few seconds while the islands deliver
+the same fragment tens of seconds apart. Two optional floors (off by
+default, still capped by `--rl-sync-grace-ms`) wait for that gap:
+`--rl-sync-grace-min-ms` (syncer `--grace-min-ms`) and
+`--rl-sync-grace-arrival-quantile Q` (syncer `--grace-arrival-quantile`),
+the Q-quantile of the last 64 measured gaps between a round's first push
+and each later push of it, late pushes included. A late push is carried
+into the next round of its fragment; the last round of a fragment has no
+next round, so `--rl-sync-terminal-grace-ms` (syncer `--terminal-grace-ms`,
+not capped by `--rl-sync-grace-ms`) holds each last round open for every
+island, and the syncer logs any late push still left out at the final cut.
+Each of these options enters the semantic profile only when it is on. The
 broadcast overwrites the islands' fragments (merge alpha 0) in both modes.
 A quorum of 1 needs a base lag of at least 1 round: otherwise the push of an
 island that missed the quorum is a strict failure of a fixed roster.

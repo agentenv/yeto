@@ -40,6 +40,22 @@ struct Args {
     /// Compute-overlap budget for the grace window, in learner inner steps (τ).
     #[arg(long, default_value_t = 2.0)]
     grace_tau: f64,
+    /// Lower bound on the grace window, in milliseconds (still capped by
+    /// --grace-ms). 0 = off.
+    #[arg(long, default_value_t = 0)]
+    grace_min_ms: u64,
+    /// Grace floor from measured arrival gaps: the window is at least this
+    /// quantile (0..1] of the recent gaps between a round's first push and
+    /// each later push of it, late pushes included. Still capped by
+    /// --grace-ms. 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    grace_arrival_quantile: f64,
+    /// Terminal grace, in milliseconds: the last round of each fragment
+    /// waits up to this long for every expected island (not capped by
+    /// --grace-ms), so a late delta of a last round still reaches the final
+    /// parameters. 0 = off.
+    #[arg(long, default_value_t = 0)]
+    terminal_grace_ms: u64,
     /// Fragment rounds in flight at once (two by default, matching the
     /// default --grace-tau 2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
@@ -346,6 +362,9 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    if !(0.0..=1.0).contains(&args.grace_arrival_quantile) {
+        anyhow::bail!("--grace-arrival-quantile must be in [0, 1] (0 = off)");
+    }
     let expected_island_contract = args
         .expected_island_contract
         .as_deref()
@@ -358,6 +377,9 @@ fn main() -> anyhow::Result<()> {
         grace_ms: args.grace_ms,
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
+        grace_min_ms: args.grace_min_ms,
+        grace_arrival_quantile: args.grace_arrival_quantile,
+        terminal_grace_ms: args.terminal_grace_ms,
         pipeline: args.pipeline,
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
