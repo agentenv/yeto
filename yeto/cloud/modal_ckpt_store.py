@@ -2,7 +2,7 @@
 (rl-resume-from-checkpoint).
 
 Moved out of ``yeto/rl/engine/resume.py`` (the neutral core must not import
-``modal``; same pattern as ``yeto.cloud.modal_reward_env``).  The core only knows
+``modal``; same pattern as the other ``yeto.cloud.modal_*`` modules).  The core only knows
 ``CheckpointStore`` and the ``YETO_RL_STORE_IMPL`` hook; the launcher exports
 ``YETO_RL_STORE_IMPL=yeto.cloud.modal_ckpt_store:store_from_env`` plus
 ``YETO_RL_STORE_MODAL_VOLUME=<volume name>`` on a Modal island with a

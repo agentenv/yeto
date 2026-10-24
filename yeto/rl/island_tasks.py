@@ -14,7 +14,7 @@ The spec has two forms:
 
 A token ``<prefix><a>-<b>`` names the tasks ``<prefix><a>`` ... ``<prefix><b>``
 unless the token itself is a task id. A row's task id is
-``metadata.task_id`` (what ``yeto.rl.rlf.catalog.prompt_rows`` writes) or a
+``metadata.task_id`` or a
 top-level ``task_id``.
 
 This module is backend-neutral: it knows JSONL rows and task ids only.

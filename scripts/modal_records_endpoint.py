@@ -109,7 +109,7 @@ def serve(config: dict[str, Any]) -> dict[str, Any]:
     engine = SGLangServerEngine(
         ServerConfig(base_dir=model_dir, card_model=names[0], device_family="cuda",
                      engine_version=sglang.__version__, precision="bf16", quant_scheme="bf16",
-                     topology="tp8", max_model_len=int(config["max_model_len"]), port=SGLANG_PORT,
+                     topology="tp1", max_model_len=int(config["max_model_len"]), port=SGLANG_PORT,
                      python=sys.executable, start_timeout_s=1800.0,
                      extra_args=("--mem-fraction-static", str(config["mem_fraction_static"]))),
         SGLangOptions(tp=1, served_model_name=config["served_model_name"]))

@@ -326,7 +326,7 @@ _ALGORITHM = (
             "fallback after this many rejected groups"
         ),
     ),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--secrlenv-max-infrastructure-replacements",
         type=int,
         default=None,
@@ -935,7 +935,7 @@ _ROLLOUT_ENGINE = (
 _AGENT = (
     shared_flag("--apply-chat-template-kwargs", type=json.loads, default=None),
     shared_flag("--custom-generate-function-path", default=None),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-reasoning-effort",
         choices=["xhigh"],
         default=None,
@@ -948,7 +948,7 @@ _AGENT = (
     shared_flag("--session-server-ip", default=None),
     shared_flag("--session-server-port", type=int, nargs="+", default=None),
     shared_flag("--tito-model", default=None),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-exclude-reasoning-from-loss",
         action="store_true",
         help=(

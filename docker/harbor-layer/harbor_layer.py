@@ -66,6 +66,32 @@ def parse_freeze(text: str) -> dict[str, str]:
     return found
 
 
+def duplicate_names(text: str) -> set[str]:
+    """Names ``uv pip freeze`` lists more than once (two ``.dist-info`` of one package in site-packages)."""
+    seen: dict[str, set[str]] = {}
+    for raw in text.splitlines():
+        if match := _PINNED.match(raw.split(" #", 1)[0].strip()):
+            seen.setdefault(canonical(match.group(1)), set()).add(match.group(2))
+    return {name for name, versions in seen.items() if len(versions) > 1}
+
+
+def unpin_duplicates(lock: dict, names: set[str]) -> dict:
+    """A package installed twice is recorded, not pinned.
+
+    Which ``.dist-info`` ``importlib.metadata`` reports first follows the
+    directory listing order, and that order differed between the Modal build
+    and the running container (Miles base image, peft 0.18.1 and 0.20.0: the
+    build saw 0.18.1, the container 0.20.0; S26 agentic check). Neither
+    version can be asserted, so the start check only requires the package."""
+    packages = dict(lock["packages"])
+    for name in sorted(names):
+        if name in packages:
+            packages[name] = {k: v for k, v in packages[name].items() if k != "version"} | {"version": None}
+    return {**lock, "packages": packages,
+            "decisions": [*lock.get("decisions", []),
+                          *(f"{n}: installed twice in the base image; recorded, not pinned" for n in sorted(names))]}
+
+
 def load_spec(backend: str, spec_file: Path = SPEC_FILE) -> tuple[dict, dict]:
     spec = json.loads(spec_file.read_text())
     if backend not in spec["backends"]:
@@ -174,8 +200,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.out is None:
         ap.error("lock needs --out")
+    dups = duplicate_names(args.freeze[-1].read_text())
+    for name in sorted(dups):
+        print(f"[harbor-layer] note: {name} is installed twice; the lock records it without a version",
+              file=sys.stderr)
+    lock = unpin_duplicates(start_lock(freezes[-1], spec, args.backend), dups)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(start_lock(freezes[-1], spec, args.backend), indent=2) + "\n")
+    args.out.write_text(json.dumps(lock, indent=2) + "\n")
     return 0
 
 

@@ -101,7 +101,7 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--rollout-all-samples-process-path",
         "--rollout-sample-filter-path",
         "--rollout-function-path",
-        "--data-source-path",  # SecRLEnv same-task retry (secrlenv_retry)
+        "--data-source-path",
         "--buffer-filter-path",
         "--fully-async",
         "--debug-train-only",
@@ -195,48 +195,6 @@ def _must_be_none(reason: str) -> _Check:
     return check
 
 
-def _stock_codex_append_roles_or_none(reason: str) -> _Check:
-    """Append roles are decided by the ``--tito-model`` template upstream, so
-    the option is refused -- except for a signed stock Codex agent, whose
-    launcher-side profile check (``validate_stock_codex_fields``) requires the
-    roles to be stated and equal to the profile's.  Those are accepted when they
-    match the profile and are NOT emitted to argv (the template decides)."""
-
-    def check(value, config):
-        if value is None:
-            return None
-        agent = getattr(config, "agent", None)
-        try:
-            from yeto.rl import SIGNED_CODEX_AGENTS
-            from yeto.rl.codex_backend import (
-                stock_codex_backend_profile,
-                stock_codex_profiles_for_tito_model,
-            )
-        except ImportError:  # pragma: no cover - defensive
-            return reason
-        if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
-            return reason
-        if not getattr(agent, "tito_model", None):
-            return reason
-        # ``tito_model`` is the Miles tokenizer family, not the profile name
-        # (``qwen35`` happened to be both; ``qwen4exp`` serves the Flash-Next
-        # profiles, rl-fn-codex-rollout 1.0): the roles are fixed by every
-        # profile of that family, which the launcher already matched to the
-        # declared ``--codex-backend-profile`` (``validate_stock_codex_fields``).
-        names = stock_codex_profiles_for_tito_model(str(agent.tito_model))
-        if not names:
-            return reason
-        fixed = {tuple(stock_codex_backend_profile(n)["tito_allowed_append_roles"]) for n in names}
-        if len(fixed) != 1 or tuple(value) != next(iter(fixed)):
-            return (
-                f"stock Codex profiles {list(names)} (tito-model {agent.tito_model!r}) fix the "
-                f"append roles to {sorted(list(r) for r in fixed)} (got {list(value)})"
-            )
-        return None
-
-    return check
-
-
 def _must_be_false(reason: str) -> _Check:
     def check(value, _config):
         return reason if value else None
@@ -255,14 +213,7 @@ SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
 )
 
 
-# yeto's Codex wrapper calls AGENTIC_TOOL_CALL_GENERATE with the same args (so it
-# reads the same agent flags) and turns CompactionRL segment sessions into one
-# sample per segment; without it a compacted rollout trains as one sample.
-from yeto.rl.algos.compactionrl import CODEX_OPENENV_GENERATE  # noqa: E402  (single source)
-from yeto.rl import SECRLENV_GENERATE  # noqa: E402  (wraps AGENTIC_TOOL_CALL_GENERATE)
-AGENT_FLAG_READERS = frozenset(
-    {AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE, SECRLENV_GENERATE}
-)
+AGENT_FLAG_READERS = frozenset({AGENTIC_TOOL_CALL_GENERATE})
 
 
 def _requires_agentic_generate(flag: str) -> _Check:
@@ -464,7 +415,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.session_server_port": _ok,
     "agent.session_server_workers": _ok,
     "agent.tito_model": _ok,
-    "agent.tito_allowed_append_roles": _stock_codex_append_roles_or_none(
+    "agent.tito_allowed_append_roles": _must_be_none(
         "upstream Miles has no --tito-allowed-append-roles; the append roles are "
         "decided by the --tito-model template (allowed_append_roles)"
     ),
@@ -538,22 +489,6 @@ def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
             f"{algorithm.dynamic_sampling_filter!r}",
         )
     return algorithm.dynamic_sampling_filter
-
-
-def _secrlenv_retry_argv(agent, batch, dynamic_filter: str | None,
-                         max_policy_age: int) -> tuple[str, ...]:
-    """P0-1.7b.4-Q1: the SecRLEnv agents bind the same-task retry classes."""
-
-    from .secrlenv_retry import rollout_argv
-
-    try:
-        return rollout_argv(custom_agent=agent.custom_agent_function_path,
-                            dynamic_filter=dynamic_filter,
-                            rollout_batch_size=batch.groups_per_round,
-                            over_sampling_batch_size=batch.over_sampling_batch_size,
-                            max_policy_age=max_policy_age)
-    except ValueError as exc:
-        raise UnmappedConfigError("agent.custom_agent_function_path", str(exc)) from None
 
 
 def placement_request(config) -> PlacementRequest:
@@ -1124,7 +1059,6 @@ def translate_run_config(
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
-    values.extend(_secrlenv_retry_argv(agent, batch, dynamic_filter, max_policy_age))
     if agent.agent_max_seq_len is not None:
         values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:

@@ -10,7 +10,7 @@ from .rl_backend import resolve_default_rl_image
 from .loss import pickled_loss_path, resolve_loss_function
 from .storage import modal_checkpoint_store
 from .rl_args import _prepare_rl_args
-from .codex import modal_sandbox_secret_name
+from .harness_env import modal_sandbox_secret_name
 
 
 def prepare_launch_args(

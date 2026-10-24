@@ -20,20 +20,14 @@ from yeto.launcher import (
     syncer_command,
 )
 from yeto.rl import (
-    CODEX_OPENENV_AGENT,
     MILES_NEXT_COMMIT,
     MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
-    SECRLENV_GENERATE,
-    SECRLENV_GROUP_FILTER,
-    SECRLENV_REWARD,
     SGLANG_NEXT_COMMIT,
     SGLANG_NEXT_REPOSITORY,
 )
 from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.codex_backend import (
-    QWEN35_08B_MODEL,
-    QWEN35_08B_REVISION,
     QWEN35_MODEL,
     QWEN35_REVISION,
 )
@@ -157,48 +151,6 @@ def test_over_sampling_without_filter_is_forwarded_for_cutoff():
 def test_over_sampling_below_the_batch_is_rejected():
     args = _args(["--over-sampling-batch-size", "1"])
     with pytest.raises(ValueError, match="at least --rollout-batch-size"):
-        _prepare_rl_args(args)
-
-
-def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
-    args = _args(
-        [
-            "--reward-function",
-            SECRLENV_REWARD,
-            "--custom-generate-function-path",
-            SECRLENV_GENERATE,
-            "--custom-agent-function-path",
-            "yeto.rl.harness.codex.agent.run",
-            "--use-session-server",
-            "--tito-model",
-            "org/model",
-        ]
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.dynamic_sampling_filter_path == SECRLENV_GROUP_FILTER
-    assert args.dynamic_sampling_max_replacements == 0
-    assert args.secrlenv_max_infrastructure_replacements == 1
-    assert args.over_sampling_batch_size == args.rollout_batch_size + 1
-
-
-def test_secrlenv_agent_rejects_the_unwrapped_miles_generator():
-    args = _args(
-        [
-            "--reward-function",
-            SECRLENV_REWARD,
-            "--custom-generate-function-path",
-            "miles.rollout.generate_hub.agentic_tool_call.generate",
-            "--custom-agent-function-path",
-            "yeto.rl.harness.codex.agent.run",
-            "--use-session-server",
-            "--tito-model",
-            "org/model",
-        ]
-    )
-
-    with pytest.raises(ValueError, match="signed SecRLEnv generate wrapper"):
         _prepare_rl_args(args)
 
 
@@ -404,45 +356,6 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
     assert args.session_server_port == [31000, 31002]
     assert args.tito_model == "deepseekv4"
     assert args.tito_allowed_append_roles == ["tool", "user"]
-
-
-def test_codex_openenv_uses_exact_08b_profile_with_qwen35_tito_family():
-    args = _args(
-        (
-            "--model",
-            QWEN35_08B_MODEL,
-            "--model-revision",
-            QWEN35_08B_REVISION,
-            "--lora-targets",
-            "attention",
-            "--custom-generate-function-path",
-            "miles.rollout.generate_hub.agentic_tool_call.generate",
-            "--custom-agent-function-path",
-            CODEX_OPENENV_AGENT,
-            "--codex-reasoning-effort",
-            "xhigh",
-            "--codex-backend-profile",
-            "qwen35_08b",
-            "--use-session-server",
-            "--tito-model",
-            "qwen35",
-            "--tito-allowed-append-roles",
-            "tool",
-            "user",
-        )
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.codex_backend_profile == "qwen35_08b"
-    assert args.tito_model == "qwen35"
-    assert args.model == QWEN35_08B_MODEL
-    assert args.model_revision == QWEN35_08B_REVISION
-    assert args.apply_chat_template_kwargs == {"clear_thinking": False}
-
-    args.tito_model = "qwen35_08b"
-    with pytest.raises(ValueError, match="Miles TITO family"):
-        _prepare_rl_args(args)
 
 
 def test_rl_parses_cybergym_worker_configuration():
@@ -1818,3 +1731,13 @@ def test_run_miles_carries_the_island_task_record(monkeypatch, tmp_path):
     record = {"task_ids": ["web1"], "data_sha256": "a" * 64}
     rl_learner.run_miles(args, model_path=model, prompt_path=prompts, island_tasks=record)
     assert captured["miles_args"].yeto_rl_island_tasks == record
+
+
+@pytest.mark.parametrize("flag, value", [
+    ("--codex-reasoning-effort", "xhigh"),
+    ("--codex-backend-profile", "qwen35_08b"),
+])
+def test_removed_codex_agent_flags_are_refused(flag, value):
+    args = _args((flag, value, "--use-session-server", "--tito-model", "qwen35"))
+    with pytest.raises(ValueError, match="signed Codex agent"):
+        _prepare_rl_args(args)

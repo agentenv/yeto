@@ -181,7 +181,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     marks.append(("placeholder_mask", time.monotonic()))
     # CompactionRL: the masks above may drop optimised tokens; the per-segment
     # counts (tokens_after, gae_length) must follow the final masks.
-    from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
+    from yeto.rl.compaction import refresh_segment_counts
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))

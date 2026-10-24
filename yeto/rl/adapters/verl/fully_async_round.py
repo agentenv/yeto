@@ -58,6 +58,7 @@ DISCARD_MECHANISM = "yeto policy-age discard (verl fully_async queue)"
 # ``data.train_batch_size`` is replaced: FullyAsyncRollouter asserts it is 0
 # (prompts are pulled one at a time, ``gen_batch_size=1``); the batch size of a
 # round is ``ppo_mini_batch_size * require_batches``.
+AGENT_LOOP_CONFIG_KEY = "actor_rollout_ref.rollout.agent.agent_loop_config_path="
 _SYNC_ONLY_PREFIXES = ("trainer.use_v1=", "trainer.v1.trainer_mode=", "trainer.n_gpus_per_node=",
                        "data.train_batch_size=")
 
@@ -172,6 +173,11 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         # fully_async_rollouter.py:351; s19-verl64b-async3-20261009a died here).
         "data.train_batch_size=0",
     ]
+    if any(o.startswith(AGENT_LOOP_CONFIG_KEY) for o in out):
+        # The rollouter replaces every row's agent_name with single_turn_agent unless
+        # multi_turn is on (fork detach_utils.prepare_single_generation_data), so an
+        # agent-loop run (Harbor) would never reach its loop (S26 agv-async-eff-b).
+        out.append("actor_rollout_ref.rollout.multi_turn.enable=True")
     return out
 
 

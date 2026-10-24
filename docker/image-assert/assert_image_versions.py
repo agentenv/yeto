@@ -78,7 +78,9 @@ def check_packages(packages: dict, report: Report) -> None:
         if want is None:
             report.add(f"package {dist}", True, f"{have} (recorded, not pinned)")
         else:
-            ok = public_version(have) == want
+            # A lock with a local version (torch 2.13.0+cu130) pins that build; one without
+            # accepts any local build of the public version.
+            ok = have == want if "+" in want else public_version(have) == want
             report.add(f"package {dist}", ok, f"{have} (lock {want})", optional=optional)
             if not ok:
                 continue

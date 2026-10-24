@@ -43,6 +43,7 @@ class FakeBoat:
         self.states = list(states or ["provisioning", "ready"])
         self.live: set[str] = set()
         self.deleted: list[str] = []
+        self.ttls: list[tuple[str, int]] = []
         self.commands: list[str] = []
         self.stopped: list[int] = []
         self.files: dict[str, bytes] = {}
@@ -86,6 +87,10 @@ class FakeBoat:
 
     def usage_seconds(self, sandbox_id: str) -> float | None:
         return 42.0
+
+    def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None:
+        assert sandbox_id in self.live
+        self.ttls.append((sandbox_id, ttl_seconds))
 
     def delete(self, sandbox_id: str) -> None:
         self.live.discard(sandbox_id)

@@ -225,19 +225,3 @@ def test_fully_async_trained_groups_hook_reports_the_round(monkeypatch):
     assert len(reported) == 1  # the all-samples hook reports otherwise
 
 
-def test_rollout_side_matches_plain_versions_against_the_published_label():
-    from yeto.rl.adapters.miles import carry_over
-    from yeto.rl.adapters.miles.rollout_meta_hook import group_matches_policy
-    from yeto.rl.harness.codex.codex_openenv_generate import window_problem
-
-    def sample(version):
-        span = SimpleNamespace(version=version, abs_start=1, abs_end=2)
-        return SimpleNamespace(status=SimpleNamespace(value="completed"), tokens=[0, 1],
-                               response_length=1, weight_versions=[SimpleNamespace(spans=[span])])
-
-    label = f"yeto:6:{H6}"
-    assert group_matches_policy([sample("6"), sample("6")], label, 2)
-    assert not group_matches_policy([sample("6"), sample("5")], label, 2)
-    assert carry_over.response_token_versions(sample("5")) == [5]
-    assert window_problem(["5", "6"], label, 1) is None
-    assert "behind" in window_problem(["4"], label, 1)

@@ -1,6 +1,5 @@
 """agentic-rollout-utilization 1.3: phase clock and tool-wait wiring."""
 
-from types import SimpleNamespace
 
 from yeto.rl.engine.trajectory_timing import PhaseClock, phase_totals, timing_fields
 
@@ -26,18 +25,6 @@ def test_timing_fields_pick_typed_values_from_metadata_and_agent_metrics():
     meta = {"trajectory_started_at": 1.0, "sandbox_start_seconds": "x",
             "agent_metrics": {"turn_tool_seconds": [1, 2.5], "turn_generation_seconds": [True]}}
     assert timing_fields(meta) == {"trajectory_started_at": 1.0, "turn_tool_seconds": [1.0, 2.5]}
-
-
-def test_codex_openenv_agent_reads_the_island_tool_wait_board():
-    from yeto.rl import CODEX_OPENENV_AGENT
-    from yeto.rl.adapters.miles.elastic_wiring import LazyBoardActor
-    from yeto.rl.adapters.miles.entry import load_tool_wait_source
-
-    args = SimpleNamespace(custom_generate_function_path="miles.x.generate",
-                           custom_agent_function_path=CODEX_OPENENV_AGENT, yeto_rl_learner_id=1)
-    assert isinstance(load_tool_wait_source(args), LazyBoardActor)
-    args.custom_agent_function_path = "other.agent.run"
-    assert load_tool_wait_source(args) is None
 
 
 def test_engine_kv_fields_and_round_peaks():

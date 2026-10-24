@@ -498,14 +498,12 @@ def _verified_outcome(
 
     if "tbench_trusted_outcome" in metadata:
         raise ValueError("trajectory metadata mixes benchmark evidence kinds")
-    from yeto.rl.harness.codex.reward import (
+    from .secrlenv_outcome import (
         CLEANUP_ERROR_STATUS,
         INFRASTRUCTURE_STATUS,
-        _canonical,
+        canonical_outcome as _canonical,
     )
-    from yeto.rl.harness.codex.reward import (
-        _verified_outcome as verified_secrlenv_outcome,
-    )
+    from .secrlenv_outcome import verified_outcome as verified_secrlenv_outcome
 
     outcome, reward = verified_secrlenv_outcome(dict(metadata))
     if outcome["status"] in {INFRASTRUCTURE_STATUS, CLEANUP_ERROR_STATUS}:

@@ -22,7 +22,7 @@ from .storage import (
     _rl_checkpoint_storage_name, droppable_rejoins_in_new_container, modal_checkpoint_store,
     resumes_in_new_container,
 )
-from .codex import CODEX_CONTAINER_DIR, modal_sandbox_secret_name
+from .harness_env import modal_sandbox_secret_name
 from .fleet import TEARDOWN_UNVERIFIED_EXIT
 
 
@@ -90,16 +90,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     if rl and island_keeps_spot_volume(args):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
         volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
-    # Codex run bundle: the sky task mounts it at CODEX_CONTAINER_DIR; Modal
-    # mounts the same directory through the image (add_local_dir).
+    # Every sky file_mount (local prompt file, initial adapter, HF token file)
+    # is mounted into the container the same way; `~` is /root in Modal.
     all_mounts = dict(getattr(task, "file_mounts", None) or {})
-    codex_dir = all_mounts.get(CODEX_CONTAINER_DIR)
-    # Every other sky file_mount (local prompt file, initial adapter, HF token
-    # file) is mounted into the container the same way; `~` is /root in Modal.
     extra_mounts = {
         ("/root" + target[1:] if target.startswith("~") else target): str(source)
         for target, source in all_mounts.items()
-        if target != CODEX_CONTAINER_DIR and not str(source).startswith(("s3://", "gs://", "r2://"))
+        if not str(source).startswith(("s3://", "gs://", "r2://"))
     }
     requirements: tuple[str, ...] = ()
     if not rl:
@@ -128,8 +125,6 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         pip_requirements=requirements,
         volume_name=volume_name,
         volume_mount=volume_mount,
-        codex_dir=codex_dir,
-        codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
         checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
         checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,

@@ -221,12 +221,6 @@ class ModalIslandConfig:
     # links CONTAINER_WORKDIR to it).
     workdir: str | None = str(REPO_ROOT)
     python_version: str = "3.12"
-    # Stock Codex run bundle (ports engine, signed Codex agent): a local dir
-    # holding the attested binary / package manifest / app-server schema,
-    # mounted read-only at ``codex_mount`` (= ``/opt/yeto/codex``, the
-    # CODEX_CONTAINER_BINARY_PATH parent) the same way sky file_mounts does.
-    codex_dir: str | None = None
-    codex_mount: str | None = None
     # Other sky file_mounts (container path -> local file or dir), mounted
     # read-only at start-up like the workdir.
     extra_mounts: dict[str, str] = field(default_factory=dict)
@@ -304,10 +298,6 @@ class ModalIslandConfig:
             raise ValueError("model_volume_name and model_volume_mount go together")
         if self.model_volume_name and self.model_volume_name in (self.volume_name, self.tape_volume_name):
             raise ValueError("the model volume must differ from the checkpoint/tape volumes")
-        if (self.codex_dir is None) != (self.codex_mount is None):
-            raise ValueError("codex_dir and codex_mount go together")
-        if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
-            raise ValueError(f"codex_dir {self.codex_dir} is not a directory")
         for target, source in self.extra_mounts.items():
             if not target.startswith("/"):
                 raise ValueError(f"extra_mounts target {target} must be absolute")
@@ -1152,9 +1142,6 @@ class ModalOps:
                 copy=False,
                 ignore=MODAL_WORKDIR_IGNORE,
             )
-        if cfg.codex_dir and cfg.codex_mount:
-            # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
-            image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)
         for target, source in sorted(cfg.extra_mounts.items()):
             source = os.path.expanduser(source)
             if os.path.isdir(source):

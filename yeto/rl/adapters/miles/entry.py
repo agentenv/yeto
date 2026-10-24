@@ -31,8 +31,6 @@ from typing import Any
 from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
-    SECRLENV_GROUP_CHECK_FILTER,
-    TBENCH_GROUP_CHECK_FILTER,
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
@@ -276,10 +274,7 @@ def miles_capabilities(
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
         placements={"colocated"},
-        dynamic_sampling_filters={
-            BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
-            TBENCH_GROUP_CHECK_FILTER,
-        },
+        dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
@@ -435,21 +430,13 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     The elastic drain board when wired; the island's named board when the
     tool-wait workload generate is configured (it counts on that board); 0
     (``TOOL_WAIT_NO_BOARD_STOCK``) for Miles' stock generate, which makes no
-    tool calls; the island's named board for the Codex OpenEnv agent, which
-    enters/exits it around every tool call (agentic-rollout-utilization 1.3);
-    None (unknown) for any other custom generate.
+    tool calls; None (unknown) for any other custom generate.
     """
-    from yeto.rl import CODEX_OPENENV_AGENT
-
     from .rollout import TOOL_WAIT_NO_BOARD_STOCK
 
     board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
     if board is not None:
         return board
-    if getattr(miles_args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT:
-        from .elastic_wiring import LazyBoardActor
-
-        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0))
     custom = getattr(miles_args, "custom_generate_function_path", None)
     if not custom:
         return TOOL_WAIT_NO_BOARD_STOCK
@@ -534,10 +521,8 @@ def publish_member_cell(miles_args: Any, learner_id: int | None = None, environ:
 
     Source, in order: an explicit ``miles_args.yeto_rl_cell_id`` (INFRA may pre-set it),
     ``learner_id`` (the island number the launcher already assigns; ``island_id`` in the
-    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  The env
-    export reaches rollout-worker subprocesses through ``worker_runtime_env`` and
-    ``preflight.configure_rollout_worker``; ``preflight.resolve_member`` then yields
-    ``engine:<cell>`` (``engine:0`` on a single island).
+    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  Rollout-side
+    code reads the env export (``engine:<cell>``; ``engine:0`` on a single island).
     """
     environ = os.environ if environ is None else environ
     cell = getattr(miles_args, "yeto_rl_cell_id", None)
@@ -1405,12 +1390,6 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
-    if miles_args is not None:
-        # Codex harness: the agent function runs in RolloutExecutor actors and
-        # configures itself from this env (preflight.configure_rollout_worker).
-        from yeto.rl.harness.codex.preflight import worker_runtime_env
-
-        env_vars.update(worker_runtime_env(miles_args, environ))
     env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address

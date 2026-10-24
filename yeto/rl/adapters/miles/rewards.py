@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from yeto.rl.rewards.registry import RewardRegistryError, load_reward, register_reward
+from yeto.rl.rewards.registry import RewardRegistryError, load_reward
 from yeto.rl.rewards.types import FilterDecision, RewardResult, Trajectory
 
 _MODULE = __name__
@@ -120,29 +120,6 @@ def miles_custom_rm_path(ref: str) -> str:
     load_reward(ref)
     attr = ref if ":" not in ref else _encode(ref)
     return f"{_MODULE}.{attr}"
-
-
-def rlf_success_reward(trajectory: Trajectory) -> RewardResult:
-    """Neutral success declaration for an authenticated RLF grader result.
-
-    This is the framework-neutral ``Trajectory -> RewardResult`` function.
-    Do NOT pass ``yeto.rl.adapters.miles.rewards:rlf_success_reward``
-    directly as Miles ``--custom-rm-path``: Miles invokes reward callables
-    as ``fn(args, samples)``, so the unwrapped neutral signature would not
-    match.  Use ``miles_custom_rm_path("rlf_success")`` instead; it resolves
-    to the ``__getattr__``-wrapped attribute below, which adapts the neutral
-    function to the Miles calling convention via :func:`miles_reward`.
-    """
-    from yeto.rl.rlf.preflight import validate_rollout
-    validate_rollout({"metadata": trajectory.metadata})
-    value = float(trajectory.metadata.get("reward", 0.0))
-    return RewardResult(value=value, metadata={"success": bool(trajectory.metadata["success"])})
-
-
-# Registered so Miles reaches the wrapped callable as
-# ``yeto.rl.adapters.miles.rewards.rlf_success`` (module ``__getattr__`` below
-# wraps registered neutral rewards with :func:`miles_reward`).
-register_reward("rlf_success", rlf_success_reward)
 
 
 def __getattr__(attr: str):

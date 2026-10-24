@@ -661,31 +661,18 @@ def test_lr_schedule_flags_are_adapter_owned():
             mc.check_extra_argv((flag, "1"))
 
 
-# ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: append roles by tokenizer family
+# ---------------------------------------------------------------- append roles are decided by the --tito-model template
 
-@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38small", True), ("deepseekv4", True),
-                                           ("nosuchfamily", False)])
-def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
-    """``--tito-model`` is a tokenizer family (``qwen4exp`` for Flash-Next), not a
-    profile name; the s15 4-layer smoke failed with UnmappedConfigError here."""
+def test_explicit_append_roles_are_refused():
+    """Since S26 E0.5 no signed Codex agent may state the append roles."""
     from types import SimpleNamespace
 
-    from yeto.rl import CODEX_OPENENV_AGENT
     from yeto.rl.adapters.miles.config import LEAF_POLICY
 
     check = LEAF_POLICY["agent.tito_allowed_append_roles"]
-    agent = SimpleNamespace(custom_agent_function_path=CODEX_OPENENV_AGENT, tito_model=tito_model)
-    cfg = SimpleNamespace(agent=agent)
+    cfg = SimpleNamespace(agent=SimpleNamespace(custom_agent_function_path="x:y", tito_model="qwen35"))
     assert check(None, cfg) is None
-    if ok:
-        assert check(("tool", "user"), cfg) is None
-        assert "fix the append roles" in check(("tool",), cfg)
-    else:
-        assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
-    # an unsigned agent is still refused
-    cfg.agent.custom_agent_function_path = "x:y"
-    assert check(("tool", "user"), cfg) is not None
-
+    assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
 
 
 # --- S17 N16: --rl-lr-schedule ----------------------------------------------------

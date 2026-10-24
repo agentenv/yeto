@@ -9,7 +9,6 @@ neutral flags and the flag machinery live in ``yeto.rl.engine.run_flags``.
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -252,7 +251,7 @@ _AGENT = (
         "on few-core single-GPU islands to avoid the parallel-import storm "
         "(32 sglang imports can miss the 300 s ready window)",
     ),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-backend-profile",
         default=None,
         help=(
@@ -441,7 +440,6 @@ _ISLAND = (
     island_flag("--groups-per-round", type=int, required=True),
     island_flag("--samples-per-group", type=int, required=True),
     island_flag("--optimizer-steps", type=int, required=True),
-    island_flag("--codex-harness-contract", type=json.loads, default=None),
     island_flag("--completed-groups-path", required=True),
     island_flag("--event-tape", required=True),
     island_flag("--audit-dir", default=None),

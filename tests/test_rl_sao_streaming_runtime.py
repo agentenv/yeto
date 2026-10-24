@@ -595,7 +595,7 @@ def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_pa
         persist_published_round_evidence,
     )
     from yeto.rl.engine.policy_versions import PublishedPolicies
-    from yeto.rl.harness.codex import reward
+    from yeto.rl import secrlenv_outcome as reward
     from yeto.rl.trajectory_evidence import (
         read_trajectory_batch_evidence,
         trajectory_batch_evidence_path,
