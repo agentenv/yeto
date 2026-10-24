@@ -261,6 +261,22 @@ class ShardedSyncerClient:
         self._manifests, self._merged = manifests, merged
         return merged, sorted(fragments, key=lambda fragment: fragment.fragment_id)
 
+    def wait_for_final_manifest(self, timeout: float | None = None) -> FinalManifest:
+        """The union of every shard's final manifest (no final fragments):
+        each fragment's version from its owner, the largest final step."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        manifests = []
+        versions = [0] * self.layout.num_fragments
+        for client in self.shards:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            manifest = client.wait_for_final_manifest(remaining)
+            manifests.append(manifest)
+            for fid in client.owned_fragments:
+                versions[fid] = manifest.versions[fid]
+        merged = FinalManifest(max(m.global_step for m in manifests), tuple(versions))
+        self._manifests, self._merged = manifests, merged
+        return merged
+
     def acknowledge_finalization(self, manifest: FinalManifest, timeout: float | None = None) -> None:
         if self._manifests is None or manifest != self._merged:
             raise RuntimeError("cannot acknowledge a final manifest that was not received")

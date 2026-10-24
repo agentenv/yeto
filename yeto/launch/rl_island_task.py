@@ -24,7 +24,8 @@ from .topology import (
 )
 from .syncer import (
     critic_syncer_address, elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret,
-    rl_dense_sweep, rl_full_parameter_async, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
+    rl_dense_sweep, rl_full_parameter_async, rl_full_parameter_final_cut, rl_needs_critic,
+    rl_sao_streaming, rl_syncer_profile,
 )
 from .credentials import registry_login_for, split_secret_envs
 from .storage import (
@@ -109,6 +110,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --full-parameter-rounds async"
     if getattr(args, "rl_sync_expert_token_weights", False):
         sweep += " --sweep-expert-token-weights"
+    if rl_full_parameter_final_cut(args) == "ack":
+        sweep += " --sweep-final-cut ack"
     if getattr(args, "rl_sync_init_mode", "auto") != "auto":
         sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":

@@ -223,6 +223,12 @@ struct Args {
     /// gets weight 0). Islands must send the counts. Off by default.
     #[arg(long)]
     expert_token_weights: bool,
+    /// What the final cut carries to every island: `full` (every f32
+    /// fragment, then the version manifest) or `manifest` (the version
+    /// manifest only; islands acknowledge without downloading the final
+    /// parameters, which stay in --checkpoint-path / --final-state).
+    #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
+    final_cut_payload: String,
     /// Fragment-sharded head (S27 P4b): this process owns the fragment
     /// range of shard --shard-index out of --shard-count and runs only the
     /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
@@ -386,6 +392,7 @@ fn main() -> anyhow::Result<()> {
         weighted_fold: args.weighted_fold.parse()?,
         shard,
         expert_token_weights: args.expert_token_weights,
+        final_cut_manifest_only: args.final_cut_payload == "manifest",
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -537,8 +537,10 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
     ``log_file`` when a test must read the log while the syncer runs."""
     from yeto import launcher
 
+    # These tests read the final parameters from the final cut.
+    final_cut = () if "--rl-sync-final-cut" in extra else ("--rl-sync-final-cut", "download")
     args, _ = _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
-                                 "--total-steps", str(total_steps), *extra))
+                                 "--total-steps", str(total_steps), *final_cut, *extra))
     command = launcher.role_syncer_commands(args, 2, binary=str(binary))["actor"]
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

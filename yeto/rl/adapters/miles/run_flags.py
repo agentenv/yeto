@@ -399,6 +399,15 @@ _ISLAND = (
         help="full-parameter sweep, int4 pushes: residual dtype of island-side error feedback",
     ),
     island_flag(
+        "--sweep-final-cut",
+        choices=("download", "ack"),
+        default="download",
+        help="dense full-parameter sweep: download = receive every final f32 fragment and "
+        "apply it before the final ACK; ack = receive the final version manifest only and ACK "
+        "once the pushes drained (the syncer runs --final-cut-payload manifest and keeps the "
+        "final parameters)",
+    ),
+    island_flag(
         "--sweep-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE: count the tokens each router sends to each "

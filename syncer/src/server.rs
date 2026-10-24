@@ -168,6 +168,12 @@ pub struct Config {
     /// `protocol::decode_expert_tags`). Every HELLO must declare the matching
     /// session flag. Off keeps the wire bytes and the merge unchanged.
     pub expert_token_weights: bool,
+    /// The final cut carries the version manifest only (no f32 fragments):
+    /// an island acknowledges once it has the final versions, and the final
+    /// parameters stay in this syncer's checkpoint / final state. Islands
+    /// must expect it, so it is in the semantic profile hash (appended only
+    /// when on). Off sends every final fragment to every island.
+    pub final_cut_manifest_only: bool,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -175,6 +181,7 @@ pub struct Config {
 const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
+const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -216,6 +223,10 @@ impl Config {
         // Appended only when on, so every existing hash stays unchanged.
         if self.expert_token_weights {
             encoded.extend_from_slice(EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN);
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.final_cut_manifest_only {
+            encoded.extend_from_slice(FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN);
         }
         Sha256::digest(encoded).into()
     }
@@ -5334,10 +5345,13 @@ async fn broadcast_all_fragments(
 /// Send every authoritative f32 fragment, then publish the version manifest
 /// on the control stream. Data/control streams may reorder; learners cache
 /// terminal fragments and use the manifest to decide when the complete cut
-/// is locally available.
-async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
-    for p in st.owned_fragments() {
-        send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
+/// is locally available. `manifest_only`: the manifest alone (islands that
+/// acknowledge without holding the final parameters).
+async fn send_final_cut(st: &GlobalState, group: &Arc<Group>, manifest_only: bool) -> Result<()> {
+    if !manifest_only {
+        for p in st.owned_fragments() {
+            send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
+        }
     }
     group
         .send_small(
@@ -5409,7 +5423,7 @@ async fn finalize_learners(
     let mut eligible: HashMap<u32, HashSet<Member>> = HashMap::new();
     for group in current_groups(registry) {
         if expected.contains(&group.member.learner_id) {
-            match send_final_cut(st, &group).await {
+            match send_final_cut(st, &group, cfg.final_cut_manifest_only).await {
                 Ok(()) => {
                     eligible
                         .entry(group.member.learner_id)
@@ -5532,7 +5546,7 @@ async fn finalize_learners(
                     && !acknowledged.contains_key(&member.learner_id)
                     && is_current_member(registry, member)
                 {
-                    match send_final_cut(st, &group).await {
+                    match send_final_cut(st, &group, cfg.final_cut_manifest_only).await {
                         Ok(()) => {
                             eligible
                                 .entry(member.learner_id)
@@ -6696,9 +6710,12 @@ mod tests {
             recovery: Default::default(),
             weighted_fold: Default::default(),
             expert_token_weights: false,
+            final_cut_manifest_only: false,
             shard: Default::default(),
         }
     }
+
+    const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
 
     #[test]
     fn semantic_profile_hash_matches_the_python_canonical_vector() {
@@ -6744,6 +6761,14 @@ mod tests {
         let digest: String =
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(digest, "f51de8a095c0fa428c5483c7921da805bb8b3cd2736fe19fdd03f47e4f733913");
+        // A manifest-only final cut appends its own domain; Python vector in
+        // tests/test_s27_final_cut_ack.py.
+        config.expert_token_weights = false;
+        config.final_cut_manifest_only = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_ne!(config.semantic_profile_hash(), original);
+        assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
     }
 
     #[test]
@@ -7379,11 +7404,21 @@ mod tests {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
-        send_final_cut(&terminal_state, &terminal_group)
+        send_final_cut(&terminal_state, &terminal_group, false)
             .await
             .unwrap();
         let final_fragment = terminal_rx.try_recv().unwrap();
         assert_eq!(chunked_inner_type(&final_fragment), MSG_FINAL_FRAGMENT);
+        assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        // A manifest-only final cut sends the version manifest alone.
+        send_final_cut(&terminal_state, &terminal_group, true)
+            .await
+            .unwrap();
         assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
         assert!(matches!(
             terminal_rx.try_recv(),

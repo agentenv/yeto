@@ -53,6 +53,11 @@ _DELAYED_NESTEROV_DOMAIN = b"yeto-syncer-delayed-nesterov-v1\0"
 # true appends the domain that server.rs::semantic_profile_hash appends.
 _EXPERT_TOKEN_WEIGHTS_FIELD = "expert_token_weights"
 _EXPERT_TOKEN_WEIGHTS_DOMAIN = b"yeto-syncer-expert-token-weights-v1\0"
+# Optional. Absent or false = the final cut carries every f32 fragment
+# (byte-identical hash); true (syncer --final-cut-payload manifest) appends
+# the domain that server.rs::semantic_profile_hash appends.
+_FINAL_CUT_MANIFEST_ONLY_FIELD = "final_cut_manifest_only"
+_FINAL_CUT_MANIFEST_ONLY_DOMAIN = b"yeto-syncer-final-cut-manifest-only-v1\0"
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -135,12 +140,13 @@ class SyncerSemanticProfile:
     require_profile_binding: bool
     outer_delayed_nesterov_period: int | None = None
     expert_token_weights: bool = False
+    final_cut_manifest_only: bool = False
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
             _FIELDS <= set(raw)
-            <= _FIELDS | {_DELAYED_NESTEROV_FIELD, _EXPERT_TOKEN_WEIGHTS_FIELD}
+            <= _FIELDS | {_DELAYED_NESTEROV_FIELD, _EXPERT_TOKEN_WEIGHTS_FIELD, _FINAL_CUT_MANIFEST_ONLY_FIELD}
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
@@ -213,6 +219,9 @@ class SyncerSemanticProfile:
             ),
             expert_token_weights=_boolean(
                 _EXPERT_TOKEN_WEIGHTS_FIELD, raw.get(_EXPERT_TOKEN_WEIGHTS_FIELD, False)
+            ),
+            final_cut_manifest_only=_boolean(
+                _FINAL_CUT_MANIFEST_ONLY_FIELD, raw.get(_FINAL_CUT_MANIFEST_ONLY_FIELD, False)
             ),
         )
         profile._validate_general()
@@ -297,6 +306,8 @@ class SyncerSemanticProfile:
             encoded.extend(struct.pack("<I", self.outer_delayed_nesterov_period))
         if self.expert_token_weights:
             encoded.extend(_EXPERT_TOKEN_WEIGHTS_DOMAIN)
+        if self.final_cut_manifest_only:
+            encoded.extend(_FINAL_CUT_MANIFEST_ONLY_DOMAIN)
         return bytes(encoded)
 
     @property
