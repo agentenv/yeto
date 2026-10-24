@@ -692,8 +692,10 @@ class ReleasingPublisher:
         def upload() -> None:
             kept = False
             try:
+                # S27 G-CD: the full releases of a delta chain carry each file's sha256
                 release = self.releases.release_staged(version, policy_hash, staged,
-                                                       position=positions, delta_base=base, **fields)
+                                                       position=positions, delta_base=base,
+                                                       digest_full=self.delta is not None, **fields)
                 kept = self.delta is not None and self.delta.advance(release, staged)
             finally:
                 if not kept:

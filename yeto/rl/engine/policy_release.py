@@ -103,7 +103,8 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -112,7 +113,7 @@ from typing import Any
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
 from .object_store import ObjectStore, download_file, object_size
-from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory
+from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -133,6 +134,7 @@ MAX_DELTA_RATIO = 0.5
 # (PolicyFollower): the first from its mirror, the next ones from the full release
 # in the store, downloaded again
 MAX_REBUILD_FAILURES = 3
+DIGEST_WORKERS = 8  # files hashed at a time (file_digests)
 
 
 class PolicyReleaseError(RuntimeError):
@@ -162,6 +164,9 @@ class PolicyRelease:
     # "base_version", "ratio", "files": {name: {"mode", "size", "sha256"}}}; the
     # directory holds the deltas, ``files`` above lists them. None: the weights themselves.
     delta: dict[str, Any] | None = None
+    # sha256 of each weight file of a full release (``file_digests``; S27 G-CD: the full
+    # releases of a delta chain); None: not digested file by file
+    file_sha256: dict[str, str] | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -262,6 +267,11 @@ class ReleaseIncomplete(PolicyReleaseError):
     """A release whose files are not all present with their recorded sizes yet."""
 
 
+class ReleaseDigestMismatch(ReleaseDeltaError):
+    """A full release whose weight files are not the released ones (``file_sha256``);
+    the follower treats it like a failed delta rebuild (``PolicyFollower``)."""
+
+
 class ReleaseNotLoaded(PolicyReleaseError):
     """The load hook did not take this release, and the sampler may go on: the
     release scheme is not the one the engine serves, or a post-load check
@@ -302,10 +312,28 @@ def check_complete(release: PolicyRelease, directory: Path) -> None:
         raise error
 
 
+def file_digests(directory: Path, names: Iterable[str] | None = None, *,
+                 workers: int = DIGEST_WORKERS) -> dict[str, str]:
+    """{relative path: sha256} of ``names`` (default: every file but the record)
+    under ``directory``, ``workers`` files at a time."""
+    root = Path(directory)
+    names = sorted(file_sizes(root)) if names is None else sorted(names)
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        return dict(zip(names, pool.map(lambda name: file_sha256(root / name), names)))
+
+
 def check_release_files(release: PolicyRelease, directory: Path) -> None:
-    """Raise when the weight files differ from the ones the trainer released."""
+    """Raise when the weight files differ from the ones the trainer released:
+    the release digest (``sha256``) or each file's (``file_sha256``)."""
     if release.sha256 is not None:
         check_release_digest(release, directory_digest(directory))
+    if release.file_sha256:
+        actual = file_digests(directory, release.file_sha256)
+        bad = sorted(name for name, digest in release.file_sha256.items() if actual[name] != digest)
+        if bad:
+            raise ReleaseDigestMismatch(f"release r{release.seq}-v{release.version}: {len(bad)} of "
+                                        f"{len(actual)} weight files differ from the released sha256 "
+                                        f"(first: {bad[0]})", file=bad[0])
 
 
 def check_release_digest(release: PolicyRelease, actual: str) -> None:
@@ -401,15 +429,15 @@ class PolicyReleaseStore:
         mirror (``release_delta.DeltaMirror``). Raises :class:`ReleaseIncomplete`
         when a recorded file (or a base record) is missing or of another size, and
         ``ReleaseDeltaError`` when a rebuilt file is not the released one.
-        ``from_store``: rebuild a delta release from the full release in the store,
-        downloaded again (not from a rebuilt copy or an earlier download)."""
+        ``from_store``: download again (not from an earlier download), and rebuild a
+        delta release from the full release in the store (not from a rebuilt copy)."""
+        if from_store and self.store.objects is not None:
+            self._prune_cache(keep=())
         if release.delta is None:
             return self._stored(release)
         if self.mirror is None:
             raise PolicyReleaseError(f"release r{release.seq}-v{release.version} is a delta "
                                      "release: this reader has no mirror to rebuild it in")
-        if from_store and self.store.objects is not None:
-            self._prune_cache(keep=())
         directory = self.mirror.materialize(release, record_of=self._record_at, from_store=from_store,
                                             weights_dir=lambda r: self._stored(r, prune_cache=False))
         if self.store.objects is not None:
@@ -550,7 +578,8 @@ class PolicyReleaseStore:
                        position: Callable[[], tuple[int | None, dict[str, int] | None]],
                        weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None,
-                       delta_base: DeltaBase | None = None) -> PolicyRelease | None:
+                       delta_base: DeltaBase | None = None,
+                       digest_full: bool = False) -> PolicyRelease | None:
         """Publish the weights already written into the local directory ``staged``
         (module doc, staged releases): the weight files go into the store first;
         then the record, in the release directory and as LATEST, in one put.
@@ -563,6 +592,9 @@ class PolicyReleaseStore:
         release instead of the weights (``release_delta``), unless the delta is
         above :data:`MAX_DELTA_RATIO` of the weights; the record's ``delta`` names
         the base. The base stays in the store while a kept release needs it.
+
+        ``digest_full``: a full release records the sha256 of each weight file
+        (``file_sha256``), which the follower checks before it loads the release.
 
         Returns None (puts nothing) when the latest release is this version and hash."""
         version = int(version)
@@ -590,6 +622,7 @@ class PolicyReleaseStore:
             with timer.phase("digest_s"):
                 sha256 = directory_digest(staged) if weights == LORA else None
                 files = file_sizes(upload)
+                digests = file_digests(staged, files) if digest_full and weights == FULL and delta is None else None
             with timer.phase("upload_s"):
                 self.store.put_directory(upload, f"{self.release_dir}/{name}")
         finally:
@@ -602,7 +635,8 @@ class PolicyReleaseStore:
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
-                               origin=None if origin is None else dict(origin), delta=delta)
+                               origin=None if origin is None else dict(origin), delta=delta,
+                               file_sha256=digests)
         text = json.dumps(asdict(record), sort_keys=True).encode("utf-8")
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
@@ -839,12 +873,14 @@ class PolicyFollower:
     is loaded at the next refresh outside the round.
 
     Rebuild failures: a delta release whose rebuilt files fail their digest
-    check (``ReleaseDeltaError``) is not loaded; the engines keep the release
-    they serve and :meth:`refresh` raises :class:`ReleaseNotLoaded` (reason
-    ``delta_rebuild_failed``). Each later try rebuilds from the full release in
-    the store (``resolve(from_store=True)``) until one release is resolved.
-    The ``max_rebuild_failures``-th failure in a row raises the
-    ``ReleaseDeltaError`` (the island stops).
+    check (``ReleaseDeltaError``), or a full release whose files fail their
+    ``file_sha256`` (:class:`ReleaseDigestMismatch`), is not loaded; the engines
+    keep the release they serve and :meth:`refresh` raises :class:`ReleaseNotLoaded`
+    (reason ``delta_rebuild_failed`` or ``release_digest_mismatch``). Each later
+    try downloads again and rebuilds from the full release in the store
+    (``resolve(from_store=True)``) until one release passes its checks.
+    The ``max_rebuild_failures``-th failure in a row raises the error (the
+    island stops).
 
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
@@ -923,11 +959,14 @@ class PolicyFollower:
             return None
         except ReleaseDeltaError as error:
             self._rebuild_failed(latest, error)
-        self.rebuild_failures = 0
         self.incomplete = None
         if not getattr(self._load, "verifies_files", False):
-            with timer.phase("verify_s"):
-                check_release_files(latest, directory)
+            try:
+                with timer.phase("verify_s"):
+                    check_release_files(latest, directory)
+            except ReleaseDigestMismatch as error:
+                self._rebuild_failed(latest, error)
+        self.rebuild_failures = 0
         with timer.phase("load_s"):
             self._load(latest, directory)
         previous = self.release
@@ -947,12 +986,14 @@ class PolicyFollower:
         self.counters.rebuild_failures += 1
         failures = self.rebuild_failures
         if failures >= self.max_rebuild_failures:
-            raise ReleaseDeltaError(f"r{release.seq}-v{release.version}: {failures} delta rebuilds "
-                                    f"in a row failed (last: {error})", file=error.file) from error
+            raise type(error)(f"r{release.seq}-v{release.version}: {failures} delta rebuilds or "
+                              f"digest checks in a row failed (last: {error})", file=error.file) from error
+        full = isinstance(error, ReleaseDigestMismatch)
         raise ReleaseNotLoaded(
-            f"r{release.seq}-v{release.version}: delta rebuild failed ({error}); the engines keep "
-            f"v{self.version}, the next try rebuilds from the full release in the store",
-            reason="delta_rebuild_failed",
+            f"r{release.seq}-v{release.version}: {'digest check' if full else 'delta rebuild'} failed "
+            f"({error}); the engines keep v{self.version}, the next try rebuilds from the full "
+            "release in the store",
+            reason="release_digest_mismatch" if full else "delta_rebuild_failed",
             fields={"release_version": release.version, "file": error.file,
                     "rebuild_failures": failures, "max_rebuild_failures": self.max_rebuild_failures},
         ) from error

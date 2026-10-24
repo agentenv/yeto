@@ -251,6 +251,11 @@ def test_staged_publisher_releases_deltas_in_the_background(tmp_path, monkeypatc
                                  mirror=rd.DeltaMirror(tmp_path / "mirror"))
     rebuilt = sampler.resolve(sampler.latest())
     assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
+    # S27 G-CD: the chain's full release carries each file's sha256, the deltas do not
+    records = sorted(sampler.records(), key=lambda r: r.seq)
+    assert records[0].file_sha256 == {
+        "model.safetensors": hashlib.sha256(words[0].astype("<u2").tobytes()).hexdigest()}
+    assert all(r.file_sha256 is None for r in records[1:])
 
 
 def test_publisher_refuses_deltas_without_staging(tmp_path):
@@ -476,7 +481,7 @@ def test_rebuild_failures_in_a_row_stop_the_sampler(tmp_path, monkeypatch):
     follower = _follower(tmp_path, loads, max_rebuild_failures=2)
     with pytest.raises(ReleaseNotLoaded, match="rebuilds from the full release"):
         follower.refresh()
-    with pytest.raises(rd.ReleaseDeltaError, match="2 delta rebuilds in a row failed") as caught:
+    with pytest.raises(rd.ReleaseDeltaError, match="2 delta rebuilds or digest checks in a row failed") as caught:
         follower.refresh()
     assert caught.value.file == "model.safetensors" and loads == [] and follower.version == 0
     with pytest.raises(ValueError, match="max_rebuild_failures"):
@@ -544,3 +549,27 @@ def test_the_sampler_loop_reports_a_failed_rebuild_and_generates_on(tmp_path, mo
     assert generated == [(0, 1), (1, 1), (2, 2)]  # v1 served until the store copy is good again
     rounds = [f for e, f in events if e == "rl_sampler_round"]
     assert rounds[-1]["releases"]["rebuild_failures"] == 2
+
+
+def test_a_full_release_with_file_digests_is_checked_before_it_loads(tmp_path, monkeypatch):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    staged = _stage(tmp_path / "s", 0, _words(20_000))
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+    plain = trainer.release_staged(0, "h0", staged, position=lambda: (0, None))
+    assert plain.file_sha256 is None  # off by default
+    record = trainer.release_staged(1, "h1", staged, position=lambda: (1, None), digest_full=True)
+    assert record.file_sha256 == {"config.json": _sha(staged / "config.json"),
+                                  "model.safetensors": _sha(staged / "model.safetensors")}
+    weights = tmp_path / "store" / "policy-releases" / record.path / "model.safetensors"
+    good = weights.read_bytes()
+    _flip_first_word(weights)
+    loads = []
+    follower = _follower(tmp_path, loads)
+    with pytest.raises(ReleaseNotLoaded) as caught:
+        follower.refresh()
+    assert caught.value.reason == "release_digest_mismatch"
+    assert caught.value.fields["file"] == "model.safetensors" and loads == []
+    weights.write_bytes(good)
+    assert follower.refresh().version == 1 and [v for v, _ in loads] == [1]
+    assert follower.counters.rebuild_failures == 1 and follower.rebuild_failures == 0
