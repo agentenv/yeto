@@ -281,12 +281,27 @@ def _block_aligned_chunks(
     left = next(ahead, 0) if ahead is not None else float("inf")
     carry = b""
     for part in parts:
-        # Zero-copy: chunks are read-only views of the part (a carried
-        # partial block is joined once).  Slicing bytes here copied the rest
-        # of the part at every segment cut, quadratic in the segments per
-        # part (S27 G-AA: ~14 s/GiB with 10 MiB tensors).
-        data = memoryview(carry + bytes(part) if carry else part).cast("B")
+        # Zero-copy: chunks are read-only views of the part.  Slicing bytes
+        # here copied the rest of the part at every segment cut, quadratic in
+        # the segments per part (S27 G-AA: ~14 s/GiB with 10 MiB tensors).
+        data = memoryview(part).cast("B")
         start = 0
+        if carry:
+            # A carried partial block (under one block) is completed from the
+            # head of this part and sent alone; only those bytes are copied
+            # (S27 G-AP: joining the carry to the whole part copied ~2 parts
+            # per part boundary).
+            if left == 0:
+                raise ValueError("f32 push delta is longer than its tensor segments")
+            start = min(4 * min(left, block) - len(carry), len(data))
+            carry += bytes(data[:start])
+            if len(carry) < 4 * min(left, block):
+                continue
+            yield carry
+            left -= len(carry) // 4
+            carry = b""
+            if left == 0 and ahead is not None:
+                left = next(ahead, 0)
         while start < len(data):
             if left == 0:
                 raise ValueError("f32 push delta is longer than its tensor segments")
@@ -352,6 +367,12 @@ def f32_bytes_to_i4(
     if segments is not None:
         head = struct.pack("<I", block) if header else b""
         return head + _encode_segments(data, segments, lambda c: f32_bytes_to_i4(c, block, header=False, rng=rng))
+    if rng is None:
+        # Nearest rounding: the cache-blocked encoder computes these exact bytes.
+        from .push_codec import encode_i4_nearest  # noqa: PLC0415 - keep the protocol import light
+
+        head = struct.pack("<I", block) if header else b""
+        return head + encode_i4_nearest(np.frombuffer(data, dtype="<f4"), block)
     values = np.frombuffer(data, dtype="<f4")
     if not np.isfinite(values).all():
         raise ValueError("int4 push delta contains a non-finite value")

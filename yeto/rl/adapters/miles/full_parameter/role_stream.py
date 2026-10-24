@@ -22,6 +22,7 @@ from typing import Any
 
 from yeto.protocol import (
     DEFAULT_I4_BLOCK,
+    PartialMessageGenerationLost,
     DEFAULT_I8_BLOCK,
     DTYPE_FLAG_BCAST_DELTA,
     DTYPE_FLAG_TENSOR_BLOCKS,
@@ -39,6 +40,7 @@ from yeto.push_error_feedback import RESIDUAL_DTYPES, PushErrorFeedback
 from yeto.syncer_shards import ShardedSyncerClient
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
+from yeto.rl.adapters.miles.full_parameter.rank_stats import report_rank_stats
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
     ReferencedPolicyCut,
@@ -351,6 +353,16 @@ class PreparedPush:
     anchor: Any
     encoded: Any  # yeto.protocol.EncodedPush
     timings: dict[str, float]
+
+
+@dataclass(frozen=True)
+class SentPush:
+    """What :meth:`MilesFullParameterRoleStream.send_prepared` did."""
+
+    queued: bool
+    link_generation: int
+    timings: dict[str, float]
+    finished_at: float  # time.monotonic() when the last chunk was queued
 
 
 @dataclass(frozen=True)
@@ -979,6 +991,7 @@ class MilesFullParameterRoleStream:
             local_step_generation=expected_generation,
             defer_payload=self._defers_capture(),
         )
+        await report_rank_stats(self.group, "export", self.config.role)
         previous = self.current
         previous_submission = self.submission_cut
         self.current = local
@@ -1037,7 +1050,10 @@ class MilesFullParameterRoleStream:
 
         if self.adapter is None or self.group is None or self.submission_cut is None:
             return ()
-        return await self.adapter.materialize(self.group, self.submission_cut, fragment_ids)
+        stored = await self.adapter.materialize(self.group, self.submission_cut, fragment_ids)
+        if stored:
+            await report_rank_stats(self.group, "materialize", self.config.role)
+        return stored
 
     def _proof_kwargs(self) -> dict[str, bool]:
         """The optimizer proofs around an apply skip their whole-model
@@ -1306,6 +1322,7 @@ class MilesFullParameterRoleStream:
             target,
             commit_token=self._apply_token(target_version, selected),
         )
+        await report_rank_stats(self.group, "apply", self.config.role)
         if before is not None:
             after = tuple(await self.group.full_parameter_optimizer_states(**self._proof_kwargs()))
             validate_optimizer_apply_transition(
@@ -1519,17 +1536,7 @@ class MilesFullParameterRoleStream:
         sends bytes computed ahead instead of streaming them now.
         """
 
-        if (
-            candidate.role != self.config.role
-            or self.client is None
-            or self.adapter is None
-            or self.final_applied
-            or id(candidate.submission_cut) not in self._pinned_cuts
-            or id(candidate.anchor) not in self._pinned_anchors
-        ):
-            raise RuntimeError("role-stream paired submission candidate changed")
-        permit = self._pending.get(candidate.permit.fragment_id)
-        if permit != candidate.permit:
+        if not self.pushable(candidate):
             return None
         fragment_id = candidate.permit.fragment_id
         if prepared is not None:
@@ -1584,11 +1591,54 @@ class MilesFullParameterRoleStream:
 
     def _push_prepared(self, candidate: RoleSubmissionCandidate,
                        prepared: PreparedPush) -> RoleFragmentSubmission | None:
+        started = time.monotonic()
+        try:
+            sent = self.send_prepared(candidate, prepared)
+        except BaseException:
+            self.note_push_timing(candidate, {**prepared.timings, "push_s": time.monotonic() - started})
+            raise
+        self.note_push_timing(candidate, sent.timings)
+        if not sent.queued:
+            return None
+        return self._pushed(candidate, sent.link_generation)
+
+    # -- background pushes (S27 G-AP) ----------------------------------------
+    # ``RolePairing`` runs prepare_push + send_prepared on a worker thread
+    # while the island trains; pushable, note_pushed and note_push_timing run
+    # on the coordinator's thread, which owns every stream table.
+
+    def pushable(self, candidate: RoleSubmissionCandidate) -> bool:
+        """Whether ``candidate`` may be pushed now: its operands are retained
+        and its permit is still the pending one (a superseded or answered
+        permit returns False).  Raises when the candidate no longer belongs
+        to this stream."""
+
+        if (
+            candidate.role != self.config.role
+            or self.client is None
+            or self.adapter is None
+            or self.final_applied
+            or id(candidate.submission_cut) not in self._pinned_cuts
+            or id(candidate.anchor) not in self._pinned_anchors
+        ):
+            raise RuntimeError("role-stream paired submission candidate changed")
+        return self._pending.get(candidate.permit.fragment_id) == candidate.permit
+
+    def send_prepared(self, candidate: RoleSubmissionCandidate, prepared: PreparedPush) -> SentPush:
+        """Enqueue bytes :meth:`prepare_push` computed for ``candidate``.
+
+        Thread-safe: touches only the syncer client (whose enqueue is
+        thread-safe) and no stream table.  Returns whether every chunk was
+        queued and the generation of the link it was queued on; a
+        partial-generation loss is reported as not queued (the pairing waits
+        for the replayed PULL, as for a synchronous push)."""
+
         if (prepared.submission_cut is not candidate.submission_cut or prepared.anchor is not candidate.anchor
                 or prepared.encoded.fragment_id != candidate.permit.fragment_id):
             raise RuntimeError("prepared push belongs to another candidate")
         extra: dict[str, Any] = {} if candidate.expert_tags is None else {"expert_tags": candidate.expert_tags}
         timings = dict(prepared.timings)
+        link_generation = self._link_generation(candidate.permit.fragment_id)
         started = time.monotonic()
         try:
             queued = self.client.push_fragment_parts(
@@ -1603,18 +1653,29 @@ class MilesFullParameterRoleStream:
                 encoded=prepared.encoded,
                 **extra,
             )
-        finally:
-            timings["push_s"] = time.monotonic() - started
-            self._note_push_timing(candidate, timings, timings["push_s"], prepared=True)
-        if queued is not True:
-            return None
-        return self._pushed(candidate)
+        except PartialMessageGenerationLost:
+            queued = False
+        timings["push_s"] = time.monotonic() - started
+        return SentPush(queued is True, link_generation, timings, time.monotonic())
 
-    def _pushed(self, candidate: RoleSubmissionCandidate) -> RoleFragmentSubmission:
+    def note_pushed(self, candidate: RoleSubmissionCandidate, link_generation: int) -> RoleFragmentSubmission:
+        """Record a background push that :meth:`send_prepared` queued."""
+
+        return self._pushed(candidate, link_generation)
+
+    def note_push_timing(self, candidate: RoleSubmissionCandidate, timings: Mapping[str, float]) -> None:
+        """Account one prepared push's time split (:meth:`_note_push_timing`)."""
+
+        self._note_push_timing(candidate, dict(timings), timings.get("push_s", 0.0), prepared=True)
+
+    def _pushed(self, candidate: RoleSubmissionCandidate, link_generation: int | None = None) -> RoleFragmentSubmission:
         self._answered[
             (candidate.permit.global_step, candidate.permit.round_attempt)
-        ] = self._link_generation(candidate.permit.fragment_id)
-        self._pending.pop(candidate.permit.fragment_id)
+        ] = self._link_generation(candidate.permit.fragment_id) if link_generation is None else link_generation
+        # A background push is recorded after the fact: a newer PULL may have
+        # superseded the permit, or the closed round dropped it, meanwhile.
+        if self._pending.get(candidate.permit.fragment_id) == candidate.permit:
+            self._pending.pop(candidate.permit.fragment_id)
         terminal = candidate.permit.global_step == self.config.total_fragment_steps
         self.terminal_submitted = self.terminal_submitted or terminal
         return RoleFragmentSubmission(
