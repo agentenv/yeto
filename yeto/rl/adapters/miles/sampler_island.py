@@ -71,6 +71,7 @@ from yeto.rl.engine.policy_release import (
     FULL,
     LORA,
     BackgroundReleaser,
+    DeltaChain,
     PhaseTimer,
     PolicyFollower,
     PolicyRelease,
@@ -81,6 +82,7 @@ from yeto.rl.engine.policy_release import (
 )
 from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, release_version
 from yeto.rl.engine.policy_versions import engine_weight_version
+from yeto.rl.engine.release_delta import DeltaMirror, default_mirror
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 from yeto.rl.quant.schemes import BF16, FP8_FFN_CHANNEL, release_dir_for
 from yeto.rl.quant.scope import QuantScopeError
@@ -123,12 +125,13 @@ def _buffer_config(miles_args: Any, role: str) -> Any:
     return config if config is not None and config.role == role else None
 
 
-def release_store(config: Any, environ: Any = None, *, scheme: str = BF16) -> PolicyReleaseStore:
+def release_store(config: Any, environ: Any = None, *, scheme: str = BF16,
+                  mirror: DeltaMirror | None = None) -> PolicyReleaseStore:
     from yeto.rl.engine.resume import store_for
 
     return PolicyReleaseStore(store_for(config.store, environ=environ),
                               release_dir=release_dir_for(scheme),
-                              cached_latest=not config.release_legacy)
+                              cached_latest=not config.release_legacy, mirror=mirror)
 
 
 def _quant_tier(miles_args: Any) -> int:
@@ -486,7 +489,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         if not lora:  # LoRA: no adapter is served before the first release (require_release)
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
         scheme = release_scheme(_quant_tier(miles_args))
-        follower = PolicyFollower(release_store(config, environ, scheme=scheme),
+        follower = PolicyFollower(release_store(config, environ, scheme=scheme,
+                                                mirror=default_mirror(environ)),
                                   loader if scheme == BF16 else scope_checked(loader),
                                   version=BASE_POLICY_VERSION, scheme=scheme)
         loop = SamplerLoop(
@@ -569,8 +573,11 @@ class ReleasingPublisher:
                  skip_base: bool = False,
                  read_position_from_thread: Callable[[], int | None] | None = None,
                  read_shards_from_thread: Callable[[], dict[str, int] | None] | None = None,
+                 delta: DeltaChain | None = None,
                  timer: Callable[[], float] = time.perf_counter) -> None:
-        """``read_shards``: the trainer's read position per sampler shard (None
+        """``delta``: staged releases go out as bf16 deltas along this chain
+        (``policy_release`` module doc, delta releases). ``read_shards``: the
+        trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
         backlog caps. Synced trainers (:mod:`yeto.rl.engine.merged_release`):
         ``version_of(state)`` is the merged version to release (default: the
@@ -580,6 +587,9 @@ class ReleasingPublisher:
         callable from the upload thread (default: ``read_position`` / ``read_shards``)."""
         if (staging is None) != (releaser is None):
             raise ValueError("staging and releaser go together")
+        if delta is not None and staging is None:
+            raise ValueError("delta releases need staged releases")
+        self.delta = delta
         self.read_position_from_thread = read_position_from_thread or read_position
         self.read_shards_from_thread = read_shards_from_thread or read_shards
         self.version_of = version_of or (lambda state: int(state.policy_version))
@@ -647,14 +657,22 @@ class ReleasingPublisher:
         def positions() -> tuple[int | None, dict[str, int] | None]:
             return self._positions(self.read_position_from_thread, self.read_shards_from_thread)
 
+        base = None if self.delta is None else self.delta.base()
+
         def upload() -> None:
+            kept = False
             try:
                 release = self.releases.release_staged(version, policy_hash, staged,
-                                                       position=positions, **fields)
+                                                       position=positions, delta_base=base, **fields)
+                kept = self.delta is not None and self.delta.advance(release, staged)
             finally:
-                shutil.rmtree(staged, ignore_errors=True)
+                if not kept:
+                    shutil.rmtree(staged, ignore_errors=True)
+            delta = None if release is None else release.delta
             self._emit_released(release, {**event, "staged": True,
-                                          "visible_at": self.releases.last_visible_at},
+                                          "visible_at": self.releases.last_visible_at,
+                                          "delta_base_seq": None if delta is None else delta["base_seq"],
+                                          "delta_ratio": None if delta is None else delta["ratio"]},
                                 {**stage, **self.releases.last_timings})
 
         self.releaser.submit(upload)
@@ -788,6 +806,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         shutil.rmtree(staging, ignore_errors=True)  # an earlier process's partial stages
     # the upload thread may not drive the driver's event loop (it may be running)
     from_thread = getattr(driver.rollout, "_in_executor_from_thread", None) or in_executor
+    delta_every = int(getattr(config, "release_delta_full_every", 0) or 0)
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
@@ -797,6 +816,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    skip_base=not lora and lane is None,
                                    read_position_from_thread=lambda: from_thread(executor_read_cursor),
                                    read_shards_from_thread=lambda: from_thread(executor_read_shards),
+                                   delta=DeltaChain(delta_every) if staged and delta_every else None,
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:

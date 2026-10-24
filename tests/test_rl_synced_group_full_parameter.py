@@ -168,3 +168,12 @@ def test_island_accepts_one_lane_only_on_a_synced_trainer():
     with pytest.raises(ValueError, match="--rl-sample-lanes >= 1"):
         island_entry._check_sample_store(_ns(rl_sample_role="trainer", rl_sample_store="/s",
                                              rl_sample_lanes=0, learner_id=0, rl_resume_store=None))
+
+
+def test_group_forwards_delta_releases_to_its_trainers_only():
+    _, plan = _plan(("--rl-sampler-follow", "trainer", "--rl-release-delta-full-every", "8"))
+    (_, t0), (_, t1), (_, s0), (_, s1) = _islands(plan)
+    assert t0.rl_release_delta_full_every == t1.rl_release_delta_full_every == 8
+    assert s0.rl_release_delta_full_every == s1.rl_release_delta_full_every == 0
+    config = sample_roles.resolve(t1, groups_per_round=4)
+    assert config.release_delta_full_every == 8 and config.store == f"{MOUNT}/trainer1"

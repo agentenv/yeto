@@ -86,7 +86,9 @@ class SampleBufferConfig:
     ``PolicyReleaseStore.cached_latest``);
     ``release_inline``: trainer, write each full-weight release into the store on
     the training critical path instead of staging it on local disk and uploading
-    it in the background (``--rl-release-inline``; ``sampler_island`` module doc)."""
+    it in the background (``--rl-release-inline``; ``sampler_island`` module doc);
+    ``release_delta_full_every``: trainer, upload staged full releases as bf16
+    deltas, every N-th one full (``--rl-release-delta-full-every``; 0: off)."""
 
     role: str
     store: str
@@ -96,6 +98,7 @@ class SampleBufferConfig:
     fused_stage: bool = False
     release_legacy: bool = False
     release_inline: bool = False
+    release_delta_full_every: int = 0
 
 
 def sample_role(args: Any) -> str:
@@ -384,6 +387,7 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_release_reload_latest = False
     if out.rl_sample_role != TRAINER:
         out.rl_release_inline = False
+        out.rl_release_delta_full_every = 0
     return out
 
 
@@ -413,6 +417,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         out.rl_sampler_max_backlog_rounds = None
         out.rl_sampler_min_round_seconds = None
         return out
+    out.rl_release_delta_full_every = 0
     if out.rl_sample_substore is not None:
         out.rl_checkpoint_store = substore_uri(args.rl_checkpoint_store, out.rl_sample_substore)
         out.rl_sample_substore = None  # a sampler's store is its trainer's sub-store
@@ -548,6 +553,8 @@ def check_launch(args: Any) -> None:
             raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer")
         if getattr(args, "rl_release_inline", False):
             raise ValueError("--rl-release-inline needs --rl-sample-role trainer")
+        if int(getattr(args, "rl_release_delta_full_every", 0) or 0):
+            raise ValueError("--rl-release-delta-full-every needs --rl-sample-role trainer")
         return
     if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
@@ -583,11 +590,44 @@ def check_launch(args: Any) -> None:
     if getattr(args, "rl_release_reload_latest", False) and role not in (TRAINER, CONVERTIBLE):
         raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer "
                          "(or a convertible pool): only a trainer writes policy releases")
+    _check_release_delta(args, role)
     wait_s = getattr(args, "rl_sample_wait_s", None)
     if wait_s is not None and (role not in (TRAINER, CONVERTIBLE) or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
     if role == CONVERTIBLE and not getattr(args, "rl_convertible_node", None):
         raise ValueError("--rl-sample-role convertible needs --rl-convertible-node NAME")
+
+
+def _check_release_delta(args: Any, role: str) -> None:
+    """``--rl-release-delta-full-every N``: 0 (off) or N >= 2, on a Miles trainer
+    whose full-weight releases are staged (``policy_release`` module doc)."""
+    every = int(getattr(args, "rl_release_delta_full_every", 0) or 0)
+    if every == 0:
+        return
+    problems = []
+    if every < 2:
+        problems.append("a value of 0 (off) or >= 2")
+    if role != TRAINER:
+        problems.append("--rl-sample-role trainer")
+    if getattr(args, "rl_release_inline", False):
+        problems.append("staged releases (no --rl-release-inline)")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        problems.append("--rl-backend miles")
+    if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
+        problems.append("no --rl-rollout-quant-tier (its re-quantizer reads whole releases)")
+    if not _full_weights(args):
+        problems.append("full-weight releases (--tuning full or the full-parameter preset)")
+    if problems:
+        raise ValueError("--rl-release-delta-full-every needs " + "; ".join(problems))
+
+
+def _full_weights(args: Any) -> bool:
+    """Whether a trainer releases whole checkpoints (not a LoRA adapter)."""
+    if int(getattr(args, "expert_full_count", 0) or 0):
+        return False
+    return (getattr(args, "tuning", "lora") == "full"
+            or getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET
+            or getattr(args, "parameter_mode", "lora") == "full")
 
 
 def convertible_min_backlog_rounds(args: Any) -> int:
@@ -628,7 +668,9 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         fused_stage=role == SAMPLER and bool(getattr(args, "rl_sampler_fused_stage", False)),
         release_legacy=role in (TRAINER, CONVERTIBLE)
         and bool(getattr(args, "rl_release_reload_latest", False)),
-        release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)))
+        release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)),
+        release_delta_full_every=(int(getattr(args, "rl_release_delta_full_every", 0) or 0)
+                                  if role == TRAINER else 0))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -664,6 +706,8 @@ def island_flags(args: Any) -> str:
         flags += " --rl-release-reload-latest"
     if role == TRAINER and getattr(args, "rl_release_inline", False):
         flags += " --rl-release-inline"
+    if role == TRAINER and int(getattr(args, "rl_release_delta_full_every", 0) or 0):
+        flags += f" --rl-release-delta-full-every {int(args.rl_release_delta_full_every)}"
     if getattr(args, "rl_sampler_node", None):
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):
