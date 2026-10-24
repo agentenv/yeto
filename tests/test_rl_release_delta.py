@@ -99,13 +99,13 @@ def test_directory_delta_rebuilds_every_file_and_copies_the_small_ones(tmp_path,
         "config.json": "full", "model-1.safetensors": "delta", "model-2.safetensors": "full"}
     assert sorted(p.name for p in (tmp_path / "d").iterdir()) == [
         "config.json", "model-1.safetensors.ydelta", "model-2.safetensors"]
-    rd.apply_directory(base, tmp_path / "d", delta.entries, tmp_path / "out", workers=2)
+    rd.apply_directory(base, [(tmp_path / "d", delta.entries)], tmp_path / "out", workers=2)
     for name in delta.entries:
         assert (tmp_path / "out" / name).read_bytes() == (target / name).read_bytes()
     corrupt = dict(delta.entries)
     corrupt["model-1.safetensors"] = rd.FileEntry("delta", corrupt["model-1.safetensors"].size, "0" * 64)
     with pytest.raises(rd.ReleaseDeltaError, match="rebuilt sha256"):
-        rd.apply_directory(base, tmp_path / "d", corrupt, tmp_path / "out2")
+        rd.apply_directory(base, [(tmp_path / "d", corrupt)], tmp_path / "out2")
 
 
 # ---------------------------------------------------------------- store, chain, mirror
@@ -351,3 +351,55 @@ def test_a_base_whose_files_are_gone_gives_a_full_release(tmp_path, monkeypatch)
     _release(trainer, chain, _stage(tmp_path / "s", 0, words), 0)
     shutil.rmtree(chain.base().directory)
     assert _release(trainer, chain, _stage(tmp_path / "s", 1, _changed(words, 0.01)), 1).delta is None
+
+
+def test_chain_apply_rebuilds_several_versions_in_one_pass(tmp_path):
+    words = [_words(30_001)]
+    for v in range(1, 4):
+        words.append(_changed(words[-1], 0.02, seed=v))
+    paths = [_write(tmp_path / f"v{v}", w, b"\x05") for v, w in enumerate(words)]
+    deltas = []
+    for v in range(1, 4):
+        rd.encode_file(paths[v - 1], paths[v], tmp_path / f"d{v}", chunk_words=4096)
+        deltas.append(tmp_path / f"d{v}")
+    assert rd.apply_chain(paths[0], deltas, tmp_path / "out") == _sha(paths[3])
+    assert (tmp_path / "out").read_bytes() == paths[3].read_bytes()
+    with pytest.raises(rd.ReleaseDeltaError, match="another size or chunking"):
+        rd.encode_file(paths[0], paths[1], tmp_path / "odd", chunk_words=2048)
+        rd.apply_chain(paths[0], [tmp_path / "odd", deltas[1]], tmp_path / "x")
+
+
+def test_directory_chain_restarts_at_a_whole_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    v0 = {"a.safetensors": _words(20_000, 1)}
+    v1 = {"a.safetensors": _words(25_000, 2)}  # another size: whole in link 1
+    v2 = {"a.safetensors": _changed(v1["a.safetensors"], 0.01)}
+    dirs = [_release_dir(tmp_path / f"v{i}", v) for i, v in enumerate((v0, v1, v2))]
+    links = []
+    for i in (1, 2):
+        result = rd.encode_directory(dirs[i - 1], dirs[i], tmp_path / f"d{i}")
+        links.append((tmp_path / f"d{i}", result.entries))
+    assert [e["a.safetensors"].mode for _, e in links] == ["full", "delta"]
+    rd.apply_directory(dirs[0], links, tmp_path / "out")
+    assert (tmp_path / "out" / "a.safetensors").read_bytes() == (dirs[2] / "a.safetensors").read_bytes()
+
+
+def test_a_sampler_two_versions_behind_rebuilds_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=4)
+    chain = DeltaChain(full_every=8)
+    words = [_words(40_000)]
+    _release(trainer, chain, _stage(tmp_path / "s", 0, words[0]), 0)
+    for version in (1, 2, 3):
+        words.append(_changed(words[-1], 0.01, seed=version))
+        _release(trainer, chain, _stage(tmp_path / "s", version, words[-1]), version)
+    calls = []
+    real_chain = rd.apply_chain
+    monkeypatch.setattr(rd, "apply_chain", lambda base, deltas, out: (
+        calls.append(len(deltas)), real_chain(base, deltas, out))[1])
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                 mirror=rd.DeltaMirror(tmp_path / "mirror"))
+    rebuilt = sampler.resolve(sampler.latest())
+    assert calls == [3]  # v1..v3 on the full v0, one pass
+    assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
+    assert [p.name for p in (tmp_path / "mirror").iterdir()] == [sampler.latest().path]

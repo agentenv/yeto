@@ -47,8 +47,9 @@ import os
 import shutil
 import struct
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -170,36 +171,53 @@ def _footer(handle: Any, path: Path) -> dict[str, Any]:
     return footer
 
 
+def _apply_chunk(words: np.ndarray, kind: str, changed: int, patch: Any, name: str) -> None:
+    """Apply one chunk record of a delta file (read from ``patch``) to ``words``."""
+    if kind == _IDX:
+        index = np.frombuffer(patch.read(4 * changed), dtype="<u4")
+        words[index] = np.frombuffer(patch.read(2 * changed), dtype="<u2")
+    elif kind == _BITS:
+        bits = np.frombuffer(patch.read((words.size + 7) // 8), dtype=np.uint8)
+        mask = np.unpackbits(bits, count=words.size).view(bool)
+        words[mask] = np.frombuffer(patch.read(2 * changed), dtype="<u2")
+    elif kind != _SAME:
+        raise ReleaseDeltaError(f"{name}: unknown chunk kind {kind!r}")
+
+
+def apply_chain(base: Path, deltas: Sequence[Path], out: Path) -> str:
+    """Write ``base`` with every delta of ``deltas`` applied in order into ``out``,
+    in one pass (each chunk is read once, patched by every delta, written once);
+    returns the sha256 of ``out``."""
+    if not deltas:
+        raise ValueError("apply_chain needs at least one delta")
+    with ExitStack() as stack:
+        patches = [stack.enter_context(Path(d).open("rb")) for d in deltas]
+        footers = [_footer(patch, Path(d)) for patch, d in zip(patches, deltas)]
+        size = os.path.getsize(base)
+        for footer, delta in zip(footers, deltas):
+            if int(footer["base_size"]) != size or int(footer["chunk_words"]) != int(footers[0]["chunk_words"]):
+                raise ReleaseDeltaError(f"{Path(delta).name}: the base has another size or chunking")
+            size = int(footer["target_size"])
+        chunk_words, words = int(footers[0]["chunk_words"]), size // 2
+        digest = hashlib.sha256()
+        old, sink = stack.enter_context(Path(base).open("rb")), stack.enter_context(Path(out).open("wb"))
+        for number in range(len(footers[0]["chunks"])):
+            chunk = _read_words(old, min(chunk_words, words - number * chunk_words))
+            for footer, patch, delta in zip(footers, patches, deltas):
+                kind, changed = footer["chunks"][number]
+                _apply_chunk(chunk, kind, int(changed), patch, Path(delta).name)
+            digest.update(chunk.data)
+            sink.write(chunk.data)
+        tail = footers[-1]["tail"]
+        if tail is not None:
+            digest.update(bytes([int(tail)]))
+            sink.write(bytes([int(tail)]))
+    return digest.hexdigest()
+
+
 def apply_file(base: Path, delta: Path, out: Path) -> str:
     """Write ``base`` with ``delta`` applied into ``out``; returns its sha256."""
-    digest = hashlib.sha256()
-    with delta.open("rb") as patch:
-        footer = _footer(patch, delta)
-        if os.path.getsize(base) != int(footer["base_size"]):
-            raise ReleaseDeltaError(f"{delta.name}: the base has another size")
-        size, chunk_words = int(footer["target_size"]), int(footer["chunk_words"])
-        words = size // 2
-        with base.open("rb") as old, out.open("wb") as sink:
-            for number, (kind, changed) in enumerate(footer["chunks"]):
-                start = number * chunk_words
-                count = min(chunk_words, words - start)
-                a = _read_words(old, count)
-                if kind == _IDX:
-                    index = np.frombuffer(patch.read(4 * changed), dtype="<u4")
-                    a[index] = np.frombuffer(patch.read(2 * changed), dtype="<u2")
-                elif kind == _BITS:
-                    bits = np.frombuffer(patch.read((count + 7) // 8), dtype=np.uint8)
-                    mask = np.unpackbits(bits, count=count).view(bool)
-                    a[mask] = np.frombuffer(patch.read(2 * changed), dtype="<u2")
-                elif kind != _SAME:
-                    raise ReleaseDeltaError(f"{delta.name}: unknown chunk kind {kind!r}")
-                digest.update(a.data)
-                sink.write(a.data)
-            if footer["tail"] is not None:
-                last = bytes([int(footer["tail"])])
-                digest.update(last)
-                sink.write(last)
-    return digest.hexdigest()
+    return apply_chain(base, [delta], out)
 
 
 def file_sha256(path: Path, chunk: int = 1 << 24) -> str:
@@ -252,26 +270,35 @@ def encode_directory(base: Path, target: Path, out: Path, *, skip: Callable[[str
                           target_bytes=sum(entry.size for _, entry, _ in results))
 
 
-def apply_directory(base: Path, delta: Path, entries: Mapping[str, FileEntry], out: Path, *,
+def apply_directory(base: Path, links: Sequence[tuple[Path, Mapping[str, FileEntry]]], out: Path, *,
                     workers: int = DEFAULT_WORKERS) -> None:
-    """Rebuild every file of ``entries`` into ``out`` from ``base`` and the delta
-    directory ``delta``; raises :class:`ReleaseDeltaError` on a digest mismatch."""
-    base, delta, out = Path(base), Path(delta), Path(out)
+    """Rebuild into ``out`` every file of the last of ``links`` (delta directory,
+    entries; oldest first), starting from ``base``: a file starts from the newest
+    link that holds it whole (else from ``base``) and takes the later deltas in
+    one pass. Raises :class:`ReleaseDeltaError` on a digest mismatch."""
+    base, out = Path(base), Path(out)
+    links = [(Path(directory), entries) for directory, entries in links]
 
     def one(item: tuple[str, FileEntry]) -> None:
         name, entry = item
+        start, deltas = base / name, []
+        for directory, entries in links:
+            if name not in entries or entries[name].mode != DELTA:
+                start, deltas = directory / name, []
+            else:
+                deltas.append(directory / (name + DELTA_SUFFIX))
         destination = out / name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if entry.mode == DELTA:
-            actual = apply_file(base / name, delta / (name + DELTA_SUFFIX), destination)
+        if deltas:
+            actual = apply_chain(start, deltas, destination)
         else:
-            shutil.copyfile(delta / name, destination)
+            shutil.copyfile(start, destination)
             actual = file_sha256(destination)
         if actual != entry.sha256 or destination.stat().st_size != entry.size:
             raise ReleaseDeltaError(f"{name}: rebuilt sha256 {actual} != released {entry.sha256}")
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
-        list(pool.map(one, entries.items()))
+        list(pool.map(one, links[-1][1].items()))
 
 
 def entries_of(record: Mapping[str, Any]) -> dict[str, FileEntry]:
@@ -287,7 +314,7 @@ class DeltaMirror:
     directory appears only complete (rebuilt into ``.partial`` first and checked).
     :meth:`materialize` rebuilds a delta release: it follows the release's bases
     (``record_of(path)``) back to one in the mirror or to a full release in the
-    store, then applies the deltas in order. ``weights_dir(release)`` is a
+    store, then applies all the deltas after it in one pass per file. ``weights_dir(release)`` is a
     release's directory in the store (mount or download). The newest ``keep``
     rebuilt releases stay (the engines may still read the one they serve)."""
 
@@ -308,16 +335,16 @@ class DeltaMirror:
             chain.append(link)
             link = record_of(str(link.delta["base_path"]))
         base = self.root / link.path if self.holds(link.path) else weights_dir(link)
+        if not chain:
+            return base
         self.root.mkdir(parents=True, exist_ok=True)
-        for step in reversed(chain):
-            partial = self.root / f".{step.path}.partial"
-            shutil.rmtree(partial, ignore_errors=True)
-            apply_directory(base, weights_dir(step), entries_of(step.delta), partial,
-                            workers=self.workers)
-            partial.replace(self.root / step.path)
-            base = self.root / step.path
+        partial = self.root / f".{release.path}.partial"
+        shutil.rmtree(partial, ignore_errors=True)
+        apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
+                        partial, workers=self.workers)
+        partial.replace(self.root / release.path)
         self._prune(newest=release.path)
-        return base
+        return self.root / release.path
 
     def _prune(self, newest: str) -> None:
         def seq(path: Path) -> int:
