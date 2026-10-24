@@ -63,13 +63,20 @@ class SampleBufferConfig:
     groups);
     ``wait_s``: trainer, max seconds to wait for one full round;
     ``min_round_s``: sampler, min seconds from one round start to the next (a
-    throttle, so a test can make the sampler slower than the trainer)."""
+    throttle, so a test can make the sampler slower than the trainer);
+    ``fused_stage``: LoRA sampler, check the release digest while copying the
+    adapter to local disk (``--rl-sampler-fused-stage``, S26 E5);
+    ``release_legacy``: trainer or convertible node, reload the store before every
+    policy release and commit LATEST separately (``--rl-release-reload-latest``;
+    ``PolicyReleaseStore.cached_latest``)."""
 
     role: str
     store: str
     max_backlog_groups: int | None = None
     wait_s: float | None = None
     min_round_s: float | None = None
+    fused_stage: bool = False
+    release_legacy: bool = False
 
 
 def sample_role(args: Any) -> str:
@@ -241,6 +248,10 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     else:
         out.rl_sampler_max_backlog_rounds = None
         out.rl_sampler_min_round_seconds = None
+    if out.rl_sample_role != SAMPLER:
+        out.rl_sampler_fused_stage = False
+    if out.rl_sample_role not in (TRAINER, CONVERTIBLE):
+        out.rl_release_reload_latest = False
     return out
 
 
@@ -333,6 +344,10 @@ def check_launch(args: Any) -> None:
                            ("--rl-sample-wait-s", "rl_sample_wait_s")):
             if getattr(args, dest, None) is not None:
                 raise ValueError(f"{flag} needs --rl-sample-role sampler or trainer")
+        if getattr(args, "rl_sampler_fused_stage", False):
+            raise ValueError("--rl-sampler-fused-stage needs --rl-sample-role sampler")
+        if getattr(args, "rl_release_reload_latest", False):
+            raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer")
         return
     if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
@@ -361,6 +376,13 @@ def check_launch(args: Any) -> None:
     if min_round_s is not None and (role != SAMPLER or not float(min_round_s) > 0):
         raise ValueError("--rl-sampler-min-round-seconds needs --rl-sample-role sampler "
                          "and a value > 0")
+    if getattr(args, "rl_sampler_fused_stage", False) and (
+            role != SAMPLER or (getattr(args, "tuning", None) or "lora") != "lora"):
+        raise ValueError("--rl-sampler-fused-stage needs --rl-sample-role sampler and "
+                         "--tuning lora (it fuses the LoRA adapter copy with its digest)")
+    if getattr(args, "rl_release_reload_latest", False) and role not in (TRAINER, CONVERTIBLE):
+        raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer "
+                         "(or a convertible pool): only a trainer writes policy releases")
     wait_s = getattr(args, "rl_sample_wait_s", None)
     if wait_s is not None and (role not in (TRAINER, CONVERTIBLE) or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
@@ -402,7 +424,10 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         max_backlog_groups=None if rounds is None else int(groups_per_round) * rounds,
         wait_s=None if wait_s is None else float(wait_s),
         min_round_s=(float(min_round_s) if role == SAMPLER and min_round_s is not None
-                     else None))
+                     else None),
+        fused_stage=role == SAMPLER and bool(getattr(args, "rl_sampler_fused_stage", False)),
+        release_legacy=role in (TRAINER, CONVERTIBLE)
+        and bool(getattr(args, "rl_release_reload_latest", False)))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -432,6 +457,10 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-min-round-seconds {float(args.rl_sampler_min_round_seconds)!r}"
     if getattr(args, "rl_sample_wait_s", None) is not None:
         flags += f" --rl-sample-wait-s {float(args.rl_sample_wait_s)!r}"
+    if role == SAMPLER and getattr(args, "rl_sampler_fused_stage", False):
+        flags += " --rl-sampler-fused-stage"
+    if role in (TRAINER, CONVERTIBLE) and getattr(args, "rl_release_reload_latest", False):
+        flags += " --rl-release-reload-latest"
     if getattr(args, "rl_sampler_node", None):
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):
