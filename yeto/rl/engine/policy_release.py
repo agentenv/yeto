@@ -113,7 +113,15 @@ from typing import Any
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
 from .object_store import ObjectStore, download_file, object_size
-from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
+from .release_delta import (
+    DeltaEngine,
+    DeltaMirror,
+    DirectoryDelta,
+    ReleaseDeltaError,
+    delta_workers,
+    encode_directory,
+    file_sha256,
+)
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -134,7 +142,6 @@ MAX_DELTA_RATIO = 0.5
 # (PolicyFollower: a delta rebuilt from its mirror, then rebuilt again from the full
 # release in the store, downloaded again; a full release's file_sha256)
 MAX_REBUILD_FAILURES = 3
-DIGEST_WORKERS = 8  # files hashed at a time (file_digests)
 
 
 class PolicyReleaseError(RuntimeError):
@@ -313,12 +320,14 @@ def check_complete(release: PolicyRelease, directory: Path) -> None:
 
 
 def file_digests(directory: Path, names: Iterable[str] | None = None, *,
-                 workers: int = DIGEST_WORKERS) -> dict[str, str]:
+                 workers: int | None = None) -> dict[str, str]:
     """{relative path: sha256} of ``names`` (default: every file but the record)
-    under ``directory``, ``workers`` files at a time."""
+    under ``directory``, ``workers`` files at a time (default
+    :func:`~.release_delta.delta_workers`)."""
     root = Path(directory)
     names = sorted(file_sizes(root)) if names is None else sorted(names)
-    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+    workers = delta_workers() if workers is None else int(workers)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         return dict(zip(names, pool.map(lambda name: file_sha256(root / name), names)))
 
 
@@ -359,11 +368,14 @@ class DeltaChain:
     falls behind rebuilds at most ``full_every - 1`` deltas); the others are
     deltas against the release before them. After each upload the staged
     directory becomes the next base (:meth:`advance`) and the older base's files
-    are deleted, so the trainer's disk holds at most two staged releases."""
+    are deleted, so the trainer's disk holds at most two staged releases.
+    ``engine``: encode with the resident engine (the base's weight files stay in
+    memory; ``release_delta`` module doc); None: the file engine."""
 
-    def __init__(self, full_every: int) -> None:
+    def __init__(self, full_every: int, *, engine: DeltaEngine | None = None) -> None:
         if int(full_every) < 2:
             raise ValueError("a delta chain needs full_every >= 2")
+        self.engine = engine
         self.full_every = int(full_every)
         self._base: DeltaBase | None = None
         self._since_full = 0  # deltas since the last full release
@@ -579,7 +591,8 @@ class PolicyReleaseStore:
                        weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None,
                        delta_base: DeltaBase | None = None,
-                       digest_full: bool = False) -> PolicyRelease | None:
+                       digest_full: bool = False,
+                       engine: DeltaEngine | None = None) -> PolicyRelease | None:
         """Publish the weights already written into the local directory ``staged``
         (module doc, staged releases): the weight files go into the store first;
         then the record, in the release directory and as LATEST, in one put.
@@ -595,6 +608,10 @@ class PolicyReleaseStore:
 
         ``digest_full``: a full release records the sha256 of each weight file
         (``file_sha256``), which the follower checks before it loads the release.
+
+        ``engine``: the resident engine (``release_delta``) encodes the delta, and
+        computes a full release's digests while it keeps its files in memory as
+        the next base; None: the file engine (base files read from disk).
 
         Returns None (puts nothing) when the latest release is this version and hash."""
         version = int(version)
@@ -614,15 +631,16 @@ class PolicyReleaseStore:
             self._names = self._listed_names()
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
-        upload, delta = staged, None
+        upload, delta, encoded = staged, None, None
         if delta_base is not None and weights == FULL:
             with timer.phase("delta_s"):
-                upload, delta = self._stage_delta(staged, delta_base)
+                upload, delta, encoded = self._stage_delta(staged, delta_base, name, engine)
         try:
             with timer.phase("digest_s"):
                 sha256 = directory_digest(staged) if weights == LORA else None
                 files = file_sizes(upload)
-                digests = file_digests(staged, files) if digest_full and weights == FULL and delta is None else None
+                digests = (self._full_digests(staged, files, name, engine, encoded)
+                           if digest_full and weights == FULL and delta is None else None)
             with timer.phase("upload_s"):
                 self.store.put_directory(upload, f"{self.release_dir}/{name}")
         finally:
@@ -656,25 +674,43 @@ class PolicyReleaseStore:
         self.last_visible_at = round(self.clock(), 3)  # LATEST names it
         return record
 
-    def _stage_delta(self, staged: Path, base: DeltaBase) -> tuple[Path, dict[str, Any] | None]:
-        """(directory to upload, the record's ``delta`` field): the delta of
-        ``staged`` against ``base`` when its files are still there and the delta
-        is small enough, else ``staged``."""
-        if not Path(base.directory).is_dir():
-            return staged, None
+    def _stage_delta(self, staged: Path, base: DeltaBase, name: str, engine: DeltaEngine | None
+                     ) -> tuple[Path, dict[str, Any] | None, DirectoryDelta | None]:
+        """(directory to upload, the record's ``delta`` field, the encode): the
+        delta of ``staged`` (release ``name``) against ``base`` when its files are
+        still there (on disk, or resident in ``engine``) and the delta is small
+        enough, else ``staged``."""
+        resident = engine is not None and engine.resident.holds(base.release.path)
+        if not resident and not Path(base.directory).is_dir():
+            return staged, None, None
         out = staged.parent / f".{staged.name}.delta"
         shutil.rmtree(out, ignore_errors=True)
+        skip = lambda file: file == RECORD  # noqa: E731
         try:
-            result = encode_directory(base.directory, staged, out, skip=lambda name: name == RECORD)
+            if engine is None:
+                result = encode_directory(base.directory, staged, out, skip=skip)
+            else:
+                result = engine.encode(base.directory, base.release.path, staged, name, out, skip=skip)
         except BaseException:
             shutil.rmtree(out, ignore_errors=True)
             raise
         if result.ratio > MAX_DELTA_RATIO:
             shutil.rmtree(out, ignore_errors=True)
-            return staged, None
+            return staged, None, result
         return out, {"base_seq": base.release.seq, "base_path": base.release.path,
                      "base_version": base.release.version, "ratio": round(result.ratio, 6),
-                     "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}
+                     "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}, result
+
+    @staticmethod
+    def _full_digests(staged: Path, files: dict[str, int], name: str, engine: DeltaEngine | None,
+                      encoded: DirectoryDelta | None) -> dict[str, str]:
+        """``file_sha256`` of a full release: from the encode that found its delta
+        too large, else hashed now (with ``engine``: while its files go resident)."""
+        if encoded is None and engine is not None:
+            encoded = engine.encode(None, None, staged, name, None, skip=lambda file: file == RECORD)
+        if encoded is not None:
+            return {file: encoded.entries[file].sha256 for file in files}
+        return file_digests(staged, files)
 
     def _kept_names(self) -> set[str]:
         """The newest ``keep`` releases and every base their deltas need."""

@@ -82,7 +82,7 @@ from yeto.rl.engine.policy_release import (
 )
 from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, release_version
 from yeto.rl.engine.policy_versions import engine_weight_version
-from yeto.rl.engine.release_delta import DeltaMirror, default_mirror
+from yeto.rl.engine.release_delta import DeltaMirror, default_mirror, delta_engine
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 from yeto.rl.quant.schemes import BF16, FP8_FFN_CHANNEL, release_dir_for
 from yeto.rl.quant.scope import QuantScopeError
@@ -695,7 +695,9 @@ class ReleasingPublisher:
                 # S27 G-CD: the full releases of a delta chain carry each file's sha256
                 release = self.releases.release_staged(version, policy_hash, staged,
                                                        position=positions, delta_base=base,
-                                                       digest_full=self.delta is not None, **fields)
+                                                       digest_full=self.delta is not None,
+                                                       engine=None if self.delta is None else self.delta.engine,
+                                                       **fields)
                 kept = self.delta is not None and self.delta.advance(release, staged)
             finally:
                 if not kept:
@@ -848,7 +850,8 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    skip_base=not lora and lane is None,
                                    read_position_from_thread=lambda: from_thread(executor_read_cursor),
                                    read_shards_from_thread=lambda: from_thread(executor_read_shards),
-                                   delta=DeltaChain(delta_every) if staged and delta_every else None,
+                                   delta=(DeltaChain(delta_every, engine=delta_engine(env))
+                                          if staged and delta_every else None),
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
