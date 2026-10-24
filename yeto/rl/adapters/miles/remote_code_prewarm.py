@@ -23,8 +23,13 @@ cache directory, before Miles creates any engine:
 
 The child is the Ray worker's ``sys.executable``: the interpreter Miles launches
 ``sglang.launch_server`` with, so its transformers lays out the cache as the engines do.
-A failure is only a WARNING and never blocks the start: the engines then load remote code
-as they did without this step.
+
+Severity. A failed loader, or a failed cache step for a module file that an engine-side
+``auto_map`` entry (config, tokenizer, processor, image/video processor, feature
+extractor) names, is a WARNING. A file that no such entry names (a modeling file, a
+reasoning parser that needs vllm, a helper script) is not imported by the engines; its
+failure is an info line ("skipped"). Nothing here ever blocks the start: the engines then
+load remote code as they did without this step.
 """
 
 from __future__ import annotations
@@ -61,26 +66,45 @@ _PROCESSOR_FILES = ("processor_config.json", "preprocessor_config.json", "video_
 _IMAGE_PROCESSOR_FILES = ("preprocessor_config.json",)
 _PROCESSOR_CLASSES = frozenset({"AutoProcessor", "AutoImageProcessor", "AutoVideoProcessor",
                                 "AutoFeatureExtractor"})
+# auto_map keys whose classes the engine processes import (SGLang: config, tokenizer, processor)
+ENGINE_AUTO_CLASSES = frozenset({"AutoConfig", "AutoTokenizer", *_PROCESSOR_CLASSES})
 
 
-def auto_map_classes(model_path: str | os.PathLike) -> frozenset[str]:
-    """The ``auto_map`` keys that the JSON configs of a local model directory declare.
+def auto_map(model_path: str | os.PathLike) -> dict[str, frozenset[str]]:
+    """The ``auto_map`` of a local model directory's JSON configs: auto class -> module files.
 
-    An empty set means transformers loads no remote code from this directory. A
-    tokenizer config's legacy list form maps ``AutoTokenizer``.
+    Empty: transformers loads no remote code from this directory. A reference into another
+    repository (``repo--module.Class``) names no local file. A tokenizer config's legacy
+    list form maps ``AutoTokenizer``.
     """
-    found: set[str] = set()
+    found: dict[str, set[str]] = {}
     for name in _AUTO_MAP_FILES:
         try:
             data = json.loads((Path(model_path) / name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        auto_map = data.get("auto_map") if isinstance(data, dict) else None
-        if isinstance(auto_map, dict):
-            found.update(str(key) for key in auto_map)
-        elif isinstance(auto_map, (list, tuple)) and name == "tokenizer_config.json":
-            found.add("AutoTokenizer")
-    return frozenset(found)
+        mapping = data.get("auto_map") if isinstance(data, dict) else None
+        if isinstance(mapping, (list, tuple)) and name == "tokenizer_config.json":
+            mapping = {"AutoTokenizer": mapping}
+        if not isinstance(mapping, dict):
+            continue
+        for key, refs in mapping.items():
+            files = found.setdefault(str(key), set())
+            for ref in refs if isinstance(refs, (list, tuple)) else (refs,):
+                if isinstance(ref, str) and "--" not in ref and "." in ref:
+                    files.add(ref.rsplit(".", 1)[0] + ".py")
+    return {key: frozenset(files) for key, files in found.items()}
+
+
+def auto_map_classes(model_path: str | os.PathLike) -> frozenset[str]:
+    """The ``auto_map`` keys that the JSON configs of a local model directory declare."""
+    return frozenset(auto_map(model_path))
+
+
+def engine_module_files(model_path: str | os.PathLike) -> frozenset[str]:
+    """Module files named by the ``auto_map`` entries that the engine processes load."""
+    mapping = auto_map(model_path)
+    return frozenset(name for key in ENGINE_AUTO_CLASSES for name in mapping.get(key, ()))
 
 
 def loader_plan(model_path: str | os.PathLike) -> tuple[str, ...]:
@@ -131,27 +155,34 @@ def warm_model_dir(model_path: str, *, transformers_module: Any = None,
     """Child side for one directory: cache every top-level ``*.py``, then run the loaders.
 
     Each step is independent; a failed step is recorded and the next one still runs.
+    ``errors`` holds the failed loaders and the failed engine module files (WARNING);
+    ``skipped`` holds the other files that could not be cached (info).
     """
     if transformers_module is None:
         import transformers as transformers_module
     if dynamic_module_utils is None:
         from transformers import dynamic_module_utils
+    engine_files = engine_module_files(model_path)
+    plan = loader_plan(model_path)
     cached: list[str] = []
     loaded: list[str] = []
+    skipped: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
     for source in sorted(Path(model_path).glob("*.py")):
         try:
             dynamic_module_utils.get_cached_module_file(model_path, source.name)
             cached.append(source.name)
         except Exception as exc:  # noqa: BLE001 - reported, never fatal
-            errors.append({"step": f"cache {source.name}", "error": _short(exc)})
-    for loader in loader_plan(model_path):
+            row = {"step": f"cache {source.name}", "error": _short(exc)}
+            (errors if source.name in engine_files else skipped).append(row)
+    for loader in plan:
         try:
             getattr(transformers_module, loader).from_pretrained(model_path, trust_remote_code=True)
             loaded.append(loader)
         except Exception as exc:  # noqa: BLE001 - reported, never fatal
             errors.append({"step": loader, "error": _short(exc)})
-    return {"path": model_path, "cached": cached, "loaded": loaded, "errors": errors}
+    return {"path": model_path, "loaders": list(plan), "cached": cached, "loaded": loaded,
+            "skipped": skipped, "errors": errors}
 
 
 @contextlib.contextmanager
@@ -274,18 +305,42 @@ def _run_on_island_nodes(ray_module: Any, model_paths: Sequence[str], *, affinit
     return results
 
 
-def _summary(result: dict[str, Any]) -> str:
-    models = (result.get("report") or {}).get("models") or []
+def _names(values: Sequence[str]) -> str:
+    return ",".join(values) or "none"
+
+
+def _loaders(models: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """(loaders that ran, loaders that failed) over every model directory of one node."""
+    ok = sorted({name for m in models for name in (m.get("loaded") or ())})
+    failed = sorted({name for m in models for name in (m.get("loaders") or ())
+                     if name not in (m.get("loaded") or ())})
+    return ok, failed
+
+
+def _node_lines(result: dict[str, Any]) -> tuple[str, str | None]:
+    """(info line, WARNING line or None) for one node's result."""
+    where = f"{result.get('node')} ({result.get('host', '?')})"
+    report = result.get("report")
+    if report is None:
+        return "", (f"[rl] WARNING: remote-code prewarm on {where} did not complete: "
+                    f"{result.get('error', 'no report')}; engines on that node may race on the "
+                    "remote-code module cache")
+    models = report.get("models") or []
+    ok, failed = _loaders(models)
     cached = sum(len(m.get("cached") or ()) for m in models)
-    loaded = sorted({name for m in models for name in (m.get("loaded") or ())})
-    return f"{cached} module file(s) cached, loaders {','.join(loaded) or 'none'}"
-
-
-def _failures(result: dict[str, Any]) -> str:
-    if result.get("error"):
-        return str(result["error"])
-    models = (result.get("report") or {}).get("models") or []
-    return "; ".join(f"{e['step']}: {e['error']}" for m in models for e in (m.get("errors") or ()))
+    info = (f"[rl] remote-code prewarm on {where}: loaders ok {_names(ok)}; "
+            f"failed {_names(failed)}; {cached} module file(s) cached")
+    skipped = [s for m in models for s in (m.get("skipped") or ())]
+    if skipped:
+        info += "; skipped (no engine loader names them): " + "; ".join(
+            f"{s['step'].removeprefix('cache ')} ({s['error'][:160]})" for s in skipped)
+    errors = [e for m in models for e in (m.get("errors") or ())]
+    if not errors and result.get("ok"):
+        return info, None
+    detail = "; ".join(f"{e['step']}: {e['error']}" for e in errors) or str(result.get("error", "?"))
+    return info, (f"[rl] WARNING: remote-code prewarm on {where}: loaders ok {_names(ok)}, "
+                  f"failed {_names(failed)}; {detail}; engines on that node may race on the "
+                  "remote-code module cache for the failed entries")
 
 
 def prewarm_remote_code(miles_args: Any, *, ray_module: Any = None, affinity: Any = None,
@@ -325,18 +380,20 @@ def prewarm_remote_code(miles_args: Any, *, ray_module: Any = None, affinity: An
         print(f"[rl] WARNING: remote-code prewarm did not run ({_short(exc)}); engines load "
               "remote code without it and may race on the module cache", file=out, flush=True)
         return None
+    nodes = []
     for result in results:
-        where = f"{result.get('node')} ({result.get('host', '?')})"
-        if result.get("ok"):
-            print(f"[rl] remote-code prewarm on {where}: {_summary(result)}", flush=True)
-        else:
-            print(f"[rl] WARNING: remote-code prewarm on {where} failed: {_failures(result)}; "
-                  "engines on that node may race on the module cache", file=out, flush=True)
+        info, warning = _node_lines(result)
+        if info:
+            print(info, flush=True)
+        if warning:
+            print(warning, file=out, flush=True)
+        ok, failed = _loaders((result.get("report") or {}).get("models") or [])
+        nodes.append({"node": result.get("node"), "host": result.get("host"),
+                      "ok": warning is None, "loaders_ok": ok, "loaders_failed": failed})
     if emit is not None:
         with contextlib.suppress(Exception):
             emit({"event": EVENT, "paths": paths, "seconds": round(clock() - started, 3),
-                  "nodes": [{"node": r.get("node"), "host": r.get("host"), "ok": bool(r.get("ok"))}
-                            for r in results]})
+                  "nodes": nodes})
     return results
 
 
