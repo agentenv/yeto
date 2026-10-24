@@ -2047,6 +2047,7 @@ class IslandDriver:
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.refuse_reconfiguration_for_finalization(rollout_id)
+                self._drain_releases()
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)
@@ -2067,6 +2068,13 @@ class IslandDriver:
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self._close_sync(failure)
+
+    def _drain_releases(self) -> None:
+        """A policy release still uploading in the background (a trainer island's
+        staged release) reaches the store before the run ends; its error fails the run."""
+        drain = getattr(self.publisher, "drain_releases", None)
+        if callable(drain):
+            drain()
 
     def _close_sync(self, failure: BaseException | None) -> None:
         """Close the bridge with the LEAVE reason of this departure (design D7).

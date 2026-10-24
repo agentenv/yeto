@@ -664,15 +664,80 @@ def test_wire_policy_releases_only_on_a_trainer_island(tmp_path):
     assert si.wire_policy_releases(driver, miles_args=SimpleNamespace(), actor_model=None,
                                    runner=None) is None
     args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
-        role="trainer", store=str(tmp_path)))
+        role="trainer", store=str(tmp_path), release_inline=True))
     calls = []
     actor = SimpleNamespace(export_hf=lambda rollout_id, path: calls.append((rollout_id, path)))
     runner = SimpleNamespace(run=lambda value: value)
     wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor, runner=runner)
-    assert driver.publisher is wired
+    assert driver.publisher is wired and wired.staging is None
     br._ACTIVE.pop(br.TRAINER, None)
-    wired.publish(_State(0, "h0"))
-    assert calls == [(0, str(tmp_path / RELEASE_DIR / "r1-v0"))]
+    wired.publish(_State(0, "h0"))  # the base policy: the samplers' engines start with it
+    assert calls == []
+    wired.publish(_State(1, "h1"))
+    assert calls == [(1, str(tmp_path / RELEASE_DIR / "r1-v1"))]
+
+
+def test_a_trainer_island_stages_full_releases_and_uploads_them_in_the_background(tmp_path):
+    """Default trainer island: every rank writes the export into a local staging
+    directory (the release plugin); a background thread puts it into the store,
+    then LATEST; the staging directory is removed; the driver drains the last one."""
+    import threading
+
+    events = []
+    driver = SimpleNamespace(publisher=SimpleNamespace(publish=lambda s: None),
+                             emit=lambda event, **fields: events.append((event, fields)),
+                             rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    store = tmp_path / "store"
+    args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="trainer", store=str(store)))
+    plugin_calls, gate = [], threading.Event()
+
+    def run_plugin(fn_path, kwargs):
+        plugin_calls.append((fn_path, kwargs["rollout_id"]))
+        Path(kwargs["path"], "model.safetensors").write_bytes(b"w" * (kwargs["rollout_id"] + 1))
+        return [{"writers": "all"}]
+
+    actor = SimpleNamespace(run_plugin=run_plugin)
+    runner = SimpleNamespace(run=lambda value: value)
+    staging = tmp_path / "staging"
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor, runner=runner,
+                                    environ={si.STAGING_ENV: str(staging)})
+    br._ACTIVE.pop(br.TRAINER, None)
+    original = wired.releases.release_staged
+
+    def slow_release(*a, **k):
+        assert gate.wait(10)  # the upload runs after publish returned
+        return original(*a, **k)
+
+    wired.releases.release_staged = slow_release
+    wired.publish(_State(1, "h1"))
+    assert plugin_calls == [(si.WRITE_FULL_CHECKPOINT, 1)]
+    assert wired.releaser.busy and not (store / RELEASE_DIR / "LATEST.json").exists()
+    gate.set()
+    wired.publish(_State(2, "h2"))  # waits for v1's upload, then stages v2
+    wired.drain_releases()
+    latest = PolicyReleaseStore(CheckpointStore(store)).latest()
+    assert (latest.seq, latest.version, latest.files) == (2, 2, {"model.safetensors": 3})
+    assert sorted(p.name for p in (store / RELEASE_DIR).iterdir()) == ["LATEST.json", "r1-v1", "r2-v2"]
+    assert list(staging.iterdir()) == []
+    released = [f for e, f in events if e == "rl_policy_released"]
+    assert [f["policy_version"] for f in released] == [1, 2] and all(f["staged"] for f in released)
+    assert {"stage_export_s", "wait_previous_s", "upload_s", "latest_s"} <= set(released[1]["release_timings"])
+    assert released[1]["visible_at"] >= released[1]["released_at"]
+
+
+def test_a_failed_background_upload_fails_the_next_publish(tmp_path):
+    from yeto.rl.engine.policy_release import BackgroundReleaser, PolicyReleaseError
+
+    releaser = BackgroundReleaser()
+
+    def fail():
+        raise OSError("disk gone")
+
+    releaser.submit(fail)
+    with pytest.raises(PolicyReleaseError, match="disk gone"):
+        releaser.submit(lambda: None)
+    assert releaser.drain() >= 0.0  # the error is reported once
 
 
 # ---------------------------------------------------------------- group identity

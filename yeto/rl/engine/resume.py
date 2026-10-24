@@ -172,6 +172,54 @@ class CheckpointStore:
         base = self.root / sub
         return sorted(p.name for p in base.iterdir()) if base.is_dir() else []
 
+    # -- publishing whole local directories (policy releases staged on local disk)
+    @property
+    def puts_bypass_mount(self) -> bool:
+        """True when :meth:`put_directory` and :meth:`put_file` write the store
+        without this host's mount: the mount shows them only after a reload."""
+        return False
+
+    def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
+        """Copy the local directory ``local`` to ``relative`` under the root (an
+        existing directory there is replaced) and make it visible to readers: one
+        commit, under the writer guard. The files in ``local`` stay."""
+        source, target = Path(local), self.root / relative
+        guard = self.hold_writer()
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def put_file(self, data: bytes, relative: str) -> None:
+        """Write ``data`` to the file ``relative`` (tmp + rename) and commit."""
+        target = self.root / relative
+        guard = self.hold_writer()
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_bytes(data)
+            _fsync(tmp)
+            os.replace(tmp, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def remove_tree(self, relative: str) -> None:
+        """Delete the directory ``relative`` (no error when it is missing) and commit."""
+        target = self.root / relative
+        if not target.exists():
+            return
+        guard = self.hold_writer()
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+            self.commit()
+        finally:
+            guard.release()
+
 
 class BucketMountStore(CheckpointStore):
     """sky Storage MOUNT of a bucket (s3://, gs://, r2://): files are uploaded by the

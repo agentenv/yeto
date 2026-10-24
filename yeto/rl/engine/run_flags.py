@@ -644,6 +644,11 @@ _RESUME = (
                 help="--rl-sample-role trainer: reload the store and read LATEST before every "
                 "policy release and commit LATEST in a second commit (the behavior before "
                 "S26 E5); default: the trainer keeps the LATEST it wrote and commits once"),
+    shared_flag("--rl-release-inline", action="store_true", default=False,
+                help="--rl-sample-role trainer: write each full-weight policy release into the "
+                "store before the next training step (the behavior before S27 G-AT); default: "
+                "stage it on local disk (every rank writes a share) and upload it while the "
+                "next step trains"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),

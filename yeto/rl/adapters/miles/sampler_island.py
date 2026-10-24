@@ -13,6 +13,20 @@
   (several islands and a syncer): only learner 0 releases, with the merged
   version (:mod:`yeto.rl.engine.merged_release`).
 
+  Staged full releases (S27 G-AT, the default on a trainer island; off with
+  ``--rl-release-inline``): the trainer exports into a local staging directory
+  (every rank writes a share of the files, ``release_plugin.write_full_checkpoint``)
+  and goes on training while a background thread uploads it to the store
+  (``PolicyReleaseStore.release_staged``). The next release waits for that
+  upload, so releases stay in order and at most one is in flight; the driver
+  waits for the last one before the run ends (``drain_releases``).
+
+  The base policy: the samplers' engines start with the base weights (version
+  0), so a non-synced full-parameter trainer releases nothing for version 0 while
+  the store holds no release (``rl_policy_release_skipped``, reason
+  ``base_policy``). Synced trainers release it (a restarted trainer restores its
+  published versions from the store's releases).
+
 Engine weight load (the order of the publisher, ``publish.MilesPublisher``):
 under the controller's update lock, every engine loads the release, then the
 plain policy version is stamped and read back on every engine; any failure
@@ -53,6 +67,7 @@ from typing import Any
 from yeto.rl.engine.policy_release import (
     FULL,
     LORA,
+    BackgroundReleaser,
     PhaseTimer,
     PolicyFollower,
     PolicyRelease,
@@ -81,10 +96,11 @@ from .publish import (
     read_engine_checksums,
     weight_view_digest,
 )
-from .release_plugin import WRITE_LORA_ADAPTER
+from .release_plugin import WRITE_FULL_CHECKPOINT, WRITE_LORA_ADAPTER
 
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
+STAGING_ENV = "YETO_RL_RELEASE_STAGING"  # local directory of staged releases (default: system temp)
 ADAPTER_REQUEST_TIMEOUT_S = 600.0
 # A fixed greedy request each LoRA load answers (rl_sampler_policy_loaded.probe):
 # its token log-probabilities show that the served adapter changed with the version.
@@ -481,7 +497,12 @@ class ReleasingPublisher:
     reader exists). The release records the wrapped publisher's engine weight
     checksums of this publish (``last_engine_checksums``; LoRA: the ``lora:*``
     keys) when every engine reported the same one. Every other attribute is the
-    wrapped publisher's."""
+    wrapped publisher's.
+
+    ``staging``: stage each release in a new directory under it and upload it on
+    ``releaser`` (module doc, staged full releases); None: write it into the
+    store on the caller's thread. ``skip_base``: release nothing for the base
+    policy while the store holds no release (module doc)."""
 
     def __init__(self, inner: Any, releases: PolicyReleaseStore,
                  export: Callable[[int, Path], None],
@@ -490,13 +511,18 @@ class ReleasingPublisher:
                  read_shards: Callable[[], dict[str, int] | None] | None = None,
                  version_of: Callable[[Any], int] | None = None,
                  guard: MergedReleaseGuard | None = None,
-                 origin: Callable[[Any], dict[str, Any]] | None = None) -> None:
+                 origin: Callable[[Any], dict[str, Any]] | None = None,
+                 staging: Path | None = None, releaser: BackgroundReleaser | None = None,
+                 skip_base: bool = False,
+                 timer: Callable[[], float] = time.perf_counter) -> None:
         """``read_shards``: the trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
         backlog caps. Synced trainers (:mod:`yeto.rl.engine.merged_release`):
         ``version_of(state)`` is the merged version to release (default: the
         policy version), ``guard`` keeps the release versions increasing and
         ``origin(state)`` is the release record's ``origin``."""
+        if (staging is None) != (releaser is None):
+            raise ValueError("staging and releaser go together")
         self.version_of = version_of or (lambda state: int(state.policy_version))
         self.guard = guard
         self.origin = origin
@@ -507,6 +533,10 @@ class ReleasingPublisher:
         self.read_shards = read_shards
         self.emit = emit
         self.weights = weights
+        self.staging = None if staging is None else Path(staging)
+        self.releaser = releaser
+        self.skip_base = bool(skip_base)
+        self.timer = timer
 
     def _engine_checksum(self) -> str | None:
         checksums = getattr(self.inner, "last_engine_checksums", None)
@@ -515,9 +545,11 @@ class ReleasingPublisher:
         return weight_view_digest(list(checksums.values()), lora=self.weights == LORA)
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
-        started = time.perf_counter()
+        started = self.timer()
         result = self.inner.publish(state, **kwargs)
-        publish_s = round(time.perf_counter() - started, 3)  # the trainer's own engines
+        publish_s = round(self.timer() - started, 3)  # the trainer's own engines
+        # an upload in flight ends first: the store is read below, and releases stay in order
+        waited_s = 0.0 if self.releaser is None else round(self.releaser.wait(), 3)
         version = int(self.version_of(state))
         if self.guard is not None:
             latest = self.releases.latest()
@@ -527,27 +559,72 @@ class ReleasingPublisher:
                           latest_version=None if latest is None else latest.version,
                           reason="not_newer_than_latest")
                 return result
+        if self.skip_base and version == BASE_POLICY_VERSION and self.releases.latest() is None:
+            self.emit("rl_policy_release_skipped", policy_version=version,
+                      local_version=int(state.policy_version), latest_version=None,
+                      reason="base_policy")
+            return result
         position = self.read_position()
         shards = self.read_shards() if self.read_shards is not None and position is not None else None
         if position is None:  # nothing read yet in this process: keep the last known positions
             latest = self.releases.latest()
             position = None if latest is None else latest.buffer_selected
             shards = None if latest is None else latest.buffer_shards
-        release = self.releases.release(version, state.policy_tensor_hash(),
-                                        lambda directory: self.export(version, directory),
-                                        buffer_selected=position, weights=self.weights,
-                                        engine_checksum=self._engine_checksum(), buffer_shards=shards,
-                                        origin=None if self.origin is None else self.origin(state))
-        if release is not None:
-            self.emit("rl_policy_released", seq=release.seq, policy_version=version,
-                      local_version=int(state.policy_version), origin=release.origin,
-                      policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
-                      weights=release.weights, sha256=release.sha256,
-                      engine_checksum=release.engine_checksum, released_at=release.released_at,
-                      publish_s=publish_s, release_timings=self.releases.last_timings,
-                      latest_source=self.releases.last_latest_source,
-                      release_bytes=sum((release.files or {}).values()))
+        fields = {"buffer_selected": position, "weights": self.weights,
+                  "engine_checksum": self._engine_checksum(), "buffer_shards": shards,
+                  "origin": None if self.origin is None else self.origin(state)}
+        policy_hash = state.policy_tensor_hash()
+        event = {"policy_version": version, "local_version": int(state.policy_version),
+                 "publish_s": publish_s}
+        if self.staging is None:
+            release = self.releases.release(version, policy_hash,
+                                            lambda directory: self.export(version, directory), **fields)
+            self._emit_released(release, event, self.releases.last_timings)
+            return result
+        staged = self._stage(version)
+        export_started = self.timer()
+        try:
+            self.export(version, staged)
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+        stage = {"wait_previous_s": waited_s, "stage_export_s": round(self.timer() - export_started, 3)}
+
+        def upload() -> None:
+            try:
+                release = self.releases.release_staged(version, policy_hash, staged, **fields)
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
+            self._emit_released(release, {**event, "staged": True,
+                                          "visible_at": self.releases.last_visible_at},
+                                {**stage, **self.releases.last_timings})
+
+        self.releaser.submit(upload)
         return result
+
+    def _stage(self, version: int) -> Path:
+        """A new, empty staging directory for ``version`` (earlier ones of it removed)."""
+        self.staging.mkdir(parents=True, exist_ok=True)
+        for old in self.staging.glob(f"v{int(version)}-*"):
+            shutil.rmtree(old, ignore_errors=True)
+        return Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+
+    def _emit_released(self, release: PolicyRelease | None, event: dict[str, Any],
+                       timings: dict[str, float]) -> None:
+        if release is None:
+            return
+        self.emit("rl_policy_released", seq=release.seq, origin=release.origin,
+                  policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
+                  weights=release.weights, sha256=release.sha256,
+                  engine_checksum=release.engine_checksum, released_at=release.released_at,
+                  release_timings=timings, latest_source=self.releases.last_latest_source,
+                  release_bytes=sum((release.files or {}).values()), **event)
+
+    def drain_releases(self) -> None:
+        """Wait for the staged release in flight (the driver calls it before the run
+        ends); raises its error. No-op without staging."""
+        if self.releaser is not None:
+            self.releaser.drain()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
@@ -619,16 +696,29 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
+    # module doc: a trainer island stages its full releases unless --rl-release-inline
+    staged = config.role == TRAINER and not lora and not config.release_inline
 
     def export(version: int, directory: Path) -> None:
         if lora:
             runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
+        elif staged:  # local disk: every rank writes a share of the files
+            runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
+                "path": str(directory), "rollout_id": int(version)}))
         else:
             runner.run(actor_model.export_hf(rollout_id=int(version), path=str(directory)))
 
+    staging = None
+    if staged:
+        env = os.environ if environ is None else environ
+        staging = Path(env.get(STAGING_ENV) or Path(tempfile.gettempdir()) / "yeto-release-staging")
+        shutil.rmtree(staging, ignore_errors=True)  # an earlier process's partial stages
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
-                                   emit=driver.emit, weights=LORA if lora else FULL, **synced)
+                                   emit=driver.emit, weights=LORA if lora else FULL,
+                                   staging=staging,
+                                   releaser=None if staging is None else BackgroundReleaser(),
+                                   skip_base=not lora and lane is None, **synced)
     driver.publisher = publisher
     return publisher

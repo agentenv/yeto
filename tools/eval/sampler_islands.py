@@ -262,6 +262,13 @@ def _sum(timings: dict[str, Any] | None) -> float | None:
     return round(sum(float(v) for v in timings.values()), 3)
 
 
+def _critical(release: dict[str, Any]) -> float | None:
+    timings = release.get("release_timings")
+    if not release.get("staged"):
+        return _sum(timings)
+    return _sum({k: v for k, v in (timings or {}).items() if k in ("wait_previous_s", "stage_export_s")})
+
+
 def latency_report(run: Path) -> dict[str, Any]:
     islands = load_run(run)
     released: dict[int, dict[str, Any]] = {}
@@ -285,6 +292,9 @@ def latency_report(run: Path) -> dict[str, Any]:
                 "release_bytes": rel.get("release_bytes"),
                 "trainer_publish_s": rel.get("publish_s"),
                 "trainer_release_s": _sum(rel.get("release_timings")),
+                # the part the trainer waits for: all of an inline release; of a staged
+                # one (S27 G-AT) the wait for the previous upload and the local export
+                "trainer_critical_s": _critical(rel),
                 "trainer_release_phases": rel.get("release_timings"),
                 "wait_s": None if seen is None else round(float(seen) - t_rel, 3),
                 "sampler_load_s": _sum(follower),
@@ -296,15 +306,16 @@ def latency_report(run: Path) -> dict[str, Any]:
             parts = (row["trainer_publish_s"], row["trainer_release_s"], row["released_to_loaded_s"])
             row["end_to_end_s"] = None if any(p is None for p in parts) else round(sum(parts), 3)
             rows.append(row)
-    keys = ("trainer_publish_s", "trainer_release_s", "wait_s", "sampler_load_s",
-            "released_to_loaded_s", "end_to_end_s")
+    keys = ("trainer_publish_s", "trainer_release_s", "trainer_critical_s", "wait_s",
+            "sampler_load_s", "released_to_loaded_s", "end_to_end_s")
     phases: dict[str, list[float]] = defaultdict(list)
     for row in rows:
         for group in ("trainer_release_phases", "sampler_follower_phases", "sampler_load_phases"):
             for name, value in (row.get(group) or {}).items():
                 phases[f"{group.split('_')[0]}.{name}"].append(value)
-    # the first release is loaded before the first round (start-up, not a policy update)
-    later = [r for r in rows if r["seq"] > 1]
+    # a release of the base policy (version 0) is loaded before the first round (start-up,
+    # not a policy update); a trainer that skips it (S27 G-AT) starts at version 1
+    later = [r for r in rows if r["seq"] > 1 or int(r.get("policy_version") or 0) > 0]
     return {
         "run": Path(run).name, "loads": len(rows), "rows": rows,
         "summary_after_first": {k: _spread([r[k] for r in later]) for k in keys},

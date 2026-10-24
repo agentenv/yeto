@@ -1117,6 +1117,9 @@ def run_commanded_trainer(driver: Any) -> Any:
         raise RuntimeError("a trainer started by the head's scheduler needs round cuts "
                            "(a checkpoint store and no outer syncer)")
     run_commanded_island(driver, store=store)
+    drain = getattr(driver.publisher, "drain_releases", None)
+    if callable(drain):  # a staged policy release still uploading reaches the store
+        drain()
     return driver.published_state
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -346,3 +347,97 @@ def test_reload_latest_flag_is_trainer_only_and_reaches_the_release_store(tmp_pa
                            rl_sampler_max_backlog_rounds=None)
     assert sample_roles.island_args(pair, 0, 2).rl_release_reload_latest is False
     assert sample_roles.island_args(pair, 1, 2).rl_release_reload_latest is True
+
+
+# ---------------------------------------------------------------- staged releases (S27 G-AT)
+class _UploadVolume:
+    """A Modal Volume fake: ``batch_upload`` copies into ``backend`` (the Volume
+    contents other containers see after a reload); the island's mount is not written."""
+
+    def __init__(self, backend):
+        self.backend = backend
+        self.batches = []
+        self.removed = []
+
+    def batch_upload(self, force=False):
+        import contextlib
+        import shutil
+
+        volume = self
+
+        @contextlib.contextmanager
+        def batch():
+            ops = []
+            yield SimpleNamespace(put_directory=lambda local, remote: ops.append(("dir", local, remote)),
+                                  put_file=lambda local, remote: ops.append(("file", local, remote)))
+            for kind, local, remote in ops:  # all at the end: the upload is all or nothing
+                target = volume.backend / remote.lstrip("/")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "dir":
+                    shutil.copytree(local, target, dirs_exist_ok=force)
+                else:
+                    shutil.copyfile(local, target)
+            volume.batches.append([(kind, remote) for kind, _, remote in ops])
+
+        return batch()
+
+    def remove_file(self, path, recursive=False):
+        import shutil
+
+        self.removed.append(path)
+        shutil.rmtree(self.backend / path.lstrip("/"), ignore_errors=True)
+
+    def commit(self):
+        raise AssertionError("a staged release does not commit the mount")
+
+    def reload(self):
+        pass
+
+
+def test_a_staged_release_reaches_the_volume_without_the_mount_and_prunes_by_name(tmp_path):
+    from yeto.cloud.modal_ckpt_store import ModalVolumeStore
+    from yeto.rl.engine.policy_release import RELEASE_DIR, PolicyRelease
+
+    backend, mount = tmp_path / "volume", tmp_path / "mount"
+    volume = _UploadVolume(backend)
+    store = ModalVolumeStore(mount / "run-a", "vol", volume_factory=lambda name: volume, mount=mount)
+    assert store.puts_bypass_mount
+    releases = PolicyReleaseStore(store, keep=2)
+    for version in (1, 2, 3):
+        staged = tmp_path / f"stage-{version}"
+        staged.mkdir()
+        (staged / "model.safetensors").write_bytes(b"x" * version)
+        record = releases.release_staged(version, f"h{version}", staged, buffer_selected=64 * version)
+        assert record.seq == version and (staged / "RELEASE.json").is_file()
+        assert releases.last_latest_source == ("reloaded" if version == 1 else "cached")
+    assert volume.batches[:2] == [[("dir", f"/run-a/{RELEASE_DIR}/r1-v1")],
+                                  [("file", f"/run-a/{RELEASE_DIR}/LATEST.json")]]
+    assert volume.removed == [f"/run-a/{RELEASE_DIR}/r1-v1"]
+    assert not (mount / "run-a" / RELEASE_DIR / "LATEST.json").exists()  # the mount is untouched
+    seen = PolicyReleaseStore(CheckpointStore(backend / "run-a"))  # a reader after its reload
+    latest = seen.latest()
+    assert (latest.seq, latest.version, latest.buffer_selected) == (3, 3, 192)
+    assert sorted(p.name for p in (backend / "run-a" / RELEASE_DIR).iterdir()) == [
+        "LATEST.json", "r2-v2", "r3-v3"]
+    assert PolicyRelease.from_record(json.loads(
+        (backend / "run-a" / RELEASE_DIR / "r3-v3" / "RELEASE.json").read_text())) == latest
+    seen.resolve(latest)  # complete: every recorded file with its size
+
+
+def test_a_store_root_outside_the_mount_writes_through_the_mount(tmp_path):
+    from yeto.cloud.modal_ckpt_store import ModalVolumeStore, store_from_env
+    from yeto.launch.storage import MODAL_CHECKPOINT_STORE_MOUNT
+
+    commits = []
+    volume = SimpleNamespace(commit=lambda: commits.append(1), reload=lambda: None)
+    store = ModalVolumeStore(tmp_path / "elsewhere", "vol", volume_factory=lambda n: volume,
+                             mount=tmp_path / "mount")
+    assert not store.puts_bypass_mount
+    staged = tmp_path / "stage"
+    staged.mkdir()
+    (staged / "a.bin").write_bytes(b"abc")
+    store.put_directory(staged, "policy-releases/r1-v1")
+    assert (tmp_path / "elsewhere" / "policy-releases" / "r1-v1" / "a.bin").read_bytes() == b"abc"
+    assert commits == [1]
+    built = store_from_env("/root/yeto-checkpoint-store/run", environ={"YETO_RL_STORE_MODAL_VOLUME": "v"})
+    assert built.mount == MODAL_CHECKPOINT_STORE_MOUNT and built.puts_bypass_mount

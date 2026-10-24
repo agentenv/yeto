@@ -68,7 +68,10 @@ class SampleBufferConfig:
     adapter to local disk (``--rl-sampler-fused-stage``, S26 E5);
     ``release_legacy``: trainer or convertible node, reload the store before every
     policy release and commit LATEST separately (``--rl-release-reload-latest``;
-    ``PolicyReleaseStore.cached_latest``)."""
+    ``PolicyReleaseStore.cached_latest``);
+    ``release_inline``: trainer, write each full-weight release into the store on
+    the training critical path instead of staging it on local disk and uploading
+    it in the background (``--rl-release-inline``; ``sampler_island`` module doc)."""
 
     role: str
     store: str
@@ -77,6 +80,7 @@ class SampleBufferConfig:
     min_round_s: float | None = None
     fused_stage: bool = False
     release_legacy: bool = False
+    release_inline: bool = False
 
 
 def sample_role(args: Any) -> str:
@@ -252,6 +256,8 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_sampler_fused_stage = False
     if out.rl_sample_role not in (TRAINER, CONVERTIBLE):
         out.rl_release_reload_latest = False
+    if out.rl_sample_role != TRAINER:
+        out.rl_release_inline = False
     return out
 
 
@@ -348,6 +354,8 @@ def check_launch(args: Any) -> None:
             raise ValueError("--rl-sampler-fused-stage needs --rl-sample-role sampler")
         if getattr(args, "rl_release_reload_latest", False):
             raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer")
+        if getattr(args, "rl_release_inline", False):
+            raise ValueError("--rl-release-inline needs --rl-sample-role trainer")
         return
     if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
@@ -427,7 +435,8 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
                      else None),
         fused_stage=role == SAMPLER and bool(getattr(args, "rl_sampler_fused_stage", False)),
         release_legacy=role in (TRAINER, CONVERTIBLE)
-        and bool(getattr(args, "rl_release_reload_latest", False)))
+        and bool(getattr(args, "rl_release_reload_latest", False)),
+        release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -461,6 +470,8 @@ def island_flags(args: Any) -> str:
         flags += " --rl-sampler-fused-stage"
     if role in (TRAINER, CONVERTIBLE) and getattr(args, "rl_release_reload_latest", False):
         flags += " --rl-release-reload-latest"
+    if role == TRAINER and getattr(args, "rl_release_inline", False):
+        flags += " --rl-release-inline"
     if getattr(args, "rl_sampler_node", None):
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):
