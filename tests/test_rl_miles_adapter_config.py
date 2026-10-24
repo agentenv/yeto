@@ -245,8 +245,16 @@ def dp_replicas(monkeypatch):
     monkeypatch.setattr(mc, "full_parameter_dp_replica_gap", lambda: None)
 
 
-def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin():
-    # S27 G-AX: the pinned image's Miles refuses DP>1 at its first manifest.
+def _pin_before_dp_replicas(monkeypatch):
+    """Pin Miles 8edea35a7: in the lineage, but before the DP replica commit."""
+    from yeto.rl.adapters.miles import pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
+
+
+def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin(monkeypatch):
+    # S27 G-AX: a Miles without data-parallel replicas refuses DP>1 at its first manifest.
+    _pin_before_dp_replicas(monkeypatch)
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     with pytest.raises(mc.MilesConfigError, match="DP 2 needs Miles 921cde8c7 or later"):
         mc.translate_run_config(cfg, AlgorithmSpec())
@@ -266,16 +274,21 @@ def test_full_parameter_sync_at_dp_above_one_needs_whole_masters():
 
 def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     from yeto.rl.adapters.miles import pins, run_config_rules
-
-    assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()
-    first = pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT
-    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", (*pins.MILES_FORK_LINEAGE, first, "f" * 40))
-    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "f" * 40)
-    assert run_config_rules.full_parameter_dp_replica_gap() is None
     from yeto.rl.engine.run_config import full_parameter_layout_problem
 
+    # The pinned image (S27 closing, ebc6519-2fa8801) has the replicas.
+    assert run_config_rules.full_parameter_dp_replica_gap() is None
     assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
                                          rollout_gpus_per_engine=1) is None
+    # A later fork commit keeps them.
+    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", (*pins.MILES_FORK_LINEAGE, "f" * 40))
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "f" * 40)
+    assert run_config_rules.full_parameter_dp_replica_gap() is None
+    # An earlier one has none: DP>1 with engines on the island is refused.
+    _pin_before_dp_replicas(monkeypatch)
+    assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()
+    assert "DP>1 needs" in full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
+                                                         rollout_gpus_per_engine=1)
 
 
 @pytest.mark.usefixtures("dp_replicas")
