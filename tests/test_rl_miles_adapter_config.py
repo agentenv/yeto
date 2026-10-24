@@ -276,7 +276,7 @@ def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     from yeto.rl.adapters.miles import pins, run_config_rules
     from yeto.rl.engine.run_config import full_parameter_layout_problem
 
-    # The pinned image (S27 closing, ebc6519-2fa8801) has the replicas.
+    # The pinned image (S27 closing, 59aea07-2fa8801) has the replicas.
     assert run_config_rules.full_parameter_dp_replica_gap() is None
     assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
                                          rollout_gpus_per_engine=1) is None
