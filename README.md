@@ -209,6 +209,7 @@ Tested — a completed Yeto fine-tuning run on real hardware:
 | `nemotron3-nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 61 |
 | `nemotron3-super` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 240 |
 | `nemotron3-ultra` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` | 1100 |
+| `nemotron35-super-vl` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | 249 |
 | `glm45-air` | `zai-org/GLM-4.5-Air` | 212 |
 | `glm46` | `zai-org/GLM-4.6` | 714 |
 | `llama4-scout` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 218 |

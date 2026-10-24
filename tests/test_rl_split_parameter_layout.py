@@ -117,6 +117,36 @@ def test_split_rows_are_balanced_and_each_fits_the_bound():
         split_parameter_specs([_spec(EMBEDDING, (2, 20))], 16)
 
 
+@pytest.mark.parametrize("matrix_merge", ["avg", "rda"])
+@pytest.mark.parametrize("minimum", [1, 3, 7])
+def test_fit_finds_the_layout_of_the_count_by_count_search(matrix_merge, minimum):
+    """``fit_owner_affine_layout`` (bins checked first, start at total / bound) builds
+    the layout the island used to find by creating one candidate per count."""
+    from yeto.rl.local_learner import fit_owner_affine_layout, owner_affine_minimum_fragments
+
+    specs = [s for rank in (0, 1) for s in _adapter_specs(rank)]
+    units = split_parameter_specs(specs, BOUND_BYTES // 4)
+    expected = None
+    for count in range(max(minimum, owner_affine_minimum_fragments(specs, matrix_merge)), len(units) + 1):
+        candidate = ParameterLayout.create(
+            algorithm="grpo", components=(_component(),), specs=specs, num_fragments=count,
+            fragment_strategy="owner_affine", matrix_merge=matrix_merge, max_fragment_numel=BOUND_BYTES // 4)
+        if all(f.numel * 4 <= BOUND_BYTES for f in candidate.fragments.fragments):
+            expected = candidate
+            break
+    layout = fit_owner_affine_layout(
+        algorithm="grpo", components=(_component(),), specs=specs, minimum_fragments=minimum,
+        max_fragment_bytes=BOUND_BYTES, matrix_merge=matrix_merge)
+    assert expected is not None
+    assert (layout.fragments.num_fragments, layout.layout_hash) == (
+        expected.fragments.num_fragments, expected.layout_hash)
+
+
+def _adapter_specs(rank: int) -> list[ParameterSpec]:
+    return [ParameterSpec(s.role, s.name, tuple(s.shape), s.dtype, s.numel, s.shard_id)
+            for s in _manifest(rank).specs]
+
+
 def test_layouts_that_split_nothing_keep_their_hash():
     specs = [_spec(MATRIX, (3, 4)), _spec(NORM, (4,)), _spec(EMBEDDING, (10, 4))]
     for merge in ("avg", "rda"):

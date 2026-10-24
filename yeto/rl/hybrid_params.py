@@ -11,15 +11,23 @@ side, the cut writer and the syncer layout apply the same rule:
 * **Frozen vision.** With the vision part frozen, the vision encoder and the
   projector take no optimizer state and no syncer fragment. The rule is by
   name, independent of ``requires_grad``, so that a layout built before the
-  trainer freezes anything is already correct. Names (verified in SGLang
-  0.5.20 ``models/nano_nemotron_vl.py`` load_weights and Megatron-LM
-  ``LLaVAModel``): HF ``vision_model.*``, ``mlp1.*``, ``sound*``; Megatron
-  ``vision_model.*``, ``vision_projection.*``.
-* **f32 parameters.** Mamba-2 ``A_log``, ``D`` and ``dt_bias`` are kept in
-  f32 by Megatron-Core (``ssm/mamba_mixer.py``: "Keep A_log in fp32") and the
-  router score-correction bias is f32 in HF transformers
-  (``_keep_in_fp32_modules_strict``). A trainer that holds them in bf16
-  changes the SSM decay and the routing, so :func:`check_f32` refuses it.
+  trainer freezes anything is already correct. Names: HF ``vision_model.*``,
+  ``mlp1.*``, ``vision_projector.*`` (Nemotron-3.5 Super VL weight index),
+  ``sound*``; Megatron-Bridge Omni ``vision_model.*``, ``vision_projection.*``,
+  ``sound_model.*``, ``sound_projection.*``. The Miles backend does not build
+  these at all (``MilesNemotronHLanguageOnlyBridge``); the rule guards the
+  layout.
+* **f32 parameters.** Mamba-2 ``A_log``, ``D`` and ``dt_bias`` and the router
+  score-correction bias must be f32 where a trainer keeps its *master*
+  copy (the FSDP / verl path holds the master in the model).
+  :func:`check_f32` refuses bf16 there. Megatron is different and passes by
+  construction: every master is f32 (the full-parameter sync reads only FP32
+  masters), while ``Float16Module`` casts the model copy of ``A_log``, ``D``,
+  ``dt_bias`` to bf16 like every other weight (Megatron-LM miles-main
+  ``transformer/module.py``: only ``mark_keep_in_fp32`` tensors stay f32) and
+  the router ``expert_bias`` is an f32 buffer. The 120B checkpoint itself
+  stores ``A_log``/``D``/``dt_bias`` in bf16 and the score-correction bias in
+  f32 (safetensors headers).
 * **Expert layout.** Routed experts must be complete per MoE layer: HF keeps
   them as one fused 3D tensor per projection (``mixer.experts.up_proj``,
   leading dim = number of experts); Megatron grouped GEMM names one tensor per
@@ -43,7 +51,19 @@ from .moe_layout import is_expert_parameter
 # FSDP / HF composite models).
 _WRAPPERS = re.compile(r"^(?:(?:module|_orig_mod|_fsdp_wrapped_module|model)\.)+")
 
-VISION_PREFIXES = ("vision_model.", "vision_projection.", "mlp1.", "sound_encoder.", "sound_projection.")
+VISION_PREFIXES = ("vision_model.", "vision_projection.", "vision_projector.", "mlp1.",
+                   "sound_encoder.", "sound_model.", "sound_projection.")
+
+# The Nemotron-H VL wrapper: the language model's config is ``llm_config``.
+VL_ARCHITECTURE = "NemotronH_Omni_Reasoning_V3"
+
+# HF layer kinds (current and legacy transformers names) -> pattern symbols.
+_LAYER_SYMBOLS = {
+    "mamba": "M", "linear_attention": "M",
+    "attention": "*", "full_attention": "*",
+    "moe": "E",
+    "mlp": "-",
+}
 
 # Mamba-2 mixer vectors and the router bias that must stay f32.
 _F32 = re.compile(
@@ -162,6 +182,38 @@ def check_expert_coverage(named_shapes: Mapping[str, Sequence[int]], *, num_expe
             if (layer, proj) not in (hf or mcore):
                 raise HybridParamError(f"layer {layer} has no {proj} experts")
     return ExpertCoverage(num_experts=num_experts, moe_layers=tuple(sorted(layers)))
+
+
+def language_model_config(config: Mapping) -> Mapping:
+    """The NemotronH language-model part of an HF config dict: ``llm_config``
+    of a VL checkpoint, the config itself for a text checkpoint."""
+    if VL_ARCHITECTURE in (config.get("architectures") or ()) or "llm_config" in config:
+        llm = config.get("llm_config")
+        if not isinstance(llm, Mapping):
+            raise HybridParamError(f"{VL_ARCHITECTURE} config has no llm_config")
+        return llm
+    return config
+
+
+def is_vl_config(config: Mapping) -> bool:
+    return language_model_config(config) is not config
+
+
+def hybrid_pattern(config: Mapping) -> str:
+    """The layer pattern (M mamba, E MoE, * attention, - MLP) of a NemotronH
+    config: ``hybrid_override_pattern`` (Nemotron-3 Nano), else the
+    ``layers_block_type`` list (Nemotron-3.5 Super VL ``llm_config``)."""
+    llm = language_model_config(config)
+    pattern = llm.get("hybrid_override_pattern")
+    if pattern:
+        return str(pattern)
+    kinds = llm.get("layers_block_type")
+    if not kinds:
+        raise HybridParamError("config has neither hybrid_override_pattern nor layers_block_type")
+    unknown = sorted(set(kinds) - set(_LAYER_SYMBOLS))
+    if unknown:
+        raise HybridParamError(f"unknown Nemotron-H layer kinds {unknown}")
+    return "".join(_LAYER_SYMBOLS[kind] for kind in kinds)
 
 
 def layer_counts(hybrid_override_pattern: str) -> dict[str, int]:

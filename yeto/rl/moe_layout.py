@@ -34,6 +34,10 @@ _EXPERT = re.compile(
 # ``local_expert_indices_offset``).
 _SEQUENTIAL_EXPERT = re.compile(r"^(.*\.mlp\.experts)\.local_experts\.(\d+)\.(linear_fc[12])\.weight\Z")
 _ROUTER = re.compile(r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.router\.weight\Z")
+# Latent MoE (Nemotron-3 Super): the router reads the hidden state and the
+# experts read its projection ``fc1_latent_proj`` ([latent, hidden], duplicated
+# on every TP rank, megatron/core/transformer/moe/moe_layer.py).
+_LATENT_FC1 = re.compile(r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.fc1_latent_proj\.weight\Z")
 _SHARD_SIZES = re.compile(r"([a-z]+)\d+-of-(\d+)")
 
 
@@ -81,16 +85,23 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
     ``None`` for a dense model. Raises ``ValueError`` when an expert is
     missing, is held by more than one owner, has its two projections on
     different owners, or disagrees with its router or its peers in shape.
+    With a latent MoE layer the router reads the hidden size and the experts
+    the latent size of the layer's ``fc1_latent_proj``.
     """
 
     owners: dict[tuple[str, int, str, int], tuple[str, str]] = {}
     shapes: dict[str, set[tuple[int, ...]]] = {"linear_fc1": set(), "linear_fc2": set()}
     routers: dict[tuple[str, int], tuple[int, ...]] = {}
+    latents: dict[tuple[str, int], set[tuple[int, ...]]] = {}
     for spec in specs:
         owner = (spec.role, spec.shard_id)
         router = _ROUTER.search(spec.name)
         if router is not None:
             routers[(spec.role, int(router.group(1)))] = tuple(spec.shape)
+            continue
+        latent = _LATENT_FC1.search(spec.name)
+        if latent is not None:
+            latents.setdefault((spec.role, int(latent.group(1))), set()).add(tuple(spec.shape))
             continue
         match = _EXPERT.search(spec.name)
         if match is None:
@@ -146,11 +157,21 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
             num_experts = count
         elif count != num_experts:
             raise ValueError(f"layer {layer} has {count} experts, others have {num_experts}")
+        router_input = fc1[1]
+        latent = latents.get((role, layer))
+        if latent is not None:
+            shape = next(iter(latent))
+            if len(latent) != 1 or len(shape) != 2 or shape[0] != fc1[1]:
+                raise ValueError(
+                    f"layer {layer} latent projection shapes {sorted(latent)} do not feed "
+                    f"experts of input size {fc1[1]}"
+                )
+            router_input = shape[1]
         router = routers.get((role, layer))
-        if router is not None and (len(router) != 2 or router != (count, fc1[1])):
+        if router is not None and (len(router) != 2 or router != (count, router_input)):
             raise ValueError(
                 f"layer {layer} router shape {router} does not match {count} experts "
-                f"of hidden size {fc1[1]}"
+                f"of hidden size {router_input}"
             )
 
     per_owner: dict[tuple[str, str], int] = {}

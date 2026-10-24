@@ -27,6 +27,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .hybrid_params import hybrid_pattern, language_model_config
+
 # Dense BF16 peak, no sparsity (NVIDIA H100/H200 SXM datasheets: 989.4 TFLOPS).
 PEAK_BF16_TFLOPS = {"H100": 989.4, "H200": 989.4}
 
@@ -37,11 +39,13 @@ def _get(cfg: Mapping[str, Any], key: str, default: Any = None) -> Any:
 
 
 def forward_flops(cfg: Mapping[str, Any], seqlens: Iterable[int]) -> float:
-    """Forward FLOPs of a batch of sequences for an HF ``nemotron_h`` config dict."""
+    """Forward FLOPs of a batch of sequences for an HF ``nemotron_h`` config dict
+    (or a VL config: its ``llm_config``; the vision part and MTP are not counted)."""
     seqlens = [int(s) for s in seqlens]
     tokens = sum(seqlens)
     sq = sum(s * s for s in seqlens)
-    pattern = cfg["hybrid_override_pattern"]
+    pattern = hybrid_pattern(cfg)
+    cfg = language_model_config(cfg)
     h = int(cfg["hidden_size"])
     v = int(cfg["vocab_size"])
     head_dim = int(_get(cfg, "head_dim", h // int(cfg["num_attention_heads"])))

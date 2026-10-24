@@ -592,7 +592,8 @@ def _rules():
 
 def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
                                   rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH,
-                                  island_gpus: int | None = None) -> str | None:
+                                  island_gpus: int | None = None,
+                                  island_gpus_per_node: int | None = None) -> str | None:
     """Why the Miles full-parameter mode refuses this layout; None when it accepts it.
 
     Three layouts are accepted:
@@ -605,10 +606,13 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
     * samples from the store (``--rl-sample-role trainer``): a trainer-only
       island. Any node count and any DP; the island starts no inference engine
       (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
-    * engines on the island (Milestone 1): one node and dedicated, evenly
-      partitioned engines. A full-parameter trainer never shares its cards with
-      engines (no colocated placement). DP>1 needs a Miles pin with
-      data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``).
+    * engines on the island (Milestone 1): dedicated, evenly partitioned
+      engines on one node, or on a multi-node island (``island_gpus_per_node``,
+      ``--rl-island-gpus-per-node``: the trainer rectangle and the engines are
+      laid out over the island's nodes, as for a LoRA fixed partition). A
+      full-parameter trainer never shares its cards with engines (no colocated
+      placement). DP>1 needs a Miles pin with data-parallel replicas
+      (``run_config_rules.full_parameter_dp_replica_gap``).
     """
     if sample_role == sample_roles.SAMPLER:
         if rollout_gpus not in (None, 0):
@@ -629,16 +633,17 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
         return ("dense full-parameter GRPO with engines on the island requires DP=1 "
                 f"with this Miles pin (DP>1 needs {gap})")
     if (
-        actor_num_nodes != 1
+        (actor_num_nodes != 1 and island_gpus_per_node is None)
         or type(rollout_gpus) is not int
         or rollout_gpus < 1
         or type(rollout_gpus_per_engine) is not int
         or rollout_gpus_per_engine < 1
         or rollout_gpus % rollout_gpus_per_engine
     ):
-        return ("full-parameter mode with engines on the island requires one node and "
-                "dedicated, evenly partitioned inference engines (never colocated); "
-                "read samples from the store (--rl-sample-role trainer) for more nodes")
+        return ("full-parameter mode with engines on the island requires one node (or a "
+                "multi-node island, --rl-island-gpus-per-node) and dedicated, evenly "
+                "partitioned inference engines (never colocated); or read samples from the "
+                "store (--rl-sample-role trainer)")
     return None
 
 
@@ -766,10 +771,11 @@ def resolve_rl_run_config(
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
         role = sample_roles.sample_role(args)
+        island_gpus_per_node = getattr(args, "rl_island_gpus_per_node", None)
         if problem := full_parameter_layout_problem(
                 data_parallel=data_parallel, actor_num_nodes=args.actor_num_nodes,
                 rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine,
-                sample_role=role, island_gpus=actor_gpus):
+                sample_role=role, island_gpus=actor_gpus, island_gpus_per_node=island_gpus_per_node):
             raise ValueError(problem)
         if role == sample_roles.TRAINER:
             rollout_gpus = 0  # trainer-only island (Miles --debug-train-only): no engine
@@ -784,7 +790,10 @@ def resolve_rl_run_config(
             visible_gpus_per_node = args.actor_num_gpus_per_node
         else:
             dedicated_rollout_gpus = rollout_gpus
-            visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+            # A multi-node island exposes every GPU of each node; the trainer
+            # rectangle and the engines are laid out over the island.
+            visible_gpus_per_node = (args.actor_num_gpus_per_node + rollout_gpus
+                                     if island_gpus_per_node is None else int(island_gpus_per_node))
     elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
         # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
         # legacy CLI never sets rl_placement, so its layout is unchanged).

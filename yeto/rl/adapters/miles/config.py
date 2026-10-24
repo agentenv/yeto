@@ -1108,7 +1108,7 @@ def translate_run_config(
                 "--num-experts", str(moe.num_experts),
                 "--moe-ffn-hidden-size", str(moe.ffn_hidden_size),
                 "--moe-router-topk", str(moe.router_topk),
-                "--moe-layer-freq", str(moe.layer_freq),
+                "--moe-layer-freq", megatron_moe_layer_freq(moe.layer_freq),
             )
         )
         if moe.shared_expert_intermediate_size is not None:
@@ -1198,6 +1198,19 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+
+
+def megatron_moe_layer_freq(layer_freq: Any) -> str:
+    """Megatron's ``--moe-layer-freq`` value: an int, or a per-layer 0/1 mask.
+
+    Megatron's ``moe_freq_type`` accepts a list only as a pattern of digits,
+    commas, brackets, ``+``, ``*`` and parentheses (``_eval_pattern``): no
+    spaces. ``str([0, 1])`` has spaces and is rejected (s27-aw-a, Nemotron-H
+    120B: ``invalid moe_freq_type value``), so a mask is written ``[0,1,...]``.
+    """
+    if isinstance(layer_freq, (list, tuple)):
+        return "[" + ",".join(str(int(value)) for value in layer_freq) + "]"
+    return str(layer_freq)
 
 
 # S27 G-Y: trainer-speed flags for MFU measurement on the Nemotron-H recipe, from the

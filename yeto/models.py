@@ -61,6 +61,8 @@ MODEL_ALIASES = {
     "nemotron3-nano": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nemotron3-super": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "nemotron3-ultra": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+    # Nemotron 3.5 Super VL: C-RADIO vision + NemotronH 120B-A12B language model
+    "nemotron35-super-vl": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
     # GLM (z.ai)
     "glm45-air": "zai-org/GLM-4.5-Air",
     "glm46": "zai-org/GLM-4.6",
@@ -178,6 +180,7 @@ MODEL_WEIGHT_GB = {
     "nemotron3-nano": 61,
     "nemotron3-super": 240,
     "nemotron3-ultra": 1100,
+    "nemotron35-super-vl": 249,  # HF safetensors 248.9 GB (revision fb0ee0bc)
     "glm45-air": 212,
     "glm46": 714,
     "glm52": 1488,  # 744B MoE

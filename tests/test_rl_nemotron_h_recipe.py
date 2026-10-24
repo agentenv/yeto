@@ -5,7 +5,9 @@ provider is a stand-in carrying the fields Megatron-Bridge 0.6.2
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -158,3 +160,102 @@ def test_train_warnings_name_the_costly_settings():
     assert "offloaded" in offload and "2 trainer GPU" in offload
     assert nemotron_h.train_warnings(samples_per_step=512, optimizer_offload_fraction=1.0, trainer_gpus=16) == ()
     assert nemotron_h.train_warnings(samples_per_step=512, optimizer_offload_fraction=0.5, trainer_gpus=2) == ()
+
+
+def test_mtp_refusal_names_the_miles_bridge_and_the_keep_switch():
+    with pytest.raises(nemotron_h.NemotronHRecipeError, match="MILES_NEMOTRONH_KEEP_MTP"):
+        nemotron_h.check_provider(_provider(mtp_num_layers=1), parameter_mode="full")
+    nemotron_h.check_provider(_provider(mtp_num_layers=None), parameter_mode="full")  # Miles bridge drops MTP
+
+
+@pytest.mark.parametrize(("config", "imported"), [
+    ({"architectures": ["NemotronH_Omni_Reasoning_V3"]}, True),
+    ({"architectures": ["NemotronHForCausalLM"], "num_nextn_predict_layers": 1}, True),  # 120B Super text
+    ({"architectures": ["NemotronHForCausalLM"]}, False),  # Nano: upstream provider, as validated
+    ({"architectures": ["Qwen3MoeForCausalLM"], "num_nextn_predict_layers": 1}, False),
+    (None, False),
+])
+def test_island_reads_the_120b_checkpoints_with_the_miles_bridges(tmp_path, monkeypatch, config, imported):
+    calls = []
+
+    def import_module(name):
+        calls.append(name)
+        return SimpleNamespace(NEMOTRON_H_OMNI_ARCHITECTURE="NemotronH_Omni_Reasoning_V3")
+
+    monkeypatch.setattr(nemotron_h.importlib, "import_module", import_module)
+    if config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(config))
+    assert nemotron_h.register_miles_bridges(tmp_path) is imported
+    assert calls[:1] == (["miles_plugins.megatron_bridge"] if imported else [])
+
+
+def test_vl_checkpoint_refuses_a_miles_without_the_vl_bridge(tmp_path, monkeypatch):
+    monkeypatch.setattr(nemotron_h.importlib, "import_module", lambda name: SimpleNamespace())
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["NemotronH_Omni_Reasoning_V3"]}))
+    with pytest.raises(nemotron_h.NemotronHRecipeError, match="language-only VL bridge"):
+        nemotron_h.register_miles_bridges(tmp_path)
+
+
+def _set(argv, flag, value=None):
+    """Set (or add) one island flag; ``value=None`` removes it with its value."""
+    if flag in argv:
+        i = argv.index(flag)
+        del argv[i:i + 2]
+    if value is not None:
+        argv += [flag, str(value)]
+
+
+def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
+    """1 island = 4 trainer nodes (TP8/EP8/PP4, DP1) + 1 engine node (2 x TP4), no offload."""
+    from yeto.rl.adapters.miles.island_entry import build_ports_launch, parse_args
+    from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H, resolve_rl_run_config
+    from yeto.rl.stage1 import expand, load_plan
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"architectures": ["NemotronH_Omni_Reasoning_V3"]}))
+    prompts = tmp_path / "p.jsonl"
+    prompts.write_text('{"messages": [{"role": "user", "content": "hi"}], "label": "1"}\n')
+    argv = list(expand(load_plan(REPO / "examples/stage1/glm5next-mini-modal.yaml")).trainer["miles"]["island_argv"][3:])
+    argv = [str(model) if a == "/data/models/glm5next-mini-bf16-7fb7883" else a for a in argv]
+    argv = [str(REPO / a) if a.startswith("examples/rl_algorithms/") else a for a in argv]
+    for flag, value in (("--rl-model-recipe", "generic"), ("--rl-sample-role", None), ("--rl-resume-store", None),
+                        ("--megatron-ref-load", None), ("--rl-optimizer-offload-fraction", None),
+                        ("--tensor-parallel", 8), ("--pipeline-parallel", 4), ("--expert-parallel", 8),
+                        ("--actor-num-nodes", 4), ("--actor-num-gpus-per-node", 8),
+                        ("--rl-placement", "fixed-partition"), ("--rollout-num-gpus", 8),
+                        ("--rollout-num-gpus-per-engine", 4), ("--rl-island-gpus-per-node", 8)):
+        _set(argv, flag, value)
+    args = parse_args(argv)
+    pattern = "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME"
+    # Miles' bridge (MilesNemotronHBridge) gives the provider a per-layer MoE mask.
+    provider = _provider(hybrid_layer_pattern=pattern, moe_layer_freq=[int(c == "E") for c in pattern],
+                         num_layers=88, hidden_size=4096, ffn_hidden_size=2688, num_moe_experts=512,
+                         moe_ffn_hidden_size=2688, moe_router_topk=22, moe_shared_expert_intermediate_size=5376,
+                         moe_latent_size=1024, moe_router_topk_scaling_factor=5.0, mtp_num_layers=None,
+                         mamba_num_heads=128)
+    config = resolve_rl_run_config(args, model_path=model, prompt_path=prompts, provider=provider,
+                                   target_modules=[], yeto_policy_sync=False, verify_ref_load=False)
+    assert config.model_recipe.name == RECIPE_NEMOTRON_H
+    miles = list(build_ports_launch(args, config, []).argv)
+    for flag, value in (("--actor-num-nodes", "4"), ("--actor-num-gpus-per-node", "8"), ("--rollout-num-gpus", "8"),
+                        ("--rollout-num-gpus-per-engine", "4"), ("--tensor-model-parallel-size", "8"),
+                        ("--pipeline-model-parallel-size", "4"), ("--expert-model-parallel-size", "8"),
+                        ("--num-experts", "512"), ("--moe-router-topk", "22"), ("--moe-latent-size", "1024"),
+                        ("--num-layers", "88"), ("--num-gpus-per-node", "8")):
+        assert _flag(miles, flag) == value, flag
+    assert "--colocate" not in miles and "--optimizer-cpu-offload" not in miles
+    # Megatron's moe_freq_type evaluates a bracketed pattern: one mask entry per layer.
+    # Its _eval_pattern allows only digits, commas, brackets, +, * and parentheses (no
+    # spaces): s27-aw-a failed on "[0, 1, ...]" (argument --moe-layer-freq: invalid value).
+    freq = _flag(miles, "--moe-layer-freq")
+    assert not re.search(r"[^,\d\[\]\(\)\+\*]", freq), freq
+    assert ast.literal_eval(freq) == [int(c == "E") for c in pattern]
+
+
+def test_megatron_moe_layer_freq_has_no_spaces():
+    from yeto.rl.adapters.miles.config import megatron_moe_layer_freq
+
+    assert megatron_moe_layer_freq(1) == "1"
+    assert megatron_moe_layer_freq([0, 1, 1]) == "[0,1,1]"
+    assert megatron_moe_layer_freq((1, 0)) == "[1,0]"
