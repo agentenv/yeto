@@ -257,6 +257,43 @@ def seek_data_source(data_source: Any, cursor: Mapping[str, int], *, shuffle: bo
         source.dataset.shuffle(int(cursor["epoch_id"]))
 
 
+def first_round_cursor(shards: Sequence[str], sampler_id: str, *, rounds: int,
+                       groups_per_round: int, samples_per_group: int) -> dict[str, int] | None:
+    """Where sampler ``sampler_id`` starts drawing prompts when several sampler
+    islands share the trainer's rounds (S25 C1); None with fewer than two shards.
+
+    Every sampler reads the same ``--data`` in the same order and generates its
+    ``rounds`` share of the trainer's rounds. Sampler ``k`` of ``shards`` starts
+    at prompt ``k * rounds * groups_per_round``, so the samplers draw disjoint
+    prompt blocks (without it every sampler drew the same prompts). The blocks
+    are disjoint while each round draws ``groups_per_round`` prompts. The group
+    and sample counters move with the offset, as the draws before it would have
+    moved them; :func:`dataset_cursor` wraps the offset into the dataset."""
+    if len(shards) < 2:
+        return None
+    if sampler_id not in shards:
+        raise SampleBufferRolloutError(f"sampler {sampler_id!r} is not one of the buffer shards "
+                                       f"{list(shards)}")
+    start = list(shards).index(sampler_id) * int(rounds) * int(groups_per_round)
+    return {"sample_offset": start, "epoch_id": 0, "sample_group_index": start,
+            "sample_index": start * int(samples_per_group)}
+
+
+def dataset_cursor(cursor: Mapping[str, int], data_source: Any) -> dict[str, int]:
+    """``cursor`` with an offset past the end of the source's dataset wrapped into
+    later epochs (Miles ``RolloutDataSource.get_samples`` wraps the same way);
+    unchanged when the source has no sized dataset."""
+    dataset = getattr(getattr(data_source, "__self__", data_source), "dataset", None)
+    try:
+        size = len(dataset)
+    except TypeError:
+        return dict(cursor)
+    if size < 1:
+        return dict(cursor)
+    epochs, offset = divmod(int(cursor["sample_offset"]), size)
+    return {**cursor, "sample_offset": offset, "epoch_id": int(cursor["epoch_id"]) + epochs}
+
+
 class SamplerRoundWriter:
     """The sampler's buffer writes, resumable across incarnations (S25 C1).
 
@@ -269,9 +306,12 @@ class SamplerRoundWriter:
     old incarnation must not write while its replacement writes the same shard."""
 
     def __init__(self, buffer: Any, sampler_id: str, *, incarnation: str, resume: bool = True,
-                 reclaimed: Callable[[], bool] = lambda: False) -> None:
+                 reclaimed: Callable[[], bool] = lambda: False,
+                 first_cursor: Mapping[str, int] | None = None) -> None:
         """``resume=False``: write as before (a convertible node: no resume
-        point, no round check, no seek)."""
+        point, no round check, no seek). ``first_cursor``: where the data source
+        starts when no earlier incarnation of this sampler wrote to the buffer
+        (:func:`first_round_cursor`; None: at the start of the data)."""
         from yeto.rl.engine.sampler_resume import RoundGuard, resume_point
 
         self.buffer = buffer
@@ -280,16 +320,20 @@ class SamplerRoundWriter:
         self.reclaimed = reclaimed
         self.resume = resume_point(buffer.entries() if resume else (), self.sampler_id)
         self.guard = RoundGuard(self.resume) if resume else None
+        self.first_cursor = None if first_cursor is None else dict(first_cursor)
         self._writer = GroupWriter(buffer, f"{self.sampler_id}-{self.incarnation}")
         self._sought = False
         self.dropped_groups = 0  # groups not written because the island is leaving
 
     def seek(self, data_source: Any, *, shuffle: bool) -> dict[str, int] | None:
-        """Before the first round only: the resume cursor applied (None: none)."""
+        """Before the first round only: the resume cursor applied, or the first
+        cursor when no earlier incarnation of this sampler wrote (None: neither)."""
         if self._sought or self.guard is None:
             return None
         self._sought = True
         cursor = self.resume.data_cursor
+        if not self.resume.resumed and self.first_cursor is not None:
+            cursor = dataset_cursor(self.first_cursor, data_source)
         if cursor is not None:
             seek_data_source(data_source, cursor, shuffle=shuffle)
         return cursor
