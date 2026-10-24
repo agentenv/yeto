@@ -618,6 +618,20 @@ class FileSampleBuffer:
             self._read = pos
             return out
 
+    def peek(self, limit: int) -> list[Selected]:
+        """The entries :meth:`select` would return next (after a refresh), without
+        selecting them: the read cursor does not move (a reader prefetches their
+        payloads)."""
+        with self._lock:
+            self.refresh()
+            out: list[Selected] = []
+            pos = self._read
+            while len(out) < max(0, int(limit)) and pos < len(self._entries):
+                if self.lane is None or self.lane.owns(pos):
+                    out.append(Selected(pos, self._entries[pos]))
+                pos += 1
+            return out
+
     def commit_consumed(self, cursor: int) -> None:
         """Every sample below ``cursor`` is trained; the next cut records it."""
         with self._lock:

@@ -8,6 +8,7 @@ import ast
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy
@@ -160,6 +161,39 @@ def test_payload_keeps_per_token_logprobs_versions_and_arrays():
     assert br.group_entry_fields([s, sample(1, 0, 5)]) == (3, 6)  # oldest token version
 
 
+def test_payload_stores_integer_arrays_in_the_narrowest_dtype():
+    """R3 expert ids (0..127, int32 on the engine) are stored as uint8 and read
+    back as int32 with the same values; a payload without ``cast`` (written
+    before it existed) decodes as before."""
+    import base64
+    import json
+
+    experts = numpy.random.default_rng(0).integers(0, 128, size=(300, 52, 6), dtype=numpy.int32)
+    cases = {"ids": experts, "neg": numpy.array([-3, 100], dtype=numpy.int64),
+             "wide": numpy.array([0, 70000], dtype=numpy.int64),
+             "int8_already": numpy.array([1, 2], dtype=numpy.uint8),
+             "empty": numpy.zeros((0, 6), dtype=numpy.int32),
+             "floats": numpy.array([0.5, 1.5], dtype=numpy.float32)}
+    s = sample(0, 0, 4)
+    s.update(cases)
+    data = br.encode_group([s])
+    stored = json.loads(data)["samples"][0]
+    assert (stored["ids"]["dtype"], stored["ids"]["cast"]) == ("uint8", "int32")
+    assert (stored["neg"]["dtype"], stored["wide"]["dtype"]) == ("int8", "uint32")
+    assert "cast" not in stored["int8_already"] and "cast" not in stored["floats"]
+    assert len(data) < experts.nbytes / 2  # base64 of uint8 ids: a third of int32 base64
+    back = br.decode_group(data)[0]
+    for name, array in cases.items():
+        assert back[name].dtype == array.dtype and back[name].shape == array.shape, name
+        assert numpy.array_equal(back[name], array), name
+        assert back[name].flags.writeable, name
+    legacy = {"schema": br.PAYLOAD_SCHEMA, "samples": [{**{k: v for k, v in s.items() if k not in cases},
+              "ids": {"__ndarray__": base64.b64encode(experts.tobytes()).decode("ascii"),
+                      "dtype": "int32", "shape": list(experts.shape)}}]}
+    old = br.decode_group(json.dumps(legacy).encode())[0]["ids"]
+    assert old.dtype == numpy.int32 and numpy.array_equal(old, experts)
+
+
 def test_entry_needs_logprobs_and_a_numeric_version():
     bad = sample(0, 0, 1)
     bad["rollout_log_probs"] = None
@@ -190,6 +224,73 @@ def test_reader_passes_over_groups_older_than_the_limit(tmp_path):
     groups, report = reader.take(0, 2, current_version=5)  # floor = 3
     assert [(pos, g[0]["group_index"]) for pos, g in groups] == [(1, 1), (3, 3)]
     assert (report.stale_groups, report.start, report.end, report.behavior_versions) == (2, 0, 4, {3: 1, 4: 1})
+
+
+def test_reader_reads_the_next_round_ahead_and_never_refreshes_with_a_read_open(tmp_path):
+    """After a take the reader reads the next round's payloads in the background
+    (a sampler appends them while the trainer trains); the next take uses them.
+    No refresh (a Volume reload) runs while one of its payload reads is open."""
+    import threading
+
+    buffer = _buffer(tmp_path)
+    writer = br.GroupWriter(buffer, "s0")
+    for g in range(2):
+        writer.write(_group(g, 1), group_key=f"r0-g{g}")
+    open_reads = [0]
+    overlaps = []
+
+    class Watched(FileSampleBuffer):
+        def read_payload(self, ref):
+            open_reads[0] += 1
+            try:
+                time.sleep(0.01)
+                return super().read_payload(ref)
+            finally:
+                open_reads[0] -= 1
+
+        def refresh(self):
+            if open_reads[0]:
+                overlaps.append(open_reads[0])
+            return super().refresh()
+
+    reader = br.BatchReader(Watched(CheckpointStore(tmp_path), batch_size=2), max_policy_age=2,
+                            wait_s=30.0, poll_s=0.01, read_workers=4)
+    first, report = reader.take(0, 2, current_version=1)
+    assert [pos for pos, _ in first] == [0, 1] and report.prefetched == 0
+    for g in range(2, 4):  # the next round arrives while the trainer trains
+        writer.write(_group(g, 2), group_key=f"r1-g{g}")
+    deadline = time.monotonic() + 10
+    while len(reader._reads) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    second, report = reader.take(1, 2, current_version=2)
+    assert [(pos, g[0]["group_index"]) for pos, g in second] == [(2, 2), (3, 3)]
+    assert report.prefetched == 2 and report.read_s >= 0.0
+    assert set(report.metrics()) >= {"sample_buffer/select_s", "sample_buffer/read_s",
+                                     "sample_buffer/decode_s", "sample_buffer/prefetched_groups"}
+    assert overlaps == []
+    reader._stop_prefetching()
+
+
+def test_reader_without_peek_or_workers_reads_inline(tmp_path):
+    buffer = _buffer(tmp_path)
+    writer = br.GroupWriter(buffer, "s0")
+    for g in range(3):
+        writer.write(_group(g, 1), group_key=f"g{g}")
+
+    class NoPeek:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            if name == "peek":
+                raise AttributeError(name)
+            return getattr(self.inner, name)
+
+    reader = br.BatchReader(NoPeek(_buffer(tmp_path)), max_policy_age=1, wait_s=0.0, poll_s=0.0,
+                            read_workers=1)
+    assert reader.prefetch is False
+    groups, report = reader.take(0, 3, current_version=1)
+    assert [pos for pos, _ in groups] == [0, 1, 2] and report.prefetched == 0
 
 
 def test_reader_waits_for_samples_then_times_out(tmp_path):
