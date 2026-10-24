@@ -47,6 +47,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -341,20 +342,25 @@ class SamplerRoundWriter:
     def write_round(self, rollout_id: int, groups: Sequence[tuple[str, list[dict[str, Any]]]],
                     data_cursor: Mapping[str, int] | None) -> int:
         """Write ``groups`` (``(group key, samples)``, aborted groups already left
-        out) of round ``rollout_id``; returns the groups written."""
+        out) of round ``rollout_id``, with one store commit at the end; returns the
+        groups written."""
         from yeto.rl.engine.sampler_resume import SamplerRound
 
         if self.guard is not None:
             self.guard.check(rollout_id)
         written = 0
-        for i, (key, samples) in enumerate(groups):
-            if self.reclaimed():
-                self.dropped_groups += len(groups) - i
-                break
-            record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
-                                  data_cursor=data_cursor, last=i == len(groups) - 1)
-            self._writer.write(samples, group_key=key, sampler_round=record.record())
-            written += 1
+        # one store commit for the round, not one per group (S27 G-AO: 64 groups of a
+        # 30B round took ~170 s of per-group Modal Volume commits)
+        hold = getattr(self.buffer, "one_commit", None)
+        with hold() if callable(hold) else nullcontext():
+            for i, (key, samples) in enumerate(groups):
+                if self.reclaimed():
+                    self.dropped_groups += len(groups) - i
+                    break
+                record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
+                                      data_cursor=data_cursor, last=i == len(groups) - 1)
+                self._writer.write(samples, group_key=key, sampler_round=record.record())
+                written += 1
         if written and self.guard is not None:
             self.guard.written(rollout_id)
         return written

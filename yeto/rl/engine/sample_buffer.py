@@ -65,6 +65,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,8 @@ class JsonlIndex:
             if not self.path.exists():
                 self.path.touch()
         self._offset = 0  # bytes of complete lines read
+        self._held = 0  # open one_commit() blocks
+        self._uncommitted = False  # appends made inside them, not committed yet
 
     def write_payload(self, name: str, data: bytes) -> str:
         path = self.root / PAYLOADS / name
@@ -162,7 +165,23 @@ class JsonlIndex:
                 absorb(list(self._lines(fh)))
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        self.store.commit()
+        if self._held:
+            self._uncommitted = True
+        else:
+            self.store.commit()
+
+    @contextmanager
+    def one_commit(self) -> Iterator[None]:
+        """Appends inside the block are committed once, when it ends (also on an
+        error: what was appended stays)."""
+        self._held += 1
+        try:
+            yield
+        finally:
+            self._held -= 1
+            if not self._held and self._uncommitted:
+                self._uncommitted = False
+                self.store.commit()
 
     # ------------------------------------------------------------ shards (merger side)
     def shard_names(self) -> list[str]:
@@ -451,6 +470,16 @@ class FileSampleBuffer:
                                         "behavior_version": int(entry.behavior_version),
                                         "payload_ref": entry.payload_ref, "tokens": int(entry.tokens),
                                         "appended_at": float(entry.appended_at), **source})
+
+    @contextmanager
+    def one_commit(self) -> Iterator[None]:
+        """Appends inside the block reach the store with one commit when it ends.
+        A Modal Volume commit costs seconds, so a sampler appends the groups of a
+        round inside one block; other islands see them after it. An object-store
+        index has no commit: its appends are visible one by one, as before."""
+        hold = getattr(self.index, "one_commit", None)
+        with hold() if callable(hold) else nullcontext():
+            yield
 
     def mark_data_end(self) -> None:
         """The samplers will append nothing more."""
