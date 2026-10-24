@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shlex
+import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
@@ -322,7 +323,7 @@ def _check_hf_export_launch_flags(args) -> None:
     if late:
         print(f"[launcher] WARNING: {EXPORT_HF_FLAG}: rounds {late} are past the {expected} rounds "
               "an island is expected to train (--total-steps x --local-rl-rounds-per-sync); "
-              "an island that stops earlier exports nothing for them")
+              "an island that stops earlier exports nothing for them", file=sys.stderr, flush=True)
 
 
 def hf_export_flags(args) -> str:

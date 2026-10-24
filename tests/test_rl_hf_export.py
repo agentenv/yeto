@@ -265,7 +265,7 @@ def test_synced_launch_forwards_the_rounds_and_the_store(capsys):
     flags = rl_ports._ports_infra_flags(args)[1]
     assert _island_flag(flags, "--rl-export-hf-rounds") == "1,3,final"
     assert _island_flag(flags, "--rl-export-hf-store") == "/root/yeto-checkpoint-store/run-1/hf"
-    assert "WARNING" not in capsys.readouterr().out
+    assert "WARNING" not in capsys.readouterr().err
     assert "--rl-export-hf-store" not in rl_ports._ports_infra_flags(_cli("--rl-checkpoint-store", "/s",
                                                                           "--rl-cut-every", "2"))[1]
 
@@ -275,7 +275,9 @@ def test_rounds_past_the_expected_rounds_warn(capsys):
 
     args = _cli("--rl-checkpoint-store", "/s", "--rl-export-hf-rounds", "2,999", "--total-steps", "4")
     rl_ports._check_hf_export_launch_flags(args)
-    assert "WARNING: --rl-export-hf-rounds: rounds [999] are past the 4 rounds" in capsys.readouterr().out
+    out = capsys.readouterr()
+    assert "WARNING: --rl-export-hf-rounds: rounds [999] are past the 4 rounds" in out.err
+    assert not out.out  # stdout carries the dry-run plan
 
 
 @pytest.mark.parametrize("extra, match", [
