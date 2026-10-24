@@ -106,6 +106,7 @@ from .publish import (
     weight_view_digest,
 )
 from .release_plugin import WRITE_LORA_ADAPTER, full_checkpoint_writer
+from .remote_code_prewarm import prewarm_remote_code
 
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
@@ -448,6 +449,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
         prepare_quantized_base(miles_args, Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
     connect_island_ray(miles_args=miles_args)
+    # S27 G-CK: fill the remote-code module cache on every node before any engine starts
+    prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
     # The rollout process's metadata hook pushes each round's group records to this
     # named actor (on a trainer island the driver creates it and consumes them).
     metadata = RayMetadataSink()

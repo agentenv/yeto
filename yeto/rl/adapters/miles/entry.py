@@ -41,6 +41,7 @@ from .traits import MILES_TRAITS
 from . import LoopRunner
 from .config import MilesConfigError, check_harness_reward_scope
 from .pins import miles_fork_lineage_from
+from .remote_code_prewarm import prewarm_remote_code
 
 ENGINE_NAME = "miles-upstream"
 
@@ -2109,6 +2110,9 @@ def run_ports_island(
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
     startup.step("ray_connected")
+    # S27 G-CK: fill the remote-code module cache on every island node before any
+    # engine or trainer actor imports from it (concurrent first imports raced).
+    prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
