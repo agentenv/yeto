@@ -169,10 +169,14 @@ def _tolerant():
                          correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
 
 
-def test_miles_argv_of_the_sampler_and_the_trainer():
+def test_miles_argv_of_the_sampler_and_the_trainer(monkeypatch):
     from tests.test_rl_miles_adapter_config import flag_value, make_config, sub
     from yeto.rl.adapters.miles import config as mc
 
+    # A sampler island builds no trainer: no full-parameter DP check (make_config is DP=2).
+    mc.translate_run_config(_full_config("sampler", max_backlog_groups=4), _tolerant())
+    # The DP=2 trainers below describe a Miles pin with data-parallel replicas.
+    monkeypatch.setattr(mc, "full_parameter_dp_replica_gap", lambda: None)
     base = mc.translate_run_config(sub(make_config(), "trainable", parameter_mode="full",
                                        target_modules=()), _tolerant())
     sampler = mc.translate_run_config(_full_config("sampler", max_backlog_groups=4), _tolerant())

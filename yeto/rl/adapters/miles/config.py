@@ -1171,7 +1171,8 @@ def translate_run_config(
                if getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) != FP8_SOURCE_ENGINE else {}),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
                                               full_parameter_sync=full_parameter_sync,
-                                              data_parallel=config.parallel.data_parallel),
+                                              data_parallel=config.parallel.data_parallel,
+                                              builds_trainer=not _is_sampler_island(sample_buffer)),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
             **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
                if getattr(config.algorithm, "critic", None) is not None
@@ -1281,8 +1282,14 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
+def _is_sampler_island(sample_buffer: Any) -> bool:
+    from .buffer_rollout import SAMPLER
+
+    return sample_buffer is not None and sample_buffer.role == SAMPLER
+
+
 def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool,
-                                    data_parallel: int = 1) -> dict[str, Any]:
+                                    data_parallel: int = 1, builds_trainer: bool = True) -> dict[str, Any]:
     """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
@@ -1290,7 +1297,8 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
     rank. At DP>1 one rank of each data-parallel replica group owns (exports)
     a parameter and the other replicas apply its bytes; that needs a Miles pin
     with data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
-    and a whole master on every replica, so no optimizer offload.
+    and a whole master on every replica, so no optimizer offload. A sampler
+    island (``builds_trainer=False``) has no trainer and no such check.
 
     * No optimizer offload: the non-distributed optimizer, whose masters are
       whole tensors. Miles' ``set_default_megatron_args`` turns the
@@ -1314,7 +1322,7 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
     offload = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0
-    if data_parallel != 1:
+    if data_parallel != 1 and builds_trainer:
         if (gap := full_parameter_dp_replica_gap()) is not None:
             raise MilesConfigError(f"the full-parameter sync at DP {data_parallel} needs {gap}")
         if offload:
