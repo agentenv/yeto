@@ -725,6 +725,22 @@ not add roster shrinking or a new fleet restart controller. Syncer restart can
 resume when its checkpoint disk survives; losing that VM and disk remains a
 deployment-level durability gap.
 
+### Verify-ahead of received broadcasts
+
+A trainer apply re-checks every replaced fragment's stored chunks (finite
+FP32 values, chunk hashes, fragment digest) in its prepare. With
+`--rl-sync-verify-ahead auto` (default) each island runs that same check
+(Miles `verify_stored_fragment_chunks`) on a background thread as soon as a
+broadcast is stored, and the apply at the next boundary names the checked
+fragments (`verified_fragments`), so the trainer reads none of their chunks;
+a fragment whose check is still running is checked by the trainer as before,
+and a failed check fails the apply before the trainer changes. The applied
+values are the same either way. It needs a trainer Miles with the
+`verified_apply` transport; `--rl-sync-verify-ahead off` (island
+`--sweep-verify-ahead off`) or `YETO_FULL_PARAMETER_VERIFY_AHEAD=0` keeps the
+check on the trainer. Each `rl_full_parameter_round` event reports
+`sync/apply_verified_ahead` and `sync/apply_verify_pending`.
+
 ## Finalization and Export
 
 At `T=N*P`, the syncer stops ordinary pulls, persists the quiescent cut, and

@@ -966,6 +966,7 @@ def _dense_full_sync_config(
         push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
         expert_token_weights=bool(getattr(args, "sweep_expert_token_weights", False)),
         final_cut=getattr(args, "sweep_final_cut", "download"),
+        verify_ahead=getattr(args, "sweep_verify_ahead", "auto") != "off",
         bcast_delta=bool(getattr(args, "bcast_delta", False)),
         # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
         # overlap's outer-step lag is bound into the session contract.

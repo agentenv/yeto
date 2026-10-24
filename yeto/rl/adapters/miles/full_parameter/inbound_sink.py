@@ -341,6 +341,7 @@ class MilesRayInboundChunkSink:
                 self._release_stored(stored)
                 transaction.finished = True
                 return StreamedInboundPayload(raced, digest)
+            stored = self.sink.with_verification(stored)
             self.sink._stored[key] = stored
 
         discarded = False

@@ -1259,6 +1259,15 @@ _SYNC = (
         "--rl-sync-mode async without --rl-eval-interval, else download",
     ),
     cli_flag(
+        "--rl-sync-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter preset: auto (default) = each island checks a received broadcast's "
+        "chunks (finite values, chunk hashes, fragment digest) on a background thread and the "
+        "trainer's apply skips that check, when the trainer's Miles has the verified apply; "
+        "off = the trainer checks every chunk in its apply (the applied values are the same)",
+    ),
+    cli_flag(
         "--rl-sync-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE models only: weight each expert's tensors in the "

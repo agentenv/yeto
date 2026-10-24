@@ -187,6 +187,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_final_cut", "auto", "--rl-sync-final-cut"),
+    ("rl_sync_verify_ahead", "auto", "--rl-sync-verify-ahead"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
