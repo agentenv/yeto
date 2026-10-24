@@ -1,6 +1,12 @@
 """When a round cut is due: every N rounds, or by wall time (S27 R-2).
 
-:class:`FixedCutInterval` is ``--rl-cut-every N`` (the default, N = 1).
+:class:`FixedCutInterval` is ``--rl-cut-every N``.
+
+The default (neither flag; S27 G-AT) is a timed interval with a prior MTBF of
+:data:`DEFAULT_MTBF_S` and a cost cap: a cut costs at most
+:data:`DEFAULT_MAX_COST_SHARE` of the wall time, so the gap is at least
+``C / share`` (a 30B trainer whose cut costs about 400 s cuts about every
+8000 s, not every round). ``--rl-cut-every`` and ``--rl-cut-auto-mtbf-s`` replace it.
 
 :class:`AutoCutInterval` (``--rl-cut-auto-mtbf-s``) is a timed
 interval: with ``C`` the
@@ -25,6 +31,8 @@ from collections import deque
 from collections.abc import Callable
 
 DEFAULT_MAX_INTERVAL_S = 3600.0  # plan C: at most one hour between cuts
+DEFAULT_MTBF_S = 21600.0  # the default interval's prior: six hours between interruptions (spot)
+DEFAULT_MAX_COST_SHARE = 0.05  # the default interval: cuts cost at most 5% of the wall time
 COST_WINDOW = 4  # cuts whose measured cost is averaged
 
 
@@ -53,19 +61,26 @@ class FixedCutInterval:
 
 
 class AutoCutInterval:
-    """A cut once ``sqrt(2 * C * MTBF)`` seconds have passed since the last one (module doc)."""
+    """A cut once ``sqrt(2 * C * MTBF)`` seconds have passed since the last one (module doc).
+
+    ``max_cost_share``: the gap is also at least ``C / max_cost_share``, above
+    ``max_interval_s`` when needed (the default interval); None: no such floor."""
 
     def __init__(self, *, mtbf_s: float, max_interval_s: float = DEFAULT_MAX_INTERVAL_S,
-                 min_interval_s: float = 0.0, clock: Callable[[], float] = time.monotonic) -> None:
+                 min_interval_s: float = 0.0, max_cost_share: float | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         if not mtbf_s > 0:
             raise ValueError("--rl-cut-auto-mtbf-s must be positive")
         if not max_interval_s > 0:
             raise ValueError("--rl-cut-max-interval-s must be positive")
         if not 0 <= min_interval_s <= max_interval_s:
             raise ValueError("the minimum cut interval must lie in [0, max interval]")
+        if max_cost_share is not None and not 0 < max_cost_share <= 1:
+            raise ValueError("the cut cost share must lie in (0, 1]")
         self.mtbf_s = float(mtbf_s)
         self.max_interval_s = float(max_interval_s)
         self.min_interval_s = float(min_interval_s)
+        self.max_cost_share = None if max_cost_share is None else float(max_cost_share)
         self.clock = clock
         self._costs: deque[float] = deque(maxlen=COST_WINDOW)
         self._last_cut: tuple[int, float] | None = None  # (rollout id, clock) of the last cut
@@ -81,8 +96,12 @@ class AutoCutInterval:
         cost = self.cost_s
         if cost is None:
             return None
-        optimum = math.sqrt(2.0 * max(cost, 0.0) * self.mtbf_s)
-        return min(max(optimum, self.min_interval_s), self.max_interval_s)
+        cost = max(cost, 0.0)
+        optimum = math.sqrt(2.0 * cost * self.mtbf_s)
+        interval = min(max(optimum, self.min_interval_s), self.max_interval_s)
+        if self.max_cost_share is not None:
+            interval = max(interval, cost / self.max_cost_share)
+        return interval
 
     def due(self, rollout_id: int, *, final: bool = False) -> bool:
         """Is a cut due at the safe point before ``rollout_id``? Decided once per
@@ -113,6 +132,7 @@ class AutoCutInterval:
     def describe(self) -> dict[str, object]:
         interval = self.interval_s()
         return {"mode": "auto", "mtbf_s": self.mtbf_s, "max_interval_s": self.max_interval_s,
+                **({} if self.max_cost_share is None else {"max_cost_share": self.max_cost_share}),
                 "cost_s": None if self.cost_s is None else round(self.cost_s, 3),
                 "interval_s": None if interval is None else round(interval, 1)}
 
@@ -120,13 +140,14 @@ class AutoCutInterval:
 def cut_interval_for(*, every: int | None, auto_mtbf_s: float | None,
                      max_interval_s: float | None) -> FixedCutInterval | AutoCutInterval:
     """The interval of the cut flags (``--rl-cut-every`` / ``--rl-cut-auto-mtbf-s`` /
-    ``--rl-cut-max-interval-s``); the two modes exclude each other."""
-    from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
-
+    ``--rl-cut-max-interval-s``); the two modes exclude each other. Neither:
+    the default timed interval (module doc)."""
     if auto_mtbf_s is None:
         if max_interval_s is not None:
             raise ValueError("--rl-cut-max-interval-s needs --rl-cut-auto-mtbf-s")
-        return FixedCutInterval(DEFAULT_CUT_EVERY if every is None else every)
+        if every is None:
+            return AutoCutInterval(mtbf_s=DEFAULT_MTBF_S, max_cost_share=DEFAULT_MAX_COST_SHARE)
+        return FixedCutInterval(every)
     if every is not None:
         raise ValueError("--rl-cut-every and --rl-cut-auto-mtbf-s exclude each other")
     return AutoCutInterval(mtbf_s=float(auto_mtbf_s),

@@ -18,7 +18,6 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
-from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.run_flags import (
     FULL_PARAMETER_ASYNC_MAX_PIPELINE,
     FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
@@ -386,7 +385,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
             "store": (str(args.rl_resume_store) if not island_store
                       else f"{str(island_store).rstrip('/')}/island{int(args.learner_id)}"),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": None if auto else int(every or DEFAULT_CUT_EVERY),
+            # None: the default timed interval (cut_interval module doc)
+            "every": None if auto or every is None else int(every),
             **auto,
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),

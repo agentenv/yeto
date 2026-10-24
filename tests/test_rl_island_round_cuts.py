@@ -61,8 +61,34 @@ def test_auto_interval_is_capped_and_floored():
     assert floored.interval_s() == 30.0
 
 
+def test_the_default_interval_keeps_cuts_under_five_percent_of_the_wall_time():
+    """S27 G-AT: no cut flag -> a timed interval; a 30B cut (about 400 s, s27-ao-a)
+    is taken about every 8000 s, above the one-hour cap, instead of every round."""
+    from yeto.rl.engine.cut_interval import DEFAULT_MAX_COST_SHARE, DEFAULT_MTBF_S
+
+    clock = _Clock()
+    default = cut_interval_for(every=None, auto_mtbf_s=None, max_interval_s=None)
+    assert isinstance(default, AutoCutInterval)
+    assert (default.mtbf_s, default.max_cost_share) == (DEFAULT_MTBF_S, DEFAULT_MAX_COST_SHARE) == (21600.0, 0.05)
+    default.clock = clock
+    assert default.due(1) is True  # the first safe point measures the cost
+    default.record_cut(1, cost_s=400.0)
+    assert default.interval_s() == pytest.approx(8000.0)  # 400 / 0.05 > 3600 cap
+    clock.now += 7999
+    assert default.due(2) is False
+    clock.now += 2
+    assert default.due(3) is True
+    small = AutoCutInterval(mtbf_s=DEFAULT_MTBF_S, max_cost_share=DEFAULT_MAX_COST_SHARE, clock=clock)
+    small.record_cut(1, cost_s=5.0)  # a small model: the Young-Daly gap is the larger one
+    assert small.interval_s() == pytest.approx(math.sqrt(2 * 5.0 * DEFAULT_MTBF_S))
+    assert default.describe()["max_cost_share"] == 0.05
+    assert "max_cost_share" not in AutoCutInterval(mtbf_s=100.0).describe()
+    with pytest.raises(ValueError, match="cost share"):
+        AutoCutInterval(mtbf_s=100.0, max_cost_share=0.0)
+
+
 def test_cut_interval_flags_exclude_each_other():
-    assert isinstance(cut_interval_for(every=None, auto_mtbf_s=None, max_interval_s=None), FixedCutInterval)
+    assert isinstance(cut_interval_for(every=3, auto_mtbf_s=None, max_interval_s=None), FixedCutInterval)
     auto = cut_interval_for(every=None, auto_mtbf_s=100.0, max_interval_s=None)
     assert isinstance(auto, AutoCutInterval) and auto.max_interval_s == DEFAULT_MAX_INTERVAL_S
     with pytest.raises(ValueError, match="exclude each other"):

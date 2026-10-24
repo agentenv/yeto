@@ -592,9 +592,12 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1 (every round). The publication "
-                "checks (policy hash, engine weight read-back) run at the same interval and "
-                "on the first publication; see --rl-verify-every-round"),
+                "last round and our own stop). Default: a timed interval, at most 5%% of the "
+                "wall time in cuts and sqrt(2 * C * 21600) s between them (C = the measured "
+                "cost of a cut), where the engine wires timed cuts; else every round. The "
+                "publication checks (policy "
+                "hash, engine weight read-back) run at the same interval and on the first "
+                "publication; see --rl-verify-every-round"),
     # S27 R-2: a timed cut interval
     shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
                 help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "

@@ -51,9 +51,10 @@ INCARNATIONS = "incarnations.jsonl"  # under the state dir: one line per launch
 RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
-# a round cut every round (and always at the end) unless --rl-cut-every or
-# --rl-cut-interval-auto says otherwise; the publication checks follow the same
-# interval (driver.verify_publication). E1 proposed 4 (S27 L14: pending user decision).
+# rounds between cuts where a fixed interval has no --rl-cut-every (verl; a direct
+# RoundCutCheckpoint). The Miles flags default to a timed interval instead
+# (cut_interval.cut_interval_for, S27 G-AT); the publication checks follow the
+# interval in use (driver.verify_publication).
 DEFAULT_CUT_EVERY = 1
 # E1: next to a store's first round cut while it is written and committed in the
 # background (``round-cuts/<cut_id>`` + this suffix, a file); see discard_unfinished_first_cut
