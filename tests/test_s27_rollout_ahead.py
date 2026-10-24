@@ -125,6 +125,39 @@ def test_a_batch_started_before_an_unannounced_stop_is_discarded(tmp_path):
     assert last["rollout_id"] == 2 and last["discarded"] is True
 
 
+def test_hf_exports_run_while_the_next_batch_generates(tmp_path):
+    # --rl-export-hf-rounds under rollout ahead: the export of a round runs after its sync
+    # boundary with the next batch still generating, then the driver joins that batch and
+    # publishes; the final export (an unannounced stop) runs before the batch in flight is
+    # discarded and before the last publication (the final ACK).
+    from yeto.rl.engine.hf_export import COMPLETE_MARKER, ExportRounds, HfRoundExports
+    from yeto.rl.engine.resume import CheckpointStore
+
+    driver, engine = _driver(tmp_path, sync=_UnannouncedStop(3))
+
+    def write(rollout_id, directory):
+        engine.calls.append(("hf_export", rollout_id))
+        directory.mkdir(parents=True)
+        (directory / "config.json").write_text("{}")
+        (directory / COMPLETE_MARKER).touch()
+
+    driver.hf_exports = HfRoundExports(ExportRounds((1,), final=True), CheckpointStore(tmp_path / "store"),
+                                       write, staging=tmp_path / "staging")
+    driver.run()
+
+    calls = [c for c in engine.calls if c[0] in ("generate", "generate_done", "train", "publish", "hf_export")]
+    assert calls == [
+        ("publish", 0), ("generate", 0), ("generate", 1), ("train", 0),
+        ("hf_export", 0), ("generate_done", 1), ("publish", 1),
+        ("generate", 2), ("train", 1), ("generate_done", 2), ("publish", 2),
+        ("generate", 3), ("train", 2), ("hf_export", 2), ("generate_done", 3), ("publish", 3),
+    ]
+    events = _events(tmp_path)
+    assert [(e["rollout_id"], e["final"], e["ok"]) for e in events if e["event"] == "rl_hf_export"] == [
+        (0, False, True), (2, True, True)]
+    assert [e for e in events if e["event"] == "rl_rollout_ahead"][-1]["discarded"] is True
+
+
 def test_serial_rounds_are_unchanged_without_rollout_ahead(tmp_path):
     driver, engine = _driver(tmp_path, rounds=2, limit=0, ahead=0)
     driver.run()
