@@ -472,16 +472,26 @@ class MilesChunkedFullParameterAdapter:
         policy_version: int,
         local_step_generation: int,
         defer_payload: bool = False,
+        lazy: bool = False,
     ) -> ReferencedPolicyCut:
         """``defer_payload``: Miles hashes every fragment (same descriptors,
         same cut identity) but stores none in Ray; :meth:`materialize` stores
-        the fragments a push needs while the masters still hold them."""
+        the fragments a push needs while the masters still hold them.
 
+        ``lazy`` (with ``defer_payload``): Miles reads no master; every row
+        carries a label instead of a content hash, so the cut identity names
+        this capture without proving its content.  :meth:`materialize` with
+        ``describe=True`` returns the content descriptor of each fragment it
+        stores (:func:`lazy_capture_supported`)."""
+
+        if lazy and not defer_payload:
+            raise ValueError("a lazy capture must defer its payload")
         cut = await group.export_full_parameter_chunked_cut(
             policy_version,
             local_step_generation,
             max_chunk_bytes=self.max_chunk_bytes,
             **({"defer_payload": True} if defer_payload else {}),
+            **({"lazy": True} if lazy else {}),
         )
         return self.validate_cut(cut, policy_version, local_step_generation)
 
@@ -507,21 +517,34 @@ class MilesChunkedFullParameterAdapter:
         group: MilesChunkedFullParameterGroup,
         cut: ReferencedPolicyCut,
         fragment_ids: Sequence[int],
-    ) -> tuple[int, ...]:
+        *,
+        describe: bool = False,
+    ) -> dict[int, Any]:
         """Store the deferred fragments ``fragment_ids`` of ``cut`` in Ray.
 
         The owner ranks export them again from their masters, refuse when the
         masters changed since the cut, and check the bytes against the cut's
         descriptors; the refs then replace the markers in ``cut``'s rows (the
-        cut identity does not change).  Returns the fragments stored."""
+        cut identity does not change).  Returns ``{fragment_id: descriptor}``
+        for the fragments stored: the row's descriptor, or with ``describe``
+        the content descriptor Miles computed (required for a lazy cut,
+        whose rows carry labels; a reader of the stored chunks passes it as
+        ``local_descriptor``)."""
 
         deferred = self.deferred_fragment_ids(cut)
         wanted = tuple(sorted({fragment_id for fragment_id in fragment_ids if fragment_id in deferred}))
         if not wanted:
-            return ()
-        stored = await group.materialize_full_parameter_fragments(cut.transport_cut, wanted)
+            return {}
+        if describe:
+            described = await group.materialize_full_parameter_fragments(
+                cut.transport_cut, wanted, return_descriptors=True)
+            stored = {fragment_id: row[1] for fragment_id, row in described.items()}
+        else:
+            stored = await group.materialize_full_parameter_fragments(cut.transport_cut, wanted)
+            described = None
         if set(stored) != set(wanted):
             raise RuntimeError("Miles materialized the wrong full-parameter fragments")
+        descriptors: dict[int, Any] = {}
         for shard in cut.transport_cut.shards:
             for descriptor, references in zip(shard.fragments, shard.chunk_refs, strict=True):
                 refs = stored.get(descriptor.fragment_id)
@@ -529,8 +552,12 @@ class MilesChunkedFullParameterAdapter:
                     continue
                 if len(refs) != len(references):
                     raise RuntimeError("Miles materialized a fragment with the wrong chunk count")
+                content = descriptor if described is None else described[descriptor.fragment_id][0]
+                if not _same_fragment_geometry(descriptor, content):
+                    raise RuntimeError("Miles described a materialized fragment with another geometry")
                 references[:] = refs
-        return wanted
+                descriptors[descriptor.fragment_id] = content
+        return descriptors
 
     def validate_cut(
         self,
@@ -600,13 +627,16 @@ class MilesChunkedFullParameterAdapter:
         local_fragment_id: int,
         *,
         ray_module=None,
+        local_descriptor: Any = None,
     ) -> Callable[[], Any]:
         """Stream ``local - authoritative`` for one arbitrary local horizon.
 
         The authoritative fragment may have arrived independently of the
         learner's current complete cut.  Miles validates its exact owner,
         plan, chunk geometry, values, and refs while keeping both operands
-        reference-backed.
+        reference-backed.  ``local_descriptor``: the content descriptor
+        :meth:`materialize` returned for a lazy row (the local chunks are
+        checked against it instead of the row's labels).
         """
 
         from miles.ray.full_parameter_transport import (
@@ -636,6 +666,8 @@ class MilesChunkedFullParameterAdapter:
         ):
             raise ValueError("authoritative fragment provenance changed")
 
+        override = {} if local_descriptor is None else {"local_descriptor": local_descriptor}
+
         def parts():
             return iter_full_parameter_authoritative_fragment_delta_parts(
                 local.transport_cut,
@@ -646,6 +678,7 @@ class MilesChunkedFullParameterAdapter:
                 authoritative_descriptor=stored.descriptor,
                 authoritative_refs=stored.refs,
                 ray_module=ray_module,
+                **override,
             )
 
         return parts
@@ -717,8 +750,12 @@ class MilesChunkedFullParameterAdapter:
         role: str,
         expected_local_step_generation: int,
         expected_optimizer_steps: int,
+        check_model: bool = True,
     ) -> LocalStepReceipt:
-        """Bind one actor or critic local round to exact rank receipts."""
+        """Bind one actor or critic local round to exact rank receipts.
+
+        ``check_model=False`` (only before a lazy capture): the ranks skip
+        their whole-model model/master comparison."""
 
         if role not in {"actor", "critic"}:
             raise ValueError("Miles local-round role is unsupported")
@@ -753,6 +790,7 @@ class MilesChunkedFullParameterAdapter:
             await group.record_full_parameter_local_step(
                 base_policy_version=anchor.policy_version,
                 rollout_id=rollout_id,
+                **({} if check_model else {"check_model": False}),
             )
         )
         expected_topologies = {manifest.topology for manifest in self.manifests}
@@ -1132,6 +1170,30 @@ def defer_capture_supported(group: Any) -> bool:
              or _takes_parameter(group.materialize_full_parameter_fragments, "fragment_ids") is True)
     )
     return _report_feature("deferred capture", enabled, "group and local Miles transport")
+
+
+LAZY_CAPTURE_ENV = "YETO_FULL_PARAMETER_LAZY_CAPTURE"
+
+
+def lazy_capture_supported(group: Any) -> bool:
+    """Lazy capture: a local round's capture reads no master (labels, no
+    hash) and its receipt skips the whole-model model/master check; each
+    pushed fragment is hashed, NaN-checked and model-checked when it is
+    materialized.  Needs the deferred capture and the Miles ``lazy_export``
+    transport.  ``YETO_FULL_PARAMETER_LAZY_CAPTURE=0`` keeps hashing every
+    fragment every round."""
+
+    import os
+
+    if os.environ.get(LAZY_CAPTURE_ENV, "1") == "0":
+        return _report_feature("lazy capture", False, f"{LAZY_CAPTURE_ENV}=0")
+    enabled = (
+        defer_capture_supported(group)
+        and transport_supports(group, "export_full_parameter_chunked_cut", "lazy", "lazy_export")
+        and transport_supports(group, "materialize_full_parameter_fragments", "return_descriptors", "lazy_export")
+        and transport_supports(group, "record_full_parameter_local_step", "check_model", "lazy_export")
+    )
+    return _report_feature("lazy capture", enabled, "group and local Miles transport")
 
 
 def optimizer_proof_without_model_check_supported(group: Any) -> bool:

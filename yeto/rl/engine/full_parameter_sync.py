@@ -1390,6 +1390,10 @@ class FullParameterSync(RoundCutHooks):
         boundary, still running, and the worker seconds they took)."""
         fields: dict[str, object] = {f"sync/boundary_{name}_s": round(value, 3)
                                      for name, value in self._phase_seconds.items()}
+        # S27 G-AY: only on a round whose capture read no master (the policy
+        # hash of that round is a label, not a content hash).
+        if getattr(self.actor, "last_capture_lazy", False) is True:
+            fields["sync/capture_lazy"] = True
         counters = self.pairing.push_job_counters()
         fields["sync/push_background"] = bool(counters)
         if counters:
@@ -1593,7 +1597,11 @@ class FullParameterSync(RoundCutHooks):
         del rollout_id, policy_hash
         if self.terminal:
             self.finished = self.pairing.acknowledge_final()
-            driver.emit("rl_full_parameter_final_ack", acknowledged=self.finished)
+            # S27 G-AY: only when the islands ACK the final manifest without
+            # downloading the final parameters (they stay with the syncer).
+            final_cut = getattr(getattr(self.actor, "config", None), "final_cut", "download")
+            driver.emit("rl_full_parameter_final_ack", acknowledged=self.finished,
+                        **({"sync/final_cut": final_cut} if final_cut != "download" else {}))
 
     def finish(self, driver: IslandDriver) -> None:
         del driver

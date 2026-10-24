@@ -345,7 +345,13 @@ def test_background_pushes_keep_every_value_bit_identical_to_synchronous_pushes(
         assert bits(got) == bits(want)
 
 
-def _run_miles(monkeypatch, *, background: bool, horizon: int = 1):
+CONTRACT_FEATURES = frozenset({"skip_resident", "deferred_export", "optimizer_state_check_model"})
+
+
+def _run_miles(monkeypatch, *, background: bool, horizon: int = 1, trainer_base=None,
+               features=CONTRACT_FEATURES, final_cut: str = "download"):
+    """``trainer_base``: the trainer fake (default the Miles deferred-export
+    contract); ``features``: the local Miles transport features."""
     import test_s27_sync_fast_miles_role_stream as fast
 
     from yeto.rl.adapters.miles.full_parameter import role_stream as role_stream_module
@@ -360,8 +366,7 @@ def _run_miles(monkeypatch, *, background: bool, horizon: int = 1):
     monkeypatch.setenv(sync_module.BACKGROUND_PUSH_ENV, "1" if background else "0")
     for env in (DEFER_CAPTURE_ENV, sync_module.BATCH_APPLY_ENV, SKIP_RESIDENT_ENV):
         monkeypatch.setenv(env, "1")
-    monkeypatch.setattr(adapter_module, "_local_transport_features",
-                        lambda: frozenset({"skip_resident", "deferred_export", "optimizer_state_check_model"}))
+    monkeypatch.setattr(adapter_module, "_local_transport_features", lambda: frozenset(features))
     rounds = 4
     generator = torch.Generator().manual_seed(41)
 
@@ -383,7 +388,7 @@ def _run_miles(monkeypatch, *, background: bool, horizon: int = 1):
             _wait_jobs(pairing)
         client.deliver()
 
-    class _Trainer(fast._MilesContractTrainer):
+    class _Trainer(trainer_base or fast._MilesContractTrainer):
         async def record_full_parameter_local_step(self, **kwargs):
             delivered_before_training()
             return await super().record_full_parameter_local_step(**kwargs)
@@ -403,7 +408,7 @@ def _run_miles(monkeypatch, *, background: bool, horizon: int = 1):
     from dataclasses import replace
 
     stream = MilesFullParameterRoleStream(replace(config, total_fragment_steps=rounds * fast.P,
-                                                  local_horizon=horizon),
+                                                  local_horizon=horizon, final_cut=final_cut),
                                           ray_module=ray)
     profile = FullParameterSyncProfile.from_configs({"actor": stream.config})
     session = FullParameterSync(
@@ -422,7 +427,7 @@ def _run_miles(monkeypatch, *, background: bool, horizon: int = 1):
             break
     session.finish(driver)
     return SimpleNamespace(trainer=trainer, syncer=syncer, stream=stream, stops=stops,
-                           pairing=session.pairing, client=client)
+                           pairing=session.pairing, client=client, driver=driver)
 
 
 class _EncodeAheadClient:
@@ -445,6 +450,11 @@ class _EncodeAheadClient:
 
     def __getattr__(self, name):
         return getattr(self._base, name)
+
+    def wait_for_final_manifest(self, timeout):
+        """A manifest-only final cut: the version manifest, no fragments."""
+        manifest, _fragments = self._base.wait_for_final_fragments(timeout)
+        return manifest
 
     def encode_push_parts(self, fragment_id, parts, *, timings=None):
         data = b"".join(bytes(part) for part in parts)
