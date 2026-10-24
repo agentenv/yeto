@@ -11,6 +11,7 @@ Moved out of ``yeto/rl/engine/resume.py`` (the neutral core must not import
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -34,14 +35,39 @@ with volume.batch_upload(force=True) as batch:
     for kind, local, remote in json.loads(sys.argv[2]):
         (batch.put_directory if kind == "dir" else batch.put_file)(local, remote)
 """
-_REMOVE_SCRIPT = """
-import sys, modal
-try:
-    modal.Volume.from_name(sys.argv[1]).remove_file(sys.argv[2], recursive=True)
-except Exception as error:  # a missing path is not an error
-    if not (isinstance(error, FileNotFoundError) or "not found" in str(error).lower()):
-        raise
-"""
+
+
+def _volume_has(volume, remote):
+    """Whether the absolute Volume path ``remote`` exists. Each directory is listed
+    from the Volume root down, so only directories known to exist are listed."""
+    current = "/"
+    for name in [part for part in remote.split("/") if part]:
+        if name not in {entry.path.rstrip("/").rsplit("/", 1)[-1] for entry in volume.listdir(current)}:
+            return False
+        current = current.rstrip("/") + "/" + name
+    return True
+
+
+def _remove_if_present(volume, remote):
+    """Remove ``remote`` recursively; a missing path is no error. Modal reports a
+    missing path with several types (``FileNotFoundError``, ``NotFoundError``,
+    ``InvalidError`` "No such file or directory") that also carry other errors, so a
+    failure is not classified by its type or text: the path is looked up, and the
+    error is raised only when the path is still there."""
+    try:
+        volume.remove_file(remote, recursive=True)
+    except Exception:
+        if _volume_has(volume, remote):
+            raise
+
+
+# the same removal in the Modal runner's interpreter (it has the Modal client, not yeto)
+_REMOVE_SCRIPT = "\n".join([
+    "import sys, modal",
+    inspect.getsource(_volume_has),
+    inspect.getsource(_remove_if_present),
+    "_remove_if_present(modal.Volume.from_name(sys.argv[1]), sys.argv[2])",
+])
 
 
 def _guard_path(volume: str) -> str:
@@ -184,10 +210,7 @@ class ModalVolumeStore(CheckpointStore):
         if remote is None or not self._direct():
             return super().remove_tree(relative)
         if self._factory is not None:
-            try:
-                self._volume().remove_file(remote, recursive=True)
-            except FileNotFoundError:
-                pass
+            _remove_if_present(self._volume(), remote)
             return
         self._runner_script(_REMOVE_SCRIPT, remote, verb="remove_file")
 

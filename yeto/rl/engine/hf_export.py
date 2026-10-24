@@ -27,6 +27,15 @@ Plain rules:
   directory with the marker is complete and committed: readers (another
   container's mount) read only directories with the marker. The staging copy
   is deleted.
+* Upload failures: removing a directory that is not there is no error (a
+  first export). A failed upload (remove, put, marker) runs again after
+  :data:`UPLOAD_RETRY_S` seconds, :data:`UPLOAD_ATTEMPTS` attempts in all.
+  When the last attempt fails, the staging copy stays on the island's local
+  disk with its marker put back (``staging_kept`` on the tape): one upload of
+  that directory to ``path`` restores the export (a final export also needs
+  ``final.json``). At most :data:`KEEP_FAILED` such copies stay (the oldest
+  goes first; ``staging_dropped``): a Nano copy is about 63 GB. They live on
+  the container's disk and go with the container.
 * Tape: every export is one ``rl_hf_export`` (:func:`HfRoundExports.export`
   lists the fields; ``final`` marks the final one, ``final.json`` is the
   pointer in the store), ``ok`` false with ``error`` when it failed. A failed
@@ -57,6 +66,9 @@ FINAL = "final"
 # marker in the staging directory, and the reader's marker in the store
 COMPLETE_MARKER = ".complete"
 FINAL_POINTER = "final.json"
+UPLOAD_ATTEMPTS = 3  # one upload and two retries
+UPLOAD_RETRY_S = (10.0, 30.0)  # the waits before the second and the third attempt
+KEEP_FAILED = 2  # staging copies kept after failed uploads, per island process
 
 
 @dataclass(frozen=True)
@@ -123,12 +135,22 @@ class HfRoundExports:
     commits it)."""
 
     def __init__(self, rounds: ExportRounds, store: Any, write: Callable[[int, Path], None], *,
-                 staging: Path, clock: Callable[[], float] = time.monotonic) -> None:
+                 staging: Path, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep,
+                 upload_attempts: int = UPLOAD_ATTEMPTS,
+                 retry_s: tuple[float, ...] = UPLOAD_RETRY_S, keep_failed: int = KEEP_FAILED) -> None:
+        if int(upload_attempts) < 1:
+            raise ValueError("upload_attempts must be >= 1")
         self.rounds = rounds
         self.store = store
         self.write = write
         self.staging = Path(staging)
         self.clock = clock
+        self.sleep = sleep
+        self.upload_attempts = int(upload_attempts)
+        self.retry_s = tuple(float(s) for s in retry_s) or (0.0,)
+        self.keep_failed = int(keep_failed)
+        self._kept: list[Path] = []  # staging copies of failed uploads, oldest first
 
     def due(self, rollout_id: int, *, final: bool) -> bool:
         return self.rounds.due(rollout_id, final=final)
@@ -137,8 +159,10 @@ class HfRoundExports:
         """Write, put and time the export of round ``rollout_id + 1`` (module doc).
         Returns the fields of its ``rl_hf_export``: round, final, policy_version,
         path (the directory in the store), store_kind, ok, files, bytes (the
-        model files, marker excluded), write_s, upload_s, seconds, and error
-        (``write: ...`` or ``upload: ...``) when not ok."""
+        model files, marker excluded), write_s, upload_s, seconds,
+        upload_attempts, and error (``write: ...`` or ``upload: ...``) when not
+        ok; upload_errors (the errors of attempts retried), staging_kept and
+        staging_dropped (module doc) when they apply."""
         round_number = int(rollout_id) + 1
         relative = f"round-{round_number}"
         local = self.staging / relative
@@ -153,21 +177,54 @@ class HfRoundExports:
             _take_marker(local)
             written = self.clock()
             record["files"], record["bytes"] = _directory_bytes(local)
-            self.store.remove_tree(relative)  # an older export of this round (a relaunch)
-            self.store.put_directory(local, relative)
-            self.store.put_files(self._completion(relative, record))
+            self._upload(local, relative, record)
         except Exception as error:  # noqa: BLE001 - the export is evidence (module doc)
             stage = "write" if written is None else "upload"
             record["error"] = f"{stage}: {type(error).__name__}: {error}"[:2000]
         finally:
-            shutil.rmtree(local, ignore_errors=True)
+            if written is not None and "error" in record:
+                self._keep(local, relative, record)
+            else:
+                shutil.rmtree(local, ignore_errors=True)
         ended = self.clock()
         written = ended if written is None else written
         record.setdefault("files", 0)
         record.setdefault("bytes", 0)
+        record.setdefault("upload_attempts", 0)
         record.update(ok="error" not in record, write_s=round(written - started, 3),
                       upload_s=round(ended - written, 3), seconds=round(ended - started, 3))
         return record
+
+    def _upload(self, local: Path, relative: str, record: dict[str, Any]) -> None:
+        """Remove an older directory of this round (a relaunch), put the directory,
+        then its marker (and the final pointer); retried (module doc)."""
+        for attempt in range(1, self.upload_attempts + 1):
+            record["upload_attempts"] = attempt
+            try:
+                self.store.remove_tree(relative)
+                self.store.put_directory(local, relative)
+                self.store.put_files(self._completion(relative, record))
+                return
+            except Exception as error:  # noqa: BLE001 - retried, then raised
+                if attempt == self.upload_attempts:
+                    raise
+                record.setdefault("upload_errors", []).append(f"{type(error).__name__}: {error}"[:500])
+                self.sleep(self.retry_s[min(attempt, len(self.retry_s)) - 1])
+
+    def _keep(self, local: Path, relative: str, record: dict[str, Any]) -> None:
+        """Keep the staging copy of a failed upload, its marker put back, so one
+        upload restores it; drop the oldest beyond ``keep_failed`` (0: keep none)."""
+        if self.keep_failed < 1:
+            shutil.rmtree(local, ignore_errors=True)
+            return
+        marker = self._completion(relative, record)[f"{relative}/{COMPLETE_MARKER}"]
+        (local / COMPLETE_MARKER).write_bytes(marker)
+        record["staging_kept"] = str(local)
+        self._kept = [path for path in self._kept if path != local] + [local]
+        while len(self._kept) > self.keep_failed:
+            dropped = self._kept.pop(0)
+            shutil.rmtree(dropped, ignore_errors=True)
+            record.setdefault("staging_dropped", []).append(str(dropped))
 
     @staticmethod
     def _completion(relative: str, record: dict[str, Any]) -> dict[str, bytes]:
