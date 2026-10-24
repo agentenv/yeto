@@ -272,6 +272,57 @@ def test_full_parameter_sync_at_dp_above_one_needs_whole_masters():
         mc.translate_run_config(cfg, AlgorithmSpec())
 
 
+def _pin_with_sharded_masters(monkeypatch):
+    """A later fork pin that carries the sharded-master commit (S27 G-BE)."""
+    from yeto.rl.adapters.miles import pins
+
+    lineage = (*pins.MILES_FORK_LINEAGE, pins.MILES_DP_SHARDED_MASTER_COMMIT)
+    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", lineage)
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_DP_SHARDED_MASTER_COMMIT)
+
+
+def _dp_full_parameter_config(dp_optimizer: str = "auto"):
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    return dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(dp_optimizer=dp_optimizer))
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_dp_optimizer_falls_back_to_whole_masters_without_the_sharded_pin():
+    # S27 G-BE: the pinned image has no sharded masters yet.
+    from yeto.rl.adapters.miles import run_config_rules
+
+    assert "d50fb04dd or later (distributed optimizer at DP>1)" in run_config_rules.full_parameter_dp_sharded_master_gap()
+    for choice in ("auto", "replicated"):
+        attrs = mc.translate_run_config(_dp_full_parameter_config(choice), AlgorithmSpec()).runtime_attrs
+        assert attrs["use_distributed_optimizer"] is False
+    with pytest.raises(mc.MilesConfigError, match="--rl-dp-optimizer distributed at DP 2 needs Miles d50fb04dd"):
+        mc.translate_run_config(_dp_full_parameter_config("distributed"), AlgorithmSpec())
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_dp_optimizer_keeps_the_distributed_optimizer_with_the_sharded_pin(monkeypatch):
+    from yeto.rl.adapters.miles import run_config_rules
+
+    _pin_with_sharded_masters(monkeypatch)
+    assert run_config_rules.full_parameter_dp_sharded_master_gap() is None
+    for choice in ("auto", "distributed"):
+        attrs = mc.translate_run_config(_dp_full_parameter_config(choice), AlgorithmSpec()).runtime_attrs
+        assert "use_distributed_optimizer" not in attrs  # Miles' default for Adam: distributed
+    attrs = mc.translate_run_config(_dp_full_parameter_config("replicated"), AlgorithmSpec()).runtime_attrs
+    assert attrs["use_distributed_optimizer"] is False
+    offload = dataclasses.replace(_dp_full_parameter_config("distributed"),
+                                  train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    with pytest.raises(mc.MilesConfigError, match="drop --rl-optimizer-offload-fraction"):
+        mc.translate_run_config(offload, AlgorithmSpec())
+
+
+def test_train_memory_reads_the_dp_optimizer():
+    assert rc._train_memory(SimpleNamespace(seq_len=8)).dp_optimizer == "auto"
+    assert rc._train_memory(SimpleNamespace(seq_len=8, rl_dp_optimizer="replicated")).dp_optimizer == "replicated"
+    with pytest.raises(ValueError, match="--rl-dp-optimizer"):
+        rc._train_memory(SimpleNamespace(seq_len=8, rl_dp_optimizer="sharded"))
+
+
 def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     from yeto.rl.adapters.miles import pins, run_config_rules
     from yeto.rl.engine.run_config import full_parameter_layout_problem

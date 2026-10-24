@@ -52,7 +52,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
-from .run_config_rules import full_parameter_dp_replica_gap
+from .run_config_rules import full_parameter_dp_replica_gap, full_parameter_dp_sharded_master_gap
 from . import sampler_snapshot
 from .binding import filter_argv
 
@@ -438,6 +438,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.max_tokens_per_gpu": _ok,
     "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
+    "train_memory.dp_optimizer": _ok,  # _full_parameter_optimizer_attrs
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline")},
@@ -1306,12 +1307,13 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
     """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
-    ``sao-streaming-full``) reads one whole FP32 master per parameter on each
-    rank. At DP>1 one rank of each data-parallel replica group owns (exports)
-    a parameter and the other replicas apply its bytes; that needs a Miles pin
-    with data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
-    and a whole master on every replica, so no optimizer offload. A sampler
-    island (``builds_trainer=False``) has no trainer and no such check.
+    ``sao-streaming-full``) reads one FP32 master per parameter. At DP>1 one
+    rank of each data-parallel replica group owns (exports) a parameter and
+    the other replicas apply its bytes; that needs a Miles pin with
+    data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
+    and no optimizer offload. The optimizer at DP>1 follows
+    ``--rl-dp-optimizer`` (:func:`_dp_optimizer_attrs`). A sampler island
+    (``builds_trainer=False``) has no trainer and no such check.
 
     * No optimizer offload: the non-distributed optimizer, whose masters are
       whole tensors. Miles' ``set_default_megatron_args`` turns the
@@ -1340,9 +1342,9 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
             raise MilesConfigError(f"the full-parameter sync at DP {data_parallel} needs {gap}")
         if offload:
             raise MilesConfigError(
-                f"the full-parameter sync at DP {data_parallel} needs a whole FP32 master on every "
-                "data-parallel rank (the non-distributed optimizer): drop --rl-optimizer-offload-fraction")
-        return {"use_distributed_optimizer": False}
+                f"the full-parameter sync at DP {data_parallel} needs its FP32 masters on the device: "
+                "drop --rl-optimizer-offload-fraction")
+        return _dp_optimizer_attrs(getattr(memory, "dp_optimizer", "auto"), data_parallel)
     if offload:
         if not _miles_reads_distributed_optimizer_masters():
             raise MilesConfigError(
@@ -1351,6 +1353,25 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
                 f"the pinned image ships {MILES_NEXT_COMMIT[:9]} (or use a no-sync trainer island)")
         return {}
     return {"use_distributed_optimizer": False}
+
+
+def _dp_optimizer_attrs(choice: str, data_parallel: int) -> dict[str, Any]:
+    """The optimizer of a full-parameter trainer at DP>1 (``--rl-dp-optimizer``).
+
+    ``distributed``: Miles' default distributed optimizer; each rank keeps one
+    FP32 range of every parameter and the sync reads and writes those ranges
+    (needs ``run_config_rules.full_parameter_dp_sharded_master_gap`` to be
+    None). ``replicated``: the non-distributed optimizer, whole FP32 masters
+    on every rank (the S27 G-AX replica path). ``auto``: distributed when the
+    pin supports it. Both give the same synced values (Miles CPU tests); the
+    distributed one keeps 1/DP of the masters and Adam moments per rank."""
+
+    gap = full_parameter_dp_sharded_master_gap()
+    if choice == "replicated" or (choice == "auto" and gap is not None):
+        return {"use_distributed_optimizer": False}
+    if gap is not None:
+        raise MilesConfigError(f"--rl-dp-optimizer distributed at DP {data_parallel} needs {gap}")
+    return {}
 
 
 def _miles_reads_distributed_optimizer_masters() -> bool:

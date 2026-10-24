@@ -12,6 +12,12 @@ Checks: the layout lists every parameter exactly once; every replica of a
 parameter ends bit-identical (masters and model) and equal to the merged
 fragment bytes.
 
+S27 G-BE: the same ranks under a stand-in for Megatron's distributed
+optimizer (each replica group keeps its parameters in one padded flat buffer
+per group, split contiguously; each rank steps the FP32 ``main_param`` of its
+range) give yeto the same layout hash and initial cut, and the apply writes
+the same masters and model bits.
+
 Needs Miles with data-parallel replicas (``importorskip``).
 """
 
@@ -67,6 +73,7 @@ class _Rank:
             expert = ep_rank * EXPERTS_PER_RANK + local
             shapes[f"decoder.layers.0.mlp.experts.linear_fc1.weight{expert}"] = (6, 4)
             shapes[f"decoder.layers.0.mlp.experts.linear_fc2.weight{expert}"] = (4, 6)
+        self.shapes = shapes
         named = []
         for name, shape in shapes.items():
             parameter = torch.nn.Parameter(torch.zeros(shape, dtype=torch.bfloat16))
@@ -86,6 +93,47 @@ class _Rank:
         self.opt_param_scheduler = SimpleNamespace(num_steps=0)
         self.weights_backuper = SimpleNamespace(backup=lambda role: None)
         self._last_rollout_id = 0
+
+
+class _ShardedRank(_Rank):
+    """The same rank under a Megatron-like distributed optimizer (sharded FP32 masters)."""
+
+    def __init__(self, rank: int) -> None:
+        super().__init__(rank)
+        groups = {
+            "dense": (self.replication.dense_ranks, [n for n in sorted(self.shapes) if ".experts." not in n]),
+            "expert": (self.replication.expert_ranks, [n for n in sorted(self.shapes) if ".experts." in n]),
+        }
+        named, wrappers, self.ranges = [], [], {}
+        for ranks, names in groups.values():
+            total = sum(torch.Size(self.shapes[name]).numel() for name in names)
+            shard = -(-total // len(ranks))
+            low = ranks.index(rank) * shard
+            buffer, offset = torch.zeros(shard * len(ranks), dtype=torch.bfloat16), 0
+            models, views, mains = [], [], []
+            for name in names:
+                shape, numel = self.shapes[name], torch.Size(self.shapes[name]).numel()
+                parameter = torch.nn.Parameter(buffer[offset:offset + numel].view(shape))
+                parameter.data.copy_(_initial(name, shape).to(torch.bfloat16))
+                parameter.main_param_sharded = True
+                parameter.main_param = None
+                if ".experts." in name:
+                    parameter.allreduce = False
+                start, stop = max(low, offset) - offset, min(low + shard, offset + numel) - offset
+                if start < stop:
+                    parameter.main_param = _initial(name, shape).reshape(-1)[start:stop].clone()
+                    models.append(parameter)
+                    views.append(parameter.detach().view(-1)[start:stop])
+                    mains.append(parameter.main_param)
+                    self.ranges[name] = (start, stop)
+                named.append((name, parameter))
+                offset += numel
+            wrappers.append(SimpleNamespace(
+                optimizer=SimpleNamespace(param_groups=[{"params": mains}],
+                                          state={main: {"exp_avg": torch.zeros_like(main)} for main in mains}),
+                model_float16_groups=[models], shard_float16_groups=[views]))
+        self.named = tuple(sorted(named))
+        self.optimizer = SimpleNamespace(chained_optimizers=wrappers)
 
 
 class _FakeRay:
@@ -135,7 +183,8 @@ class _TrainerController:
 
 
 @pytest.fixture
-def trainer(monkeypatch):
+def trainers(monkeypatch):
+    """``make(rank_type)`` -> (controller, ranks, fake ray); one Ray stand-in for every trainer."""
     current, ray = {}, _FakeRay()
     monkeypatch.setattr(fps, "full_parameter_topology", lambda: current["rank"].topology)
     monkeypatch.setattr(fps, "full_parameter_replication", lambda: current["rank"].replication)
@@ -144,8 +193,17 @@ def trainer(monkeypatch):
         parameter.data.copy_(parameter.main_param.to(torch.bfloat16)) for _name, parameter in actor.named])
     monkeypatch.setattr(fps, "_resolve_ray_module", lambda _module: ray)
     monkeypatch.setattr(transport, "_resolve_ray_module", lambda _module: ray)
-    ranks = [_Rank(rank) for rank in range(WORLD)]
-    return _TrainerController(ranks, current), ranks, ray
+
+    def make(rank_type):
+        ranks = [rank_type(rank) for rank in range(WORLD)]
+        return _TrainerController(ranks, current), ranks, ray
+
+    return make
+
+
+@pytest.fixture
+def trainer(trainers):
+    return trainers(_Rank)
 
 
 def _merged(fragment_id: int, numel: int) -> torch.Tensor:
@@ -190,3 +248,48 @@ def test_dp_replicas_cover_every_parameter_once_and_apply_identically(trainer):
     copies = {name: sum(name in dict(rank.named) for rank in ranks) for name in held}
     assert {copies[name] for name in DENSE} == {WORLD}
     assert {count for name, count in copies.items() if ".experts." in name} == {WORLD // EP}
+
+
+def _initialize(group):
+    return asyncio.run(MilesChunkedFullParameterAdapter.initialize(
+        group, policy_version=0, algorithm="grpo", components=(ComponentIdentity("actor", "a" * 40, "b" * 64),),
+        minimum_fragments=WORLD, max_fragment_bytes=64, max_chunk_bytes=32))
+
+
+def _apply_merged(adapter, initial, group, ray) -> None:
+    sink = adapter.fragment_sink(initial, ray_module=ray)
+    stored = [sink(fragment_id, adapter._fragment_version(1, fragment_id),
+                   _merged(fragment_id, fragment.numel).numpy().tobytes())
+              for fragment_id, fragment in enumerate(adapter.layout.fragments.fragments)]
+    target = adapter.assemble_target(initial, target_policy_version=1, fragments=stored)
+    assert asyncio.run(adapter.apply(group, target, commit_token="dp-merge-1")) == adapter.expected_parameter_tensor_count
+
+
+def test_sharded_masters_keep_the_yeto_layout_and_apply_the_same_bits(trainers):
+    from miles.ray.full_parameter_transport import full_parameter_chunked_cut_identity
+
+    whole_group, whole_ranks, ray = trainers(_Rank)
+    sharded_group, sharded_ranks, _ray = trainers(_ShardedRank)
+    whole_adapter, whole_initial = _initialize(whole_group)
+    sharded_adapter, sharded_initial = _initialize(sharded_group)
+    assert sharded_group.full_parameter_sharded_master_topologies  # the transport routes contributions
+    assert sharded_adapter.layout.layout_hash == whole_adapter.layout.layout_hash
+    assert sharded_adapter.layout.specs == whole_adapter.layout.specs
+    assert (full_parameter_chunked_cut_identity(sharded_initial.transport_cut)
+            == full_parameter_chunked_cut_identity(whole_initial.transport_cut))
+    # Some dense parameter is split across ranks, and some rank holds none of one.
+    assert any(0 < stop - start < dict(rank.named)[name].numel()
+               for rank in sharded_ranks for name, (start, stop) in rank.ranges.items())
+    assert any(name not in rank.ranges for rank in sharded_ranks for name, _parameter in rank.named)
+
+    _apply_merged(whole_adapter, whole_initial, whole_group, ray)
+    _apply_merged(sharded_adapter, sharded_initial, sharded_group, ray)
+    for whole_rank, sharded_rank in zip(whole_ranks, sharded_ranks, strict=True):
+        whole_named = dict(whole_rank.named)
+        for name, parameter in sharded_rank.named:
+            expected = whole_named[name]
+            assert torch.equal(parameter.detach().view(torch.int16), expected.detach().view(torch.int16)), name
+            if name in sharded_rank.ranges:
+                start, stop = sharded_rank.ranges[name]
+                master = expected.main_param.reshape(-1)[start:stop]
+                assert torch.equal(parameter.main_param.view(torch.int32), master.view(torch.int32)), name
