@@ -97,6 +97,33 @@ def test_verify_miles_revision_accepts_ports_group(tmp_path, monkeypatch):
     assert verify(tmp_path) == tmp_path.resolve()
 
 
+@pytest.mark.parametrize("origin", [
+    "https://github.com/new-home/miles",
+    "https://github.com/new-home/miles.git",
+    # an image built before a move keeps the former origin in /root/miles
+    rl.MILES_NEXT_REPOSITORY,
+    rl.MILES_NEXT_REPOSITORY + ".git/",
+])
+def test_verify_miles_revision_accepts_current_and_former_origin(tmp_path, monkeypatch, origin):
+    from yeto.rl.adapters.miles.pins import MilesRevisionPins
+
+    moved = MilesRevisionPins("https://github.com/new-home/miles", rl.MILES_NEXT_COMMIT,
+                              (rl.MILES_NEXT_REPOSITORY,))
+    verify, _ = _fake_git(monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT, origin=origin)
+    assert verify(tmp_path, expected=moved) == tmp_path.resolve()
+    assert not moved.accepts_origin("https://github.com/radixark/miles")
+
+
+def test_island_commit_override_keeps_the_pinned_origins():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.island_entry import miles_revision_pins
+
+    pins = miles_revision_pins(SimpleNamespace(miles_commit="a" * 40))
+    assert pins.repository == rl.MILES_NEXT_REPOSITORY
+    assert pins.former_repositories == rl.MILES_NEXT_PINS.former_repositories
+
+
 def test_verify_miles_revision_rejects_a_branch_checkout(tmp_path, monkeypatch):
     verify, responses = _fake_git(
         monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT, origin=rl.MILES_NEXT_REPOSITORY

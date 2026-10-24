@@ -12,12 +12,26 @@ class MilesRevisionPins(NamedTuple):
 
     repository: str
     commit: str
+    # Origins that also identify ``repository`` (the fork's earlier homes).
+    # Images already built keep the origin they were built with.
+    former_repositories: tuple[str, ...] = ()
+
+    def accepts_origin(self, origin: str) -> bool:
+        """True when ``origin`` (``.git`` suffix and trailing ``/`` ignored) names this fork."""
+
+        normalized = origin.rstrip("/").removesuffix(".git").rstrip("/")
+        return normalized in (self.repository, *self.former_repositories)
 
 MILES_PEFT_VERSION = "0.20.0"
 
 # Ports engine (the only Miles engine): upstream Miles plus yeto compatibility
 # commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
 MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
+# Earlier homes of the fork that pinned images may still carry as their
+# /root/miles origin. Empty while the S27 commits (d1616ba12 and its lineage)
+# live only on michaellchung/miles; the move to agentenv/miles lists the
+# michaellchung URL here.
+MILES_NEXT_FORMER_REPOSITORIES: tuple[str, ...] = ()
 MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # yeto/ports (= yeto-elastic-m1-m6 after four review rounds): run_plugin,
 # --worker-dynamic-port-start, the elastic M1-M6 changes and the LoRA bridge
@@ -174,7 +188,9 @@ TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
 TMS_PRELOAD_BASE_BINARY_SHA256 = (
     "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
 )
-MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
+MILES_NEXT_PINS = MilesRevisionPins(
+    MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, MILES_NEXT_FORMER_REPOSITORIES
+)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
 # radixark 9e4260d, sglang v0.5.20 base): the base MILES_NEXT_IMAGE extends
 # (its linux/amd64 manifest).  Public.
