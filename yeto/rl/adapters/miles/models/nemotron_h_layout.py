@@ -24,9 +24,17 @@ TP2/EP2 (S27 ``s27-gr-probe-b``) gives 3264 specs and 15,792,996,640 scalars
 per rank, the two Miles per-rank manifest hashes, 60 fragments and the layout
 hash ``0ec93ba8...``.
 
-Scope (refused outside it): DP=1 and CP=1 with EP equal to TP, so every expert
-has exactly one owner (:mod:`yeto.rl.moe_layout`); expert TP 1; untied
-embeddings; no MTP parameters (the Miles Nemotron-H bridge drops the MTP block
+Data-parallel replicas (Miles 921cde8c7, ``full_parameter_state._replica_owners``):
+at DP>1 every rank of a replica group holds the same parameters and exactly one
+of them lists each in its manifest. A dense parameter's group is the stage's
+data-parallel group; it goes to the least-loaded rank, largest parameter first
+(ties: name, then group order). With EP = DP (expert data-parallel size 1) every
+rank owns its own experts. :func:`rank_manifests` applies the same rule, so the
+manifests list each parameter once.
+
+Scope (refused outside it): CP=1; at DP=1 EP equal to TP, at DP>1 TP 1 and EP
+equal to DP, so every expert has exactly one owner (:mod:`yeto.rl.moe_layout`);
+expert TP 1; untied embeddings; no MTP parameters (the Miles Nemotron-H bridge drops the MTP block
 unless ``MILES_NEMOTRONH_KEEP_MTP`` is set); the vision part of a VL
 checkpoint is not built (Miles ``MilesNemotronHLanguageOnlyBridge``).
 
@@ -117,7 +125,8 @@ class NemotronHGeometry:
 
 @dataclass(frozen=True)
 class RankManifest:
-    """One training rank's FP32 master specs: ``(Miles global name, shape)`` in name order."""
+    """One training rank's FP32 master specs: ``(Miles global name, shape)`` in name
+    order. At DP>1 only the parameters the rank owns (module doc)."""
 
     tp_rank: int
     tp_size: int
@@ -126,6 +135,8 @@ class RankManifest:
     ep_rank: int
     ep_size: int
     specs: tuple[tuple[str, tuple[int, ...]], ...]
+    dp_rank: int = 0
+    dp_size: int = 1
 
     @property
     def topology(self) -> dict[str, int]:
@@ -135,7 +146,7 @@ class RankManifest:
             "pp_rank": self.pp_rank, "pp_size": self.pp_size,
             "ep_rank": self.ep_rank, "ep_size": self.ep_size,
             "cp_rank": 0, "cp_size": 1,
-            "dp_rank": 0, "dp_size": 1,
+            "dp_rank": self.dp_rank, "dp_size": self.dp_size,
         }
 
     @property
@@ -227,11 +238,14 @@ def _layer_specs(g: NemotronHGeometry, symbol: str, layer: int, *, tp: int, ep: 
     raise NemotronHLayoutError(f"unknown layer symbol {symbol!r}")
 
 
-def rank_manifests(geometry: NemotronHGeometry, *, tp: int, ep: int, pp: int = 1,
+def rank_manifests(geometry: NemotronHGeometry, *, tp: int, ep: int, pp: int = 1, dp: int = 1,
                    vocab_divisor: int = 128) -> tuple[RankManifest, ...]:
-    """Every training rank's specs at DP=1, CP=1 (module scope), in rank order (pp, tp)."""
-    if tp < 1 or ep < 1 or pp < 1:
+    """Every training rank's specs at CP=1 (module scope), in global rank order:
+    (pp, tp) at DP=1, (pp, dp) at DP>1."""
+    if tp < 1 or ep < 1 or pp < 1 or dp < 1:
         raise NemotronHLayoutError("parallel sizes must be positive")
+    if dp > 1:
+        return _replica_rank_manifests(geometry, ep=ep, pp=pp, dp=dp, tp=tp, vocab_divisor=vocab_divisor)
     if geometry.num_experts and ep != tp:
         raise NemotronHLayoutError(
             f"EP ({ep}) must equal TP x CP ({tp}) at DP=1: otherwise experts are replicated "
@@ -258,6 +272,74 @@ def rank_manifests(geometry: NemotronHGeometry, *, tp: int, ep: int, pp: int = 1
             manifests.append(RankManifest(tp_rank, tp, pp_rank, pp, ep_rank, ep if geometry.num_experts else 1,
                                           tuple(sorted(specs))))
     return tuple(manifests)
+
+
+def _replica_rank_manifests(geometry: NemotronHGeometry, *, tp: int, ep: int, pp: int, dp: int,
+                            vocab_divisor: int) -> tuple[RankManifest, ...]:
+    """DP>1 (module doc): TP 1, EP = DP; each dense parameter owned by one rank of
+    its stage's data-parallel group, each expert by the rank that holds it."""
+    if tp != 1:
+        raise NemotronHLayoutError(f"DP>1 is modelled at TP 1 only (got TP {tp})")
+    if geometry.num_experts and ep != dp:
+        raise NemotronHLayoutError(
+            f"EP ({ep}) must equal DP ({dp}) at TP 1: every expert on one rank "
+            "(expert data-parallel size 1)")
+    if not geometry.num_experts and ep != 1:
+        raise NemotronHLayoutError("a dense model has EP 1")
+    held = {
+        (manifest.pp_rank, ep_rank): manifest
+        for ep_rank in range(ep if geometry.num_experts else 1)
+        for manifest in _held_specs(geometry, pp=pp, ep=ep, ep_rank=ep_rank, vocab_divisor=vocab_divisor)
+    }
+    manifests = []
+    for pp_rank in range(pp):
+        stage = [held[(pp_rank, dp_rank if geometry.num_experts else 0)] for dp_rank in range(dp)]
+        dense = [(name, shape) for name, shape in stage[0].specs if not _is_expert(name)]
+        owner = _balanced_owners(dense, dp)
+        for dp_rank, manifest in enumerate(stage):
+            owned = tuple((name, shape) for name, shape in manifest.specs
+                          if _is_expert(name) or owner[name] == dp_rank)
+            manifests.append(RankManifest(0, 1, pp_rank, pp, dp_rank if geometry.num_experts else 0,
+                                          ep if geometry.num_experts else 1, owned, dp_rank, dp))
+    return tuple(manifests)
+
+
+def _held_specs(geometry: NemotronHGeometry, *, pp: int, ep: int, ep_rank: int,
+                vocab_divisor: int) -> tuple[RankManifest, ...]:
+    """The parameters a TP-1 rank holds (dense and its experts), one manifest per stage."""
+    layers = len(geometry.pattern)
+    per_stage = _divide(layers, pp, "layers")
+    vocab = _padded_vocab(geometry.vocab_size, vocab_divisor, 1)
+    manifests = []
+    for pp_rank in range(pp):
+        specs: list[tuple[str, tuple[int, ...]]] = []
+        if pp_rank == 0:
+            specs.append((_PREFIX + "embedding.word_embeddings.weight", (vocab, geometry.hidden_size)))
+        for layer in range(pp_rank * per_stage, (pp_rank + 1) * per_stage):
+            specs += _layer_specs(geometry, geometry.pattern[layer], layer, tp=1, ep=ep, ep_rank=ep_rank)
+        if pp_rank == pp - 1:
+            specs.append((_PREFIX + "decoder.final_norm.weight", (geometry.hidden_size,)))
+            specs.append((_PREFIX + "output_layer.weight", (vocab, geometry.hidden_size)))
+        manifests.append(RankManifest(0, 1, pp_rank, pp, ep_rank, ep, tuple(sorted(specs))))
+    return tuple(manifests)
+
+
+def _is_expert(name: str) -> bool:
+    """A routed-expert weight (Megatron ``allreduce=False``): its replica group is
+    the expert data-parallel group, not the dense one."""
+    return ".mlp.experts." in name
+
+
+def _balanced_owners(specs: Sequence[tuple[str, tuple[int, ...]]], group: int) -> dict[str, int]:
+    """Miles ``_replica_owners`` for one replica group: largest parameter first
+    (ties by name) to the least-loaded position (ties by group order)."""
+    load = [0] * group
+    owners: dict[str, int] = {}
+    for name, shape in sorted(specs, key=lambda spec: (-prod(spec[1]), spec[0])):
+        position = min(range(group), key=lambda index: (load[index], index))
+        load[position] += prod(shape)
+        owners[name] = position
+    return owners
 
 
 def miles_source_layout_sha256(manifest: RankManifest, role: str = "actor") -> str:

@@ -5,12 +5,15 @@ parallelism reports at its layout check, from the checkpoint's config.json:
 
   python tools/nemotron_h_offline_layout.py CONFIG.json --model-revision SHA \\
       --tp 8 --pp 4 [--matrix-merge rda] [--fragment-max-bytes 2147483648]
+  python tools/nemotron_h_offline_layout.py CONFIG.json --model-revision SHA \\
+      --tp 1 --ep 8 --dp 8 --matrix-merge rda --minimum-fragments 60
 
 The values are what the launcher takes as ``--fragments`` and
 ``--rl-parameter-layout-sha256``. ``config_sha256`` is the sha256 of the file
 given (the island hashes ``<model>/config.json``), so pass the exact file the
 island loads. Scope: :mod:`yeto.rl.adapters.miles.models.nemotron_h_layout`
-(DP=1, CP=1, EP=TP, MTP dropped, vision not built).
+(CP=1; DP=1 with EP=TP, or DP>1 with TP=1 and EP=DP, the Miles data-parallel
+replica owners; MTP dropped, vision not built).
 """
 
 from __future__ import annotations
@@ -32,8 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("config", type=Path, help="the checkpoint's config.json")
     parser.add_argument("--model-revision", required=True, help="HF commit of the checkpoint (40 hex)")
     parser.add_argument("--tp", type=int, required=True)
-    parser.add_argument("--ep", type=int, default=None, help="default: TP (required at DP=1)")
+    parser.add_argument("--ep", type=int, default=None, help="default: TP at DP=1, DP at DP>1")
     parser.add_argument("--pp", type=int, default=1)
+    parser.add_argument("--dp", type=int, default=1, help="data-parallel size (DP>1: Miles replica owners)")
     parser.add_argument("--matrix-merge", default="avg", choices=("avg", "rda"), help="the run's --rl-sync-matrix-merge")
     parser.add_argument("--fragment-max-bytes", type=int, default=2 << 30)
     parser.add_argument("--minimum-fragments", type=int, default=1)
@@ -41,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
 
     raw = args.config.read_bytes()
     geometry = L.NemotronHGeometry.from_hf_config(json.loads(raw))
-    manifests = L.rank_manifests(geometry, tp=args.tp, ep=args.ep or args.tp, pp=args.pp)
+    ep = args.ep or (args.dp if args.dp > 1 else args.tp)
+    manifests = L.rank_manifests(geometry, tp=args.tp, ep=ep, pp=args.pp, dp=args.dp)
     layout = L.offline_layout(
         manifests,
         model_revision=args.model_revision,
@@ -55,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({
         "config_sha256": hashlib.sha256(raw).hexdigest(),
         "model_revision": args.model_revision.lower(),
-        "parallel": {"tp": args.tp, "ep": args.ep or args.tp, "pp": args.pp, "cp": 1, "dp": 1,
+        "parallel": {"tp": args.tp, "ep": ep, "pp": args.pp, "cp": 1, "dp": args.dp,
                      "training_gpus": len(manifests)},
         "layer_counts": geometry.layer_counts(),
         "mtp_layers_dropped": geometry.mtp_layers,

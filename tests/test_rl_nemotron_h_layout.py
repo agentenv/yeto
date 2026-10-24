@@ -10,6 +10,7 @@ checkpoint's safetensors headers (revision fb0ee0bc, headers only).
 from __future__ import annotations
 
 import json
+from math import prod
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,50 @@ def test_nano_tp2_ep2_matches_the_measured_island_layout():
                                   matrix_merge="rda", minimum_fragments=minimum)
         assert layout.fragments.num_fragments == 60
         assert layout.layout_hash == "0ec93ba8a8610c16c086407070cda74650f306d083e4f20f37e50975b9d24270"
+
+
+def test_nano_tp1_ep8_dp8_lists_every_parameter_once():
+    """The S27 closing trainer (TP1/EP8/DP8, Miles data-parallel replicas)."""
+    geometry = L.NemotronHGeometry.from_hf_config(NANO)
+    manifests = L.rank_manifests(geometry, tp=1, ep=8, dp=8)
+    (whole,) = L.rank_manifests(geometry, tp=1, ep=1)  # one rank holding every parameter
+
+    assert [m.shard_id for m in manifests] == [f"tp0-of-1.pp0-of-1.ep{r}-of-8.cp0-of-1.dp{r}-of-8" for r in range(8)]
+    owned = [spec for m in manifests for spec in m.specs]
+    assert sorted(owned) == list(whole.specs)  # each parameter on exactly one rank
+    for rank, manifest in enumerate(manifests):  # every rank owns its own 16 experts of each MoE layer
+        experts = {int(name.rsplit("weight", 1)[1]) for name, _ in manifest.specs if ".mlp.experts." in name}
+        assert experts == set(range(16 * rank, 16 * (rank + 1)))
+    dense = [sum(prod(shape) for name, shape in m.specs if ".mlp.experts." not in name) for m in manifests]
+    largest = max(prod(shape) for name, shape in whole.specs if ".mlp.experts." not in name)
+    assert max(dense) - min(dense) <= largest
+    check_expert_partition([spec for m in manifests for spec in m.parameter_specs()])
+    # Offline only: not yet compared with an island's layout check on GPU.
+    layout = L.offline_layout(manifests, model_revision=NANO_REVISION, config_sha256=NANO_CONFIG_SHA256,
+                              matrix_merge="rda", minimum_fragments=60)
+    assert layout.fragments.num_fragments == 64
+    assert layout.layout_hash == "c2c3cb49ad5a3f22ae4d8613ad5eefc366b9a425f39ed61ce3d68b32c45d62b0"
+
+
+def test_dense_owners_follow_the_miles_replica_rule():
+    """Same owners as Miles' own ``_replica_owners`` (needs the Miles checkout)."""
+    state = pytest.importorskip("miles.backends.megatron_utils.full_parameter_state")
+    geometry = L.NemotronHGeometry.from_hf_config(NANO)
+    manifests = L.rank_manifests(geometry, tp=1, ep=8, dp=8)
+    (held,) = L._held_specs(geometry, pp=1, ep=8, ep_rank=0, vocab_divisor=128)
+
+    class Parameter:
+        def __init__(self, shape, expert):
+            self.shape, self.allreduce = shape, not expert
+
+        def numel(self):
+            return prod(self.shape)
+
+    named = [(name, Parameter(shape, ".mlp.experts." in name)) for name, shape in held.specs]
+    replication = state.FullParameterReplication(global_rank=0, dense_ranks=tuple(range(8)), expert_ranks=(0,))
+    miles = state._replica_owners(named, replication)
+    ours = {name: rank for rank, m in enumerate(manifests) for name, _ in m.specs}
+    assert {name: owner for name, (owner, _) in miles.items()} == {name: ours[name] for name, _ in held.specs}
 
 
 def test_vl_geometry_is_the_language_model():
@@ -93,6 +138,8 @@ def test_vl_offline_layout(tp, pp, fragments, layout_hash):
     ({"tp": 4, "ep": 2}, "EP .* must equal TP"),
     ({"tp": 16, "ep": 16}, "Mamba groups"),
     ({"tp": 8, "ep": 8, "pp": 3}, "layers"),
+    ({"tp": 2, "ep": 8, "dp": 4}, "TP 1 only"),
+    ({"tp": 1, "ep": 4, "dp": 8}, "EP .* must equal DP"),
 ])
 def test_out_of_scope_parallelism_is_refused(kw, match):
     with pytest.raises(L.NemotronHLayoutError, match=match):
