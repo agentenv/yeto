@@ -104,6 +104,9 @@ from .release_plugin import WRITE_FULL_CHECKPOINT, WRITE_LORA_ADAPTER
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
 STAGING_ENV = "YETO_RL_RELEASE_STAGING"  # local directory of staged releases (default: system temp)
+# "miles": a staged release is written by Miles' export_hf (rank 0 writes) instead of
+# every rank (release_plugin.write_full_checkpoint); a fallback that needs no code change
+STAGED_EXPORT_ENV = "YETO_RL_RELEASE_EXPORT"
 ADAPTER_REQUEST_TIMEOUT_S = 600.0
 # A fixed greedy request each LoRA load answers (rl_sampler_policy_loaded.probe):
 # its token log-probabilities show that the served adapter changed with the version.
@@ -716,13 +719,15 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
+    env = os.environ if environ is None else environ
     # module doc: a trainer island stages its full releases unless --rl-release-inline
     staged = config.role == TRAINER and not lora and not config.release_inline
+    all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"
 
     def export(version: int, directory: Path) -> None:
         if lora:
             runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
-        elif staged:  # local disk: every rank writes a share of the files
+        elif all_ranks_write:  # local disk: every rank writes a share of the files
             runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
                 "path": str(directory), "rollout_id": int(version)}))
         else:
@@ -730,7 +735,6 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
 
     staging = None
     if staged:
-        env = os.environ if environ is None else environ
         staging = Path(env.get(STAGING_ENV) or Path(tempfile.gettempdir()) / "yeto-release-staging")
         shutil.rmtree(staging, ignore_errors=True)  # an earlier process's partial stages
     # the upload thread may not drive the driver's event loop (it may be running)

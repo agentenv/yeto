@@ -727,6 +727,15 @@ def test_a_trainer_island_stages_full_releases_and_uploads_them_in_the_backgroun
     assert [f["policy_version"] for f in released] == [1, 2] and all(f["staged"] for f in released)
     assert {"stage_export_s", "wait_previous_s", "upload_s", "latest_s"} <= set(released[1]["release_timings"])
     assert released[1]["visible_at"] >= released[1]["released_at"]
+    exported = []
+    driver.publisher = SimpleNamespace(publish=lambda s: None)
+    fallback = si.wire_policy_releases(
+        driver, miles_args=args, runner=runner,
+        actor_model=SimpleNamespace(export_hf=lambda rollout_id, path: exported.append(rollout_id)),
+        environ={si.STAGING_ENV: str(staging), si.STAGED_EXPORT_ENV: "miles"})
+    br._ACTIVE.pop(br.TRAINER, None)
+    fallback.export(3, staging)
+    assert exported == [3] and fallback.staging == staging  # still staged, Miles writes
 
 
 def test_a_failed_background_upload_fails_the_next_publish(tmp_path):
