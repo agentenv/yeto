@@ -32,8 +32,8 @@ from .topology import (
     rl_island_count, rl_island_placement_args, rl_island_spec, rl_min_nodes, rl_trainer_shape,
 )
 from .syncer import (
-    ROLE_SYNCERS, island_pool, rl_full_parameter_async, rl_needs_critic,
-    rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
+    ROLE_SYNCERS, island_pool, rl_dense_sweep, rl_full_parameter_async, rl_full_parameter_final_cut,
+    rl_needs_critic, rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
 from .peer_recovery import check_peer_recovery
@@ -380,11 +380,22 @@ def rl_sync_mode_applies(args) -> bool:
     """The async mode fills unset options only for a run with two or more
     islands on strict-avg, decoupled or full-parameter, without a critic or
     --experimental-rl-sync; every other run keeps the strict values."""
-    return (getattr(args, "rl_sync_preset", "strict-avg") in (
-                "strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET)
-            and rl_island_count(args) >= 2
-            and not getattr(args, "experimental_rl_sync", False)
-            and not rl_needs_critic(args))
+    return not rl_sync_mode_off_reasons(args)
+
+
+def rl_sync_mode_off_reasons(args) -> list[str]:
+    """Why the async mode does not apply to this run (empty: it applies)."""
+    reasons = []
+    preset = getattr(args, "rl_sync_preset", "strict-avg")
+    if preset not in ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET):
+        reasons.append(f"preset {preset}")
+    if (islands := rl_island_count(args)) < 2:
+        reasons.append(f"{islands} island")
+    if getattr(args, "experimental_rl_sync", False):
+        reasons.append("--experimental-rl-sync")
+    if rl_needs_critic(args):
+        reasons.append("a critic")
+    return reasons
 
 
 def _apply_rl_sync_mode(args) -> None:
@@ -431,6 +442,28 @@ def _apply_rl_sync_mode(args) -> None:
         if hasattr(args, dest):
             setattr(args, dest, plain(getattr(args, dest)))
     args.rl_sync_mode_effective = mode
+    if getattr(args, "rl_sync_mode", "strict") == "async" and mode == "strict" and not explicit_sweep:
+        _warn_async_mode_off(args)
+
+
+def _warn_async_mode_off(args) -> None:
+    """S27 G-CD: ``--rl-sync-mode async`` (the default) that does not apply to a
+    synced run: name the mode in effect and the final cut, which a one-island
+    full-parameter run otherwise only sees as an f32 download of the whole model
+    (120B: about 494 GB per island, GBC-120B-STAGEB §3)."""
+    import sys
+
+    if getattr(args, "rl_single_island_no_sync", False):
+        return  # no syncer: neither mode has anything to fill
+    final = ""
+    if rl_dense_sweep(args):
+        cut = rl_full_parameter_final_cut(args)
+        final = (f"; final cut: {cut}" + (
+            " (every island downloads the f32 model, about 4 bytes per parameter; "
+            "--rl-sync-final-cut ack keeps it in the syncer)" if cut == "download" else ""))
+    print(f"[launcher] WARNING: --rl-sync-mode async does not apply "
+          f"({', '.join(rl_sync_mode_off_reasons(args))}): the run uses the strict sync values "
+          f"(rl_sync_mode_effective strict){final}", file=sys.stderr)
 
 
 # S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
