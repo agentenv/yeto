@@ -60,8 +60,11 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
@@ -248,6 +251,9 @@ class PairedSubmission:
     # The island's local round (RolePairing.local_round) when it retained the
     # pair: the round whose cut the pair pushes (lead cap).
     local_round: int = 0
+    # Background push (S27 G-AP): the worker job pushing this pair, until
+    # the pairing harvests it.
+    job: _PushJob | None = None
 
     @property
     def logical_key(self) -> LogicalKey:
@@ -301,6 +307,34 @@ class RolePairing:
         self.lead_waits = 0
         self.lead_wait_seconds = 0.0
         self.lead_wait_escapes = 0
+        # Background pushes (S27 G-AP), decided at the first submit (a role
+        # knows whether it can encode ahead once it is initialized); None
+        # keeps every push on this thread.
+        self._pusher: _BackgroundPusher | None = None
+        self._pusher_decided = False
+        # Pairs released while their push job still ran: their operands stay
+        # pinned until the job is harvested.
+        self._releasing: list[PairedSubmission] = []
+        # Submissions harvested since the last submit_ready (its return value).
+        self._harvested: dict[str, list[Any]] = {role: [] for role in self.streams}
+
+    @property
+    def pushes_in_background(self) -> bool:
+        """Whether pushes run on worker threads (:class:`_BackgroundPusher`)."""
+        return self._pusher is not None
+
+    @property
+    def push_jobs_running(self) -> int:
+        """Push jobs submitted and not yet harvested."""
+        return sum(pair.job is not None for pair in (*self.inflight.values(), *self._releasing))
+
+    def push_job_counters(self) -> dict[str, float]:
+        """Cumulative background push counters (empty without background pushes)."""
+        pusher = self._pusher
+        if pusher is None:
+            return {}
+        return {"submitted": pusher.submitted, "harvested": pusher.harvested,
+                "busy_seconds": pusher.busy_seconds, "running": self.push_jobs_running}
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -313,14 +347,23 @@ class RolePairing:
             error.add_note(note)
 
     def close_all(self) -> list[str]:
-        """Close every role even when one close raises; one note per failure."""
+        """Close every role even when one close raises; one note per failure.
 
+        Background pushes not started yet are cancelled; a running one stops
+        at its next enqueue once its client is closed (the enqueue rechecks
+        every 0.5 s), and is awaited for at most PUSH_SHUTDOWN_WAIT_S."""
+
+        running = self._pusher.stop() if self._pusher is not None else []
         notes = []
         for role, stream in self.streams.items():
             try:
                 stream.close()
             except Exception as close_error:  # noqa: BLE001 - every role must close
                 notes.append(f"{role} close failed: {type(close_error).__name__}: {close_error}")
+        if running:
+            _done, pending = wait_for_futures(running, timeout=PUSH_SHUTDOWN_WAIT_S)
+            if pending:
+                notes.append(f"{len(pending)} background push(es) still running at close")
         return notes
 
     async def gather_roles(self, make: Any) -> dict[str, Any]:
@@ -364,6 +407,13 @@ class RolePairing:
             raise RuntimeError("full-parameter pairing is fail-stopped") from self.failure
         produced: dict[str, list[Any]] = {role: [] for role in self.streams}
         try:
+            if not self._pusher_decided:
+                self._pusher = _BackgroundPusher.for_streams(self.streams, self.profile)
+                self._pusher_decided = True
+            self._harvest_pushes()
+            for role, submissions in self._harvested.items():
+                produced[role].extend(submissions)
+                submissions.clear()
             by_role = {
                 role: _candidate_map(stream.ready_submission_candidates(), role=role)
                 for role, stream in self.streams.items()
@@ -372,6 +422,10 @@ class RolePairing:
             self._note_final_rounds(by_role)
             for key, pair in tuple(self.inflight.items()):
                 observed = {role: by_role[role].pop(key, None) for role in self.streams}
+                if pair.job is not None:
+                    # A worker is pushing it: the PULL stays pending until the
+                    # push is harvested, and is no replay.
+                    continue
                 self._push_once(pair, observed, produced)
             capacity = self.profile.effective_pipeline_depth - len(self.inflight)
             shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())))
@@ -381,12 +435,19 @@ class RolePairing:
                 shared = [key for key in shared if not self._round_closed(key[1], key[0])]
             planned = [(key, {role: by_role[role].pop(key) for role in self.streams})
                        for key in shared[: max(0, capacity)]]
-            with _PushPrefetch(self.streams, planned) as prefetch:
+            if self._pusher is not None:
                 for key, candidates in planned:
                     pair = self._new_pair(candidates)
                     self._retain(pair)
                     self.inflight[key] = pair
-                    self._push_once(pair, dict(pair.candidates), produced, prepared=prefetch.take(key))
+                    self._push_in_background(pair, dict(pair.candidates))
+            else:
+                with _PushPrefetch(self.streams, planned) as prefetch:
+                    for key, candidates in planned:
+                        pair = self._new_pair(candidates)
+                        self._retain(pair)
+                        self.inflight[key] = pair
+                        self._push_once(pair, dict(pair.candidates), produced, prepared=prefetch.take(key))
             self._check_timeouts(by_role, now)
         except BaseException as error:
             self.fail_stop(error)
@@ -473,6 +534,15 @@ class RolePairing:
             raise
 
     def _release(self, pair: PairedSubmission) -> None:
+        """Unpin a pair's operands; with its push job still running, only
+        once the job is harvested (a job not yet started is cancelled)."""
+        job = pair.job
+        if job is not None:
+            if job.future.cancel():
+                pair.job = None
+            else:
+                self._releasing.append(pair)
+                return
         for role, candidate in pair.candidates.items():
             self.streams[role].release_candidate(candidate)
 
@@ -483,7 +553,8 @@ class RolePairing:
         produced: dict[str, list[Any]],
         prepared: Mapping[str, Any] | None = None,
     ) -> None:
-        for role, stream in self.streams.items():
+        replays = {}
+        for role in self.streams:
             replayed = _retained_replay(pair.candidates[role], observed.get(role))
             if replayed is None:
                 continue
@@ -491,6 +562,13 @@ class RolePairing:
             # A PULL visible after a successful enqueue proves that generation
             # did not commit it: replay the exact retained bytes.
             pair.submissions.pop(role, None)
+            replays[role] = replayed
+        if self._pusher is not None:
+            if replays:
+                self._push_in_background(pair, replays)
+            return
+        for role, replayed in replays.items():
+            stream = self.streams[role]
             ahead = None if prepared is None else prepared.get(role)
             try:
                 submission = (stream.push_candidate(replayed) if ahead is None
@@ -503,6 +581,60 @@ class RolePairing:
                 # The wait for this round's broadcast starts at its last push:
                 # a replay answers a reopened round (new attempt).
                 pair.retained_at = time.monotonic()
+
+    # -- background pushes (S27 G-AP) -------------------------------------------
+
+    def _push_in_background(self, pair: PairedSubmission, candidates: Mapping[str, Any]) -> None:
+        """Hand ``candidates`` (role -> candidate of ``pair``) to a worker.
+
+        Roles whose permit is no longer pending are skipped, as a synchronous
+        push would return no submission for them."""
+        pushable = {role: candidate for role, candidate in candidates.items()
+                    if self.streams[role].pushable(candidate)}
+        if pushable:
+            pair.job = _PushJob(self._pusher.submit(pushable), pushable)
+
+    def _harvest_pushes(self) -> None:
+        """Record every finished push job on this thread.
+
+        A queued push becomes the pair's submission (and the wait for its
+        broadcast starts when its last chunk was queued); a push that was not
+        queued leaves the pair waiting for its replayed PULL.  A pair released
+        while its job ran is unpinned now.  A worker exception propagates."""
+        pusher = self._pusher
+        if pusher is None:
+            return
+        live = {id(pair) for pair in self.inflight.values()}
+        for pair in [pair for pair in (*self.inflight.values(), *self._releasing)
+                     if pair.job is not None and pair.job.future.done()]:
+            job, pair.job = pair.job, None
+            results = job.future.result()
+            pusher.harvested += 1
+            for role, sent in results.items():
+                stream = self.streams[role]
+                stream.note_push_timing(job.candidates[role], sent.timings)
+                pusher.busy_seconds += sent.timings.get("prepare_s", 0.0) + sent.timings.get("push_s", 0.0)
+                if not sent.queued:
+                    continue
+                submission = stream.note_pushed(job.candidates[role], sent.link_generation)
+                if id(pair) in live:
+                    pair.submissions[role] = submission
+                    self._harvested[role].append(submission)
+                    pair.retained_at = sent.finished_at
+        for pair in [pair for pair in self._releasing if pair.job is None]:
+            self._releasing.remove(pair)
+            self._release(pair)
+
+    async def _drain_pushes(self) -> None:
+        """Wait (at most the wait timeout) for every push job, then harvest."""
+        futures = [pair.job.future for pair in (*self.inflight.values(), *self._releasing)
+                   if pair.job is not None]
+        if futures:
+            _done, pending = await asyncio.to_thread(
+                wait_for_futures, futures, timeout=self.profile.wait_timeout)
+            if pending:
+                raise TimeoutError(f"{len(pending)} background push(es) did not finish before the wait timeout")
+        self._harvest_pushes()
 
     def _check_timeouts(self, by_role: Mapping[str, Mapping[LogicalKey, Any]], now: float) -> None:
         seen = set().union(*(set(keys) for keys in by_role.values()))
@@ -548,6 +680,9 @@ class RolePairing:
 
         applied: dict[str, list[int]] = {role: [] for role in self.streams}
         try:
+            # A finished background push makes its pair complete: harvest it
+            # first, so its broadcast is the paired apply, not an overwrite.
+            self._harvest_pushes()
             await asyncio.gather(*(stream.stage_available_broadcasts() for stream in self.streams.values()))
             if self.profile.partial_quorum:
                 await self._commit_partial_quorum(applied)
@@ -844,6 +979,7 @@ class RolePairing:
                 raise TimeoutError("paired terminal barrier could not reach every final cut")
             await asyncio.sleep(self.profile.poll_seconds)
         try:
+            await self._drain_pushes()
             await asyncio.gather(*(stream.wait_and_apply_final() for stream in self.streams.values()))
             self.fragment_versions()
             for key, pair in sorted(self.inflight.items()):
@@ -971,6 +1107,105 @@ class _PushPrefetch:
 # Lead cap: poll interval of the boundary wait (the wait lasts a peer's round).
 LEAD_WAIT_POLL_S = 0.05
 
+# S27 G-AP background pushes: "0" keeps every push on the coordinator thread.
+BACKGROUND_PUSH_ENV = "YETO_FULL_PARAMETER_BACKGROUND_PUSH"
+# CPU priority (nice increment) of the background push threads: training,
+# whose optimizer may run on the CPU, keeps the cores it needs.
+PUSH_NICE_ENV = "YETO_FULL_PARAMETER_PUSH_NICE"
+DEFAULT_PUSH_NICE = 10
+# Seconds close_all waits for running background pushes after closing roles.
+PUSH_SHUTDOWN_WAIT_S = 30.0
+
+
+@dataclass(frozen=True)
+class _PushJob:
+    """One pair's background push: the candidates it pushes and its future
+    (role -> ``SentPush``)."""
+
+    future: Future
+    candidates: dict[str, Any]
+
+
+def _lower_thread_priority(nice: int) -> None:
+    """Raise this thread's nice value (Linux applies it per thread)."""
+    if nice <= 0 or not hasattr(os, "setpriority"):
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), nice)
+    except OSError:  # pragma: no cover - a platform without per-thread priority
+        pass
+
+
+def push_nice() -> int:
+    try:
+        return max(0, min(19, int(os.environ.get(PUSH_NICE_ENV, DEFAULT_PUSH_NICE))))
+    except ValueError:
+        return DEFAULT_PUSH_NICE
+
+
+class _BackgroundPusher:
+    """Push preparation and upload on worker threads (S27 G-AP).
+
+    The synchronous push made the island wait at every boundary while it
+    computed each pushed fragment's delta and wire encoding and queued the
+    bytes (s27-gr-j: 150-250 s of 450-600 s rounds on a 30B model).  A job
+    does that for one pair (``prepare_push`` + ``send_prepared`` for every
+    role) while the island trains on.  The pairing keeps every table: it
+    submits jobs, keeps a pair's operands pinned while its job runs, and
+    records results (``note_pushed``) only when it harvests a finished job on
+    its own thread.  The bytes are those of a synchronous push: the job reads
+    the same retained cut and anchor, and only deterministic codecs encode
+    ahead.
+
+    Used for the asynchronous rounds (``partial_quorum``) when every role can
+    encode ahead and offers the background methods;
+    ``YETO_FULL_PARAMETER_BACKGROUND_PUSH=0`` keeps the synchronous push.
+    ``YETO_FULL_PARAMETER_PUSH_WORKERS`` sets the worker count (default 3)."""
+
+    METHODS = ("pushable", "prepare_push", "send_prepared", "note_pushed", "note_push_timing")
+
+    def __init__(self, streams: Mapping[str, Any], workers: int, nice: int) -> None:
+        self.streams = streams
+        self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="yeto-push-bg",
+                                           initializer=_lower_thread_priority, initargs=(nice,))
+        self.workers = workers
+        self.submitted = 0
+        self.harvested = 0
+        self.busy_seconds = 0.0
+        self._futures: list[Future] = []
+
+    @classmethod
+    def for_streams(cls, streams: Mapping[str, Any], profile: FullParameterSyncProfile) -> _BackgroundPusher | None:
+        if (
+            not profile.partial_quorum
+            or profile.sweep
+            or profile.overlap
+            or os.environ.get(BACKGROUND_PUSH_ENV, "1") == "0"
+            or not all(getattr(stream, "encodes_ahead", False)
+                       and all(callable(getattr(stream, name, None)) for name in cls.METHODS)
+                       for stream in streams.values())
+        ):
+            return None
+        return cls(streams, push_workers(), push_nice())
+
+    def submit(self, candidates: Mapping[str, Any]) -> Future:
+        future = self.executor.submit(self._push, dict(candidates))
+        self.submitted += 1
+        self._futures = [value for value in self._futures if not value.done()] + [future]
+        return future
+
+    def _push(self, candidates: dict[str, Any]) -> dict[str, Any]:
+        sent = {}
+        for role, candidate in candidates.items():
+            stream = self.streams[role]
+            sent[role] = stream.send_prepared(candidate, stream.prepare_push(candidate))
+        return sent
+
+    def stop(self) -> list[Future]:
+        """Cancel jobs not started; return the running ones."""
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        return [future for future in self._futures if not future.done()]
+
 
 @dataclass(frozen=True)
 class _PlannedApply:
@@ -999,6 +1234,19 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
     return replace(retained, permit=observed.permit)
 
 
+
+
+class _PhaseClock:
+    """Seconds between consecutive marks, by the name of the part that ended."""
+
+    def __init__(self) -> None:
+        self.seconds: dict[str, float] = {}
+        self._last = time.monotonic()
+
+    def mark(self, name: str) -> None:
+        now = time.monotonic()
+        self.seconds[name] = self.seconds.get(name, 0.0) + now - self._last
+        self._last = now
 
 
 class FullParameterSync(RoundCutHooks):
@@ -1045,6 +1293,10 @@ class FullParameterSync(RoundCutHooks):
         self._overwritten_before = 0
         self._lead_wait_s = 0.0  # lead cap: this boundary's wait
         self._push_timing_before: dict[str, float] | None = None
+        # S27 G-AP: seconds of each part of this boundary, and the background
+        # push counters at the previous boundary.
+        self._phase_seconds: dict[str, float] = {}
+        self._push_jobs_before: dict[str, float] = {}
 
     @property
     def outer_version(self) -> int | None:
@@ -1082,6 +1334,7 @@ class FullParameterSync(RoundCutHooks):
         del stats
         self._timing = SyncTiming(None, None)
         self._lead_wait_s = 0.0
+        self._phase_seconds = {}
         self.pairing.local_round = rollout_id + 1
         self.terminal = self.run(self._boundary(rollout_id))
         versions = self.pairing.fragment_versions()
@@ -1098,6 +1351,7 @@ class FullParameterSync(RoundCutHooks):
                 **(self._partial_quorum_fields(versions) if self.pairing.profile.partial_quorum else {}),
                 **self._lead_fields(),
                 **self._push_timing_fields(),
+                **self._boundary_fields(),
                 **self._timing.fields(),
                 **self._upload_fields(),
             },
@@ -1127,6 +1381,26 @@ class FullParameterSync(RoundCutHooks):
             "sync/lead_waits": pairing.lead_waits,
             "sync/lead_wait_escapes": pairing.lead_wait_escapes,
         }
+
+    def _boundary_fields(self) -> dict[str, object]:
+        """S27 G-AP: where this boundary's time went (``sync/boundary_<part>_s``:
+        capture = record + capture of the local round, apply, materialize,
+        submit, apply_after_submit, wait = peer snapshots, lead cap and sweep
+        waits) and the background pushes (submitted / harvested this
+        boundary, still running, and the worker seconds they took)."""
+        fields: dict[str, object] = {f"sync/boundary_{name}_s": round(value, 3)
+                                     for name, value in self._phase_seconds.items()}
+        counters = self.pairing.push_job_counters()
+        fields["sync/push_background"] = bool(counters)
+        if counters:
+            before, self._push_jobs_before = self._push_jobs_before, counters
+            fields.update({
+                "sync/push_jobs_submitted": int(counters["submitted"] - before.get("submitted", 0)),
+                "sync/push_jobs_harvested": int(counters["harvested"] - before.get("harvested", 0)),
+                "sync/push_jobs_running": int(counters["running"]),
+                "sync/push_worker_s": round(counters["busy_seconds"] - before.get("busy_seconds", 0.0), 3),
+            })
+        return fields
 
     def _push_timing_fields(self) -> dict[str, object]:
         """The actor's push time split of this boundary (S27 G-AG): delta
@@ -1162,20 +1436,30 @@ class FullParameterSync(RoundCutHooks):
             return await self._overlap_boundary(rollout_id)
         pairing = self.pairing
         trajectories = self.trajectories(rollout_id)
+        phases = _PhaseClock()
         await pairing.gather_roles(
             lambda _role, stream: stream.complete_local_round(
                 rollout_id=rollout_id, trajectories=trajectories
             )
         )
+        phases.mark("capture")
         before = pairing.fragment_versions()
         if pairing.profile.partial_quorum:
             # Rounds that closed while this island trained are applied first,
             # so the island never uploads a delta the syncer would refuse.
             await pairing.commit_staged_broadcasts()
+            phases.mark("apply")
         await pairing.prepare_submissions()
+        phases.mark("materialize")
         pairing.submit_ready()
+        phases.mark("submit")
         submit_ts = unix_now()
-        await pairing.commit_staged_broadcasts()
+        if not pairing.pushes_in_background:
+            # A synchronous submit took long enough for more broadcasts to
+            # arrive; with background pushes the next boundary applies them
+            # (one trainer apply per boundary: an apply has whole-model costs).
+            await pairing.commit_staged_broadcasts()
+            phases.mark("apply_after_submit")
         await self._serve_peer_snapshots()
         if pairing.profile.max_local_rounds_ahead is not None:
             self._lead_wait_s = await pairing.wait_for_lead(self._serve_peer_snapshots)
@@ -1186,6 +1470,8 @@ class FullParameterSync(RoundCutHooks):
             self._timing = SyncTiming(submit_ts, unix_now())
         else:
             self._timing = SyncTiming(submit_ts, None)  # streaming: no global wait
+        phases.mark("wait")
+        self._phase_seconds = phases.seconds
         if pairing.any_finalizing:
             await pairing.finish_without_more_training()
             return True
