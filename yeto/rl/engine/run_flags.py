@@ -1264,7 +1264,7 @@ _SYNC = (
         default="auto",
         help="full-parameter preset: auto (default) = each island checks a received broadcast's "
         "chunks (finite values, chunk hashes, fragment digest) on a background thread and the "
-        "trainer's apply skips that check, when the trainer's Miles has the verified apply; "
+        "trainer's apply skips that check, when the trainer backend supports it; "
         "off = the trainer checks every chunk in its apply (the applied values are the same)",
     ),
     cli_flag(
