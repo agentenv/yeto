@@ -132,7 +132,8 @@ def test_warm_model_dir_caches_every_module_and_keeps_going_after_a_failure(tmp_
                 raise ValueError("no processor class")
 
     tf = SimpleNamespace(**{n: Loader(n) for n in ("AutoConfig", "AutoProcessor", "AutoImageProcessor")})
-    out = rcp.warm_model_dir(str(model), transformers_module=tf, dynamic_module_utils=Dmu)
+    out = rcp.warm_model_dir(str(model), trust_remote_code=True, transformers_module=tf,
+                             dynamic_module_utils=Dmu)
     assert [c for c in calls if c[0] == "cache"] == [
         ("cache", "configuration_fake_h.py"), ("cache", "helpers_fake.py"),
         ("cache", "image_processing_fake_omni.py"), ("cache", "ultra_v3_reasoning_parser.py")]
@@ -178,7 +179,13 @@ def test_real_transformers_engine_start_writes_nothing_after_the_prewarm(tmp_pat
     cache = tmp_path / "modules"
     env = _env(cache)
 
-    warm = subprocess.run([sys.executable, "-m", rcp.MODULE, "--model-path", str(model)],
+    untrusted = subprocess.run([sys.executable, "-m", rcp.MODULE, "--model-path", str(model)],
+                               env=env, capture_output=True, text=True, timeout=300)
+    assert untrusted.returncode == 2 and "not trusted" in untrusted.stderr
+    assert not cache.exists()  # nothing cached, nothing imported
+
+    warm = subprocess.run([sys.executable, "-m", rcp.MODULE, "--trust-remote-code",
+                           "--model-path", str(model)],
                           env=env, capture_output=True, text=True, timeout=300)
     report = rcp._parse_report(warm.stdout)
     assert report is not None, warm.stderr[-2000:]
@@ -216,7 +223,7 @@ def test_run_on_this_node_uses_the_worker_interpreter_without_gpus():
 
     out = rcp.run_on_this_node(["/m"], 12.0, run=run)
     assert out["ok"] is True and out["report"]["models"][0]["cached"] == ["a.py"]
-    assert seen["cmd"] == [sys.executable, "-m", rcp.MODULE, "--model-path", "/m"]
+    assert seen["cmd"] == [sys.executable, "-m", rcp.MODULE, "--trust-remote-code", "--model-path", "/m"]
     assert seen["env"]["CUDA_VISIBLE_DEVICES"] == ""
     assert seen["env"]["PYTHONPATH"].split(os.pathsep)[0] == str(ROOT)
     assert seen["timeout"] == 12.0
@@ -289,6 +296,11 @@ def _node(node_id, address, gpus=8, alive=True):
             "Resources": {"GPU": gpus, "CPU": 32} if gpus else {"CPU": 32}}
 
 
+def _trusted(**fields):
+    """Island Miles args as island_entry sets them (--trust-remote-code is required for RL)."""
+    return SimpleNamespace(yeto_rl_trust_remote_code=True, **fields)
+
+
 def _affinity(*, node_id, soft):
     return {"node_id": node_id, "soft": soft}
 
@@ -304,7 +316,7 @@ def test_prewarm_runs_once_per_machine_pinned_to_it(tmp_path):
     ])
     events = []
     out = io.StringIO()
-    results = rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)), ray_module=ray,
+    results = rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(model)), ray_module=ray,
                                       affinity=_affinity, emit=events.append, out=out)
     assert sorted(s[0]["node_id"] for s in ray.submitted) == ["eng-a", "head"]
     assert all(s[0]["soft"] is False for s in ray.submitted)  # hard pin: runs there or not at all
@@ -322,7 +334,7 @@ def test_prewarm_failure_only_warns(tmp_path):
                   results={"head": {"host": "h", "ok": False, "error": "timed out after 300 s"}},
                   get_error={"eng": TimeoutError("GetTimeoutError")})
     out = io.StringIO()
-    results = rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)), ray_module=ray,
+    results = rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(model)), ray_module=ray,
                                       affinity=_affinity, out=out)
     assert [r["ok"] for r in results] == [False, False]
     assert ray.cancelled == [("eng", True)]
@@ -349,7 +361,7 @@ def test_prewarm_lines_name_the_loaders_and_keep_skipped_files_at_info(tmp_path,
                   results={"head": clean, "eng": broken})
     out = io.StringIO()
     events = []
-    rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)), ray_module=ray,
+    rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(model)), ray_module=ray,
                             affinity=_affinity, emit=events.append, out=out)
     info = capsys.readouterr().out
     assert ("[rl] remote-code prewarm on 10.100.0.1 (h): loaders ok "
@@ -370,21 +382,40 @@ def test_prewarm_never_raises(tmp_path):
             raise ConnectionError("GCS unreachable")
 
     out = io.StringIO()
-    assert rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)),
+    assert rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(model)),
                                    ray_module=Broken([]), affinity=_affinity, out=out) is None
     assert "remote-code prewarm did not run (ConnectionError: GCS unreachable)" in out.getvalue()
 
     out = io.StringIO()
-    assert rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)),
+    assert rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(model)),
                                    ray_module=FakeRay([_node("c", "1.1.1.1", gpus=0)]),
                                    affinity=_affinity, out=out) is None
     assert "no alive Ray node with GPUs" in out.getvalue()
 
 
+def test_prewarm_needs_the_island_trust_decision(tmp_path):
+    ray = FakeRay([_node("head", "10.100.0.1")])
+    model = _model_dir(tmp_path)
+    for args in (SimpleNamespace(hf_checkpoint=str(model)),
+                 SimpleNamespace(hf_checkpoint=str(model), yeto_rl_trust_remote_code=False)):
+        assert rcp.prewarm_remote_code(args, ray_module=ray, affinity=_affinity) is None
+    assert ray.submitted == []
+
+
+def test_island_entry_sets_the_trust_decision_on_every_island():
+    """--rl-single-island-no-sync (s27-ch-d1) runs without policy sync: set before that branch."""
+    from yeto.rl.adapters.miles import island_entry
+
+    source = inspect.getsource(island_entry.run_miles)
+    line = "\n    miles_args.yeto_rl_trust_remote_code = args.trust_remote_code\n"  # function body level
+    assert source.count("yeto_rl_trust_remote_code =") == 1 and source.count(line) == 1
+    assert source.index(line) < source.index("\n    _run_ports(")
+
+
 def test_prewarm_without_remote_code_dispatches_nothing(tmp_path):
     ray = FakeRay([_node("head", "10.100.0.1")])
     plain = _model_dir(tmp_path, auto_map=False)
-    assert rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(plain)), ray_module=ray,
+    assert rcp.prewarm_remote_code(_trusted(hf_checkpoint=str(plain)), ray_module=ray,
                                    affinity=_affinity) is None
     assert ray.submitted == []
 
@@ -399,7 +430,7 @@ def test_prewarm_without_connected_ray_runs_on_this_machine(tmp_path):
     ray = Local([_node("head", "10.100.0.1")])
     calls = []
     results = rcp.prewarm_remote_code(
-        SimpleNamespace(hf_checkpoint=str(model)), ray_module=ray, affinity=_affinity,
+        _trusted(hf_checkpoint=str(model)), ray_module=ray, affinity=_affinity,
         run_local=lambda paths: calls.append(list(paths)) or {"host": "me", "ok": True})
     assert calls == [[str(model)]] and ray.submitted == []
     assert results == [{"host": "me", "ok": True, "node": "local"}]

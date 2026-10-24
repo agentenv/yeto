@@ -1847,6 +1847,8 @@ def run_miles(
     algorithm_spec_sha256 = ports_algorithm.sha256()
     algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
     code_pack_digest = _island_code_pack_digest(args)
+    # every island (also --rl-single-island-no-sync): the remote-code prewarm reads it
+    miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -1866,7 +1868,6 @@ def run_miles(
 
             layout_hash = canonical_layout_hash(specs)
             lora_config_hash = _lora_config_hash(args, canonical_targets)
-        miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
         miles_args.yeto_rl_base_model_revision = args.model_revision
