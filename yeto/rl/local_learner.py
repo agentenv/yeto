@@ -495,6 +495,46 @@ def owner_affine_minimum_fragments(
     return len(_merge_groups(specs, matrix_merge))
 
 
+def fit_owner_affine_layout(
+    *,
+    algorithm: str,
+    components: Sequence[ComponentIdentity],
+    specs: Sequence[ParameterSpec],
+    minimum_fragments: int,
+    max_fragment_bytes: int,
+    stream_role: str | None = None,
+    matrix_merge: str = "avg",
+) -> ParameterLayout:
+    """The owner-affine layout with the fewest fragments, at least
+    ``minimum_fragments``, whose FP32 fragments all fit ``max_fragment_bytes``.
+
+    Parameters above the bound are split into dimension-0 row slices
+    (:func:`split_parameter_specs`). The fit is checked on the bins alone and
+    the layout (and its hash) is built once, for the first count that fits.
+    Pure: the island adapter and offline planning tools call the same function.
+    """
+
+    max_fragment_numel = max_fragment_bytes // 4
+    units = split_parameter_specs(tuple(sorted(specs)), max_fragment_numel)
+    # No count below total / bound can fit, so starting there finds the same layout.
+    by_size = -(-sum(unit.numel for unit in units) // max_fragment_numel)
+    start = max(minimum_fragments, owner_affine_minimum_fragments(specs, matrix_merge), by_size)
+    for count in range(start, len(units) + 1):
+        bins = _owner_affine_parameter_bins(units, count, matrix_merge)
+        if all(sum(unit.numel for unit in members) <= max_fragment_numel for members in bins):
+            return ParameterLayout.create(
+                algorithm=algorithm,
+                components=components,
+                specs=specs,
+                num_fragments=count,
+                fragment_strategy="owner_affine",
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+                max_fragment_numel=max_fragment_numel,
+            )
+    raise RuntimeError("owner-affine layout did not fit the fragment byte bound")
+
+
 def _owner_affine_parameter_bins(
     specs: Sequence[ParameterSpec | ParameterSlice],
     num_fragments: int,
