@@ -157,7 +157,8 @@ def build_ports_launch(args, run_config, extra_argv=()):
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
                                 async_buffer_rounds=getattr(args, "rl_async_buffer_rounds", None),
-                                full_parameter_sync=not _no_sync_island(args))
+                                full_parameter_sync=not _no_sync_island(args),
+                                rollout_ahead=int(getattr(args, "rl_rollout_ahead", 0) or 0))
 
 
 _ELASTIC_COMPANIONS = rl_option_pairs(
@@ -352,6 +353,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
             check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    if getattr(args, "rl_rollout_ahead", 0):  # read by entry (driver) and carry_over
+        miles_args.yeto_rl_rollout_ahead = int(args.rl_rollout_ahead)
     apply_sample_role(args, miles_args, environ)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:

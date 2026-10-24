@@ -48,6 +48,22 @@ class LoopRunner:
             return self.loop.run_until_complete(_await(value))
         return value
 
+    def spawn(self, value: Any) -> asyncio.Future:
+        """Start ``value`` on the island loop and return its task at once; a later
+        ``run(task)`` waits for its result.
+
+        Before this returns the coroutine runs to its first suspension, so a call
+        into a Ray actor is already sent and the actor works while the caller does
+        other things. The task then advances whenever the loop runs (every later
+        ``run``). A plain value comes back as a finished future."""
+        if not inspect.isawaitable(value):
+            future = self.loop.create_future()
+            future.set_result(value)
+            return future
+        task = self.loop.create_task(_await(value))
+        self.loop.run_until_complete(asyncio.sleep(0))
+        return task
+
     def close(self) -> None:
         if self._loop is not None and not self._loop.is_closed():
             self._loop.close()

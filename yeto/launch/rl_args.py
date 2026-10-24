@@ -579,6 +579,31 @@ def _prepare_node_inventory(args) -> None:
     args.rl_node_inventory_nodes = load_inventory(path)
 
 
+def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None:
+    """--rl-rollout-ahead (``yeto.rl.engine.rollout_ahead``), refused before any cloud work."""
+    from ..rl.engine.rollout_ahead import FLAG, launch_problems
+
+    ahead = getattr(args, "rl_rollout_ahead", 0) or 0
+    problems = launch_problems(
+        ahead,
+        backend_max=int(backend_max),
+        max_policy_age=max_policy_age,
+        placements=[getattr(i, "rl_placement", "colocated") for i in rl_island_placement_args(args)],
+        sync_supported=(rl_full_parameter_async(args)
+                        or bool(getattr(args, "rl_single_island_no_sync", False))),
+        sample_roles=(getattr(args, "rl_sample_role", None) or "both") != "both"
+        or bool(getattr(args, "rl_island_sample_role", None)),
+        elastic=bool(getattr(args, "rl_elastic", False)),
+        island_cuts=(any(getattr(args, name, None) is not None
+                         for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"))
+                     or (bool(getattr(args, "rl_single_island_no_sync", False))
+                         and bool(getattr(args, "rl_checkpoint_store", None)))),
+        overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
+    )
+    if problems:
+        raise ValueError(f"{FLAG} {ahead} requires " + "; ".join(problems))
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -713,6 +738,8 @@ def _prepare_rl_args(
         task_check(max_policy_age,
                    custom_generate=getattr(args, "custom_generate_function_path", None),
                    custom_agent=getattr(args, "custom_agent_function_path", None))
+    _check_rollout_ahead(args, max_policy_age=max_policy_age,
+                         backend_max=getattr(policy_age_module, "MAX_ROLLOUT_AHEAD", 0))
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
     elif args.over_sampling_batch_size < args.rollout_batch_size:

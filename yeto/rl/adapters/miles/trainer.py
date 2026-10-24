@@ -353,7 +353,8 @@ class MilesTrainerGroup:
         try:
             self._reshard_guard(batch)
             if self._check_tokens:  # spec: reject before training
-                require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
+                # the generating publication (rollout ahead: one version behind the round)
+                require_policy_tokens(batch, policy_token(batch.policy_version, batch.policy_hash))
             critic_outputs = self._train_critic(batch) if self._critic is not None else None
             self._install_actor_recorders()
             if critic_outputs is None:
