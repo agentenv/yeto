@@ -2054,6 +2054,12 @@ def run_miles(
     else:
         from megatron.bridge import AutoBridge
 
+        from yeto.rl.adapters.miles.models.nemotron_h import register_miles_bridges
+
+        # Nemotron-H: read the checkpoint with the Miles trainer's bridge (MTP
+        # dropped; a VL checkpoint as its language model), so the recipe checks
+        # the model Miles builds.
+        register_miles_bridges(model_path)
         model_bridge = AutoBridge.from_hf_pretrained(
             model_path,
             trust_remote_code=args.trust_remote_code,

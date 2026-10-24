@@ -85,3 +85,37 @@ def test_nemotron_h_provider_reaches_the_miles_argv(tmp_path):
     assert _flag(miles, "--moe-router-bias-update-rate") == "0"
     assert "--swiglu" not in miles  # relu2 experts
     assert miles.count("--moe-router-score-function") == 1
+
+
+def test_mtp_refusal_names_the_miles_bridge_and_the_keep_switch():
+    with pytest.raises(nemotron_h.NemotronHRecipeError, match="MILES_NEMOTRONH_KEEP_MTP"):
+        nemotron_h.check_provider(_provider(mtp_num_layers=1), parameter_mode="full")
+    nemotron_h.check_provider(_provider(mtp_num_layers=None), parameter_mode="full")  # Miles bridge drops MTP
+
+
+@pytest.mark.parametrize(("config", "imported"), [
+    ({"architectures": ["NemotronH_Omni_Reasoning_V3"]}, True),
+    ({"architectures": ["NemotronHForCausalLM"], "num_nextn_predict_layers": 1}, True),  # 120B Super text
+    ({"architectures": ["NemotronHForCausalLM"]}, False),  # Nano: upstream provider, as validated
+    ({"architectures": ["Qwen3MoeForCausalLM"], "num_nextn_predict_layers": 1}, False),
+    (None, False),
+])
+def test_island_reads_the_120b_checkpoints_with_the_miles_bridges(tmp_path, monkeypatch, config, imported):
+    calls = []
+
+    def import_module(name):
+        calls.append(name)
+        return SimpleNamespace(NEMOTRON_H_OMNI_ARCHITECTURE="NemotronH_Omni_Reasoning_V3")
+
+    monkeypatch.setattr(nemotron_h.importlib, "import_module", import_module)
+    if config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(config))
+    assert nemotron_h.register_miles_bridges(tmp_path) is imported
+    assert calls[:1] == (["miles_plugins.megatron_bridge"] if imported else [])
+
+
+def test_vl_checkpoint_refuses_a_miles_without_the_vl_bridge(tmp_path, monkeypatch):
+    monkeypatch.setattr(nemotron_h.importlib, "import_module", lambda name: SimpleNamespace())
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["NemotronH_Omni_Reasoning_V3"]}))
+    with pytest.raises(nemotron_h.NemotronHRecipeError, match="language-only VL bridge"):
+        nemotron_h.register_miles_bridges(tmp_path)
