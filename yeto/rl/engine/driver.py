@@ -1466,6 +1466,21 @@ class IslandDriver:
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)
 
+    def _emit_round_data_rows(self, rollout_id: int, batch: Any) -> None:
+        """S27 task assignment (observe only): one ``rl_round_data_rows`` with every
+        --data row the round trained, as compact runs (not capped per sample)."""
+        rows = getattr(batch, "round_data_rows", None)
+        if not rows:
+            return
+        from .data_split import run_row_count
+        from .timeline import ROUND_DATA_ROWS_EVENT
+
+        runs = [[int(v) for v in run] for run in rows["rows"]]
+        self.emit(ROUND_DATA_ROWS_EVENT, rollout_id=rollout_id,
+                  policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                  t=self.clock(), **self._labels(), samples=int(rows["samples"]),
+                  row_count=run_row_count(runs), rows=runs)
+
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
@@ -1691,6 +1706,7 @@ class IslandDriver:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)
             self._emit_trajectory_rewards(rollout_id, batch)
+            self._emit_round_data_rows(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)

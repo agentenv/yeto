@@ -478,6 +478,9 @@ def build_metadata(
         # default path (old key set kept).
         payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
             args, all_samples, trained, limit=trajectory_records_limit(args))
+        rows = round_data_rows(trained_samples)
+        if rows is not None:  # S27: only on an island that reads a row slot
+            payload[ROUND_DATA_ROWS_KEY] = rows
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
@@ -682,8 +685,7 @@ def trajectory_reward_records(
         for s in samples:
             if len(out) >= limit:
                 return out
-            meta = getattr(s, "metadata", None)
-            meta = meta if isinstance(meta, dict) else {}
+            meta = _metadata(s)
             reward = _reward(args, s)
             success = meta.get("success")
             trajectory = meta.get("trajectory_id")
@@ -703,6 +705,27 @@ def trajectory_reward_records(
                    if _carry.max_policy_age(args) > 0 else {}),
             })
     return out
+
+
+ROUND_DATA_ROWS_KEY = "round_data_rows"
+
+
+def round_data_rows(trained_samples: Iterable[Any]) -> dict[str, Any] | None:
+    """S27 task assignment: ``{"samples": n, "rows": data_split.row_runs(...)}``
+    of every trained sample that carries its --data row
+    (``metadata[DATA_ROW_KEY]``), however many there are (the reward records
+    stop at a limit); None when none does (no row slot)."""
+    from yeto.rl.engine.data_split import row_runs
+
+    rows = [row["data_row"] for row in (_data_row(_metadata(s)) for s in trained_samples) if row]
+    if not rows:
+        return None
+    return {"samples": len(rows), "rows": row_runs(rows)}
+
+
+def _metadata(sample: Any) -> dict[str, Any]:
+    meta = getattr(sample, "metadata", None)
+    return meta if isinstance(meta, dict) else {}
 
 
 _DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",

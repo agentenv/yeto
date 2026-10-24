@@ -150,6 +150,10 @@ class RolloutBatchHandle:
     # (rollout_meta_hook.trajectory_reward_records: task_id/trajectory_id/reward/
     # success); None = not reported. The driver tapes them as ``rl_trajectory_reward``.
     trajectory_rewards: tuple[Mapping[str, Any], ...] | None = field(default=None, compare=False)
+    # S27 task assignment (observe only): every --data row the round trained,
+    # ``{"samples": n, "rows": data_split.row_runs(...)}``, not capped like the
+    # reward records; None = not reported. The driver tapes it as ``rl_round_data_rows``.
+    round_data_rows: Mapping[str, Any] | None = field(default=None, compare=False)
     # agentic-rollout-utilization 4.1 (limit > 0 only; None at limit 0): what the
     # round carried in from / back to the engine's buffer and discarded over the
     # limit (``carry_over.CARRY_FIELDS`` + carried_out_groups, cross_version_tokens,

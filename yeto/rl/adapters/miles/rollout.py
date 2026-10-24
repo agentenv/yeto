@@ -526,6 +526,7 @@ def handle_from_metadata(
         trajectory_rewards=(
             tuple(payload["trajectory_rewards"]) if payload.get("trajectory_rewards") else None
         ),
+        round_data_rows=payload.get("round_data_rows") or None,
         carry_over=_carry_over_fields(payload),
         cross_version_truncated_fraction=(
             float(payload["cross_version_truncated_fraction"])

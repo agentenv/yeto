@@ -241,3 +241,49 @@ def overlapping_tasks(task_lists: Mapping[int, Sequence[str]]) -> dict[tuple[int
             if common:
                 out[(a, b)] = common
     return out
+
+
+def row_runs(rows: Iterable[int]) -> list[list[int]]:
+    """The distinct ``rows`` as arithmetic runs ``[first, last, step]``, ascending.
+
+    Used by ``rl_round_data_rows`` so that one round's record stays small. A
+    round of pass 0 of a slot (rows ``k, k+N, k+2N, ...`` in data order) is one
+    run. A reshuffled pass or filtered groups give more runs, at most one per
+    two rows. A run of one row is ``[row, row, 1]``."""
+    ordered = sorted(set(rows))
+    runs: list[list[int]] = []
+    index = 0
+    while index < len(ordered):
+        first = ordered[index]
+        if index + 1 == len(ordered):
+            runs.append([first, first, 1])
+            break
+        step = ordered[index + 1] - first
+        last = index + 1
+        while last + 1 < len(ordered) and ordered[last + 1] - ordered[last] == step:
+            last += 1
+        runs.append([first, ordered[last], step])
+        index = last + 1
+    return runs
+
+
+def _run_length(run: Sequence[int]) -> int:
+    first, last, step = run
+    if step < 1 or last < first or (last - first) % step:
+        raise ValueError(f"malformed row run {list(run)}")
+    return (last - first) // step + 1
+
+
+def run_row_count(runs: Iterable[Sequence[int]]) -> int:
+    """The number of rows :func:`row_runs` encoded (no expansion)."""
+    return sum(_run_length(run) for run in runs)
+
+
+def rows_of_runs(runs: Iterable[Sequence[int]]) -> list[int]:
+    """The rows :func:`row_runs` encoded, ascending."""
+    rows: list[int] = []
+    for run in runs:
+        _run_length(run)
+        first, last, step = run
+        rows.extend(range(first, last + 1, step))
+    return rows

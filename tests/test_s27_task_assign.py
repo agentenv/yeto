@@ -616,3 +616,131 @@ def test_data_split_check_reads_the_island_tapes(tmp_path):
     assert not report["ok"]
     assert any(p.startswith("disjoint") for p in report["problems"])
     assert any(p.startswith("own_slot: island 1") for p in report["problems"])
+
+
+# -- rl_round_data_rows: every trained row of a round, as runs (not capped) -------------
+def test_row_runs_round_trip_and_stay_small():
+    import random
+
+    from yeto.rl.engine.data_split import row_runs, rows_of_runs, run_row_count
+
+    slot_round = list(range(1, 64, 2)) * 16  # 32 prompts of slot 1/2, 16 samples each
+    assert row_runs(slot_round) == [[1, 63, 2]]
+    assert run_row_count([[1, 63, 2]]) == 32
+    for rows in ([], [5], [1, 3, 5, 7, 8, 9, 10, 20], [3, 3, 1]):
+        assert rows_of_runs(row_runs(rows)) == sorted(set(rows))
+        assert run_row_count(row_runs(rows)) == len(set(rows))
+    reshuffled = random.Random(0).sample(range(1, 4096, 2), 32)  # a later pass: any 32 slot rows
+    assert len(row_runs(reshuffled)) <= 16
+    assert rows_of_runs(row_runs(reshuffled)) == sorted(reshuffled)
+    for malformed in ([4, 1, 1], [0, 5, 2], [0, 4, 0]):
+        with pytest.raises(ValueError, match="malformed row run"):
+            rows_of_runs([malformed])
+        with pytest.raises(ValueError, match="malformed row run"):
+            run_row_count([malformed])
+
+
+def test_hook_reports_every_trained_row_past_the_record_limit():
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles.rollout import handle_from_metadata
+
+    def sample(index, row):
+        return SimpleNamespace(index=index, group_index=index // 16, rollout_id=0,
+                               metadata={DATA_ROW_KEY: row, "task_id": f"t{row}"}, reward=1.0,
+                               status=SimpleNamespace(value="completed"), response_length=4,
+                               weight_versions=None, remove_sample=False)
+
+    # One round of slot 0/2: 32 prompts (rows 0, 2, ..., 62) x 16 samples.
+    data = [[sample(16 * g + s, 2 * g) for s in range(16)] for g in range(32)]
+    args = SimpleNamespace(yeto_rl_observe_timeline=True)
+    hook.record_trained_groups(args, data)
+    meta = hook.build_metadata(args, data)
+    assert len(meta[hook.TRAJECTORY_REWARDS_KEY]) == 256  # the reward records stop at the cap
+    assert meta[hook.ROUND_DATA_ROWS_KEY] == {"samples": 512, "rows": [[0, 62, 2]]}
+    json.dumps(meta)
+    handle = handle_from_metadata(meta, rollout_id=0, policy_version=0, policy_hash="h", data_pack=None)
+    assert handle.round_data_rows == meta[hook.ROUND_DATA_ROWS_KEY]
+    # An island without a row slot reports no round rows.
+    assert hook.round_data_rows([SimpleNamespace(metadata={"task_id": "t"})]) is None
+    args = SimpleNamespace(yeto_rl_observe_timeline=False)
+    hook.record_trained_groups(args, data)
+    assert hook.ROUND_DATA_ROWS_KEY not in hook.build_metadata(args, data)
+
+
+@pytest.mark.parametrize("observe", [False, True])
+def test_driver_tapes_one_round_data_rows_event_per_round(tmp_path, observe):
+    import dataclasses
+
+    from yeto.rl.engine import timeline as tl
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0, placement_kind="fixed-partition")
+    per_round = {0: {"samples": 512, "rows": [[0, 62, 2]]}, 1: None}
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r, **kw: dataclasses.replace(original(r, **kw), round_data_rows=per_round[r])
+    profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+    IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer, policy_state=engine.policy_state,
+                 publisher=engine.publisher, placement=engine.placement,
+                 capabilities=fake_capabilities(execution_modes={"partitioned-serial"}), algorithm=AlgorithmSpec(),
+                 sync=LocalOnlySync(2), events=EventTape(tmp_path / "e.jsonl", 0), profile=profile,
+                 observe=observe).run()
+    events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
+    got = [e for e in events if e["event"] == tl.ROUND_DATA_ROWS_EVENT]
+    if not observe:
+        assert got == []
+        return
+    assert [(e["rollout_id"], e["samples"], e["row_count"], e["rows"]) for e in got] == [(0, 512, 32, [[0, 62, 2]])]
+    assert tl.validate_round_data_rows(got[0]) == []
+    assert tl.validate_round_data_rows({**got[0], "rows": [[0, 62]]})
+
+
+def test_data_split_check_prefers_the_round_rows_over_capped_rewards(tmp_path):
+    from tools.eval.data_split_check import check, read_records
+
+    def tape(name, island, slot, rewards, round_rows):
+        records = [(1, {"event": "rl_driver_start", "data_slot": slot})]
+        records += [(2, {"event": "rl_trajectory_reward", "rollout_id": 0, "data_row": row}) for row in rewards]
+        records += [(3, {"event": "rl_round_data_rows", "rollout_id": 0, "policy_version": 0, "samples": 16,
+                         "row_count": 5, "rows": runs}) for runs in round_rows]
+        path = tmp_path / name
+        path.write_text("".join(json.dumps({"island_id": island, "time_unix": t, **r}) + "\n" for t, r in records))
+        return path
+
+    # The reward records stop at the cap and look clean; the round record shows row 9
+    # (slot 1/2) trained on island 0 as well.
+    island0 = tape("i0.jsonl", 0, "0/2", [0, 2], [[[0, 8, 2], [9, 9, 1]]])
+    island1 = tape("i1.jsonl", 1, "1/2", [1, 3], [[[1, 9, 2]]])
+    report = check(read_records([island0, island1]))
+    assert report["rows_source"] == {"0": {"rounds": 1}, "1": {"rounds": 1}}
+    assert report["rows_per_island"] == {"0": 6, "1": 5}
+    assert any(p.startswith("disjoint: 1 rows") for p in report["problems"])
+    assert any(p.startswith("own_slot: island 0") for p in report["problems"])
+    clean = tape("i0b.jsonl", 0, "0/2", [0, 2], [[[0, 8, 2]]])
+    assert check(read_records([clean, island1]))["ok"]
+    # Without round records the reward records still serve (older tapes).
+    old = tape("i0c.jsonl", 0, "0/2", [0, 2], [])
+    report = check(read_records([old, island1]))
+    assert report["ok"] and report["rows_source"]["0"] == {"rewards": 1}
+    # A round record must hold every rewarded row of its round and be well formed.
+    short = tape("i0d.jsonl", 0, "0/2", [0, 2, 10], [[[0, 8, 2]]])
+    problems = check(read_records([short, island1]))["problems"]
+    assert problems == ["round_rows: island 0 round 0: rewarded rows missing from rl_round_data_rows: [10]"]
+    torn = tape("i0e.jsonl", 0, "0/2", [0, 2], [[[0, 8]]])
+    report = check(read_records([torn, island1]))
+    assert [p.split(":")[0] for p in report["problems"]] == ["round_rows"]
+    assert report["rows_source"]["0"] == {"rewards": 1}
+
+
+def test_a_handle_without_round_rows_tapes_nothing(tmp_path):
+    """verl (and any rollout that does not report the rows) keeps the old key set."""
+    from yeto.rl.engine.ports import RolloutBatchHandle
+
+    handle = RolloutBatchHandle(rollout_id=0, policy_version=0, policy_hash="h", groups=(), completed=0,
+                                aborted=0, payload=None, backend="verl")
+    assert handle.round_data_rows is None
+    driver = SimpleNamespace(emitted=[])
+    driver.emit = lambda *a, **kw: driver.emitted.append(a)
+    IslandDriver._emit_round_data_rows(driver, 0, handle)
+    assert driver.emitted == []
