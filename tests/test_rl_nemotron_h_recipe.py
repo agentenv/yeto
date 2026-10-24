@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -171,5 +172,17 @@ def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
                         ("--num-layers", "88"), ("--num-gpus-per-node", "8")):
         assert _flag(miles, flag) == value, flag
     assert "--colocate" not in miles and "--optimizer-cpu-offload" not in miles
-    # Megatron's moe_freq_type evaluates a bracketed pattern: one mask entry per layer
-    assert ast.literal_eval(_flag(miles, "--moe-layer-freq")) == [int(c == "E") for c in pattern]
+    # Megatron's moe_freq_type evaluates a bracketed pattern: one mask entry per layer.
+    # Its _eval_pattern allows only digits, commas, brackets, +, * and parentheses (no
+    # spaces): s27-aw-a failed on "[0, 1, ...]" (argument --moe-layer-freq: invalid value).
+    freq = _flag(miles, "--moe-layer-freq")
+    assert not re.search(r"[^,\d\[\]\(\)\+\*]", freq), freq
+    assert ast.literal_eval(freq) == [int(c == "E") for c in pattern]
+
+
+def test_megatron_moe_layer_freq_has_no_spaces():
+    from yeto.rl.adapters.miles.config import megatron_moe_layer_freq
+
+    assert megatron_moe_layer_freq(1) == "1"
+    assert megatron_moe_layer_freq([0, 1, 1]) == "[0,1,1]"
+    assert megatron_moe_layer_freq((1, 0)) == "[1,0]"
