@@ -1044,6 +1044,8 @@ def dry_run_plan(args) -> dict:
                 # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
+            if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
+                entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
             if learner_id == trainer_loop.held_island(args):
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:

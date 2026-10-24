@@ -441,7 +441,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.dp_optimizer": _ok,  # _full_parameter_optimizer_attrs
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
-                    "fused_stage", "release_legacy", "release_inline")},
+                    "fused_stage", "release_legacy", "release_inline",
+                    "release_delta_full_every")},
 }
 
 

@@ -57,6 +57,16 @@ writer, so every layout below has one writer per file or key:
   ``LATEST.json``), so a sampler that reads ``LATEST.json`` by key sees a
   complete release. Nothing here needs a cross-host lock or create-if-absent.
 
+Own lanes (``--rl-sampler-follow trainer``, ``sample_roles`` module doc): each
+trainer has its own samplers and its own store sub-directory, so it reads lane 0
+of 1 there (:data:`OWN_LANE`: the whole buffer, with the same lane cursor log),
+is the publisher of that sub-store, and releases and gates with its *local*
+policy version (:func:`release_version`): its samplers serve the policy the
+trainer itself trains, so the policy age counts the trainer's own versions.
+The merged broadcasts reach the samplers inside those versions (a local version
+contains the fragments the syncer overwrote). The release guard still keeps
+the versions increasing (a restarted trainer continues the syncer's round).
+
 Failures:
 
 * the publisher island stops: no new release appears. The samplers keep the
@@ -108,14 +118,29 @@ class BufferLane:
         index, sep, count = str(text).partition("/")
         if not sep or not index.strip().isdigit() or not count.strip().isdigit():
             raise ValueError(f"{LANE_ENV}={text!r}: expected M/N")
-        lane = cls(int(index), int(count))
-        return None if lane.count == 1 else lane
+        return cls(int(index), int(count))
 
     def name(self) -> str:
         return f"{self.index}-of-{self.count}"
 
+    @property
+    def is_own(self) -> bool:
+        """The whole buffer of one trainer whose samplers follow it (module doc)."""
+        return self.count == 1
+
     def file_name(self) -> str:
         return f"{self.name()}.jsonl"
+
+
+# A trainer whose samplers follow it (--rl-sampler-follow trainer) reads the whole
+# buffer of its own sub-store and releases its local versions (module doc).
+OWN_LANE = BufferLane(0, 1)
+
+
+def release_version(driver: Any, state: Any, lane: BufferLane) -> int:
+    """The version a synced trainer releases and gates with on ``lane``: its local
+    policy version on its own lane, else the merged version."""
+    return int(state.policy_version) if lane.is_own else merged_version(driver, state)
 
 
 def merges_shards(lane: BufferLane | None) -> bool:

@@ -41,7 +41,7 @@ def _fill(buffer: FileSampleBuffer, n: int, version: int = 0) -> None:
 
 # ---------------------------------------------------------------- lanes
 def test_lane_parse_and_ownership():
-    assert BufferLane.parse(None) is None and BufferLane.parse("0/1") is None
+    assert BufferLane.parse(None) is None and BufferLane.parse("0/1") == BufferLane(0, 1)
     lane = BufferLane.parse("1/3")
     assert lane == BufferLane(1, 3) and lane.env() == "1/3"
     assert [p for p in range(9) if lane.owns(p)] == [1, 4, 7]

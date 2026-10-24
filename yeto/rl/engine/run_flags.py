@@ -661,6 +661,12 @@ _RESUME = (
                 "store before the next training step (the behavior before S27 G-AT); default: "
                 "stage it on local disk (every rank writes a share) and upload it while the "
                 "next step trains"),
+    shared_flag("--rl-release-delta-full-every", type=int, default=0, metavar="N",
+                help="--rl-sample-role trainer with staged full-weight releases: upload "
+                "each release as the bf16 words that changed since the previous release; every "
+                "N-th release (and a delta above half the full size) goes in full. The samplers "
+                "rebuild the weights on local disk and check every file's sha256. 0 (default): "
+                "every release in full"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),

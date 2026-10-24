@@ -230,10 +230,22 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     the syncer runs ordinary fragment rounds (H local RL rounds per fragment,
     at most two rounds in flight, the decoupled preset's outer Nesterov), and
     the outer-merge options (quorum K, grace, weights, base lag, RDA) apply.
-    The fragment count P comes from the Miles layout probe."""
+    The fragment count P comes from the Miles layout probe.
+
+    Placement: islands with engines on the island need dedicated engine GPUs
+    (``--rl-placement fixed-partition``). Synced trainers that read their samples
+    from the store (``--rl-sample-role trainer``) start no engine, so they take
+    no placement (their sampler islands are their own engine partitions)."""
+    from ..rl.engine.sample_roles import is_synced_trainer
+
     async_rounds = rl_full_parameter_async(args)
     problems = []
-    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+    fixed_partition = getattr(args, "rl_placement", "colocated") == "fixed-partition"
+    if is_synced_trainer(args):
+        if fixed_partition:
+            problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (the "
+                            "trainers start no engine; the sampler islands generate)")
+    elif not fixed_partition:
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
         problems.append("--rl-parameter-layout-sha256 <64 lowercase hex>")

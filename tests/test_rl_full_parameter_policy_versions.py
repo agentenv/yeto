@@ -254,8 +254,9 @@ def test_full_parameter_synced_trainer_plan(monkeypatch):
               "--rl-checkpoint-store", "modal-volume://yeto-r1/run-a", "--rl-sample-wait-s", "900",
               "--cluster-prefix", "r1-synced",
               "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json")
-    full = ("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
-            "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", "e" * 64, "--fragments", "4")
+    # store-fed trainers start no engine: no fixed partition (S27 G-BG)
+    full = ("--rl-sync-preset", "full-parameter", "--rl-parameter-layout-sha256", "e" * 64,
+            "--fragments", "4")
     gpu = "modal:2xh100,modal:2xh100"
     plan = dry_run_plan(_args(full + ("--rl-sync-full-parameter-rounds", "async"), gpu=gpu,
                               base=synced))
@@ -264,6 +265,9 @@ def test_full_parameter_synced_trainer_plan(monkeypatch):
     assert dry_run_plan(_args(full, gpu=gpu, base=synced))["syncer"] is not None
     with pytest.raises(ValueError, match="rounds async"):
         _args(full + ("--rl-sync-mode", "strict"), gpu=gpu, base=synced)
+    with pytest.raises(ValueError, match="trainers start no engine"):
+        _args(full + ("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"), gpu=gpu,
+              base=synced)
 
 
 # -- the real Rust syncer with a membership lease -------------------------------------

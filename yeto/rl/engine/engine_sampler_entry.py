@@ -229,12 +229,14 @@ def build_reward(spec: Mapping[str, Any]) -> Reward:
 def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> tuple[Any, Any]:
     """(release store, sample buffer) of the spec."""
     from .policy_release import RELEASE_DIR, PolicyReleaseStore  # noqa: PLC0415
+    from .release_delta import default_mirror  # noqa: PLC0415
     from .resume import store_for  # noqa: PLC0415
     from .sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index  # noqa: PLC0415
 
     store = str(_require(spec, "store"))
     releases = PolicyReleaseStore(store_for(store, environ=environ),
-                                  release_dir=str(spec.get("release_dir") or RELEASE_DIR))
+                                  release_dir=str(spec.get("release_dir") or RELEASE_DIR),
+                                  mirror=default_mirror(environ))  # delta releases
     buffer_store = store_for(str(spec.get("buffer_root") or store), environ=environ)
     sampler_id = str(_require(spec, "sampler_id"))
     shards = [str(s) for s in spec.get("buffer_shards") or ()]
