@@ -487,3 +487,12 @@ def test_vllm_prefix_renaming_is_undone():
         "base_model.model.model.language_model.layers.0.linear_attn.out_proj.lora_B.weight"
     assert pn.vllm_to_canonical("model.layers.0.self_attn.o_proj", "A", None, hf) == \
         "base_model.model.model.layers.0.self_attn.o_proj.lora_A.weight"
+
+
+def test_verl_refuses_expert_parallel_with_e7_reason():
+    # S26 E7: verl+EP is refused with the reason and the backend to use instead.
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    rules.check_expert_parallel(8, 1)
+    with pytest.raises(ValueError, match="E7.*Miles"):
+        rules.check_expert_parallel(8, 8)
