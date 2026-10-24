@@ -17,9 +17,14 @@ cache directory, before Miles creates any engine:
 1. every top-level ``*.py`` of the model directory goes through
    ``get_cached_module_file`` (the cache path and copy that an ``auto_map`` entry naming
    that file gets, relative imports included);
-2. the loaders that the model directory maps to remote code run once with
-   ``trust_remote_code=True``: ``AutoConfig``, ``AutoTokenizer``, ``AutoProcessor``,
-   ``AutoImageProcessor`` (the processor pair also when a processor config file exists).
+2. the loaders that the model directory maps to remote code run once with remote code
+   trusted: ``AutoConfig``, ``AutoTokenizer``, ``AutoProcessor``, ``AutoImageProcessor``
+   (the processor pair also when a processor config file exists).
+
+Trust. The step runs only when the island trusts remote code (``--trust-remote-code``,
+``miles_args.yeto_rl_trust_remote_code``; the launcher requires it for the pinned Miles,
+whose engines load the model with remote code trusted). The child gets the decision as
+its own ``--trust-remote-code`` flag and does nothing without it.
 
 The child is the Ray worker's ``sys.executable``: the interpreter Miles launches
 ``sglang.launch_server`` with, so its transformers lays out the cache as the engines do.
@@ -150,7 +155,7 @@ def _short(exc: BaseException, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def warm_model_dir(model_path: str, *, transformers_module: Any = None,
+def warm_model_dir(model_path: str, *, trust_remote_code: bool, transformers_module: Any = None,
                    dynamic_module_utils: Any = None) -> dict[str, Any]:
     """Child side for one directory: cache every top-level ``*.py``, then run the loaders.
 
@@ -177,7 +182,8 @@ def warm_model_dir(model_path: str, *, transformers_module: Any = None,
             (errors if source.name in engine_files else skipped).append(row)
     for loader in plan:
         try:
-            getattr(transformers_module, loader).from_pretrained(model_path, trust_remote_code=True)
+            getattr(transformers_module, loader).from_pretrained(
+                model_path, trust_remote_code=trust_remote_code)
             loaded.append(loader)
         except Exception as exc:  # noqa: BLE001 - reported, never fatal
             errors.append({"step": loader, "error": _short(exc)})
@@ -203,13 +209,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Child entry: warm every ``--model-path`` under the lock; print one JSON report line."""
     parser = argparse.ArgumentParser(prog=MODULE)
     parser.add_argument("--model-path", action="append", required=True)
+    parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args(argv)
+    if not args.trust_remote_code:
+        print(f"{MODULE}: remote code is not trusted (no --trust-remote-code); nothing done",
+              file=sys.stderr, flush=True)
+        return 2
     started = time.monotonic()
     from transformers.utils import HF_MODULES_CACHE
 
     with exclusive_lock(HF_MODULES_CACHE):
         locked = time.monotonic()
-        models = [warm_model_dir(path) for path in args.model_path]
+        models = [warm_model_dir(path, trust_remote_code=args.trust_remote_code)
+                  for path in args.model_path]
     report = {
         "cache": str(HF_MODULES_CACHE),
         "import_and_lock_s": round(locked - started, 3),
@@ -246,7 +258,7 @@ def run_on_this_node(model_paths: Sequence[str], timeout_s: float = NODE_TIMEOUT
     env["CUDA_VISIBLE_DEVICES"] = ""
     root = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = os.pathsep.join([root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else root
-    cmd = [sys.executable, "-m", MODULE]
+    cmd = [sys.executable, "-m", MODULE, "--trust-remote-code"]  # callers gate on the island's flag
     for path in model_paths:
         cmd += ["--model-path", str(path)]
     started = time.monotonic()
@@ -354,11 +366,14 @@ def prewarm_remote_code(miles_args: Any, *, ray_module: Any = None, affinity: An
     With Ray connected, one task per machine (alive node with GPUs, deduplicated by
     address) is pinned there with ``NodeAffinitySchedulingStrategy``; without a
     connected Ray (Miles starts a local one later), it runs on this machine. Returns the
-    per-node results, or ``None`` when the model has no remote code or the step could not
-    run. Never raises: each problem is one ``[rl] WARNING`` line.
+    per-node results, or ``None`` when the island does not trust remote code, the model
+    has no remote code, or the step could not run. Never raises: each problem is one
+    ``[rl] WARNING`` line.
     """
     out = sys.stderr if out is None else out
     started = clock()
+    if not getattr(miles_args, "yeto_rl_trust_remote_code", False):
+        return None
     try:
         paths = engine_model_paths(miles_args)
         if not paths:
