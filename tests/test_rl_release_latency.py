@@ -407,16 +407,22 @@ def test_a_staged_release_reaches_the_volume_without_the_mount_and_prunes_by_nam
         staged = tmp_path / f"stage-{version}"
         staged.mkdir()
         (staged / "model.safetensors").write_bytes(b"x" * version)
-        record = releases.release_staged(version, f"h{version}", staged, buffer_selected=64 * version)
-        assert record.seq == version and (staged / "RELEASE.json").is_file()
+        uploaded = []
+        record = releases.release_staged(
+            version, f"h{version}", staged,
+            position=lambda: uploaded.append(len(volume.batches)) or (64 * version, {"island0": version}))
+        assert record.seq == version and not (staged / "RELEASE.json").exists()
+        assert uploaded == [2 * (version - 1) + 1]  # read after the weights reached the Volume
         assert releases.last_latest_source == ("reloaded" if version == 1 else "cached")
     assert volume.batches[:2] == [[("dir", f"/run-a/{RELEASE_DIR}/r1-v1")],
-                                  [("file", f"/run-a/{RELEASE_DIR}/LATEST.json")]]
+                                  [("file", f"/run-a/{RELEASE_DIR}/r1-v1/RELEASE.json"),
+                                   ("file", f"/run-a/{RELEASE_DIR}/LATEST.json")]]
     assert volume.removed == [f"/run-a/{RELEASE_DIR}/r1-v1"]
     assert not (mount / "run-a" / RELEASE_DIR / "LATEST.json").exists()  # the mount is untouched
     seen = PolicyReleaseStore(CheckpointStore(backend / "run-a"))  # a reader after its reload
     latest = seen.latest()
-    assert (latest.seq, latest.version, latest.buffer_selected) == (3, 3, 192)
+    assert (latest.seq, latest.version, latest.buffer_selected, latest.buffer_shards) == (
+        3, 3, 192, {"island0": 3})
     assert sorted(p.name for p in (backend / "run-a" / RELEASE_DIR).iterdir()) == [
         "LATEST.json", "r2-v2", "r3-v3"]
     assert PolicyRelease.from_record(json.loads(

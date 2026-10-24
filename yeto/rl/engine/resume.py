@@ -176,7 +176,7 @@ class CheckpointStore:
     # -- publishing whole local directories (policy releases staged on local disk)
     @property
     def puts_bypass_mount(self) -> bool:
-        """True when :meth:`put_directory` and :meth:`put_file` write the store
+        """True when :meth:`put_directory` and :meth:`put_files` write the store
         without this host's mount: the mount shows them only after a reload."""
         return False
 
@@ -195,16 +195,18 @@ class CheckpointStore:
         finally:
             guard.release()
 
-    def put_file(self, data: bytes, relative: str) -> None:
-        """Write ``data`` to the file ``relative`` (tmp + rename) and commit."""
-        target = self.root / relative
+    def put_files(self, files: Mapping[str, bytes]) -> None:
+        """Write each ``{relative path: data}`` (tmp + rename, in the given order),
+        then commit once."""
         guard = self.hold_writer()
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(target.name + ".tmp")
-            tmp.write_bytes(data)
-            _fsync(tmp)
-            os.replace(tmp, target)
+            for relative, data in files.items():
+                target = self.root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_name(target.name + ".tmp")
+                tmp.write_bytes(data)
+                _fsync(tmp)
+                os.replace(tmp, target)
             self.commit()
         finally:
             guard.release()

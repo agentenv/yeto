@@ -163,18 +163,21 @@ class ModalVolumeStore(CheckpointStore):
             return super().put_directory(local, relative)
         self._upload([("dir", os.fspath(local), remote)])
 
-    def put_file(self, data: bytes, relative: str) -> None:
-        remote = self._volume_path(relative)
-        if remote is None or not self._direct():
-            return super().put_file(data, relative)
+    def put_files(self, files: Mapping[str, bytes]) -> None:
+        """All of ``files`` in one upload (a reader sees all or none of them)."""
+        remotes = {relative: self._volume_path(relative) for relative in files}
+        if None in remotes.values() or not self._direct():
+            return super().put_files(files)
         import tempfile
 
-        with tempfile.NamedTemporaryFile(prefix="yeto-put-", delete=False) as handle:
-            handle.write(data)
-        try:
-            self._upload([("file", handle.name, remote)])
-        finally:
-            os.unlink(handle.name)
+        with tempfile.TemporaryDirectory(prefix="yeto-put-") as tmp:
+            ops = []
+            for index, (relative, data) in enumerate(files.items()):
+                local = os.path.join(tmp, str(index))
+                with open(local, "wb") as handle:
+                    handle.write(data)
+                ops.append(("file", local, remotes[relative]))
+            self._upload(ops)
 
     def remove_tree(self, relative: str) -> None:
         remote = self._volume_path(relative)

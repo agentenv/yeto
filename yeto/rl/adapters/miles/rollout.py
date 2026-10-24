@@ -799,16 +799,33 @@ class MilesRolloutPool:
     def _in_executor(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
         """Run ``fn(executor, ...)`` inside the rollout executor's process (same
         targets as ``live_data_cursor``); raises when it cannot."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+
+    def _in_executor_from_thread(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
+        """:meth:`_in_executor` for a thread other than the driver's: it waits on the
+        Ray reference itself instead of the driver's event loop (which may be running)."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        import ray
+
+        return ray.get(remote(fn, *fn_args, **fn_kwargs))
+
+    def _executor_call(self) -> tuple[Any, Any]:
+        """(local executor view, None) or (None, the actor's ``__ray_call__.remote``)."""
         kind, target = _executor_target(self._executor)
         if kind == "local":
-            return fn(SimpleNamespace(data_source=target), *fn_args, **fn_kwargs)
+            return SimpleNamespace(data_source=target), None
         if kind != "ray":
             raise RuntimeError("rollout executor %s is neither a local executor nor a Ray "
                                "actor (handle)" % type(self._executor).__name__)
         remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
         if not callable(remote):
             raise RuntimeError("Ray actor handle %s has no __ray_call__" % type(target).__name__)
-        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+        return None, remote
 
     def late_cross_version_fraction(self, rollout_id: int) -> float | None:
         """E1: the deferred cross-version IS estimate of ``rollout_id`` (fully_async),

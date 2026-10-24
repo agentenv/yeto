@@ -75,10 +75,11 @@ of twice; the follower then skips its own check.
 
 Staged releases (S27 G-AT): the trainer exports a full checkpoint into a
 directory on its local disk, and :meth:`PolicyReleaseStore.release_staged`
-publishes that directory: the weights with their record in one store upload
+publishes that directory: the weight files in one store upload
 (``CheckpointStore.put_directory``; a Modal Volume takes it in one
-``batch_upload``, without the trainer's mount), then LATEST. A reader still sees
-a release only once LATEST names it and its files are complete. The upload runs
+``batch_upload``, without the trainer's mount), then the record and LATEST in
+one more (``put_files``). A reader still sees a release only once LATEST names
+it and its files are complete. The upload runs
 on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
 while the samplers' release is written; releases stay in version order (the next
 one waits for the upload of the previous one).
@@ -439,13 +440,16 @@ class PolicyReleaseStore:
         return record
 
     def release_staged(self, version: int, policy_hash: str, staged: Path, *,
-                       buffer_selected: int | None = None, weights: str = FULL,
-                       engine_checksum: str | None = None,
-                       buffer_shards: dict[str, int] | None = None,
+                       position: Callable[[], tuple[int | None, dict[str, int] | None]],
+                       weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None) -> PolicyRelease | None:
         """Publish the weights already written into the local directory ``staged``
-        (module doc, staged releases): the record goes into ``staged``, the
-        directory into the store, then LATEST. ``staged`` keeps its files.
+        (module doc, staged releases): the weight files go into the store first;
+        then the record, in the release directory and as LATEST, in one put.
+        ``position()`` is called between the two: ``(buffer_selected,
+        buffer_shards)`` then include the rounds the trainer took while the weights
+        uploaded, so a sampler's backlog cap lifts with this release. ``staged``
+        keeps its files.
 
         Returns None (puts nothing) when the latest release is this version and hash."""
         version = int(version)
@@ -468,6 +472,9 @@ class PolicyReleaseStore:
         with timer.phase("digest_s"):
             sha256 = directory_digest(staged) if weights == LORA else None
             files = file_sizes(staged)
+        with timer.phase("upload_s"):
+            self.store.put_directory(staged, f"{self.release_dir}/{name}")
+        buffer_selected, buffer_shards = position()
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
                                released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
@@ -475,12 +482,10 @@ class PolicyReleaseStore:
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
                                origin=None if origin is None else dict(origin))
-        with timer.phase("upload_s"):
-            _write_json_atomic(staged / RECORD, asdict(record))
-            self.store.put_directory(staged, f"{self.release_dir}/{name}")
+        text = json.dumps(asdict(record), sort_keys=True).encode("utf-8")
         with timer.phase("latest_s"):
-            self.store.put_file(json.dumps(asdict(record), sort_keys=True).encode("utf-8"),
-                                f"{self.release_dir}/{LATEST}")
+            self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
+                                  f"{self.release_dir}/{LATEST}": text})
         self._names = [n for n in self._names if n != name] + [name]
         with timer.phase("prune_s"):
             for old in self._names[:-self.keep]:
@@ -488,7 +493,7 @@ class PolicyReleaseStore:
             self._names = self._names[-self.keep:]
         self._written = record
         self.last_timings = timer.as_dict()
-        self.last_visible_at = round(self.clock(), 3)  # LATEST names it (after the upload)
+        self.last_visible_at = round(self.clock(), 3)  # LATEST names it
         return record
 
     def _listed_names(self) -> list[str]:

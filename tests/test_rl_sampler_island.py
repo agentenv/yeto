@@ -713,11 +713,14 @@ def test_a_trainer_island_stages_full_releases_and_uploads_them_in_the_backgroun
     wired.publish(_State(1, "h1"))
     assert plugin_calls == [(si.WRITE_FULL_CHECKPOINT, 1)]
     assert wired.releaser.busy and not (store / RELEASE_DIR / "LATEST.json").exists()
+    read_from_thread = []
+    wired.read_position_from_thread = lambda: read_from_thread.append(1) or 64
     gate.set()
     wired.publish(_State(2, "h2"))  # waits for v1's upload, then stages v2
     wired.drain_releases()
     latest = PolicyReleaseStore(CheckpointStore(store)).latest()
     assert (latest.seq, latest.version, latest.files) == (2, 2, {"model.safetensors": 3})
+    assert latest.buffer_selected == 64 and read_from_thread == [1, 1]  # read on the upload thread
     assert sorted(p.name for p in (store / RELEASE_DIR).iterdir()) == ["LATEST.json", "r1-v1", "r2-v2"]
     assert list(staging.iterdir()) == []
     released = [f for e, f in events if e == "rl_policy_released"]
@@ -853,3 +856,30 @@ def test_convertible_nodes_get_a_backlog_cap_at_least_one_start_wave():
         sample_roles.check_launch(launch)
     launch.rl_sampler_max_backlog_rounds = 3
     sample_roles.check_launch(launch)
+
+
+def test_the_rollout_executor_is_called_from_the_upload_thread_without_the_event_loop(monkeypatch):
+    """The staged-release upload thread reads the trainer's buffer position through
+    the Ray reference itself: the driver's event loop may be running meanwhile."""
+    import sys
+    import threading
+
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
+
+    class ActorHandle:  # the Ray actor handle type name _executor_target looks for
+        __ray_call__ = SimpleNamespace(remote=lambda fn, *a: ("ref", fn, a))
+
+    got = []
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(
+        get=lambda ref: got.append(threading.current_thread().name) or ref[1](None, *ref[2])))
+    pool = MilesRolloutPool.__new__(MilesRolloutPool)
+    pool._executor = ActorHandle()
+    pool._run = lambda value: (_ for _ in ()).throw(AssertionError("the event loop was driven"))
+    worker = threading.Thread(target=lambda: got.append(pool._in_executor_from_thread(
+        lambda executor, x: x + 1, 41)), name="upload")
+    worker.start()
+    worker.join()
+    assert got == ["upload", 42]
+    local = MilesRolloutPool.__new__(MilesRolloutPool)
+    local._executor = SimpleNamespace(data_source="source")
+    assert local._in_executor_from_thread(lambda executor: executor.data_source) == "source"
