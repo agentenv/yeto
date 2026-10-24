@@ -172,46 +172,6 @@ def test_seek_puts_the_data_source_where_its_load_would_and_only_once(tmp_path):
         br.seek_data_source(SimpleNamespace(sample_offset=0), _cursor(1), shuffle=False)
 
 
-def test_several_samplers_start_at_disjoint_prompt_blocks():
-    shards = ("island0", "island1", "island2")
-    blocks = [br.first_round_cursor(shards, s, rounds=4, groups_per_round=8, samples_per_group=2)
-              for s in shards]
-    assert [c["sample_offset"] for c in blocks] == [0, 32, 64]
-    assert blocks[1] == {"sample_offset": 32, "epoch_id": 0, "sample_group_index": 32,
-                         "sample_index": 64}
-    assert br.first_round_cursor(("island0",), "island0", rounds=4, groups_per_round=8,
-                                 samples_per_group=2) is None
-    assert br.first_round_cursor((), "island0", rounds=4, groups_per_round=8,
-                                 samples_per_group=2) is None
-    with pytest.raises(br.SampleBufferRolloutError, match="not one of the buffer shards"):
-        br.first_round_cursor(shards, "island9", rounds=4, groups_per_round=8, samples_per_group=2)
-
-
-def test_a_fresh_sampler_seeks_its_block_and_a_replacement_its_resume_cursor(tmp_path):
-    def source(size):
-        return SimpleNamespace(sample_offset=0, epoch_id=0, sample_group_index=0, sample_index=0,
-                               dataset=[None] * size)
-
-    store = CheckpointStore(tmp_path)
-    fresh = br.SamplerRoundWriter(FileSampleBuffer(store, batch_size=1), "island1", incarnation="a",
-                                  first_cursor=_cursor(32))
-    data = source(100)
-    assert fresh.seek(data, shuffle=False)["sample_offset"] == 32
-    assert (data.sample_offset, data.epoch_id, data.sample_group_index) == (32, 0, 32)
-    # an offset past the dataset wraps into the next epoch, as Miles' own draw does
-    wrapped = source(20)
-    br.SamplerRoundWriter(FileSampleBuffer(store, batch_size=1), "island2", incarnation="a",
-                          first_cursor=_cursor(32)).seek(wrapped, shuffle=False)
-    assert (wrapped.sample_offset, wrapped.epoch_id, wrapped.sample_group_index) == (12, 1, 32)
-    # a replacement incarnation continues at its own resume cursor, not at the block start
-    fresh.write_round(0, _round(0, 1), _cursor(40))
-    replacement = br.SamplerRoundWriter(FileSampleBuffer(store, batch_size=1), "island1",
-                                        incarnation="b", first_cursor=_cursor(32))
-    resumed = source(100)
-    assert replacement.seek(resumed, shuffle=False)["sample_offset"] == 40
-    assert resumed.sample_offset == 40
-
-
 def test_a_writer_without_resume_writes_as_before(tmp_path):
     """A convertible node keeps its own rollout numbering: no round check."""
     store = CheckpointStore(tmp_path)

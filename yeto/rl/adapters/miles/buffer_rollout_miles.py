@@ -38,9 +38,7 @@ from .buffer_rollout import (
     BatchReader,
     SampleBufferRolloutError,
     SamplerRoundWriter,
-    buffer_shards,
     convertible_mode,
-    first_round_cursor,
     open_buffer,
     open_lane_log,
     register_reader,
@@ -62,8 +60,7 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
     A replacement incarnation of the island continues where the buffer says the
     earlier ones stopped (:class:`.buffer_rollout.SamplerRoundWriter`): the data
     source is put at the saved cursor before the first round, and a round
-    already in the buffer is refused. With several sampler islands, a first
-    incarnation starts at its own prompt block (``first_round_cursor``)."""
+    already in the buffer is refused."""
 
     resumable = True  # a convertible node keeps its own rollout numbering (no resume)
 
@@ -75,16 +72,9 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
         # the incarnation suffix keeps the sample ids unique: a restarted sampler repeats
         # Miles group indexes; the trainer renumbers groups by buffer position
         incarnation = os.environ.get(INCARNATION_ENV) or new_incarnation()
-        # several sampler islands share the trainer's rounds: each draws its own prompt block
-        first = first_round_cursor(buffer_shards(os.environ), sampler_id,
-                                   rounds=input.args.num_rollout,
-                                   groups_per_round=input.args.rollout_batch_size,
-                                   samples_per_group=input.args.n_samples_per_prompt,
-                                   ) if self.resumable else None
         self._rounds = SamplerRoundWriter(self._open_writer_buffer(), sampler_id,
                                           incarnation=incarnation, resume=self.resumable,
-                                          reclaimed=lambda: reclaim_requested(os.environ),
-                                          first_cursor=first)
+                                          reclaimed=lambda: reclaim_requested(os.environ))
         self._shuffle = bool(getattr(input.args, "rollout_shuffle", False))  # the seek re-shuffles
 
     def _open_writer_buffer(self) -> Any:
