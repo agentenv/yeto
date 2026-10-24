@@ -79,7 +79,7 @@ from yeto.rl.engine.policy_release import (
     copy_with_digest,
     ReleaseNotLoaded,
 )
-from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, merged_version
+from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, release_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 from yeto.rl.quant.schemes import BF16, FP8_FFN_CHANNEL, release_dir_for
@@ -728,7 +728,9 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
 
     Synced trainers (a buffer lane on ``miles_args.yeto_rl_sample_lane``): every
     island gates on the merged version; only the publisher (learner id 0) releases,
-    with the merged version (:mod:`yeto.rl.engine.merged_release`)."""
+    with the merged version (:mod:`yeto.rl.engine.merged_release`). On its own lane
+    (its samplers follow it) a trainer is the publisher of its sub-store and
+    releases and gates with its local version."""
     config = _buffer_config(miles_args, TRAINER) or _buffer_config(miles_args, CONVERTIBLE)
     if config is None:
         return None
@@ -740,11 +742,11 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     synced: dict[str, Any] = {}
     if lane is not None:
         def version_of(state: Any) -> int:
-            return merged_version(driver, state)
+            return release_version(driver, state, lane)
 
         def origin(state: Any) -> dict[str, Any]:
-            return {"kind": "merged", "learner_id": lane.index, "num_learners": lane.count,
-                    "local_version": int(state.policy_version)}
+            return {"kind": "local" if lane.is_own else "merged", "learner_id": lane.index,
+                    "num_learners": lane.count, "local_version": int(state.policy_version)}
 
         def on_gap(previous: int, version: int) -> None:
             driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
@@ -760,7 +762,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
             driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
         publisher_island = is_publisher(lane.index, lane.count)
         driver.emit("rl_policy_release_role", learner_id=lane.index, num_learners=lane.count,
-                    publisher=publisher_island)
+                    publisher=publisher_island, own_lane=lane.is_own)
         if not publisher_island:
             return None
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}

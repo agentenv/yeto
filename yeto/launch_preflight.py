@@ -393,6 +393,14 @@ def add_cli_args(p) -> None:
                    "syncer, each island runs as a one-learner no-sync island with that "
                    "--rl-sample-role. With one sampler, combine with --rl-trainer-scheduler s1 "
                    "--rl-trainer-island M to start and stop the trainer island")
+    g.add_argument("--rl-sampler-follow", choices=("merged", "trainer"), default="merged",
+                   help="a synced group (--rl-sample-role trainer --rl-island-sample-role "
+                   "M:sampler): which model the sampler islands load. merged (default): the "
+                   "trainer with learner id 0 releases the merged version, and every sampler "
+                   "feeds every trainer's buffer lane. trainer (Miles): sampler j feeds trainer "
+                   "j %% K only and loads that trainer's own local policy, released every "
+                   "version; each trainer and its samplers share a sub-directory "
+                   "trainer<k> of --rl-checkpoint-store (sample_roles module doc)")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "

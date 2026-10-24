@@ -38,6 +38,14 @@ asynchronous rounds only) the publisher releases full weights at the merged
 version of the fragments (``full_parameter_sync.merged_version``), and the
 samplers run ``--tuning full``.
 
+Samplers that follow their own trainer (``--rl-sampler-follow trainer``, Miles):
+in a synced group, sampler j (in island order) feeds trainer j % K only. Each
+trainer and its samplers form one pair inside the group: they share the store
+sub-directory ``trainer<k>`` (:func:`trainer_substore`; the buffer and the
+releases), the trainer reads that whole buffer (its own lane, 0 of 1) and
+releases every local policy version for its samplers
+(``merged_release`` module doc). The trainers still merge through the syncer.
+
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
 """
@@ -53,6 +61,8 @@ from .selection import FULL_PARAMETER_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
+# --rl-sampler-follow: what a synced group's samplers load (module doc)
+FOLLOW_MERGED, FOLLOW_TRAINER = "merged", "trainer"
 
 # groups a sampler may have ahead of the trainer's last released read position,
 # in units of one round (rollout batch), when --rl-sampler-max-backlog-rounds is unset
@@ -103,13 +113,14 @@ def is_synced_trainer(args: Any) -> bool:
 def buffer_lane(args: Any) -> Any:
     """The buffer lane of a synced trainer island (island args: ``learner_id`` and
     ``--rl-sample-lanes``, the trainer count the launcher forwards); None for every
-    other island."""
-    from .merged_release import BufferLane
+    other island. ``--rl-sample-lanes 1``: a trainer whose samplers follow it reads
+    its own sub-store, the whole buffer (lane 0 of 1)."""
+    from .merged_release import OWN_LANE, BufferLane
 
-    if not is_synced_trainer(args):
+    if not is_synced_trainer(args) or getattr(args, "rl_sample_lanes", None) is None:
         return None
-    count = int(getattr(args, "rl_sample_lanes", None) or 1)
-    return None if count == 1 else BufferLane(int(getattr(args, "learner_id", 0) or 0), count)
+    count = int(args.rl_sample_lanes)
+    return OWN_LANE if count == 1 else BufferLane(int(getattr(args, "learner_id", 0) or 0), count)
 
 
 def check_synced_trainers(args: Any, num_islands: int) -> None:
@@ -169,9 +180,9 @@ def check_sample_store(args: Any) -> None:
             raise ValueError("--rl-sample-store / --rl-sample-lanes need --rl-sample-role trainer "
                              "with a syncer (no --rl-single-island-no-sync)")
         return
-    if not store or lanes is None or int(lanes) < 2:
+    if not store or lanes is None or int(lanes) < 1:
         raise ValueError("a synced trainer island needs --rl-sample-store and --rl-sample-lanes "
-                         ">= 2 (the launcher forwards both)")
+                         ">= 1 (the launcher forwards both; 1: its samplers follow it)")
     if getattr(args, "rl_resume_store", None):
         raise ValueError("a synced trainer island takes --rl-sample-store, not --rl-resume-store")
     buffer_lane(args)  # learner id inside 0..lanes-1
@@ -272,8 +283,55 @@ def buffer_shards(args: Any, num_islands: int) -> list[str] | None:
     """The buffer shards of a pair with several sampler islands (S25 C1): one per
     sampler island, named by its node name; None with one sampler (it writes the
     index itself, as before)."""
-    samplers = sampler_islands(args, num_islands)
+    return _shards_of(sampler_islands(args, num_islands))
+
+
+def _shards_of(samplers: list[int]) -> list[str] | None:
     return [node_name(m) for m in samplers] if len(samplers) > 1 else None
+
+
+def follows_trainer(args: Any) -> bool:
+    """Whether a synced group's samplers follow their own trainer
+    (``--rl-sampler-follow trainer``, module doc)."""
+    return is_synced_group(args) and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER
+
+
+def sampler_bindings(args: Any, num_islands: int) -> dict[int, int]:
+    """{sampler island: trainer island} of a synced group whose samplers follow
+    their trainer: sampler j (in island order) feeds trainer j % K; {} otherwise."""
+    if not follows_trainer(args):
+        return {}
+    trainers = sorted(synced_group_learners(args, num_islands))
+    return {m: trainers[j % len(trainers)] for j, m in enumerate(sampler_islands(args, num_islands))}
+
+
+def trainer_substore(learner: int) -> str:
+    """The store sub-directory of trainer ``learner`` and its samplers (buffer and
+    releases) when the samplers follow their trainer."""
+    return f"trainer{int(learner)}"
+
+
+def substore_uri(store: str, name: str) -> str:
+    """``--rl-checkpoint-store`` (a path or a ``scheme://`` URI) with one more path
+    segment."""
+    return f"{str(store).rstrip('/')}/{name}"
+
+
+def check_sampler_follow(args: Any, num_islands: int) -> None:
+    """Launch checks of ``--rl-sampler-follow trainer``: a synced group on Miles
+    whose samplers split evenly over its trainers."""
+    if getattr(args, "rl_sampler_follow", FOLLOW_MERGED) != FOLLOW_TRAINER:
+        return
+    if not is_synced_group(args):
+        raise ValueError("--rl-sampler-follow trainer needs a synced group (--rl-sample-role "
+                         "trainer --rl-island-sample-role M:sampler, a syncer)")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError("--rl-sampler-follow trainer is wired for --rl-backend miles only")
+    trainers = len(synced_group_learners(args, num_islands))
+    samplers = len(sampler_islands(args, num_islands))
+    if samplers % trainers:
+        raise ValueError(f"--rl-sampler-follow trainer: {samplers} sampler islands do not split "
+                         f"evenly over {trainers} trainers (each trainer needs the same count)")
 
 
 def is_store_coupled(args: Any) -> bool:
@@ -337,17 +395,27 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     from ...launch.syncer import _ISLAND_POOL_PARAMS
 
     samplers = sampler_islands(args, num_islands)
+    learners = synced_group_learners(args, num_islands)
+    bindings = sampler_bindings(args, num_islands)
     out = copy.copy(args)
     out.rl_island_sample_role = None  # the island is no group: its role is below
     out.rl_sample_role = roles[island]
     out.rl_buffer_shards = buffer_shards(args, num_islands)
-    out.rl_synced_trainers = len(synced_group_learners(args, num_islands))
+    out.rl_synced_trainers = len(learners)
+    out.rl_sample_substore = None
+    if bindings:  # each trainer and its own samplers: one sub-store (module doc)
+        trainer = island if out.rl_sample_role == TRAINER else bindings[island]
+        out.rl_buffer_shards = _shards_of([m for m, t in sorted(bindings.items()) if t == trainer])
+        out.rl_sample_substore = trainer_substore(learners[trainer])
     if out.rl_sample_role == TRAINER:
         out.rl_sampler_node = None
         out.rl_sampler_data_slot = None
         out.rl_sampler_max_backlog_rounds = None
         out.rl_sampler_min_round_seconds = None
         return out
+    if out.rl_sample_substore is not None:
+        out.rl_checkpoint_store = substore_uri(args.rl_checkpoint_store, out.rl_sample_substore)
+        out.rl_sample_substore = None  # a sampler's store is its trainer's sub-store
     out.rl_single_island_no_sync = True
     for name, _flag in _ISLAND_POOL_PARAMS:
         setattr(out, name, None)
@@ -357,9 +425,24 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
                                 if len(samplers) > 1 else None)
     out.rl_sample_wait_s = None
     out.total_steps = out.rl_synced_trainers * int(args.total_steps) // len(samplers)
+    if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET:
+        _as_full_parameter_sampler(out)
     if getattr(args, "rl_total_fragment_steps", None) is not None:
-        out.rl_total_fragment_steps = out.total_steps * int(getattr(args, "fragments", 1) or 1)
+        out.rl_total_fragment_steps = out.total_steps * int(getattr(out, "fragments", 1) or 1)
     return out
+
+
+def _as_full_parameter_sampler(out: Any) -> None:
+    """A sampler of a full-parameter synced group runs as a pair's full-parameter
+    sampler: a no-sync island with ``--tuning full`` and the default sync preset
+    (it syncs nothing, so no fragment or merge option reaches its command)."""
+    out.rl_sync_preset = "strict-avg"
+    out.tuning = "full"
+    out.rl_sync_full_parameter_rounds = "sweep"
+    out.rl_sync_matrix_merge = "avg"
+    out.rl_sync_bcast_delta_full_every = 0
+    out.local_rl_rounds_per_sync = 1
+    out.fragments = 1
 
 
 def island_learner(args: Any, island: int, num_learners: int,
