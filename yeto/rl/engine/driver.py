@@ -522,6 +522,10 @@ class IslandDriver:
         # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
         # log); None: the data source cursor is restored (_restore_data_cursor).
         self.data_position_owner: str | None = None
+        # S27 task assignment: an island whose rounds count from 0 in every process
+        # (full parameter) keeps its data position in the run store
+        # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
+        self.data_positions: Any = None
         # S27 L11: () -> ((version, policy hash), ...) published before this process
         # started (e.g. the store's policy releases); None: none to restore.
         self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
@@ -692,6 +696,7 @@ class IslandDriver:
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
             **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
+            **({"data_slot": self.data_slot} if self.data_slot else {}),
             **self._code_identity(),
         )
 
@@ -1475,6 +1480,9 @@ class IslandDriver:
     # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
     # into rl_driver_start as ``island_tasks`` only when the island has its own list.
     island_tasks: Mapping[str, Any] | None = None
+    # S27 task assignment: the island's row slot "I/N" (``data_split.DataSlot``),
+    # recorded in rl_driver_start only when the island reads a part of --data.
+    data_slot: str | None = None
     # rl-identity-tiering L9.1: this island's code identity, written into
     # rl_driver_start with ``semantic_sha256`` only when set.
     code_pack_digest: str | None = None
@@ -1689,6 +1697,7 @@ class IslandDriver:
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
+        self._record_data_position(rollout_id)
         self._join_eval()
         if self.colocated and self.publish_offloaded:
             # E1: a round cut due at the next safe point writes the trainer state now,
@@ -1976,6 +1985,52 @@ class IslandDriver:
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
 
+    def _resume_data_position(self) -> None:
+        """S27 task assignment (``data_position`` module doc): a process that joined
+        a running pool continues at the island's last recorded data position; a
+        process that starts the run writes a start record. Fail closed: a recorded
+        position the pool cannot seek to, or a seek that lands elsewhere, raises."""
+        log = self.data_positions
+        if log is None:
+            return
+        read = getattr(self.rollout, "data_cursor", None)
+        if not getattr(self.sync, "joined_running_pool", False):
+            self._write_data_position(log.start, read() if callable(read) else None)
+            return
+        record = log.last()
+        if record is None or record.cursor is None:
+            self.emit("rl_data_position_unknown", slot=log.slot,
+                      reason="no recorded data position" if record is None
+                      else "the last record has no data cursor")
+            return
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        if not callable(seek):
+            raise DriverError(f"rejoin: the data position log holds {record.cursor} but the "
+                              "rollout pool cannot seek its data source")
+        landed = seek(record.cursor)
+        landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+        if landed != record.cursor:
+            raise DriverError(f"rejoin: data source seek to the recorded position "
+                              f"{record.cursor} landed on {landed}")
+        self.emit("rl_data_position_restored", after_round=record.round, slot=log.slot,
+                  data_cursor=dict(landed))
+
+    def _record_data_position(self, rollout_id: int) -> None:
+        """S27 task assignment: the data cursor after this round's sync boundary."""
+        log = self.data_positions
+        read = getattr(self.rollout, "data_cursor", None)
+        if log is None or not callable(read):
+            return
+        self._write_data_position(log.record, rollout_id, read())
+
+    def _write_data_position(self, write: Callable[..., None], *fields: Any) -> None:
+        """A record the store refuses costs a relaunch some rows read again, never
+        the round: the failure goes on the tape and the island trains on."""
+        try:
+            write(*fields)
+        except OSError as error:
+            self.emit("rl_data_position_write_failed", error=f"{type(error).__name__}: {error}")
+
     def _emit_critic_round(self, rollout_id: int) -> None:
         """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
         hashes, param mode, init source, critic weight hash, value metrics).
@@ -2026,6 +2081,7 @@ class IslandDriver:
                         # (1b: rollouts 3, 4 re-trained rollouts 0, 1). S17 N16: same
                         # for a strict island relaunched at v > 0 (verl V2 island 1).
                         self._restore_data_cursor(start.rollout_id)
+                    self._resume_data_position()
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)
                     self._confirm_recovery(start.rollout_id)
@@ -2086,7 +2142,20 @@ class IslandDriver:
         reason = leave_reason_for(failure)
         if failure is not None:
             self._record_leave(reason, failure)
+        if self.data_positions is not None:
+            self._close_data_positions()
         self.sync.close(reason)
+
+    def _close_data_positions(self) -> None:
+        """Wait for the last data position commit; a commit that failed or did not
+        end goes on the tape (the tape must not mask the run's own error)."""
+        log = self.data_positions
+        try:
+            ended = log.close()
+            if log.commit_errors or not ended:
+                self.emit("rl_data_position_commit", ended=ended, errors=log.commit_errors[-5:])
+        except Exception:  # noqa: BLE001 - closing the session comes first
+            pass
 
     def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
         try:

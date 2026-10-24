@@ -365,6 +365,47 @@ Add the following for decoupled synchronization:
 The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
 claimed to be optimal for every model.
 
+### Which island reads which rows of `--data`
+
+Row `i` is the 0-based number of a row of `--data`, in the order the rows are
+read. The launcher decides which rows each island reads, prints the rule
+(`[launcher] data split (...)`) and records it in the run manifest and the
+dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
+(`data_slot`). The rules are in `yeto/rl/engine/data_split.py`.
+
+- Islands that generate and train (the default sample role), two or more of
+  them: the island with learner id `k` of `N` reads the rows with
+  `i % N == k`, in data order (`--rl-data-split auto`, the default). The
+  launcher sends each island `--rl-data-slot k/N`; the island keeps only those
+  rows when it writes its prompt file, for a local JSONL file and a Hub
+  dataset, on Miles and on verl. Each kept row carries its row number as
+  `metadata.yeto_data_row` (verl: `extra_info.yeto_data_row`). In round `r`
+  the `N` islands together read the rows that `N` rounds of one island would
+  read.
+- After its last row an island starts the next pass over its own rows. Pass 0
+  is data order; every later pass is reshuffled with a seed made from `--seed`
+  and the pass number (Miles). verl keeps its own sampler, which shuffles every
+  pass with `--seed`.
+- `--rl-island-tasks` replaces the split with your task lists. Lists that name
+  the same task on two islands get a warning.
+- `--rl-data-split shared` gives every island every row in the same order (the
+  behaviour before S27). Use it only for controlled experiments: the launch
+  prints a warning, because every island then trains the same prompts in every
+  round. `--external-learners` also falls back to `shared`, with the same
+  warning.
+- Sampler islands always read their own slots (sampler `k` of `S`:
+  `i % S == k`); trainers that read the sample buffer read buffer lanes.
+- The slots are fixed at launch. A relaunched or re-joined island keeps its
+  learner id and so its rows. Known limits: the rows of an island that left
+  are read by no other island, and an island added after the launch gets no
+  slot.
+- A full-parameter island restarts its round counter at 0 in every process.
+  With `--rl-checkpoint-store` it keeps its data position after every round
+  under `<store>/data-positions/`, and a process that joins the running pool
+  continues at the next row of its slot (`rl_data_position_restored`). Without
+  a store a relaunched island reads its rows from the first row again (the
+  launch warns for an island pool).
+
 ### Clouds, controller and images
 
 - **Controller.** `--controller head` (default) hands the run to one small

@@ -202,6 +202,9 @@ TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
 # Codex exit status (completed / max_turns / max_seq_len / timeout), agent
 # counters and the signed test.sh exit code.
 TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
+    # S27 task assignment: the sample's row number in the unsplit --data, on an
+    # island that reads a row slot (``data_split.DATA_ROW_KEY``)
+    "data_row": (int,),
     "exit_status": (str,),
     "turns": (int,),
     "terminal_calls": (int,),

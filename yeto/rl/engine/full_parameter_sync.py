@@ -1297,6 +1297,11 @@ class FullParameterSync(RoundCutHooks):
         # push counters at the previous boundary.
         self._phase_seconds: dict[str, float] = {}
         self._push_jobs_before: dict[str, float] = {}
+        # S27 task assignment: this process joined a pool that was already running
+        # (fragments newer than version 0, or a peer recovery), so the island ran
+        # before; the driver then continues at its recorded data position
+        # (``data_position`` module doc). Set by ``start``.
+        self.joined_running_pool = False
 
     @property
     def outer_version(self) -> int | None:
@@ -1321,7 +1326,10 @@ class FullParameterSync(RoundCutHooks):
                         done_step=outcome.done_step, steps=outcome.steps, replayed=outcome.replayed,
                         refused_sources=outcome.refused_sources, seconds=outcome.seconds,
                         versions=list(outcome.versions))
+        self.joined_running_pool = outcome is not None or any(
+            int(version) > 0 for version in self.pairing.fragment_versions())
         self._publish_outer_version(driver)
+        # the local round counter starts at 0 in every process (module doc)
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
 
     def _publish_outer_version(self, driver: IslandDriver) -> None:

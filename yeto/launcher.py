@@ -47,7 +47,7 @@ from .launch.syncer import (
 from .launch.storage import (
     droppable_rejoins_in_new_container, resumes_in_new_container,
 )
-from .launch.island_tasks import island_task_plan
+from .launch.island_tasks import data_split_plan, island_task_plan
 from .launch.args import prepare_launch_args
 from .launch.rl_island_task import _echoes_events, make_miles_island_task
 from .launch.learner_task import make_learner_task
@@ -1011,6 +1011,7 @@ def dry_run_plan(args) -> dict:
 
     memory = dry_run_memory(args, specs)
     task_plan = island_task_plan(args) if rl else None
+    split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
     for learner_id, spec in enumerate(specs):
         entry = {
@@ -1047,6 +1048,8 @@ def dry_run_plan(args) -> dict:
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:
                 entry["island_tasks"] = task_plan[learner_id].record()
+            if split_plan.several_islands:
+                entry["data_split"] = split_plan.island_record(learner_id)
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 
@@ -1063,6 +1066,9 @@ def dry_run_plan(args) -> dict:
         "rl_engine": "ports" if rl else None,
         "controller": "head" if head else "local",
         "islands": len(specs) + external,
+        # S27 task assignment: which rows of --data each training island reads
+        **({"data_split": {**split_plan.record(), "warning": split_plan.warning()}}
+           if split_plan is not None else {}),
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),

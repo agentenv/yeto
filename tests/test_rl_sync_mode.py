@@ -81,12 +81,23 @@ def base_tree(tmp_path_factory):
     return root
 
 
+def _without_data_split(plan: dict) -> dict:
+    """The plan without the S27 data split records (``data_split``), which BASE
+    predates; the island commands keep everything else."""
+    out = {k: v for k, v in plan.items() if k != "data_split"}
+    out["island_requests"] = [{k: v for k, v in island.items() if k != "data_split"}
+                              for island in plan["island_requests"]]
+    return out
+
+
 def test_strict_mode_commands_equal_the_commands_before_the_modes(base_tree):
     before = _plans(base_tree, CONTROL_CASES)
-    strict = _plans(ROOT, {name: (*extra, "--rl-sync-mode", "strict")
+    # --rl-data-split shared: every island reads every row, as before the data split
+    # (S27); the comparison is about the sync modes only
+    strict = _plans(ROOT, {name: (*extra, "--rl-sync-mode", "strict", "--rl-data-split", "shared")
                            for name, extra in CONTROL_CASES.items()})
     for name in CONTROL_CASES:
-        assert strict[name] == before[name], name
+        assert _without_data_split(strict[name]) == before[name], name
 
 
 # -- the async defaults -------------------------------------------------------

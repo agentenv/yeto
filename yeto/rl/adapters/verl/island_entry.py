@@ -85,6 +85,8 @@ def parse_args(argv):
     p.add_argument("--rl-sampler-node", default=None)
     p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
     p.add_argument("--rl-sampler-data-slot", default=None)
+    # S27 task assignment: this training island's row slot of --data (data_split)
+    p.add_argument("--rl-data-slot", default=None)
     p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
     p.add_argument("--rl-sampler-min-round-seconds", type=float, default=None)
     # S25 C3: a synced trainer island (syncer, learner m of N) reads lane m of the
@@ -209,9 +211,16 @@ def _threshold_card(manifest: dict) -> str:
     return "H100" if "H100" in smi else smi
 
 
-def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64) -> tuple[str, str]:
+def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
+                 slot: Any = None) -> tuple[str, str]:
+    """``data``'s train and test splits as verl parquet files. ``slot``
+    (``data_split.DataSlot``, S27 task assignment): the train file keeps only the
+    slot's rows, in data order, each with its row number in the unsplit data as
+    ``extra_info["yeto_data_row"]``; the validation rows stay whole."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
+
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
 
     root.mkdir(parents=True, exist_ok=True)
     out = {}
@@ -227,10 +236,27 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
+        elif slot is not None and not slot.whole:
+            rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
+                    for number, row in slot.numbered(rows)]
         path = root / f"{split}.parquet"
         pd.DataFrame(rows).to_parquet(path)
         out[split] = str(path)
     return out["train"], out["test"]
+
+
+def island_data_slot(args: Any) -> Any:
+    """The training island's ``--rl-data-slot`` (``data_split.DataSlot``), None when
+    it reads every row; refused on a sampler island (it reads
+    ``--rl-sampler-data-slot``)."""
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.data_split import DataSlot
+
+    if not getattr(args, "rl_data_slot", None):
+        return None
+    if sample_roles.sample_role(args) != sample_roles.BOTH:
+        raise SystemExit("--rl-data-slot belongs to a training island that generates and trains")
+    return DataSlot.parse(args.rl_data_slot)
 
 
 MIN_RAY_CPUS = 32  # logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
@@ -336,7 +362,8 @@ def main(argv=None) -> int:
 
     model_path = snapshot_download(args.model, revision=args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
-    train_file, val_file = prepare_data(args.data, args.data_revision, work / "data")
+    train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
+                                        slot=island_data_slot(args))
     spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
@@ -401,6 +428,7 @@ def main(argv=None) -> int:
                            _threshold_card(manifest)],
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
+        "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),

@@ -1266,20 +1266,30 @@ def prepare_prompt_data(
     output_path: str | Path,
     prompt_column: str | None = None,
     label_column: str | None = None,
+    slot: Any = None,
 ) -> Path:
+    """Write ``source`` (local file or Hub dataset) as Miles prompt rows.
+
+    ``slot`` (``data_split.DataSlot``, S27 task assignment): keep only the
+    slot's rows, in data order; each kept row records its row number in the
+    unsplit data as ``metadata["yeto_data_row"]``."""
     from yeto.data import load_rows
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
 
     split = _prompt_split(source, revision)
     if split == "train":
         rows = load_rows(source, revision=revision)
     else:
         rows = load_rows(source, split=split, revision=revision)
+    split_rows = slot is not None and not slot.whole
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
     count = 0
     with temporary.open("w", encoding="utf-8") as handle:
-        for raw in rows:
+        for number, raw in enumerate(rows):
+            if split_rows and not slot.owns(number):
+                continue
             row = dict(raw)
             metadata = dict(row.get("metadata") or {})
             metadata.update(
@@ -1289,6 +1299,8 @@ def prepare_prompt_data(
                     if key not in {"messages", "metadata"}
                 }
             )
+            if split_rows:
+                metadata[DATA_ROW_KEY] = number
             normalized = {
                 "messages": _messages(row, prompt_column),
                 "label": (
@@ -1311,7 +1323,8 @@ def prepare_prompt_data(
             count += 1
     if count == 0:
         temporary.unlink(missing_ok=True)
-        raise ValueError("RL prompt dataset is empty")
+        raise ValueError("RL prompt dataset is empty" if not split_rows
+                         else f"data slot {slot.env()} of the RL prompt dataset is empty")
     os.replace(temporary, output)
     return output
 
@@ -1326,6 +1339,28 @@ def _verify_island_task_data(args) -> dict[str, Any] | None:
     from yeto.rl.island_tasks import verify_island_data
 
     return verify_island_data(args.data, expected)
+
+
+def _island_data_slot(args) -> Any:
+    """S27 task assignment: the island's ``--rl-data-slot`` (``data_split.DataSlot``),
+    None when the island reads every row. A slot belongs to a training island
+    that reads ``--data`` itself: refused with per-island task data, on a
+    sampler (``--rl-sampler-data-slot``) and on an eval-only island."""
+
+    text = getattr(args, "rl_data_slot", None)
+    if not text:
+        return None
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.data_split import DataSlot
+
+    if getattr(args, "data_sha256", None):
+        raise ValueError("--rl-data-slot and per-island task data (--data-sha256) exclude each other")
+    if sample_roles.sample_role(args) != sample_roles.BOTH or getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-slot belongs to a training island that generates and trains "
+                         "(a sampler reads --rl-sampler-data-slot)")
+    if getattr(args, "eval_only", False):
+        raise ValueError("--rl-data-slot: an eval-only island evaluates every row")
+    return DataSlot.parse(text)
 
 
 def _verify_eval_dataset_identity(args) -> Path | None:
@@ -1962,6 +1997,11 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    # S27 task assignment: the island's row slot (rl_driver_start, data passes) and
+    # where a full-parameter island keeps its data position across processes
+    slot = _island_data_slot(args)
+    miles_args.yeto_rl_data_slot = None if slot is None or slot.whole else slot.env()
+    miles_args.yeto_rl_data_position_store = getattr(args, "rl_data_position_store", None)
     if full_parameter and not yeto_policy_sync:
         # A no-sync buffer island (L4.6) trains every parameter without the sync
         # block above: bind the same full-parameter identity for _run_ports.
@@ -2263,6 +2303,7 @@ def main(argv=None) -> None:
         )
     eval_source = _verify_eval_dataset_identity(args)
     island_tasks = _verify_island_task_data(args)
+    slot = _island_data_slot(args)
     columns = dict(
         prompt_column=getattr(args, "rl_prompt_column", None),
         label_column=getattr(args, "rl_label_column", None),
@@ -2272,6 +2313,7 @@ def main(argv=None) -> None:
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
         **columns,
+        slot=slot,
     )
     eval_prompt_path = None
     if eval_source is not None:

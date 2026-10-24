@@ -69,7 +69,7 @@ from typing import Any
 
 from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
 from .sampler_checks import PostLoadChecks
-from .sample_roles import DataSlot
+from .data_split import DataSlot
 from .sampler_engine import Completion, SamplerEngine, SamplingParams
 
 PROMPT_FORMATS = ("text", "chat")

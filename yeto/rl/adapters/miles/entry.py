@@ -656,6 +656,20 @@ def build_sync(
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
 
 
+def data_position_log_for(miles_args: Any, sync: Any, *, learner_id: int) -> Any:
+    """S27 task assignment: the data position log of a full-parameter island in
+    the run store (``--rl-data-position-store``), None otherwise. Only a
+    full-parameter session restarts its round counter at 0 in every process; the
+    other sessions resume their data cursor by global rollout id."""
+    store = getattr(miles_args, "yeto_rl_data_position_store", None)
+    if not store or not _is_full_parameter_sync(sync):
+        return None
+    from yeto.rl.engine.data_position import data_position_log
+
+    return data_position_log(str(store), learner_id=int(learner_id),
+                             slot=getattr(miles_args, "yeto_rl_data_slot", None))
+
+
 def _is_full_parameter_sync(sync: Any) -> bool:
     from yeto.rl.engine.full_parameter_sync import FullParameterSync
 
@@ -2175,6 +2189,8 @@ def run_ports_island(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
             eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+            driver.data_slot = getattr(miles_args, "yeto_rl_data_slot", None)
+            driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
             driver.start_phases = start_phases  # L0: first_step_done

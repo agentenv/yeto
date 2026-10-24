@@ -70,7 +70,7 @@ from yeto.rl.engine.merged_release import (
     lane_cursor_log,
     merges_shards,
 )
-from yeto.rl.engine.sample_roles import DataSlot
+from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
@@ -246,9 +246,6 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
 
 
 # ---------------------------------------------------------------------- sampler side
-DATA_ROW_KEY = "yeto_data_row"  # a sample's row index in the unsplit data (DataSlot)
-
-
 def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
     """Keep only ``slot``'s rows in a Miles ``RolloutDataSource`` (S26 E9.3).
 

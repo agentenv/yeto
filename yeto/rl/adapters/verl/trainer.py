@@ -267,6 +267,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",
@@ -357,6 +358,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile, ledger=None if resume is None else resume.ledger)
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)

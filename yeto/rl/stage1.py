@@ -61,7 +61,7 @@ from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.launch.node_inventory import InventoryError, Node, load_inventory
 from yeto.rl.adapters.miles.models import glm5_next
 from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
-from yeto.rl.engine.sample_roles import DataSlot
+from yeto.rl.engine.data_split import DataSlot
 from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"

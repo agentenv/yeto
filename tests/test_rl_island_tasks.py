@@ -202,7 +202,7 @@ def test_island_task_mount_replaces_the_shared_data(catalog, tmp_path, monkeypat
     assert str(catalog) not in mounts.values()
 
 
-def test_without_the_flag_every_island_shares_data(tmp_path, monkeypatch):
+def test_without_the_flag_every_island_shares_the_data_file_and_reads_its_row_slot(tmp_path, monkeypatch):
     from yeto import launcher
 
     args = _launcher_args("ports", gpu=TWO_ISLANDS)
@@ -211,6 +211,8 @@ def test_without_the_flag_every_island_shares_data(tmp_path, monkeypatch):
     commands = [i["learner_command"] for i in launcher.dry_run_plan(args)["island_requests"]]
     assert {_flag(c, "--data") for c in commands} == {"org/data"}
     assert all("--data-sha256" not in c for c in commands)
+    # S27 task assignment: the default split gives each island its own rows of the file
+    assert [_flag(c, "--rl-data-slot") for c in commands] == ["0/2", "1/2"]
     assert launcher._island_tasks_manifest(args) == {}
 
 
