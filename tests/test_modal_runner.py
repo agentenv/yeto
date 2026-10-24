@@ -434,6 +434,23 @@ def test_a_relaunch_into_a_stopped_app_abandons_the_island_at_once(monkeypatch, 
     assert island_ops.relaunch(cfg, name) is None
 
 
+def test_the_island_container_moves_ephemeral_ports_off_the_miles_port_range(tmp_path):
+    """gVisor starts with ephemeral ports 16000-65535 (Modal CPU probe, S27 G-AT);
+    the island narrows them to Linux's default before Ray and Miles start."""
+    proc = tmp_path / "ip_local_port_range"
+    proc.write_text("16000\t65535\n")
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 16000-65535 -> 32768-60999"
+    assert proc.read_text().split() == ["32768", "60999"]
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 32768-60999: kept"
+    assert "unreadable" in mr.narrow_ephemeral_ports(str(tmp_path / "missing"))
+    proc.write_text("1024 65535")
+    proc.chmod(0o444)
+    try:
+        assert "not narrowed" in mr.narrow_ephemeral_ports(str(proc))
+    finally:
+        proc.chmod(0o644)
+
+
 def test_manual_cli_builds_a_config(tmp_path, monkeypatch):
     script = tmp_path / "run.sh"
     script.write_text("torchrun -m yeto.learner\n")

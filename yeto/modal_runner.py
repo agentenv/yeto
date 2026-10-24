@@ -904,6 +904,37 @@ def island_main(cfg_json: str) -> int:
                   flush=True)
 
 
+EPHEMERAL_PORT_RANGE = "/proc/sys/net/ipv4/ip_local_port_range"
+# Linux's default ephemeral range. A Modal (gVisor) container starts with 16000-65535,
+# which covers the ports Miles hands to engines, routers and the trainer master
+# (20000+) after probing them free: a connection opened in between (NCCL, torch
+# c10d, a health check) can take one, and the engine's later bind fails with
+# "[Errno 98] address already in use" (S27 G-AT s27-at-a: 3 of 3 sampler island
+# starts; CPU probe: about 1.5% of outgoing connections got a port in 20000-20999).
+LINUX_EPHEMERAL_PORTS = (32768, 60999)
+
+
+def narrow_ephemeral_ports(path: str = EPHEMERAL_PORT_RANGE,
+                           target: tuple[int, int] = LINUX_EPHEMERAL_PORTS) -> str:
+    """Move the container's ephemeral port range to ``target`` when it starts below
+    it (the container is the island's own; Ray's worker ports 10002-19999 and
+    Miles' ports stay outside). Returns a line for the island log; a range that
+    cannot be read or written is reported, not fatal."""
+    try:
+        before = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports: unreadable ({exc})"
+    if before[0] >= target[0]:
+        return f"ephemeral ports {before[0]}-{before[1]}: kept"
+    try:
+        with open(path, "w") as handle:
+            handle.write(f"{target[0]} {target[1]}")
+        after = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports {before[0]}-{before[1]}: not narrowed ({exc})"
+    return f"ephemeral ports {before[0]}-{before[1]} -> {after[0]}-{after[1]}"
+
+
 def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dict,
                  env: dict, tape: "TapeSync | None") -> int:
     try:
@@ -924,6 +955,7 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
     if cfg.gpu_name:
         check_gpu_model(cfg.gpu_name, names, cfg.gpus_per_node)
+    print(f"[modal-island {cfg.learner_id}] {narrow_ephemeral_ports()}", flush=True)
     if cfg.setup_script:
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:
