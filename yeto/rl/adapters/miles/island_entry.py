@@ -158,6 +158,7 @@ def build_ports_launch(args, run_config, extra_argv=()):
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
+                                async_buffer_rounds=getattr(args, "rl_async_buffer_rounds", None),
                                 full_parameter_sync=not _no_sync_island(args))
 
 

@@ -679,6 +679,14 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
+    # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
+    # realised policy age (the backend maps K to its own buffer setting).
+    shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",
+                help="--rl-max-policy-age N > 0 with generation that overlaps training "
+                "(partitioned island): the finished-group buffer holds K rounds of groups, "
+                "so generation runs at most about K rounds ahead and the realised policy "
+                "age stays near min(K, N). Default: K = N (a deeper buffer only adds groups "
+                "that are too old when trained). Refused without overlap"),
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                 help="island optimizer LR schedule: auto (default) = constant for decoupled, "
