@@ -173,6 +173,15 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
 MILES_DISTOPT_FULL_PARAMETER_COMMIT = "56190a5a86d14f1eb96d592038d76a9ad8651b0c"
 
 
+# First Miles commit whose full-parameter sync supports data-parallel replicas
+# (DP>1, EP spanning DP): one rank of each replica group owns and exports a
+# parameter, the other ranks apply the owner's bytes (S27 G-AX; fork branch
+# yeto/s27-dp-sync on 8edea35a7, whose head d78bf39e4 also pins the
+# HybridDeviceOptimizer CPU masters).  Not in the image yet: until
+# MILES_FORK_LINEAGE reaches it, a full-parameter sync at DP>1 is refused.
+MILES_DP_REPLICA_FULL_PARAMETER_COMMIT = "921cde8c7fe7657471bb2be255a4af9bf3653c3d"
+
+
 def miles_fork_lineage_from(commit: str) -> frozenset[str]:
     """``commit`` and every later commit of :data:`MILES_FORK_LINEAGE`."""
     return frozenset(MILES_FORK_LINEAGE[MILES_FORK_LINEAGE.index(commit):])

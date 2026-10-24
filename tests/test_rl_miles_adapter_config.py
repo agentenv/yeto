@@ -230,6 +230,7 @@ def test_unmappable_values_rejected_by_name(section, field, value, path):
     assert path in str(err.value)
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_full_parameter_mode_emits_no_lora_flags():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
@@ -237,6 +238,47 @@ def test_full_parameter_mode_emits_no_lora_flags():
 
 
 
+
+@pytest.fixture
+def dp_replicas(monkeypatch):
+    """A Miles pin with data-parallel replicas: ``make_config`` is a DP=2 trainer."""
+    monkeypatch.setattr(mc, "full_parameter_dp_replica_gap", lambda: None)
+
+
+def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin():
+    # S27 G-AX: the pinned image's Miles refuses DP>1 at its first manifest.
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    with pytest.raises(mc.MilesConfigError, match="DP 2 needs Miles 921cde8c7 or later"):
+        mc.translate_run_config(cfg, AlgorithmSpec())
+    # A no-sync trainer island has no full-parameter reader.
+    assert "use_distributed_optimizer" not in mc.translate_run_config(
+        cfg, AlgorithmSpec(), full_parameter_sync=False).runtime_attrs
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_full_parameter_sync_at_dp_above_one_needs_whole_masters():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    assert mc.translate_run_config(cfg, AlgorithmSpec()).runtime_attrs["use_distributed_optimizer"] is False
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    with pytest.raises(mc.MilesConfigError, match="drop --rl-optimizer-offload-fraction"):
+        mc.translate_run_config(cfg, AlgorithmSpec())
+
+
+def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
+    from yeto.rl.adapters.miles import pins, run_config_rules
+
+    assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()
+    first = pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT
+    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", (*pins.MILES_FORK_LINEAGE, first, "f" * 40))
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "f" * 40)
+    assert run_config_rules.full_parameter_dp_replica_gap() is None
+    from yeto.rl.engine.run_config import full_parameter_layout_problem
+
+    assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
+                                         rollout_gpus_per_engine=1) is None
+
+
+@pytest.mark.usefixtures("dp_replicas")
 def test_trainer_only_full_parameter_island_starts_no_engine():
     # S25 T-INTEG2: a full-parameter trainer that reads the store (DP>1, no engine).
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
@@ -249,6 +291,7 @@ def test_trainer_only_full_parameter_island_starts_no_engine():
     assert "--colocate" not in argv and "--rollout-num-gpus" not in argv
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     # Miles' set_default_megatron_args forces the distributed optimizer on for
     # Adam, which leaves each FP32 master a flat slice; the full-parameter
@@ -280,6 +323,7 @@ def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader
     # HybridDeviceOptimizer's offloaded FP32 copies) from 56190a5a8 on; an
     # older pinned image is refused before launch.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", data_parallel=1)  # the DP=1 distributed-optimizer reader
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=0.5))
     monkeypatch.setattr(mc, "MILES_NEXT_COMMIT", "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b")
     with pytest.raises(mc.MilesConfigError, match="56190a5a8 or later"):
@@ -288,6 +332,7 @@ def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader
 
 def test_optimizer_offload_with_the_full_parameter_sync_keeps_the_distributed_optimizer():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", data_parallel=1)  # the DP=1 distributed-optimizer reader
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
     launch = mc.translate_run_config(cfg, AlgorithmSpec())
     assert "use_distributed_optimizer" not in launch.runtime_attrs
@@ -319,6 +364,7 @@ def test_lora_mode_leaves_the_distributed_optimizer_to_miles():
     assert "use_distributed_optimizer" not in launch.runtime_attrs
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_validate_parsed_args_refuses_a_reenabled_distributed_optimizer():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     launch = mc.translate_run_config(cfg, AlgorithmSpec())

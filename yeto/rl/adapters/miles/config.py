@@ -52,6 +52,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
+from .run_config_rules import full_parameter_dp_replica_gap
 from . import sampler_snapshot
 from .binding import filter_argv
 
@@ -1166,7 +1167,8 @@ def translate_run_config(
             **({"yeto_rollout_quant_fp8_source": serving.rollout_quant_fp8_source}
                if getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) != FP8_SOURCE_ENGINE else {}),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
-                                              full_parameter_sync=full_parameter_sync),
+                                              full_parameter_sync=full_parameter_sync,
+                                              data_parallel=config.parallel.data_parallel),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
             **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
                if getattr(config.algorithm, "critic", None) is not None
@@ -1254,12 +1256,16 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
-def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool) -> dict[str, Any]:
+def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool,
+                                    data_parallel: int = 1) -> dict[str, Any]:
     """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
     ``sao-streaming-full``) reads one whole FP32 master per parameter on each
-    rank (islands run DP=1).
+    rank. At DP>1 one rank of each data-parallel replica group owns (exports)
+    a parameter and the other replicas apply its bytes; that needs a Miles pin
+    with data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
+    and a whole master on every replica, so no optimizer offload.
 
     * No optimizer offload: the non-distributed optimizer, whose masters are
       whole tensors. Miles' ``set_default_megatron_args`` turns the
@@ -1273,7 +1279,7 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
       Miles reads it and, on a cut apply, writes both that copy and the BF16
       model view (``full_parameter_state._propagate_master_writes``). Needs
       a Miles image at or after :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT`;
-      DP>1 is still refused by Miles at the first manifest.
+      DP=1 only (at DP>1 a distributed-optimizer master is a partial range).
 
     A no-sync trainer island (samples from the store, L4.6) has no such reader:
     it keeps Miles' distributed optimizer, so DP replicas shard the optimizer
@@ -1282,7 +1288,16 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
 
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
-    if float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0:
+    offload = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0
+    if data_parallel != 1:
+        if (gap := full_parameter_dp_replica_gap()) is not None:
+            raise MilesConfigError(f"the full-parameter sync at DP {data_parallel} needs {gap}")
+        if offload:
+            raise MilesConfigError(
+                f"the full-parameter sync at DP {data_parallel} needs a whole FP32 master on every "
+                "data-parallel rank (the non-distributed optimizer): drop --rl-optimizer-offload-fraction")
+        return {"use_distributed_optimizer": False}
+    if offload:
         if not _miles_reads_distributed_optimizer_masters():
             raise MilesConfigError(
                 "--rl-optimizer-offload-fraction with the full-parameter sync needs Miles "
