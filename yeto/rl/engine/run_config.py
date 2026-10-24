@@ -605,9 +605,10 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
     * samples from the store (``--rl-sample-role trainer``): a trainer-only
       island. Any node count and any DP; the island starts no inference engine
       (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
-    * engines on the island (Milestone 1): one node, DP=1 and dedicated, evenly
+    * engines on the island (Milestone 1): one node and dedicated, evenly
       partitioned engines. A full-parameter trainer never shares its cards with
-      engines (no colocated placement).
+      engines (no colocated placement). DP>1 needs a Miles pin with
+      data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``).
     """
     if sample_role == sample_roles.SAMPLER:
         if rollout_gpus not in (None, 0):
@@ -624,9 +625,9 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
             return ("a full-parameter trainer that reads samples from the store starts no "
                     "inference engine: --rollout-num-gpus must be 0 or absent")
         return None
-    if data_parallel != 1:
+    if data_parallel != 1 and (gap := _rules().full_parameter_dp_replica_gap()) is not None:
         return ("dense full-parameter GRPO with engines on the island requires DP=1 "
-                "(read samples from the store, --rl-sample-role trainer, for DP>1)")
+                f"with this Miles pin (DP>1 needs {gap})")
     if (
         actor_num_nodes != 1
         or type(rollout_gpus) is not int

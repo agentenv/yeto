@@ -44,3 +44,18 @@ def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
 def check_global_batch(global_batch: int, data_parallel: int) -> None:
     if global_batch % data_parallel:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
+
+
+def full_parameter_dp_replica_gap() -> str | None:
+    """Why the pinned Miles cannot run the full-parameter sync at DP>1; None when it can.
+
+    Miles :data:`~yeto.rl.adapters.miles.pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT`
+    and later give every parameter one owner rank per data-parallel replica group
+    and apply the owner's bytes on the other replicas."""
+    from yeto.rl.adapters.miles import pins
+
+    first = pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT
+    if first in pins.MILES_FORK_LINEAGE and pins.MILES_NEXT_COMMIT in pins.miles_fork_lineage_from(first):
+        return None
+    return (f"Miles {first[:9]} or later (data-parallel replicas); "
+            f"the pinned image ships {pins.MILES_NEXT_COMMIT[:9]}")

@@ -44,7 +44,7 @@ async def report_rank_stats(group: Any, operation: str, role: str) -> None:
         print(f"[yeto-full-parameter] rank stats after {operation} failed: {type(error).__name__}: {error}",
               file=sys.stderr, flush=True)
         return
-    phases = {"apply": ("prepare", "commit"), "materialize": ("materialize",), "export": ("export",)}[operation]
+    phases = {"apply": ("prepare", "commit"), "materialize": ("materialize",), "export": ("export", "replica_export")}[operation]
     for rank, stats in enumerate(results or ()):
         if not isinstance(stats, dict):
             continue

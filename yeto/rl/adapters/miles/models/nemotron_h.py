@@ -28,10 +28,24 @@ Differences that matter for the 120B Super (VL) and are NOT handled here:
 * 512 experts with top-22: covered by the same flags; EP must divide 512.
 * VL: the Bridge provider of ``NemotronH_Omni_Reasoning_V3`` is not this one;
   the vision freeze rule is :mod:`yeto.rl.hybrid_params`.
+
+Training defaults (:func:`train_flags`, S27 G-AN on 8 x H200, Nemotron-3 Nano,
+real RL samples): selective recompute of the MoE and layernorm modules, a
+dynamic micro batch of 8192 tokens per GPU at TP1, and the DeepEP flex
+dispatcher with permute fusion when the image has DeepEP (else all-to-all with
+permute fusion). Measured: 9.7k tokens/s/GPU, 19.4% actor MFU with TP1/EP8/DP8,
+no optimizer offload and 512 samples per step. Each default steps aside for
+the matching yeto option (``--rl-activation-recompute``,
+``--rl-max-tokens-per-gpu``), and pass-through Megatron flags come later in the
+argv, so they win. :func:`train_warnings` names the two settings that cost the
+most there: few samples per optimizer step and a full optimizer offload on a
+small trainer.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import math
 from typing import Any
 
 
@@ -85,3 +99,73 @@ def model_flags(provider: Any) -> tuple[str, ...]:
     if latent is not None:
         flags += ["--moe-latent-size", str(int(latent))]
     return tuple(flags)
+
+
+# G-AN (SESSION27/MFU-INVESTIGATION.md §3.1, §5): 8192 tokens per GPU was the
+# fastest micro batch at TP1 (16384: -5%); TP2 at 16384 matched it.
+TOKENS_PER_GPU_PER_TP = 8192
+SELECTIVE_RECOMPUTE_MODULES = ("moe", "layernorm")
+# Below this many samples per optimizer step the fixed per-step costs
+# (optimizer step, log-prob pass, weight update) dominate: 128 -> 512 samples
+# raised training throughput by 22% at TP1/EP8/DP8 (E4 -> E4L).
+MIN_SAMPLES_PER_STEP = 256
+# A full optimizer offload on one node: 2 GPUs spent 16.3 s of a 24.6 s actor
+# step in the CPU optimizer (Y1); 8 GPUs ran 4.6x slower than without (Xoff).
+FEW_TRAINER_GPUS = 8
+
+
+def _has_moe(model_flags: tuple[str, ...]) -> bool:
+    """:func:`model_flags` writes the router flags only for an MoE provider."""
+
+    return "--moe-router-score-function" in model_flags
+
+
+def deepep_available() -> bool:
+    """DeepEP is importable here (the island builds its argv inside the training image)."""
+
+    return importlib.util.find_spec("deep_ep") is not None
+
+
+def train_flags(
+    model_flags: tuple[str, ...],
+    *,
+    activation_recompute: bool,
+    max_tokens_per_gpu: int | None,
+    tensor_parallel: int,
+    context_parallel: int,
+    seq_len: int,
+    deepep: bool,
+) -> tuple[str, ...]:
+    """The Nemotron-H training defaults (module docstring) for one island."""
+
+    flags: list[str] = []
+    if not activation_recompute:  # --rl-activation-recompute keeps full recompute
+        flags += ["--recompute-granularity", "selective", "--recompute-modules", *SELECTIVE_RECOMPUTE_MODULES]
+    if max_tokens_per_gpu is None:  # --rl-max-tokens-per-gpu keeps its own budget
+        # A packed micro batch holds max_tokens_per_gpu * CP tokens and must fit one sample.
+        tokens = max(TOKENS_PER_GPU_PER_TP * tensor_parallel, math.ceil(seq_len / context_parallel))
+        flags += ["--use-dynamic-batch-size", "--max-tokens-per-gpu", str(tokens)]
+    if _has_moe(model_flags):
+        if deepep:
+            flags += ["--moe-token-dispatcher-type", "flex", "--moe-flex-dispatcher-backend", "deepep"]
+        else:
+            flags += ["--moe-token-dispatcher-type", "alltoall"]
+        flags.append("--moe-permute-fusion")
+    return tuple(flags)
+
+
+def train_warnings(*, samples_per_step: int, optimizer_offload_fraction: float, trainer_gpus: int) -> tuple[str, ...]:
+    """Launch-time warnings for the two settings that cost most in G-AN's measurements."""
+
+    warnings: list[str] = []
+    if samples_per_step < MIN_SAMPLES_PER_STEP:
+        warnings.append(
+            f"each optimizer step trains {samples_per_step} samples; below {MIN_SAMPLES_PER_STEP} the fixed "
+            "per-step costs (optimizer step, log-prob pass, weight update) dominate (S27 G-AN: 128 -> 512 "
+            "samples per step raised training throughput by 22%)")
+    if optimizer_offload_fraction >= 1.0 and trainer_gpus <= FEW_TRAINER_GPUS:
+        warnings.append(
+            f"the whole optimizer state is offloaded to the host on {trainer_gpus} trainer GPU(s); the CPU "
+            "optimizer step dominates (S27 G-AN: 16.3 s of a 24.6 s actor step on 2 GPUs; 4.6x slower than "
+            "no offload on 8 GPUs): prefer more trainer GPUs without --rl-optimizer-offload-fraction")
+    return tuple(warnings)

@@ -100,10 +100,11 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
         if key in owners:
             sizes = parallel_sizes(spec.shard_id)
             raise ValueError(
-                f"expert {expert} of layer {layer} ({projection}) is held by both "
+                f"expert {expert} of layer {layer} ({projection}) is listed by both "
                 f"{owners[key][1]!r} and {spec.shard_id!r}: full-parameter sync needs "
-                "each expert on exactly one rank, i.e. expert-model-parallel size = "
-                "tensor-parallel x context-parallel size "
+                "each expert listed by exactly one rank. A Miles pin with data-parallel "
+                "replicas gives each expert one owner; an older one needs "
+                "expert-model-parallel size = tensor-parallel x context-parallel size "
                 f"(this island: {sizes})"
             )
         owners[key] = owner
