@@ -62,8 +62,10 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # aa6b887d8 = + deferred export with on-demand materialize, faster finite/hash
 # checks, hybrid R3 layer mapping (S27 G-AA);
 # d1616ba12 = + THD packs carry a per-sample seq_idx, so Mamba conv/SSM state
-# restarts per sample (S27 G-AL).
-MILES_NEXT_COMMIT = "d1616ba1203f7b70b372d60803c0f740561e5b38"
+# restarts per sample (S27 G-AL);
+# 8edea35a7 = + full-parameter chunks stored in Ray as numpy buffers (zero-copy
+# get, one-copy put) (S27 G-AP).
+MILES_NEXT_COMMIT = "8edea35a76026d83e0a819038baf09d88bd448d9"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -145,6 +147,9 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     # d1616ba12 = + THD packs carry a per-sample seq_idx (total_tokens in
     # PackedSeqParams), so Mamba state restarts per sample (S27 G-AL).
     "d1616ba1203f7b70b372d60803c0f740561e5b38",
+    # 8edea35a7 = + full-parameter chunks travel through Ray as numpy buffers
+    # (S27 G-AP); same values, no loss path.
+    "8edea35a76026d83e0a819038baf09d88bd448d9",
 )
 
 # First Miles commit whose full-parameter sync reads distributed-optimizer
@@ -189,7 +194,7 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag d1616ba-2fa8801; (S27 IMG6: Miles d1616ba12 = aa6b887d8 + per-sample seq_idx for THD packs, Mamba state restarts per sample (G-AL); previous aa6b887-2fa8801 @sha256:2c4bd1db...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-d1616ba-2fa8801/). Earlier: tag aa6b887-2fa8801; (S27 IMG5: Miles aa6b887d8 = b13c170ce + deferred full-parameter export, on-demand materialize, faster checks, hybrid R3 layers (G-AA); previous b13c170-2fa8801 @sha256:814a7e27...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-aa6b887-2fa8801/). Earlier: tag b13c170-2fa8801; (S27 IMG4: Miles b13c170ce = 0b64b40c1 + per-fragment full-parameter apply (G-X); previous 0b64b40-2fa8801 @sha256:2b8c36f6...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-b13c170-2fa8801/). Earlier: tag 0b64b40-2fa8801; (S27 IMG3: Miles 0b64b40c1 = cc693c693 + flat-range fragment split + scheduler anchor rebase; previous cc693c6-2fa8801 @sha256:2011cbf9... (a477bcb-2fa8801 built but voided); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-0b64b40-2fa8801/). Earlier: tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
+# Tag 8edea35-2fa8801; (S27 G-AP: Miles 8edea35a7 = d1616ba12 + zero-copy full-parameter chunks in Ray; previous d1616ba-2fa8801 @sha256:0b251d82...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-8edea35-2fa8801/). Earlier: tag d1616ba-2fa8801; (S27 IMG6: Miles d1616ba12 = aa6b887d8 + per-sample seq_idx for THD packs, Mamba state restarts per sample (G-AL); previous aa6b887-2fa8801 @sha256:2c4bd1db...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-d1616ba-2fa8801/). Earlier: tag aa6b887-2fa8801; (S27 IMG5: Miles aa6b887d8 = b13c170ce + deferred full-parameter export, on-demand materialize, faster checks, hybrid R3 layers (G-AA); previous b13c170-2fa8801 @sha256:814a7e27...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-aa6b887-2fa8801/). Earlier: tag b13c170-2fa8801; (S27 IMG4: Miles b13c170ce = 0b64b40c1 + per-fragment full-parameter apply (G-X); previous 0b64b40-2fa8801 @sha256:2b8c36f6...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-b13c170-2fa8801/). Earlier: tag 0b64b40-2fa8801; (S27 IMG3: Miles 0b64b40c1 = cc693c693 + flat-range fragment split + scheduler anchor rebase; previous cc693c6-2fa8801 @sha256:2011cbf9... (a477bcb-2fa8801 built but voided); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-0b64b40-2fa8801/). Earlier: tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
 # Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
 # build record openspec/changes/rl-infra-spec/evidence/ports-image/
 # 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
@@ -198,7 +203,7 @@ MILES_NEXT_BASE_IMAGE = (
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "0b251d82a880a6c4751146927677905280fd6f2cb4273cacc35dbea852feb054"
+    "6cc7b51ddcec0e96fc183d4a07d84d5e1b356adbdcd0257c1c655b47d173f630"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
