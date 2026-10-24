@@ -430,8 +430,8 @@ in advance, so it is part of the semantic profile hash: the domain
 `yeto-syncer-final-cut-manifest-only-v1\0` is appended when it is on (off
 keeps every existing hash). The launcher selects it for the full-parameter
 preset with `--rl-sync-final-cut ack`, the default for asynchronous rounds
-unless islands evaluate (`--rl-eval-interval`; the strict sweep keeps the full
-cut by default); `--rl-sync-final-cut download` keeps the full cut,
+in `--rl-sync-mode async` unless islands evaluate (`--rl-eval-interval`; the
+strict sweep and `--rl-sync-mode strict` keep the full cut by default); `--rl-sync-final-cut download` keeps the full cut,
 for example to evaluate the final policy on an island or to compare island
 and syncer parameters bit for bit. For a 30B-parameter model the full cut is
 about 120 GB of f32 per island; the coordinator sends it to one island after

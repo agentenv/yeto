@@ -294,7 +294,7 @@ def _flag(command: str, flag: str):
     return tokens[tokens.index(flag) + 1] if flag in tokens else None
 
 
-@pytest.mark.parametrize(("extra", "mode"), [((), "ack"),
+@pytest.mark.parametrize(("extra", "mode"), [(("--rl-sync-mode", "async"), "ack"),
                                              (("--rl-sync-final-cut", "ack"), "ack"),
                                              (("--rl-sync-final-cut", "download"), "download")])
 def test_the_launcher_resolves_the_final_cut_for_syncer_profile_and_islands(extra, mode):
@@ -325,12 +325,17 @@ def test_the_strict_sweep_keeps_the_download_by_default():
     args, sweep = plan(FULL + ("--rl-sync-final-cut", "ack"))
     assert rl_full_parameter_final_cut(args) == "ack"
     assert _flag(sweep["role_syncers"][0]["command"], "--final-cut-payload") == "manifest"
+    # The strict sync mode is the control: its commands do not change.
+    args, strict = _plan(("--rl-sync-mode", "strict"))
+    assert rl_full_parameter_final_cut(args) == "download"
+    assert "--final-cut-payload" not in strict["role_syncers"][0]["command"]
 
 
 def test_island_eval_keeps_the_download_by_default():
     from yeto.launch.syncer import rl_full_parameter_final_cut
 
-    args, _ = _plan()
+    args, _ = _plan(("--rl-sync-mode", "async"))
+    assert rl_full_parameter_final_cut(args) == "ack"
     args.rl_eval_interval = 5
     assert rl_full_parameter_final_cut(args) == "download"
     args.rl_sync_final_cut = "ack"
@@ -377,10 +382,9 @@ def test_the_real_syncer_sends_a_manifest_only_final_cut(syncer_binary, tmp_path
 
     rounds = 2  # merges per fragment (launcher --total-steps)
     total_steps = rounds * P
-    # The launcher's default for a run without island eval: a manifest-only
-    # final cut (the profile hash the clients send binds it).
+    # A manifest-only final cut (the profile hash the clients send binds it).
     process, port, profile_hash = _start_async_syncer(
-        syncer_binary, tmp_path, "--rl-sync-quorum", "2", "--rl-sync-final-cut", "auto", total_steps=rounds,
+        syncer_binary, tmp_path, "--rl-sync-quorum", "2", "--rl-sync-final-cut", "ack", total_steps=rounds,
         log_file=tmp_path / "syncer.log")
     clients = [_client(learner, port, profile_hash) for learner in (0, 1)]
     seen: list[set] = [set(), set()]

@@ -260,17 +260,20 @@ def rl_full_parameter_final_cut(args) -> str:
     drained; the final parameters stay in the syncer's checkpoint, so no
     island downloads the f32 model (about 4 bytes per parameter per island).
     "download": every f32 fragment, applied to the trainer before the ACK.
-    "auto" (default) is "ack" for asynchronous rounds unless islands evaluate
-    the policy (``--rl-eval-interval``: the final eval and the eval exports
-    need the final parameters on the island), and "download" for the strict
-    sweep (the bit-exact control profile). Other presets keep their final
-    cut ("download")."""
+    "auto" (default) is "ack" for asynchronous rounds in ``--rl-sync-mode
+    async`` unless islands evaluate the policy (``--rl-eval-interval``: the
+    final eval and the eval exports need the final parameters on the
+    island); "download" for the strict sweep and in ``--rl-sync-mode
+    strict`` (the control keeps its commands). Other presets keep their
+    final cut ("download")."""
     if not rl_dense_sweep(args):
         return "download"
     choice = getattr(args, "rl_sync_final_cut", "auto") or "auto"
     if choice != "auto":
         return choice
-    if not rl_full_parameter_async(args) or getattr(args, "rl_eval_interval", None) is not None:
+    if (not rl_full_parameter_async(args)
+            or getattr(args, "rl_sync_mode_effective", "strict") != "async"
+            or getattr(args, "rl_eval_interval", None) is not None):
         return "download"
     return "ack"
 
