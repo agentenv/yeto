@@ -82,6 +82,7 @@ def test_plan_modes_and_refusals():
     assert plan_data_split("auto", islands=[], sample_roles=True).mode == ROLES
     external = plan_data_split("auto", islands=[0, 1], external_learners=1)
     assert external.mode == SHARED and "external-learners" in external.warning()
+    assert "its own launch" in external.warning() and "drop" in shared.warning()
     for kwargs, message in (({"tasks": True}, "exclude each other"),
                             ({"sample_roles": True}, "sampler islands"),
                             ({"external_learners": 1}, "external-learners")):

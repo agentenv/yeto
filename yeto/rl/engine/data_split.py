@@ -171,11 +171,13 @@ class DataSplitPlan:
         """The loud launch warning when several islands read the same rows."""
         if self.mode != SHARED:
             return None
+        remedy = (f"drop {DATA_SPLIT_FLAG} shared (default auto) to split the rows by island"
+                  if self.requested == SHARED else
+                  "an external learner reads the data of its own launch: give it other rows there")
         return (f"{len(self.islands)} training islands read the same --data rows in the same "
                 f"order ({self.reason}): in every round each island trains the same prompts, "
                 "so the merged update averages repeated samples of one batch instead of "
-                f"covering more prompts; drop {DATA_SPLIT_FLAG} shared (default auto) to split "
-                "the rows by island")
+                f"covering more prompts; {remedy}")
 
     def record(self) -> dict[str, Any]:
         """What the run manifest and the dry-run plan carry for the launch."""
