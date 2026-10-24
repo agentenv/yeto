@@ -150,6 +150,15 @@ def test_full_parameter_layout_rule_is_shared():
     assert "must be 0" in full_parameter_layout_problem(
         data_parallel=2, actor_num_nodes=3, rollout_gpus=8, rollout_gpus_per_engine=8,
         sample_role="trainer")
+    # A multi-node island (--rl-island-gpus-per-node): the trainer rectangle spans
+    # nodes, engines stay dedicated; still DP 1 (120B Nemotron: 4 trainer nodes + 1 engine node).
+    assert "one node (or a multi-node island" in full_parameter_layout_problem(
+        data_parallel=1, actor_num_nodes=4, rollout_gpus=8, rollout_gpus_per_engine=4)
+    assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=4, rollout_gpus=8,
+                                         rollout_gpus_per_engine=4, island_gpus_per_node=8) is None
+    assert "requires DP=1" in full_parameter_layout_problem(
+        data_parallel=2, actor_num_nodes=4, rollout_gpus=8, rollout_gpus_per_engine=4,
+        island_gpus_per_node=8)
 
 
 # ------------------------------------------------------------ gap 5: SSH trainer island

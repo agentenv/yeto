@@ -119,3 +119,53 @@ def test_vl_checkpoint_refuses_a_miles_without_the_vl_bridge(tmp_path, monkeypat
     (tmp_path / "config.json").write_text(json.dumps({"architectures": ["NemotronH_Omni_Reasoning_V3"]}))
     with pytest.raises(nemotron_h.NemotronHRecipeError, match="language-only VL bridge"):
         nemotron_h.register_miles_bridges(tmp_path)
+
+
+def _set(argv, flag, value=None):
+    """Set (or add) one island flag; ``value=None`` removes it with its value."""
+    if flag in argv:
+        i = argv.index(flag)
+        del argv[i:i + 2]
+    if value is not None:
+        argv += [flag, str(value)]
+
+
+def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
+    """1 island = 4 trainer nodes (TP8/EP8/PP4, DP1) + 1 engine node (2 x TP4), no offload."""
+    from yeto.rl.adapters.miles.island_entry import build_ports_launch, parse_args
+    from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H, resolve_rl_run_config
+    from yeto.rl.stage1 import expand, load_plan
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"architectures": ["NemotronH_Omni_Reasoning_V3"]}))
+    prompts = tmp_path / "p.jsonl"
+    prompts.write_text('{"messages": [{"role": "user", "content": "hi"}], "label": "1"}\n')
+    argv = list(expand(load_plan(REPO / "examples/stage1/glm5next-mini-modal.yaml")).trainer["miles"]["island_argv"][3:])
+    argv = [str(model) if a == "/data/models/glm5next-mini-bf16-7fb7883" else a for a in argv]
+    argv = [str(REPO / a) if a.startswith("examples/rl_algorithms/") else a for a in argv]
+    for flag, value in (("--rl-model-recipe", "generic"), ("--rl-sample-role", None), ("--rl-resume-store", None),
+                        ("--megatron-ref-load", None), ("--rl-optimizer-offload-fraction", None),
+                        ("--tensor-parallel", 8), ("--pipeline-parallel", 4), ("--expert-parallel", 8),
+                        ("--actor-num-nodes", 4), ("--actor-num-gpus-per-node", 8),
+                        ("--rl-placement", "fixed-partition"), ("--rollout-num-gpus", 8),
+                        ("--rollout-num-gpus-per-engine", 4), ("--rl-island-gpus-per-node", 8)):
+        _set(argv, flag, value)
+    args = parse_args(argv)
+    provider = _provider(hybrid_layer_pattern="MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*"
+                                              "EMEMEMEMEM*EMEMEMEM*EMEMEMEME",
+                         num_layers=88, hidden_size=4096, ffn_hidden_size=2688, num_moe_experts=512,
+                         moe_ffn_hidden_size=2688, moe_router_topk=22, moe_shared_expert_intermediate_size=5376,
+                         moe_latent_size=1024, moe_router_topk_scaling_factor=5.0, mtp_num_layers=None,
+                         mamba_num_heads=128)
+    config = resolve_rl_run_config(args, model_path=model, prompt_path=prompts, provider=provider,
+                                   target_modules=[], yeto_policy_sync=False, verify_ref_load=False)
+    assert config.model_recipe.name == RECIPE_NEMOTRON_H
+    miles = list(build_ports_launch(args, config, []).argv)
+    for flag, value in (("--actor-num-nodes", "4"), ("--actor-num-gpus-per-node", "8"), ("--rollout-num-gpus", "8"),
+                        ("--rollout-num-gpus-per-engine", "4"), ("--tensor-model-parallel-size", "8"),
+                        ("--pipeline-model-parallel-size", "4"), ("--expert-model-parallel-size", "8"),
+                        ("--num-experts", "512"), ("--moe-router-topk", "22"), ("--moe-latent-size", "1024"),
+                        ("--num-layers", "88"), ("--num-gpus-per-node", "8")):
+        assert _flag(miles, flag) == value, flag
+    assert "--colocate" not in miles and "--optimizer-cpu-offload" not in miles
