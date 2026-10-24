@@ -8,6 +8,12 @@ bridge, same completion marker); only the file writes are spread. A model the
 bridge path does not export (``--megatron-to-hf-mode raw``, LoRA) is written by
 ``export_hf`` itself.
 
+Export timings (S27 G-CJ, measurement only): every rank reports how long its
+export took (``export_s``) and how long its safetensors file writes took
+(``save_s``, ``save_files``, ``save_bytes``; the writes are timed by wrapping
+``safetensors.torch.save_file`` while the export runs). :func:`export_profile`
+sums them up for the release event: it tells the conversion from the file writes.
+
 LoRA policy release export (L4.6 LoRA):
 
 Loaded through ``TrainGroup.run_plugin`` like :mod:`.cut_plugin`. A trainer
@@ -23,7 +29,9 @@ trainer is asleep when it publishes; see :func:`_awake_process_groups`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import os
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -32,20 +40,61 @@ WRITE_LORA_ADAPTER = "yeto.rl.adapters.miles.release_plugin.write_lora_adapter"
 WRITE_FULL_CHECKPOINT = "yeto.rl.adapters.miles.release_plugin.write_full_checkpoint"
 
 
-def full_checkpoint_writer(actor_model: Any, runner: Any, *, all_ranks: bool) -> Callable[[int, Path], None]:
+def full_checkpoint_writer(actor_model: Any, runner: Any, *, all_ranks: bool
+                           ) -> Callable[[int, Path], list[dict[str, Any]] | None]:
     """Driver side: ``write(rollout_id, directory)`` puts the actor's full weights
     into ``directory`` as an HF checkpoint. ``all_ranks``: every rank writes a
     share of the files (:func:`write_full_checkpoint`; ``directory`` must be on a
-    disk every trainer rank sees); else Miles' ``export_hf`` (rank 0 writes)."""
+    disk every trainer rank sees) and ``write`` returns the ranks' reports; else
+    Miles' ``export_hf`` (rank 0 writes) and ``write`` returns None."""
 
-    def write(rollout_id: int, directory: Path) -> None:
+    def write(rollout_id: int, directory: Path) -> list[dict[str, Any]] | None:
         if all_ranks:
-            runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
+            return runner.run(actor_model.run_plugin(WRITE_FULL_CHECKPOINT, {
                 "path": str(directory), "rollout_id": int(rollout_id)}))
-        else:
-            runner.run(actor_model.export_hf(rollout_id=int(rollout_id), path=str(directory)))
+        runner.run(actor_model.export_hf(rollout_id=int(rollout_id), path=str(directory)))
+        return None
 
     return write
+
+
+def export_profile(reports: Sequence[Any] | None) -> dict[str, float]:
+    """The ranks' export timings (module doc) for a release event: the slowest
+    rank's export and file-write seconds, the summed write seconds and the GB
+    written. Empty when no rank reported them (rank 0 export, LoRA)."""
+    ranks = [r for r in (reports or ()) if isinstance(r, Mapping) and r.get("export_s") is not None]
+    if not ranks:
+        return {}
+    saves = [float(r.get("save_s") or 0.0) for r in ranks]
+    return {"rank_export_max_s": round(max(float(r["export_s"]) for r in ranks), 3),
+            "rank_save_max_s": round(max(saves), 3), "rank_save_sum_s": round(sum(saves), 3),
+            "rank_save_gb": round(sum(int(r.get("save_bytes") or 0) for r in ranks) / 1e9, 3)}
+
+
+@contextmanager
+def _timed_saves() -> Iterator[dict[str, float]]:
+    """Time the safetensors file writes made while the context is open (module
+    doc): ``safetensors.torch.save_file`` is wrapped and restored afterwards. A
+    caller that bound the function before the context is not timed (zero)."""
+    import safetensors.torch as safetensors_torch
+
+    original = safetensors_torch.save_file
+    stats: dict[str, float] = {"save_s": 0.0, "save_files": 0, "save_bytes": 0}
+
+    def save_file(tensors: Any, filename: Any, *args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return original(tensors, filename, *args, **kwargs)
+        finally:
+            stats["save_s"] += time.perf_counter() - started
+            stats["save_files"] += 1
+            stats["save_bytes"] += os.path.getsize(filename) if os.path.exists(filename) else 0
+
+    safetensors_torch.save_file = save_file
+    try:
+        yield stats
+    finally:
+        safetensors_torch.save_file = original
 
 
 def write_full_checkpoint(actor: Any, *, path: str, rollout_id: int) -> dict[str, Any]:
@@ -76,9 +125,12 @@ def write_full_checkpoint(actor: Any, *, path: str, rollout_id: int) -> dict[str
         if not any(Path(directory).glob("*.safetensors")):
             raise RuntimeError(f"HF export to {directory} produced no weight files")
 
-    with _awake_process_groups(actor):
+    started = time.perf_counter()
+    with _awake_process_groups(actor), _timed_saves() as saves:
         write_checkpoint_dir(Path(path), write, completion_marker=HF_EXPORT_COMPLETE_MARKER)
-    return {"path": str(path), "writers": "all"}
+    return {"path": str(path), "writers": "all", "export_s": round(time.perf_counter() - started, 3),
+            "save_s": round(saves["save_s"], 3), "save_files": int(saves["save_files"]),
+            "save_bytes": int(saves["save_bytes"])}
 
 
 def write_lora_adapter(actor: Any, *, path: str) -> dict[str, Any]:

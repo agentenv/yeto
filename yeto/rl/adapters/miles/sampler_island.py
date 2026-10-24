@@ -105,7 +105,7 @@ from .publish import (
     read_engine_checksums,
     weight_view_digest,
 )
-from .release_plugin import WRITE_LORA_ADAPTER, full_checkpoint_writer
+from .release_plugin import WRITE_LORA_ADAPTER, export_profile, full_checkpoint_writer
 
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
@@ -579,9 +579,10 @@ def mark_trainer_end(miles_args: Any, *, learner_id: int, environ: Any = None) -
 class ReleasingPublisher:
     """A publisher that also releases each published policy for the samplers.
 
-    ``export(version, directory)`` writes the weights in the ``weights`` format;
-    ``read_position()`` is the trainer's buffer read position (None before its
-    reader exists). The release records the wrapped publisher's engine weight
+    ``export(version, directory)`` writes the weights in the ``weights`` format
+    (it may return the ranks' reports: their export timings go into the release
+    event, ``release_plugin.export_profile``); ``read_position()`` is the
+    trainer's buffer read position (None before its reader exists). The release records the wrapped publisher's engine weight
     checksums of this publish (``last_engine_checksums``; LoRA: the ``lora:*``
     keys) when every engine reported the same one. Every other attribute is the
     wrapped publisher's.
@@ -592,7 +593,7 @@ class ReleasingPublisher:
     policy while the store holds no release (module doc)."""
 
     def __init__(self, inner: Any, releases: PolicyReleaseStore,
-                 export: Callable[[int, Path], None],
+                 export: Callable[[int, Path], Any],
                  read_position: Callable[[], int | None], emit: Callable[..., None],
                  *, weights: str = FULL,
                  read_shards: Callable[[], dict[str, int] | None] | None = None,
@@ -678,11 +679,12 @@ class ReleasingPublisher:
         staged = self._stage(version)
         export_started = self.timer()
         try:
-            self.export(version, staged)
+            exported = self.export(version, staged)
         except BaseException:
             shutil.rmtree(staged, ignore_errors=True)
             raise
-        stage = {"wait_previous_s": waited_s, "stage_export_s": round(self.timer() - export_started, 3)}
+        stage = {"wait_previous_s": waited_s, "stage_export_s": round(self.timer() - export_started, 3),
+                 **export_profile(exported)}
 
         def positions() -> tuple[int | None, dict[str, int] | None]:
             return self._positions(self.read_position_from_thread, self.read_shards_from_thread)
@@ -828,11 +830,10 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     # local disk: every rank writes a share of the files
     write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write)
 
-    def export(version: int, directory: Path) -> None:
+    def export(version: int, directory: Path) -> Any:
         if lora:
-            runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
-        else:
-            write_full(version, directory)
+            return runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
+        return write_full(version, directory)
 
     staging = None
     if staged:
