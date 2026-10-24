@@ -77,6 +77,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec
+from .buffer_payload import is_buffer_exhausted
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -2041,7 +2042,17 @@ class IslandDriver:
                         raise DriverError("run reached max_rollouts without a stop")
                     self.safe_point(rollout_id)
                     self._inject_exit(rollout_id)
-                    boundary = self.run_round(rollout_id)
+                    try:
+                        boundary = self.run_round(rollout_id)
+                    except BaseException as error:
+                        if not (is_buffer_exhausted(error)
+                                and getattr(self.sync, "ends_on_data_end", True)):
+                            raise
+                        # S26 E9.3: the samplers ended and nothing trainable is left;
+                        # the rounds so far are trained and published: end FINISHED
+                        self.emit("rl_buffer_exhausted", rollout_id=rollout_id,
+                                  error=f"{type(error).__name__}: {error}")
+                        break
                     state = boundary.state
                     rollout_id += 1
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)

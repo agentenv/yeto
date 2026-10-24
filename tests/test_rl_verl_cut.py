@@ -342,3 +342,37 @@ def test_frozen_base_weights_are_not_in_the_cut_and_do_not_block_the_restore(tmp
             assert torch.equal(p, q), name
             for key in ("exp_avg", "exp_avg_sq", "step"):
                 assert torch.equal(trained.optimizer.state[p][key], fresh.optimizer.state[q][key]), key
+
+
+def test_a_requires_grad_parameter_outside_the_optimizer_is_not_in_the_cut(tmp_path):
+    """S26 E9.2: verl's state dict carries ``lm_head.weight`` (requires_grad, not in the
+    optimizer: 865 MB per rank file on GPU T-C4). Only the optimizer's parameters are
+    saved; the restore needs nothing else and continues bit for bit."""
+
+    def handles(model):
+        # layer 2 keeps requires_grad but no optimizer holds it (the lm_head shape)
+        opt = torch.optim.AdamW([p for n, p in model.named_parameters() if not n.startswith("2.")], lr=1e-2)
+        return TrainHandles(model, opt, torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0 / (1 + s)))
+
+    trained = handles(_model())
+    assert trained.module[2].weight.requires_grad
+    for r in range(CUT):
+        _round(trained, r)
+    worker = SimpleNamespace(module=trained.module, optimizer=trained.optimizer, lr_scheduler=trained.scheduler)
+    vcut.VerlCutTrainer(lambda fn, *a: [fn(worker, *a)], optimizer_steps_per_round=K).save_cut(
+        epoch=1, context=_context(tmp_path))
+    saved = torch.load(tmp_path / "cut-v" / vcut.rank_file(0), weights_only=True)["model"]
+    assert sorted(saved) == ["0.bias", "0.weight"]
+    fresh = handles(_model())
+    fresh_worker = SimpleNamespace(module=fresh.module, optimizer=fresh.optimizer, lr_scheduler=fresh.scheduler)
+    vcut.VerlCutTrainer(lambda fn, *a: [fn(fresh_worker, *a)], optimizer_steps_per_round=K).restore_cut(
+        "cut-v", epoch=1, root=str(tmp_path), expect=_expect())
+    for r in range(CUT, TOTAL):
+        _round(trained, r)
+        _round(fresh, r)
+    for (name, p), (_, q) in zip(trained.module.named_parameters(), fresh.module.named_parameters()):
+        assert torch.equal(p, q), name
+        if p in trained.optimizer.state:
+            for key in ("exp_avg", "exp_avg_sq", "step"):
+                assert torch.equal(trained.optimizer.state[p][key], fresh.optimizer.state[q][key]), key
+    assert trained.scheduler.last_epoch == fresh.scheduler.last_epoch

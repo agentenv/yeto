@@ -94,7 +94,7 @@ def test_verl_run_config_rules_refuse_multi_gpu_and_megatron_options():
     (dict(top_p=0.9), "top_p"),
     (dict(top_k=50), "top_p/top_k"),
     (dict(temperature=0.7), "温度"),
-    (dict(n_gpus=2), "1 张卡"),
+    (dict(n_gpus=0), "n_gpus 必须 >= 1"),
 ])
 def test_config_rules_refuse(kw, match):
     with pytest.raises(vconf.VerlConfigError, match=match):

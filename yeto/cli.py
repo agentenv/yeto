@@ -1645,9 +1645,13 @@ def cmd_head(payload: str) -> int:
         from .rl.sao_streaming_manifest import load_sao_streaming_manifest
 
         args.rl_sao_manifest = load_sao_streaming_manifest(args.rl_sao_contracts)
-    # Same count launcher.run uses: --gpu islands plus --external-learners
+    # Same count launcher.run uses: the synced islands (a synced group's sampler
+    # islands do not join the syncer, S26 e9b-sync-a) plus --external-learners
     # seats; without the seats the syncer rejects every manual joiner.
-    num_learners = len(parse_gpu_spec(args.gpu)) + (getattr(args, "external_learners", 0) or 0)
+    from .rl.engine import sample_roles
+
+    num_learners = (sample_roles.syncer_learner_count(args, len(parse_gpu_spec(args.gpu)))
+                    + (getattr(args, "external_learners", 0) or 0))
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()

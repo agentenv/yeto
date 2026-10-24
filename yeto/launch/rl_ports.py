@@ -615,7 +615,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     if resume_store is not None and sample_role_is_synced_trainer(args):
         # S25 C3: synced trainers mount the store for the buffer and the releases
         flags += (f" --rl-sample-store {shlex.quote(resume_store[0])}"
-                  f" --rl-sample-lanes {rl_island_count(args)}")
+                  f" --rl-sample-lanes {getattr(args, 'rl_synced_trainers', None) or rl_island_count(args)}")
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)

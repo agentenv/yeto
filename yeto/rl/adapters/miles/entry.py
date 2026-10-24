@@ -887,9 +887,11 @@ def compose_island(
     if resume is not None:
         if resume.stop_after is not None:
             sync.stop_after = resume.stop_after
-        from yeto.rl.engine.resume import install_preempt_handler
+        from yeto.rl.engine.resume import install_preempt_handler, watch_preempt_marker
 
         install_preempt_handler(resume.controller, emit=driver.emit)
+        # S26 E9.1: on Modal the signal reaches the runner, which writes the reclaim marker
+        watch_preempt_marker(resume.controller)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)

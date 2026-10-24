@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
@@ -724,6 +725,58 @@ def write_preempt_marker(store_root: Path, *, signal_name: str, incarnation: Map
         except Exception:  # noqa: BLE001
             pass
     return record
+
+
+PREEMPT_WATCH_THREAD = "preempt-marker-watcher"
+
+
+def watch_preempt_marker(controller: "ResumeController", *, environ: Mapping[str, str] | None = None,
+                         poll_s: float = 0.5, out: Any = None) -> Any:
+    """S26 E9.1: the preemption marker for a driver that never gets the signal.
+
+    Modal sends SIGINT/SIGTERM to the container's main process only. A driver in
+    a Ray actor (verl: the task runner) is neither that process nor its main
+    thread, so :func:`install_preempt_handler` cannot catch it. The Modal runner
+    turns the signal into the reclaim marker file (``YETO_SPOT_RECLAIM_MARKER``,
+    set by the launcher on a resumable island); this daemon thread polls that
+    file in the actor's process and, once it appears, writes the same store
+    preemption marker as the handler (the next launch resumes from LATEST).
+    Returns the started :class:`~.sampler_resume.ReclaimWatcher`, or None when
+    the marker path is not set."""
+    from .sampler_resume import RECLAIM_MARKER_ENV, ReclaimWatcher, reclaim_marker, reclaim_requested
+
+    env = os.environ if environ is None else environ
+    if not env.get(RECLAIM_MARKER_ENV):
+        return None
+    marker = reclaim_marker(env)
+
+    def on_reclaim() -> None:
+        rank = 0
+        try:
+            doc = json.loads(marker.read_text(encoding="utf-8"))
+            name = signal_name(int(doc.get("signal")))
+            rank = int(doc.get("rank") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            name = "unknown"
+        # a multi-node island: the Modal runner of rank>0 relays its signal to rank 0
+        source = "reclaim marker" if rank == 0 else f"reclaim marker, rank {rank}"
+        record = write_preempt_marker(controller.checkpoint_store, signal_name=f"{name} ({source})",
+                                      incarnation=controller.incarnation, rollout_id=None,
+                                      store=controller.store)
+        print(f"[yeto] rl_preempt_notice {json.dumps(record, sort_keys=True)}", file=out or sys.stdout,
+              flush=True)
+
+    return ReclaimWatcher(lambda: reclaim_requested(env), on_reclaim, poll_s=poll_s,
+                          name=PREEMPT_WATCH_THREAD).start()
+
+
+def signal_name(signum: int) -> str:
+    import signal as _signal
+
+    try:
+        return _signal.Signals(int(signum)).name
+    except ValueError:
+        return f"signal {int(signum)}"
 
 
 def install_preempt_handler(controller: "ResumeController", *, emit: Callable[..., Any] | None = None,

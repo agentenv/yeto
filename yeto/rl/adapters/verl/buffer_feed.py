@@ -322,6 +322,12 @@ class BufferFeed:
         samplers for their backlog cap)."""
         return int(self.buffer.read_cursor)
 
+    def read_shards(self) -> dict[str, int] | None:
+        """The read cursor per sampler shard (None without merged shards): a
+        sampler that writes its own shard counts its backlog from this
+        (``SamplerLoop.backlog``), not from the merged position."""
+        return self.buffer.shard_positions(self.buffer.read_cursor) or None
+
 
 ASSEMBLE_METHOD = "yeto_assemble"  # the rollout port's call after a round's collection
 

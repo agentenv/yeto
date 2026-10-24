@@ -655,6 +655,9 @@ _RESUME = (
                 type=lambda text: [s for s in text.split(",") if s],
                 help="--rl-island-sample-role with several samplers: the sampler shards of the "
                 "buffer (set by the launcher); each sampler writes its own, the trainer merges them"),
+    shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
+                help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
+                "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
 )
 
 _SCHEDULING = (

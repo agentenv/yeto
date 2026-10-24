@@ -61,6 +61,7 @@ from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.launch.node_inventory import InventoryError, Node, load_inventory
 from yeto.rl.adapters.miles.models import glm5_next
 from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
+from yeto.rl.engine.sample_roles import DataSlot
 from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"
@@ -559,7 +560,8 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
         env = {**common_env, DEVICE_FAMILY_ENV: node.device_family, **engine.env()}
         sampler_runs.append({"node": node.name, "engine_argv": engine.argv(engine.config.base_dir), "env": env,
                              "spec_path": f"{state_dir}/sampler-{node.name}.json",
-                             "spec": sampler_spec(plan, node, engine),
+                             "spec": sampler_spec(plan, node, engine, slot=DataSlot(samplers.index(node),
+                                                                                    len(samplers))),
                              "argv": ["python3", "-m", "yeto.rl.engine.engine_sampler",
                                       "--spec", f"{state_dir}/sampler-{node.name}.json"],
                              "url": f"http://{rendezvous.get(node.name)}:{engine.config.port}"})
@@ -595,8 +597,9 @@ def state_dir_of(plan: Stage1Plan) -> str:
     return f"/data/yeto/{plan.run_id}"
 
 
-def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
-    """The engine sampler island's spec file (``engine_sampler_entry``)."""
+def sampler_spec(plan: Stage1Plan, node: Node, engine: Any, *, slot: DataSlot | None = None) -> dict[str, Any]:
+    """The engine sampler island's spec file (``engine_sampler_entry``). ``slot``:
+    the node's slot of the prompt data when several sampler nodes draw (S26 E9.3)."""
     sampling, task, quant = plan.section("sampling"), plan.section("task"), plan.section("quant")
     config, options = engine.config, engine.options
     server = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
@@ -623,7 +626,8 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
         "prompts": {"path": str(_get(task, "prompts_jsonl", "task")), "input_key": str(_get(task, "input_key", "task")),
                     "label_key": str(_get(task, "label_key", "task")),
                     "groups_per_round": int(task["rollout_batch_size"]),
-                    "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True},
+                    "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True,
+                    **({"data_slot": slot.env()} if slot is not None and not slot.whole else {})},
         "reward": str(task["reward"]), "reward_kind": "miles",
         # sampler.checks: further PostLoadChecks overrides (e.g. require_fixed_answers for a
         # cut-down rehearsal model); the expected expert count always comes from quant

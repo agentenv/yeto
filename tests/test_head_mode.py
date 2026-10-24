@@ -910,3 +910,23 @@ def test_head_public_image_sends_no_registry_login(fake_sky, monkeypatch, tmp_pa
     (_, job_task), = fake_sky["execs"]
     assert job_task.secrets == {"MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"}
     assert not any(k.startswith("SKYPILOT_DOCKER") for k in (job_task.envs or {}))
+
+
+def test_head_syncer_skips_a_synced_groups_sampler_islands(monkeypatch):
+    """S26 e9b-sync-a: the head syncer waited for 3 learners (2 trainers + the
+    sampler island), so the two synced trainers never got their first round."""
+    seen = {}
+
+    class FakeSyncer:
+        def __init__(self, args, n):
+            seen["n"] = n
+            raise SystemExit(0)
+
+    monkeypatch.setattr(launcher, "LocalSyncer", FakeSyncer)
+    ns = cli.parse_args(["--training-mode", "rl", "--rl-backend", "verl", "--gpu",
+                         "modal:1xa10g,modal:1xa10g,modal:1xa10g", "--model", "Qwen/Qwen3-0.6B",
+                         "--data", "org/ds", "--rl-sample-role", "trainer", "--rl-island-sample-role",
+                         "2:sampler", "--rl-max-policy-age", "2", "--cluster-prefix", "hsg"])
+    with pytest.raises(SystemExit):
+        cli.cmd_head(json.dumps(cli._serializable_args(ns)))
+    assert seen["n"] == 2

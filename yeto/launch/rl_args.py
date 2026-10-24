@@ -162,6 +162,15 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
             for shipped in (island.runtime, island.layout_attestation)}
 
 
+def _synced_learners(args, specs) -> int:
+    """Islands that join the syncer, the roster every quorum and membership
+    check counts: a synced group's sampler islands do not (S26 e9b-sync-b:
+    quorum 3 over --learners 2 made the syncer exit)."""
+    from ..rl.engine.sample_roles import syncer_learner_count
+
+    return syncer_learner_count(args, len(specs))
+
+
 _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_fragment_pipeline", 1, "--rl-sync-fragment-pipeline"),
     ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
@@ -1107,6 +1116,7 @@ def _prepare_rl_args(
     if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
         _refuse_full_parameter_sync_options(args)
     _check_bcast_delta(args)
+    learners = _synced_learners(args, specs)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")
@@ -1116,7 +1126,7 @@ def _prepare_rl_args(
             raise ValueError("decoupled RL pipeline must be between 1 and fragments")
         if args.fragment_pattern != "binpack":
             raise ValueError("decoupled RL requires --fragment-pattern binpack")
-        args.quorum = len(specs)
+        args.quorum = learners
         args.grace_ms = 0
         args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
         args.delta_correction = "none"
@@ -1126,12 +1136,12 @@ def _prepare_rl_args(
         args.wire_dtype = "f32"
         args.rl_total_fragment_steps = args.total_steps * args.fragments
     elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
-        _prepare_dense_full_sweep(args, num_islands=len(specs))
+        _prepare_dense_full_sweep(args, num_islands=learners)
     elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
         args.fragments = 1
-        args.quorum = len(specs)
+        args.quorum = learners
         args.grace_ms = 0
         args.pipeline = 1
         args.sync_interval_steps = 0.0
@@ -1151,9 +1161,9 @@ def _prepare_rl_args(
                 raise ValueError(
                     f"RL's one-fragment f32 bridge still requires {flag}"
                 )
-    _apply_rl_outer_merge_options(args, num_islands=len(specs))
+    _apply_rl_outer_merge_options(args, num_islands=learners)
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
-    _check_island_pool(args, num_islands=len(specs))
+    _check_island_pool(args, num_islands=learners)
     check_peer_recovery(args)
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
