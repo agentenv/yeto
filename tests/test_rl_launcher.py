@@ -919,6 +919,64 @@ def test_island_ray_object_store_and_spill_dir_reach_ray_start():
     assert "--object-store-memory" not in run and "--system-config" not in run
 
 
+def _island_run(extra):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--gpu", "aws:2x4xa100@us-east-1", *extra))
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    start = run.index('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n') + len('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n')
+    head = run[start:].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    return run, head, worker
+
+
+def test_island_ray_head_store_and_preallocation_reach_only_the_head():
+    """S27 RAY-SEGV R1: head-only store size and RAY_* prefix on the head's ray start."""
+    run, head, worker = _island_run(("--rl-island-ray-object-store-gib", "1000",
+                                     "--rl-island-ray-head-object-store-gib", "700",
+                                     "--rl-island-ray-head-preallocate",
+                                     "--rl-island-ray-head-start-wait-s", "1800"))
+    assert head.startswith("  RAY_preallocate_plasma_memory=1 RAY_raylet_start_wait_time_s=1800 "
+                           "RAY_raylet_client_num_connect_attempts=1800 ray start --head ")
+    assert f"--object-store-memory={700 << 30}" in head and f"--object-store-memory={1000 << 30}" not in head
+    assert f"--object-store-memory={1000 << 30}" in worker
+    assert "RAY_preallocate" not in worker and "RAY_raylet_" not in worker
+    assert run.count("RAY_preallocate_plasma_memory") == 1
+
+    # preallocation without a wait gets Ray's 120 s for both waits
+    _, head, _ = _island_run(("--rl-island-ray-head-object-store-gib", "64", "--rl-island-ray-head-preallocate"))
+    assert head.startswith("  RAY_preallocate_plasma_memory=1 RAY_raylet_start_wait_time_s=120 "
+                           "RAY_raylet_client_num_connect_attempts=120 ray start --head ")
+    # a head store size alone: no RAY_ prefix; workers keep Ray's default size
+    _, head, worker = _island_run(("--rl-island-ray-head-object-store-gib", "64"))
+    assert head.startswith("  ray start --head ") and f"--object-store-memory={64 << 30}" in head
+    assert "--object-store-memory" not in worker
+    # a wait alone (no preallocation)
+    _, head, _ = _island_run(("--rl-island-ray-head-start-wait-s", "300"))
+    assert head.startswith("  RAY_raylet_start_wait_time_s=300 RAY_raylet_client_num_connect_attempts=300 "
+                           "ray start --head ")
+
+
+def test_island_ray_head_flags_unset_leave_the_head_command_alone():
+    run, head, _ = _island_run(())
+    assert head.startswith("  ray start --head --node-ip-address=")
+    assert "RAY_preallocate" not in run and "RAY_raylet_" not in run
+
+
+@pytest.mark.parametrize("extra, message", [
+    (("--rl-island-ray-head-preallocate",), "needs --rl-island-ray-head-object-store-gib"),
+    (("--rl-island-ray-head-object-store-gib", "0"), "head-object-store-gib must be >= 1"),
+    (("--rl-island-ray-object-store-gib", "64", "--rl-island-ray-head-preallocate",
+      "--rl-island-ray-head-start-wait-s", "0"), "head-start-wait-s must be >= 1"),
+])
+def test_island_ray_head_flags_are_checked(extra, message):
+    with pytest.raises(ValueError, match=message):
+        _island_run(extra)
+
+
 def _assert_island_ray_is_private(run: str) -> None:
     """The island's Ray must coexist with SkyPilot's runtime Ray on the node.
 

@@ -2387,6 +2387,9 @@ def _run_ports(
 
 
 def main(argv=None) -> None:
+    from yeto.modal_runner import allow_any_ptracer
+
+    allow_any_ptracer()  # S27 RAY-SEGV R5: only with YETO_STACK_SAMPLE_S (py-spy sampling on gVisor)
     learner_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     from yeto.provenance import (
