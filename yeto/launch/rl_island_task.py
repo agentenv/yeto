@@ -9,7 +9,7 @@ import sys
 import time
 
 from ..gpu_spec import ClusterSpec
-from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
+from ..hw.catalog import COMPAT_GROUP_ENV, compat_group, launch_compat_group
 from .code_pack import code_pack_island_flag, code_workdir
 from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
@@ -229,6 +229,9 @@ def make_miles_island_task(
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + (f" --rl-dp-optimizer {args.rl_dp_optimizer}"
            if (getattr(args, "rl_dp_optimizer", None) or "auto") != "auto" else "")
+        + (" --rl-grad-reduce-bf16" if getattr(args, "rl_grad_reduce_bf16", False) else "")
+        + (" --rl-precision-aware-optimizer"
+           if getattr(args, "rl_precision_aware_optimizer", False) else "")
         + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
         + _wan_transport_flags(args)
@@ -394,8 +397,9 @@ def make_miles_island_task(
         # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
         SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
-        # card raises here, before any cloud spend (no default).
-        COMPAT_GROUP_ENV: compat_group(spec.gpu),
+        # card raises here, before any cloud spend (no default). An explicit
+        # --rl-compat-group replaces it on every island (mixed cards, operator decision).
+        COMPAT_GROUP_ENV: _island_compat_group(args, spec, learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.
@@ -539,7 +543,7 @@ def make_miles_island_task(
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
-            + rl_island_ray_storage(args, head=True)
+            + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -568,7 +572,7 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
@@ -655,6 +659,23 @@ STORE_CLIENT_SETUP = (
     'python -c "import boto3" 2>/dev/null || pip install -q boto3 '
     "|| { echo '[yeto-setup] boto3 install failed: the s3 store object API is unavailable' >&2; exit 1; }"
 )
+
+
+def _island_compat_group(args, spec, learner_id: int) -> str:
+    """The compat group this island declares (``$YETO_RL_COMPAT_GROUP``).
+
+    The card group from the catalog, or ``--rl-compat-group`` when the operator
+    declares one group for every island (e.g. an H200 island and an H100 island
+    in one session). The replacement is printed, so the launch log says which
+    island merges across card types without a calibrated tolerance."""
+    explicit = getattr(args, "rl_compat_group", None)
+    group = launch_compat_group(spec.gpu, explicit)
+    derived = compat_group(spec.gpu)
+    if group != derived:
+        print(f"[launcher] island {learner_id}: --rl-compat-group {group} replaces the card group "
+              f"{derived} (one declared group for mixed cards; numeric tolerance not calibrated)",
+              file=sys.stderr)
+    return group
 
 
 def _worker_node_ip_flag(cloud: str) -> str:

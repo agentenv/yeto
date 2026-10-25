@@ -195,6 +195,20 @@ _ROLLOUT_ENGINE = (
         "with the distributed optimizer). Default 0: all on the device",
     ),
     shared_flag(
+        "--rl-grad-reduce-bf16",
+        action="store_true",
+        help="ports: gradient buffers and the data-parallel gradient reduce in bf16 "
+        "(Megatron --grad-reduce-in-bf16) instead of fp32; FP32 masters and Adam moments "
+        "stay. Saves 2 bytes per local parameter (e.g. Nemotron-3 Nano EP8 on 80 GB cards)",
+    ),
+    shared_flag(
+        "--rl-precision-aware-optimizer",
+        action="store_true",
+        help="ports: Megatron precision-aware optimizer with bf16 Adam moments (FP32 masters "
+        "kept as 16-bit remainders). --rl-single-island-no-sync only: the full-parameter "
+        "sync reads FP32 masters",
+    ),
+    shared_flag(
         "--rl-dp-optimizer",
         choices=DP_OPTIMIZERS,
         default="auto",
@@ -494,7 +508,12 @@ _ISLAND = (
     island_flag("--rl-island-bundle-map", default=None, metavar="JSON"),
     # decoupling 7.7a: "<vendor>-<card>" from the launcher's card catalog
     # (yeto.hw.catalog); falls back to $YETO_RL_COMPAT_GROUP, unset -> error.
-    island_flag("--rl-compat-group", default=None),
+    # On the launcher: one group exported to every island instead of each card's
+    # group (mixed-card islands in one session; tolerance not calibrated).
+    shared_flag("--rl-compat-group", default=None, metavar="VENDOR-CARD",
+                help="declare this compat group on every island instead of the group of each "
+                     "island's card, so islands on different cards (e.g. H200 and H100) merge; "
+                     "their numeric tolerance is not calibrated"),
     # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
     # synced after every commit point and restored on an empty state dir (machine replaced)
     island_flag("--rl-elastic-checkpoint-store", default=None, metavar="PATH"),

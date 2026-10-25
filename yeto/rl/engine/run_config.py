@@ -277,6 +277,15 @@ class TrainMemoryConfig:
     # "distributed" (sharded FP32 masters), "replicated" (whole masters on
     # every DP rank) or "auto" (distributed when the Miles pin supports it).
     dp_optimizer: str = "auto"
+    # Gradient buffers and the data-parallel gradient reduce in bf16
+    # (--rl-grad-reduce-bf16, Megatron --grad-reduce-in-bf16) instead of fp32;
+    # FP32 masters and Adam moments stay (the full-parameter sync reads them).
+    grad_reduce_bf16: bool = False
+    # Megatron precision-aware optimizer with bf16 Adam moments
+    # (--rl-precision-aware-optimizer): FP32 masters live as 16-bit remainders
+    # inside TE FusedAdam, which the full-parameter sync cannot read, so only a
+    # no-sync island may use it.
+    precision_aware_optimizer: bool = False
 
 
 @dataclass(frozen=True)
@@ -1200,12 +1209,22 @@ def _train_memory(args) -> TrainMemoryConfig:
     dp_optimizer = getattr(args, "rl_dp_optimizer", None) or "auto"
     if dp_optimizer not in DP_OPTIMIZERS:
         raise ValueError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
+    precision_aware = bool(getattr(args, "rl_precision_aware_optimizer", False))
+    if precision_aware and not getattr(args, "rl_single_island_no_sync", False):
+        # Miles full_parameter_state reads FP32 masters; TE FusedAdam keeps only remainders
+        raise ValueError("--rl-precision-aware-optimizer needs --rl-single-island-no-sync "
+                         "(the full-parameter sync reads FP32 optimizer masters)")
+    if precision_aware and offload > 0:
+        raise ValueError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
+                         "are exclusive (the offload already runs the precision-aware path)")
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
         optimizer_offload_fraction=offload,
         gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
         dp_optimizer=dp_optimizer,
+        grad_reduce_bf16=bool(getattr(args, "rl_grad_reduce_bf16", False)),
+        precision_aware_optimizer=precision_aware,
     )
 
 

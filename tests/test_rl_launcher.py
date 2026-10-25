@@ -1741,3 +1741,40 @@ def test_removed_codex_agent_flags_are_refused(flag, value):
     args = _args((flag, value, "--use-session-server", "--tito-model", "qwen35"))
     with pytest.raises(ValueError, match="signed Codex agent"):
         _prepare_rl_args(args)
+
+
+def test_nebius_island_caps_the_ray_object_store_at_dev_shm(tmp_path):
+    # G-DF yeto-df-6: sky's docker runtime on Nebius gives the container a 200 GB /dev/shm and Ray refused
+    # a 644 GB object store at `ray start`. The size is now min(requested, 90% of /dev/shm) on the node.
+    import subprocess
+
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--gpu", "nebius:2x4xh100@eu-north1", "--rl-island-ray-object-store-gib", "600"))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    head = run[run.index("ray start --head"):].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    flag = f'--object-store-memory="$(r={600 << 30};'
+    assert flag in head and flag in worker
+    # evaluate the flag with a fake df: /dev/shm of 200e9 bytes -> 90% of it; a large /dev/shm keeps 600 GiB
+    word = head[head.index('--object-store-memory="'):]
+    word = word[:word.index('fi)"') + len('fi)"')]
+    fake = tmp_path / "df"
+    for shm, want in ((200_000_000_000, 180_000_000_000), (2_000_000_000_000, 600 << 30)):
+        fake.write_text(f"#!/bin/sh\necho '     1B-blocks'\necho ' {shm}'\n")
+        fake.chmod(0o755)
+        out = subprocess.run(["bash", "-c", f"echo {word}"], capture_output=True, text=True,
+                             env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, check=True)
+        assert out.stdout.strip() == f"--object-store-memory={want}"
+    # other clouds keep the literal size
+    aws = _args(("--gpu", "aws:2x4xa100@us-east-1", "--rl-island-ray-object-store-gib", "600"))
+    aws.model_revision, aws.data_revision = "a" * 40, "b" * 40
+    aws.source_sha256, aws.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(aws)
+    run = make_miles_island_task(aws, parse_gpu_spec(aws.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    assert f"--object-store-memory={600 << 30}" in run and "/dev/shm" not in run
