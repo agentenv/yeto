@@ -131,9 +131,13 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
         layout, meta = layout_manifest.fetch(board, timeout_s=layout_timeout_s)
     finally:
         board.close()
-    client = SubscriberClient(addr, subscriber_id, layout, num_streams=num_streams, hmac_key=key)
+    from yeto.rl.engine.task_dispense import member_incarnation
+
+    client = SubscriberClient(addr, subscriber_id, layout, num_streams=num_streams, hmac_key=key,
+                              incarnation=member_incarnation(env))
     client.start()
     emit("rl_spot_sampler_channels", syncer=text, subscriber_id=subscriber_id,
+         member_incarnation=f"{client.incarnation:016x}",
          fragments=layout.num_fragments, layout_meta=meta)
     out = Path(work_dir) / "spot-weights"
     return SubscriberReleaseStore(

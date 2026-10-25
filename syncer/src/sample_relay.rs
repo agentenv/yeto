@@ -11,9 +11,20 @@
 //! Any number of producers write to a channel; one consumer reads it (a newer
 //! consumer connection supersedes the older one).
 //!
-//! Delivery: a producer PUT carries a per-(producer, incarnation) sequence
-//! number; a resend of the last sequence number gets the same answer (no
-//! duplicate item). A full channel answers FULL and stores nothing; the
+//! Delivery: a producer PUT carries a per-(producer, incarnation, stream)
+//! sequence number; a resend of the last sequence number gets the same
+//! answer (no duplicate item). `incarnation` is the sampler process's member
+//! incarnation (the same on its TASK_HELLO and SUBSCRIBE); `stream` is
+//! random per producer object, so two writers of one process (a Miles driver
+//! and its rollout workers, a restarted worker) never share a sequence.
+//!
+//! Members (docs/PROTOCOL.md "Sampler members"): a producer is the member
+//! `(client, incarnation)` of the syncer's shared table (`members.rs`). Its
+//! RELAY_HELLO joins the table (a new incarnation supersedes the id's
+//! current one on every channel), every request renews the lease, and once
+//! the table retired it (superseded, expired, from before a restart) its
+//! connection is answered `fenced: relay ...` and closed. Items it stored
+//! stay in the channel. Consumers and boards are not members. A full channel answers FULL and stores nothing; the
 //! producer retries the same sequence later. The consumer TAKEs items after a
 //! cursor and acknowledges items through an id; only acknowledged items are
 //! deleted, so a consumer that reconnects (or a new consumer process) gets
@@ -30,6 +41,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
+use crate::members::{Holder, SharedMembers};
 use crate::protocol::{read_frame_limited, MAGIC, MSG_ERROR};
 
 pub const MSG_RELAY_HELLO: u8 = 60;
@@ -40,7 +52,10 @@ pub const MSG_RELAY_TAKE: u8 = 64;
 pub const MSG_RELAY_ITEMS: u8 = 65;
 pub const MSG_RELAY_STATUS: u8 = 66;
 
-pub const RELAY_VERSION: u16 = 1;
+/// 2: RELAY_HELLO carries the producer stream (S27 dispatch merge).
+pub const RELAY_VERSION: u16 = 2;
+/// Prefix of the ERROR that closes a retired producer's connection.
+pub const FENCED_PREFIX: &str = "fenced: relay";
 pub const RELAY_MAC_DOMAIN: &[u8] = b"yeto-relay-hello-mac-v1\0";
 pub const ROLE_PRODUCER: u8 = 1;
 pub const ROLE_CONSUMER: u8 = 2;
@@ -54,8 +69,11 @@ pub const PUT_STORED: u8 = 0;
 pub const PUT_DUPLICATE: u8 = 1;
 pub const PUT_FULL: u8 = 2;
 
-/// RELAY_HELLO body: version u16 | role u8 | channel u32 | client u32 | incarnation u64.
-const HELLO_BODY_LEN: usize = 2 + 1 + 4 + 4 + 8;
+/// RELAY_HELLO body: version u16 | role u8 | channel u32 | client u32 |
+/// incarnation u64 | stream u64.
+const HELLO_BODY_LEN: usize = 2 + 1 + 4 + 4 + 8 + 8;
+/// How often an idle producer connection checks whether it was retired.
+const FENCE_POLL: Duration = Duration::from_millis(200);
 /// RELAY_TAKE: after u64 | ack_through u64 | max_items u32 | max_bytes u64 | wait_ms u32.
 const TAKE_LEN: usize = 8 + 8 + 4 + 8 + 4;
 const MAX_WAIT: Duration = Duration::from_secs(60);
@@ -93,6 +111,7 @@ pub struct Hello {
     pub channel: u32,
     pub client: u32,
     pub incarnation: u64,
+    pub stream: u64,
 }
 
 pub fn parse_hello(body: &[u8]) -> Result<Hello> {
@@ -109,6 +128,7 @@ pub fn parse_hello(body: &[u8]) -> Result<Hello> {
         channel: u32::from_le_bytes(body[3..7].try_into().unwrap()),
         client: u32::from_le_bytes(body[7..11].try_into().unwrap()),
         incarnation: u64::from_le_bytes(body[11..19].try_into().unwrap()),
+        stream: u64::from_le_bytes(body[19..27].try_into().unwrap()),
     })
 }
 
@@ -165,8 +185,8 @@ struct Channel {
     acked_through: u64,
     /// (client, incarnation) of the current consumer connection.
     consumer: Option<(u32, u64, u64)>,
-    /// Last accepted (seq, item id) per producer process.
-    producers: HashMap<(u32, u64), (u64, u64)>,
+    /// Last accepted (seq, item id) per (producer, incarnation, stream).
+    producers: HashMap<(u32, u64, u64), (u64, u64)>,
     counters: Counters,
 }
 
@@ -262,7 +282,15 @@ impl Relay {
         token
     }
 
-    pub fn put(&mut self, channel: u32, producer: u32, incarnation: u64, seq: u64, payload: Vec<u8>) -> Result<PutReply> {
+    pub fn put(
+        &mut self,
+        channel: u32,
+        producer: u32,
+        incarnation: u64,
+        stream: u64,
+        seq: u64,
+        payload: Vec<u8>,
+    ) -> Result<PutReply> {
         let max_item = self.cfg.max_item_bytes;
         let max_items = self.cfg.max_items;
         let max_bytes = self.cfg.max_bytes;
@@ -273,7 +301,7 @@ impl Relay {
             payload.len()
         );
         let ch = self.channel(channel);
-        if let Some(&(last_seq, last_id)) = ch.producers.get(&(producer, incarnation)) {
+        if let Some(&(last_seq, last_id)) = ch.producers.get(&(producer, incarnation, stream)) {
             if seq <= last_seq {
                 ch.counters.duplicate += 1;
                 let item_id = if seq == last_seq { last_id } else { 0 };
@@ -289,7 +317,7 @@ impl Relay {
         ch.next_id += 1;
         ch.items.push_back(Item { id, producer, payload: Arc::new(payload) });
         ch.bytes += len;
-        ch.producers.insert((producer, incarnation), (seq, id));
+        ch.producers.insert((producer, incarnation, stream), (seq, id));
         ch.counters.stored += 1;
         ch.counters.stored_bytes += len;
         Ok(PutReply { seq, status: PUT_STORED, item_id: id, depth: ch.depth() })
@@ -361,13 +389,25 @@ pub struct RelayHub {
     pub state: Mutex<Relay>,
     pub notify: Notify,
     pub key: Option<Vec<u8>>,
+    /// The syncer's shared member table (producers are members).
+    pub members: SharedMembers,
 }
 
 impl RelayHub {
-    pub fn new(cfg: RelayConfig, key: Option<Vec<u8>>) -> Arc<Self> {
+    pub fn new(cfg: RelayConfig, key: Option<Vec<u8>>, members: SharedMembers) -> Arc<Self> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let epoch = (nanos as u64) ^ ((std::process::id() as u64) << 32) | 1;
-        Arc::new(RelayHub { state: Mutex::new(Relay::new(cfg, epoch)), notify: Notify::new(), key })
+        Arc::new(RelayHub { state: Mutex::new(Relay::new(cfg, epoch)), notify: Notify::new(), key, members })
+    }
+
+    /// The `fenced:` text when the table retired `holder` (None: it is live).
+    fn fenced(&self, holder: Holder, now: Instant) -> Option<String> {
+        let mut members = self.members.lock().unwrap();
+        members.expire(now);
+        match members.touch(holder, now) {
+            true => None,
+            false => Some(format!("{FENCED_PREFIX} {}", members.fenced_text(holder))),
+        }
     }
 
     /// Spawn a task that logs the per-channel counters every `every` when they change.
@@ -463,6 +503,32 @@ where
         let _ = write_frame(wr, MSG_ERROR, &[message.as_bytes()]).await;
         bail!(message);
     };
+    let member = (hello.role == ROLE_PRODUCER)
+        .then_some(Holder { learner_id: hello.client, incarnation: hello.incarnation });
+    if let Some(holder) = member {
+        let refused = {
+            let mut members = hub.members.lock().unwrap();
+            let now = Instant::now();
+            members.expire(now);
+            if members.is_retired(holder) {
+                Some(format!("{FENCED_PREFIX} {}", members.fenced_text(holder)))
+            } else {
+                if let crate::members::Join::Joined { superseded: Some(old) } = members.join(holder, now) {
+                    info!(
+                        client = holder.learner_id,
+                        incarnation = holder.incarnation,
+                        superseded = old.incarnation,
+                        "sample relay producer superseded an older incarnation"
+                    );
+                }
+                None
+            }
+        };
+        if let Some(message) = refused {
+            let _ = write_frame(wr, MSG_ERROR, &[message.as_bytes()]).await;
+            bail!(message);
+        }
+    }
     let (epoch, cfg, depth, token) = {
         let mut relay = hub.state.lock().unwrap();
         let token = if hello.role == ROLE_CONSUMER {
@@ -477,6 +543,7 @@ where
         channel = hello.channel,
         client = hello.client,
         incarnation = hello.incarnation,
+        stream = hello.stream,
         "sample relay connection"
     );
     let mut welcome = Vec::with_capacity(64);
@@ -490,15 +557,34 @@ where
     let put_limit = 8 + cfg.max_item_bytes;
     let role = hello.role;
     loop {
-        let frame = match read_frame_limited(rd, |msg_type| match (role, msg_type) {
+        let read = read_frame_limited(rd, |msg_type| match (role, msg_type) {
             (ROLE_PRODUCER, MSG_RELAY_PUT) => Ok(put_limit),
             (ROLE_BOARD, MSG_RELAY_PUT) => Ok(8 + MAX_BOARD_BYTES),
             (ROLE_CONSUMER | ROLE_BOARD, MSG_RELAY_TAKE) => Ok(TAKE_LEN as u64),
             (_, MSG_RELAY_STATUS) => Ok(0),
             (_, other) => bail!("relay role {role} cannot send message type {other}"),
-        })
-        .await
-        {
+        });
+        tokio::pin!(read);
+        // A producer waiting for its next request is closed as soon as the
+        // member table retires it (the same frame read keeps being polled).
+        let read = loop {
+            let Some(holder) = member else { break read.await };
+            tokio::select! {
+                frame = &mut read => break frame,
+                _ = tokio::time::sleep(FENCE_POLL) => {
+                    let retired = {
+                        let members = hub.members.lock().unwrap();
+                        members.is_retired(holder).then(|| format!("{FENCED_PREFIX} {}", members.fenced_text(holder)))
+                    };
+                    if let Some(message) = retired {
+                        info!(client = holder.learner_id, incarnation = holder.incarnation, "{message}");
+                        let _ = write_frame(wr, MSG_ERROR, &[message.as_bytes()]).await;
+                        bail!(message);
+                    }
+                }
+            }
+        };
+        let frame = match read {
             Ok(frame) => frame,
             Err(error) => {
                 if error.downcast_ref::<std::io::Error>().is_some() {
@@ -510,6 +596,10 @@ where
                 return Err(error);
             }
         };
+        if let Some(message) = member.and_then(|holder| hub.fenced(holder, Instant::now())) {
+            let _ = write_frame(wr, MSG_ERROR, &[message.as_bytes()]).await;
+            bail!(message);
+        }
         match frame.msg_type {
             MSG_RELAY_STATUS => {
                 let depth = hub.state.lock().unwrap().depth(hello.channel);
@@ -545,7 +635,14 @@ where
                 let seq = u64::from_le_bytes(frame.payload[0..8].try_into().unwrap());
                 let mut payload = frame.payload;
                 payload.drain(0..8);
-                let reply = hub.state.lock().unwrap().put(hello.channel, hello.client, hello.incarnation, seq, payload);
+                let reply = hub.state.lock().unwrap().put(
+                    hello.channel,
+                    hello.client,
+                    hello.incarnation,
+                    hello.stream,
+                    seq,
+                    payload,
+                );
                 let reply = match reply {
                     Ok(reply) => reply,
                     Err(error) => {
@@ -637,27 +734,27 @@ mod tests {
     #[test]
     fn put_dedupes_resends_and_refuses_when_full() {
         let mut relay = Relay::new(cfg(2, 100, 50), 7);
-        let a = relay.put(0, 1, 11, 1, vec![1; 10]).unwrap();
+        let a = relay.put(0, 1, 11, 0, 1, vec![1; 10]).unwrap();
         assert_eq!((a.status, a.item_id), (PUT_STORED, 1));
         // Resend of the same sequence: same item, nothing stored.
-        let again = relay.put(0, 1, 11, 1, vec![1; 10]).unwrap();
+        let again = relay.put(0, 1, 11, 0, 1, vec![1; 10]).unwrap();
         assert_eq!((again.status, again.item_id, again.depth.items), (PUT_DUPLICATE, 1, 1));
         // A new incarnation of the same producer starts its own sequence.
-        let b = relay.put(0, 1, 12, 1, vec![2; 10]).unwrap();
+        let b = relay.put(0, 1, 12, 0, 1, vec![2; 10]).unwrap();
         assert_eq!((b.status, b.item_id), (PUT_STORED, 2));
-        let full = relay.put(0, 1, 12, 2, vec![3; 10]).unwrap();
+        let full = relay.put(0, 1, 12, 0, 2, vec![3; 10]).unwrap();
         assert_eq!((full.status, full.depth.items), (PUT_FULL, 2));
         // Too large for the item limit is a protocol error.
-        assert!(relay.put(0, 1, 12, 3, vec![0; 51]).is_err());
+        assert!(relay.put(0, 1, 12, 0, 3, vec![0; 51]).is_err());
         // Channels are independent.
-        assert_eq!(relay.put(1, 1, 12, 9, vec![0; 50]).unwrap().status, PUT_STORED);
+        assert_eq!(relay.put(1, 1, 12, 0, 9, vec![0; 50]).unwrap().status, PUT_STORED);
     }
 
     #[test]
     fn take_returns_after_cursor_and_deletes_only_acked() {
         let mut relay = Relay::new(cfg(16, 1000, 100), 7);
         for seq in 1..=4 {
-            relay.put(0, 3, 1, seq, vec![seq as u8; 10]).unwrap();
+            relay.put(0, 3, 1, 0, seq, vec![seq as u8; 10]).unwrap();
         }
         let token = relay.attach_consumer(0, 0, 99);
         let (items, depth) = relay.take(0, token, 0, 0, 2, 1000).unwrap();
@@ -701,8 +798,10 @@ mod tests {
         body.extend_from_slice(&5u32.to_le_bytes());
         body.extend_from_slice(&7u32.to_le_bytes());
         body.extend_from_slice(&9u64.to_le_bytes());
+        body.extend_from_slice(&3u64.to_le_bytes());
         let hello = parse_hello(&body).unwrap();
-        assert_eq!(hello, Hello { role: ROLE_CONSUMER, channel: 5, client: 7, incarnation: 9 });
+        assert_eq!(hello, Hello { role: ROLE_CONSUMER, channel: 5, client: 7, incarnation: 9, stream: 3 });
+        assert!(parse_hello(&body[..19]).is_err(), "the version 1 body (no stream) is refused");
         let mut framed = RELAY_MAC_DOMAIN.to_vec();
         framed.extend_from_slice(&body);
         let mut sealed = body.clone();
@@ -721,18 +820,75 @@ mod tests {
     }
 
     fn hello_frame(role: u8, channel: u32, client: u32, inc: u64) -> Vec<u8> {
+        hello_frame_stream(role, channel, client, inc, 1)
+    }
+
+    fn hello_frame_stream(role: u8, channel: u32, client: u32, inc: u64, stream: u64) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&RELAY_VERSION.to_le_bytes());
         body.push(role);
         body.extend_from_slice(&channel.to_le_bytes());
         body.extend_from_slice(&client.to_le_bytes());
         body.extend_from_slice(&inc.to_le_bytes());
+        body.extend_from_slice(&stream.to_le_bytes());
         body
+    }
+
+    fn members() -> SharedMembers {
+        crate::members::shared(Duration::from_secs(300))
+    }
+
+    #[test]
+    fn streams_of_one_incarnation_number_their_puts_apart() {
+        let mut relay = Relay::new(cfg(8, 1000, 100), 7);
+        assert_eq!(relay.put(0, 1, 11, 5, 1, vec![1; 4]).unwrap().status, PUT_STORED);
+        // Another writer of the same process starts at 1 too: not a duplicate.
+        assert_eq!(relay.put(0, 1, 11, 6, 1, vec![2; 4]).unwrap().status, PUT_STORED);
+        assert_eq!(relay.put(0, 1, 11, 5, 1, vec![1; 4]).unwrap().status, PUT_DUPLICATE);
+    }
+
+    #[tokio::test]
+    async fn a_superseded_producer_is_fenced_at_once_and_its_items_stay() {
+        let table = members();
+        let hub = RelayHub::new(cfg(8, 1 << 20, 1 << 16), None, table.clone());
+        let id = crate::members::SAMPLER_MEMBER_BIT | 4;
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (mut srd, mut swr) = tokio::io::split(server);
+        let h = Arc::clone(&hub);
+        let hello = hello_frame(ROLE_PRODUCER, 0, id, 1);
+        let old = tokio::spawn(async move { serve(&mut srd, &mut swr, &hello, Some(h)).await });
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        assert_eq!(read_reply(&mut crd).await.unwrap().msg_type, MSG_RELAY_WELCOME);
+        let mut put = 1u64.to_le_bytes().to_vec();
+        put.extend_from_slice(b"old-1");
+        write_frame(&mut cwr, MSG_RELAY_PUT, &[&put]).await.unwrap();
+        assert_eq!(read_reply(&mut crd).await.unwrap().payload[8], PUT_STORED);
+        // A new incarnation of the same sampler joins on another channel.
+        table.lock().unwrap().join(Holder { learner_id: id, incarnation: 2 }, Instant::now());
+        let err = tokio::time::timeout(Duration::from_secs(2), read_reply(&mut crd)).await.unwrap().unwrap();
+        assert_eq!(err.msg_type, MSG_ERROR);
+        let text = String::from_utf8(err.payload).unwrap();
+        assert!(text.starts_with(FENCED_PREFIX) && text.ends_with("(superseded)"), "{text}");
+        assert!(old.await.unwrap().is_err());
+        // Its RELAY_HELLO is refused from now on; the item it stored stays.
+        let (client, server) = tokio::io::duplex(1 << 16);
+        let (mut srd, mut swr) = tokio::io::split(server);
+        let h = Arc::clone(&hub);
+        let hello = hello_frame_stream(ROLE_PRODUCER, 0, id, 1, 9);
+        let again = tokio::spawn(async move { serve(&mut srd, &mut swr, &hello, Some(h)).await });
+        let (mut crd, _cwr) = tokio::io::split(client);
+        let err = read_reply(&mut crd).await.unwrap();
+        assert_eq!(err.msg_type, MSG_ERROR);
+        assert!(String::from_utf8(err.payload).unwrap().starts_with(FENCED_PREFIX));
+        assert!(again.await.unwrap().is_err());
+        assert_eq!(hub.state.lock().unwrap().depth(0).items, 1);
+        // Consumers are not members: a consumer with the same id is served.
+        assert!(!table.lock().unwrap().is_live(Holder { learner_id: 0, incarnation: 2 }));
     }
 
     #[tokio::test]
     async fn serve_round_trip_over_duplex() {
-        let hub = RelayHub::new(cfg(8, 1 << 20, 1 << 16), None);
+        let hub = RelayHub::new(cfg(8, 1 << 20, 1 << 16), None, members());
         // Producer.
         let (client, server) = tokio::io::duplex(1 << 20);
         let (mut srd, mut swr) = tokio::io::split(server);

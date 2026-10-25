@@ -79,6 +79,16 @@ MSG_INIT_CONFIRM = 29
 MSG_SUBSCRIBE = 67
 SUBSCRIBER_ID_BIT = 0x8000_0000
 SUBSCRIBE_MAC_DOMAIN = b"yeto-subscribe-mac-v1\0"
+# SUBSCRIBE body trailer (inside the MAC): the sampler process's member
+# incarnation (docs/PROTOCOL.md "Sampler members"; syncer subscriber.rs).
+SUBSCRIBE_INCARNATION_MAGIC = b"YSI1"
+
+
+def encode_subscribe_incarnation(incarnation: int) -> bytes:
+    """The ``YSI1 | incarnation u64`` trailer of a SUBSCRIBE body."""
+    if not 0 < int(incarnation) < 1 << 64:
+        raise ValueError("a member incarnation is a nonzero u64")
+    return SUBSCRIBE_INCARNATION_MAGIC + struct.pack("<Q", int(incarnation))
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -984,6 +994,11 @@ class SyncerClient:
     _hello_msg_type: int = MSG_HELLO
     _hello_mac_domain: bytes = HELLO_MAC_DOMAIN
 
+    def _hello_body_suffix(self) -> bytes:
+        """Bytes after the HELLO body, inside the MAC (a subscriber's member
+        incarnation trailer); empty for a learner, whose HELLO is unchanged."""
+        return b""
+
     # Transport defaults (S26 E3b); __init__ overrides them per client.
     stream_schedule: str = "rr"
     stream_stall_timeout: float | None = None
@@ -1241,7 +1256,7 @@ class SyncerClient:
                         syncer_epoch=self.syncer_epoch,
                         recover=self._recover.is_set(),
                         expert_tokens=self.expert_tokens,
-                    ),
+                    ) + self._hello_body_suffix(),
                     self.hmac_key,
                     self._hello_mac_domain,
                 ),

@@ -284,9 +284,10 @@ impl DispenseService {
         syncer_epoch: u64,
         hmac_key: Option<Vec<u8>>,
         restore: Option<&Path>,
+        members: crate::members::SharedMembers,
     ) -> Result<Self> {
         cfg.validate()?;
-        let mut dispenser = Dispenser::new(cfg);
+        let mut dispenser = Dispenser::with_members(cfg, members);
         if let Some(path) = restore {
             let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
             dispenser.restore_persisted(&bytes).with_context(|| format!("restore dispenser record {}", path.display()))?;

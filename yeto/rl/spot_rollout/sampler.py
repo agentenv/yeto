@@ -48,6 +48,7 @@ class SpotChannels:
     def __init__(self, spec: Mapping[str, Any], environ: Mapping[str, str] | None = None, *,
                  incarnation: str, emit: Callable[..., None]) -> None:
         from yeto.protocol import island_hmac_key_from_env
+        from yeto.rl.engine.task_dispense import member_incarnation
 
         from . import layout_manifest
         from .materialize import converter_from_spec, materialize
@@ -65,13 +66,19 @@ class SpotChannels:
                 board, timeout_s=float(spec.get("layout_timeout_s", 1800.0)))
         finally:
             board.close()
+        # One member incarnation for the process's subscriber, relay producer and
+        # task dispenser connections (engine_sampler_entry.run derives it from the
+        # process incarnation); a newer process of this sampler supersedes all three.
+        self.incarnation = member_incarnation(environ)
         self.client = SubscriberClient(self.addr, self.subscriber_id, self.layout,
-                                       num_streams=int(spec.get("num_streams", 4)), hmac_key=key)
+                                       num_streams=int(spec.get("num_streams", 4)), hmac_key=key,
+                                       incarnation=self.incarnation)
         self.client.start()
         self.follower = WeightFollower(self.client, self.layout.num_fragments)
-        # A producer incarnation is random per connection object: a restarted writer
+        # The producer's stream is random per connection object: a restarted writer
         # never reuses the sequence numbers of an earlier one.
-        self.producer = RelayProducer(self.addr, int(spec["channel"]), self.subscriber_id, key=key)
+        self.producer = RelayProducer(self.addr, int(spec["channel"]), self.subscriber_id, key=key,
+                                      incarnation=self.incarnation)
         self.syncer_lost_s = float(spec.get("syncer_lost_s", 1800.0))
         self._lost_since: float | None = None
         convert = converter_from_spec(spec)
@@ -88,6 +95,7 @@ class SpotChannels:
                                         should_stop=self.stopping)
         emit("rl_spot_sampler_channels", syncer=f"{self.addr[0]}:{self.addr[1]}",
              subscriber_id=self.subscriber_id, channel=int(spec["channel"]),
+             member_incarnation=f"{self.incarnation:016x}",
              fragments=self.layout.num_fragments, layout_meta=self.meta)
 
     def syncer_lost(self) -> bool:

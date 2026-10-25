@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 use anyhow::{ensure, Result};
 
 pub use crate::members::Holder;
-use crate::members::{Join, Members, RETIRED_LIMIT};
+use crate::members::{Retired, SharedMembers, RETIRED_LIMIT};
 
 /// Magic and version of the persisted dispenser record (YDS1: the P2 record,
 /// one stream; still restored).
@@ -476,15 +476,23 @@ pub struct Dispenser {
     blocks: BTreeMap<u64, Block>,
     next_block: u64,
     live: BTreeMap<Holder, Live>,
-    /// Leases, current incarnations and fencing (`members.rs`, shared rules).
-    members: Members,
+    /// Leases, current incarnations and fencing (`members.rs`): the syncer
+    /// process's one table, shared with the spot rollout subscribers and
+    /// sample relay; a member they retire loses its rows here too.
+    members: SharedMembers,
     pub totals: Totals,
     events: Vec<DispenseEvent>,
 }
 
 impl Dispenser {
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools; the syncer shares its table
     pub fn new(cfg: DispenseConfig) -> Self {
-        let members = Members::new(cfg.lease);
+        let members = crate::members::shared(cfg.lease);
+        Self::with_members(cfg, members)
+    }
+
+    /// A dispenser on the syncer's shared member table (its lease is the table's).
+    pub fn with_members(cfg: DispenseConfig, members: SharedMembers) -> Self {
         Self {
             cfg,
             data: None,
@@ -522,8 +530,15 @@ impl Dispenser {
         self.live.contains_key(&holder)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn is_retired(&self, holder: Holder) -> bool {
-        self.members.is_retired(holder)
+        self.members.lock().unwrap().is_retired(holder)
+    }
+
+    /// The shared member table.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
+    pub fn members(&self) -> &SharedMembers {
+        &self.members
     }
 
     /// Positions waiting in the queues (returned, requeued, released).
@@ -559,8 +574,8 @@ impl Dispenser {
         self.streams[stream].next >= self.limit(stream)
     }
 
-    fn retire(&mut self, holder: Holder) {
-        self.members.retire(holder);
+    fn retire(&mut self, holder: Holder, reason: Retired) {
+        self.members.lock().unwrap().retire(holder, reason);
     }
 
     /// Put spans back at the front of their streams' queues, ascending.
@@ -574,7 +589,10 @@ impl Dispenser {
     /// Retire `holder` and return its unreported positions to the queue front.
     fn reclaim(&mut self, holder: Holder, reason: ReclaimReason) -> u64 {
         let Some(live) = self.live.remove(&holder) else { return 0 };
-        self.retire(holder);
+        self.retire(holder, match reason {
+            ReclaimReason::Expired => Retired::Expired,
+            ReclaimReason::Superseded => Retired::Superseded,
+        });
         let mut spans = Vec::new();
         for id in live.blocks {
             if let Some(block) = self.blocks.remove(&id) {
@@ -612,12 +630,13 @@ impl Dispenser {
         accept: Option<&[u16]>,
         now: Instant,
     ) -> DResult<OpenOutcome> {
-        if self.is_retired(holder) {
+        let retired = {
+            let members = self.members.lock().unwrap();
+            members.is_retired(holder).then(|| members.fenced_text(holder))
+        };
+        if let Some(text) = retired {
             self.events.push(DispenseEvent::Fenced { holder, request: "open" });
-            return Err(DispenseError::Fenced(format!(
-                "incarnation {:016x} of island {} is retired (expired, superseded or from before a restart)",
-                holder.incarnation, holder.learner_id
-            )));
+            return Err(DispenseError::Fenced(text));
         }
         if data.total_rows() == 0 {
             return Err(DispenseError::Refused("the island declares 0 rows".into()));
@@ -658,7 +677,7 @@ impl Dispenser {
         };
         let logged_accept = (accept_list.len() < streams).then(|| accept_list.clone());
         if let Some(live) = self.live.get_mut(&holder) {
-            self.members.touch(holder, now);
+            self.members.lock().unwrap().touch(holder, now);
             live.accept = accept_list;
             self.events.push(DispenseEvent::Open {
                 holder,
@@ -672,13 +691,19 @@ impl Dispenser {
         if self.live.len() >= LIVE_LIMIT {
             return Err(DispenseError::Refused(format!("more than {LIVE_LIMIT} live islands")));
         }
-        let previous = self.members.current(holder.learner_id).map(|h| h.incarnation);
+        // Join the shared table: a new incarnation retires the id's current one,
+        // which may have joined here or on another channel; the same
+        // incarnation may already be a member through a subscriber or relay
+        // connection of this process (then nothing is superseded here).
+        self.members.lock().unwrap().join(holder, now);
+        let older: Vec<Holder> =
+            self.live.keys().copied().filter(|h| h.learner_id == holder.learner_id && *h != holder).collect();
+        let mut previous = None;
         let mut reclaimed = 0;
-        if let Some(incarnation) = previous {
-            reclaimed = self.reclaim(Holder { learner_id: holder.learner_id, incarnation }, ReclaimReason::Superseded);
+        for old in older {
+            reclaimed += self.reclaim(old, ReclaimReason::Superseded);
+            previous = Some(old.incarnation);
         }
-        let joined = self.members.join(holder, now);
-        debug_assert_eq!(joined, Join::Joined { superseded: None }, "the old incarnation was reclaimed above");
         self.live.insert(holder, Live { blocks: BTreeSet::new(), waiting: false, last: None, accept: accept_list });
         self.events.push(DispenseEvent::Open {
             holder,
@@ -691,14 +716,22 @@ impl Dispenser {
     }
 
     fn require_live(&mut self, holder: Holder, request: &'static str, now: Instant) -> DResult<()> {
-        match self.live.contains_key(&holder) && self.members.touch(holder, now) {
-            true => Ok(()),
-            false => {
-                self.events.push(DispenseEvent::Fenced { holder, request });
-                Err(DispenseError::Fenced(format!(
+        let retired = {
+            let mut members = self.members.lock().unwrap();
+            match self.live.contains_key(&holder) && members.touch(holder, now) {
+                true => None,
+                false if members.is_retired(holder) => Some(members.fenced_text(holder)),
+                false => Some(format!(
                     "incarnation {:016x} of island {} holds no lease",
                     holder.incarnation, holder.learner_id
-                )))
+                )),
+            }
+        };
+        match retired {
+            None => Ok(()),
+            Some(text) => {
+                self.events.push(DispenseEvent::Fenced { holder, request });
+                Err(DispenseError::Fenced(text))
             }
         }
     }
@@ -964,18 +997,39 @@ impl Dispenser {
         Ok(totals)
     }
 
-    /// Expire every holder silent for the lease; returns them in order.
+    /// Expire every member silent for the lease, then reclaim the rows of
+    /// every holder the shared table retired (here or on another channel:
+    /// a subscriber or relay connection of a newer incarnation supersedes
+    /// it); returns the holders whose lease expired, in order.
     pub fn expire(&mut self, now: Instant) -> Vec<Holder> {
-        let gone: Vec<Holder> = self.members.expired(now);
-        for &holder in &gone {
-            self.reclaim(holder, ReclaimReason::Expired);
+        let (retired, reasons): (Vec<Holder>, Vec<Option<Retired>>) = {
+            let mut members = self.members.lock().unwrap();
+            members.expire(now);
+            self.live
+                .keys()
+                .copied()
+                .filter(|&h| members.is_retired(h))
+                .map(|h| (h, members.retired_reason(h)))
+                .unzip()
+        };
+        let mut gone = Vec::new();
+        for (holder, reason) in retired.into_iter().zip(reasons) {
+            match reason {
+                Some(Retired::Superseded) => {
+                    self.reclaim(holder, ReclaimReason::Superseded);
+                }
+                _ => {
+                    self.reclaim(holder, ReclaimReason::Expired);
+                    gone.push(holder);
+                }
+            }
         }
         gone
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn next_expiry(&self) -> Option<Instant> {
-        self.members.next_expiry()
+        self.members.lock().unwrap().next_expiry()
     }
 
     /// Persisted record: the state as if every live holder were reclaimed
@@ -1000,7 +1054,7 @@ impl Dispenser {
             queue.extend(held.iter().copied().filter(|span| stream_of(span.start) == s));
             queue.extend(state.queue.iter().copied());
         }
-        let retired: Vec<Holder> = self.members.fence_list();
+        let retired: Vec<Holder> = self.members.lock().unwrap().fence_list();
         let mut out = Vec::new();
         out.extend_from_slice(PERSIST_MAGIC);
         out.push(u8::from(self.data.is_some()));
@@ -1130,7 +1184,7 @@ impl Dispenser {
         }
         let retired = holders.len();
         for holder in holders {
-            self.retire(holder);
+            self.retire(holder, Retired::Restart);
         }
         self.events.push(DispenseEvent::Restore { next: self.next_position(), queued: self.queued(), retired });
         Ok(())
@@ -1289,6 +1343,50 @@ mod tests {
 
     fn report(d: &mut Dispenser, holder: Holder, block: u64, kind: ReportKind, ranges: &[(u64, u64)], now: Instant) -> ReportTotals {
         d.report(holder, seq(), &[ReportEntry { block, kind, ranges: ranges.to_vec() }], now).unwrap()
+    }
+
+    #[test]
+    fn a_member_superseded_on_another_channel_loses_its_rows_and_is_fenced() {
+        // S27: the syncer's one member table; a spot rollout subscriber (or
+        // relay producer) of a newer incarnation of the sampler joins it.
+        let t = Instant::now();
+        let table = crate::members::shared(Duration::from_secs(10));
+        let mut d = Dispenser::with_members(cfg(None), table.clone());
+        let sampler = crate::members::SAMPLER_MEMBER_BIT | 3;
+        d.open(h(sampler, 1), 100, FP, t).unwrap();
+        d.open(h(0, 9), 100, FP, t).unwrap();
+        let (_, held) = grant(&mut d, h(sampler, 1), 6, t);
+        assert_eq!(held, vec![(0, 6)]);
+        table.lock().unwrap().join(h(sampler, 2), t);
+        // The service expires before every request (DispenseService::with): the
+        // next request of any island finds the old incarnation's rows returned.
+        assert_eq!(d.expire(t), vec![]);
+        assert_eq!(grant(&mut d, h(0, 9), 4, t).1, vec![(0, 4)]);
+        let reclaims: Vec<_> = d
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                DispenseEvent::Reclaim { holder, reason, ranges } => Some((holder, reason, ranges)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reclaims, vec![(h(sampler, 1), ReclaimReason::Superseded, vec![(0, 6)])]);
+        let error = d.claim(h(sampler, 1), seq(), 1, t).unwrap_err().to_string();
+        assert!(error.starts_with(FENCED_PREFIX) && error.ends_with("(superseded)"), "{error}");
+        // The new incarnation is already a member (its subscriber joined): it opens
+        // without superseding anything and takes the rest of the returned rows.
+        assert_eq!(
+            d.open(h(sampler, 2), 100, FP, t).unwrap(),
+            OpenOutcome::Joined { superseded: None, reclaimed: 0 }
+        );
+        assert_eq!(grant(&mut d, h(sampler, 2), 4, t).1, vec![(4, 6), (6, 8)]);
+        // A member silent on every channel expires, whoever expires it.
+        let later = t + Duration::from_secs(10);
+        assert!(table.lock().unwrap().touch(h(0, 9), later));
+        table.lock().unwrap().expire(later);
+        assert_eq!(d.expire(later), vec![h(sampler, 2)]);
+        assert!(d.claim(h(sampler, 2), seq(), 1, later).unwrap_err().to_string().ends_with("(lease expired)"));
+        d.check_invariants().unwrap();
     }
 
     #[test]

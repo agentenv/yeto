@@ -10,9 +10,10 @@ Wire (each connection: first frame RELAY_HELLO, then request/answer pairs):
 ====  ============  ========================================================
 type  name          payload
 ====  ============  ========================================================
-60    RELAY_HELLO   version u16 (=1) | role u8 (1 producer, 2 consumer,
-                    3 board) | channel u32 | client u32 | incarnation u64,
-                    then HMAC-SHA256(key, RELAY_MAC_DOMAIN | body) with a key
+60    RELAY_HELLO   version u16 (=2) | role u8 (1 producer, 2 consumer,
+                    3 board) | channel u32 | client u32 | incarnation u64 |
+                    stream u64, then HMAC-SHA256(key, RELAY_MAC_DOMAIN | body)
+                    with a key
 61    WELCOME       version u16 | relay_epoch u64 | max_item_bytes u64 |
                     max_items u32 | max_bytes u64 | depth
 62    PUT           seq u64 | item bytes (producer; board: sets the board)
@@ -27,8 +28,12 @@ type  name          payload
 
 ``depth`` = items u32 | bytes u64 | acked_through u64 | next_id u64.
 
-Delivery: a producer numbers its PUTs from 1 per incarnation; resending the
-last number gets the same answer and stores nothing twice. A full channel
+Delivery: a producer numbers its PUTs from 1 per (incarnation, stream);
+resending the last number gets the same answer and stores nothing twice.
+``incarnation`` is the sampler process's member incarnation
+(``task_dispense.member_incarnation``: the same on its TASK_HELLO and
+SUBSCRIBE); ``stream`` is random per producer object, so two writers of one
+process never share a sequence. A full channel
 answers FULL and stores nothing (the producer retries later). The consumer
 reads after a cursor and acknowledges through an item id; only acknowledged
 items are deleted, so a reconnecting or restarted consumer gets every
@@ -37,7 +42,10 @@ carries a new ``relay_epoch`` and the clients reset their cursors.
 
 Errors: the syncer answers ERROR (type 10) and closes. ``relay refused:``
 (relay off, bad HELLO, too large item) is fatal; ``relay superseded:`` means
-a newer consumer owns the channel.
+a newer consumer owns the channel; ``fenced: relay`` means the syncer's
+island member table retired this producer's member (a newer incarnation of
+the sampler joined on any channel, or its lease expired): fatal, the process
+does not come back under the same incarnation (:class:`RelayFenced`).
 """
 
 from __future__ import annotations
@@ -66,7 +74,7 @@ MSG_RELAY_TAKE = 64
 MSG_RELAY_ITEMS = 65
 MSG_RELAY_STATUS = 66
 
-RELAY_VERSION = 1
+RELAY_VERSION = 2  # 2: RELAY_HELLO carries the producer stream
 RELAY_MAC_DOMAIN = b"yeto-relay-hello-mac-v1\0"
 ROLE_PRODUCER = 1
 ROLE_CONSUMER = 2
@@ -78,8 +86,9 @@ PUT_FULL = 2
 
 REFUSED_PREFIX = "relay refused:"
 SUPERSEDED_PREFIX = "relay superseded:"
+FENCED_PREFIX = "fenced: relay"  # syncer sample_relay.rs FENCED_PREFIX
 
-_HELLO = struct.Struct("<HBIIQ")
+_HELLO = struct.Struct("<HBIIQQ")
 _WELCOME = struct.Struct("<HQQIQ")
 _DEPTH = struct.Struct("<IQQQ")
 _PUT_ACK = struct.Struct("<QBQ")
@@ -97,6 +106,10 @@ class RelayRefused(ProtocolError):
 
 class RelaySuperseded(RelayError):
     """A newer consumer owns the channel."""
+
+
+class RelayFenced(RelayRefused):
+    """The syncer retired this producer's member (superseded or expired)."""
 
 
 @dataclass(frozen=True)
@@ -136,8 +149,8 @@ class Item:
 
 
 def encode_relay_hello(role: int, channel: int, client: int, incarnation: int,
-                       key: bytes | None) -> bytes:
-    body = _HELLO.pack(RELAY_VERSION, role, channel, client, incarnation)
+                       key: bytes | None, stream: int = 0) -> bytes:
+    body = _HELLO.pack(RELAY_VERSION, role, channel, client, incarnation, stream)
     return seal_hello(body, key, RELAY_MAC_DOMAIN)
 
 
@@ -145,6 +158,8 @@ def _raise_error(payload: bytes) -> None:
     message = payload.decode("utf-8", errors="replace")
     if message.startswith(SUPERSEDED_PREFIX):
         raise RelaySuperseded(message)
+    if message.startswith(FENCED_PREFIX):
+        raise RelayFenced(message)
     raise RelayRefused(message)
 
 
@@ -153,12 +168,14 @@ class RelayConnection:
 
     def __init__(self, addr: tuple[str, int], role: int, channel: int, client: int, *,
                  incarnation: int | None = None, key: bytes | None = None,
-                 timeout: float = 120.0) -> None:
+                 timeout: float = 120.0, stream: int | None = None) -> None:
         self.addr = (str(addr[0]), int(addr[1]))
         self.role = int(role)
         self.channel = int(channel)
         self.client = int(client)
         self.incarnation = secrets.randbits(63) | 1 if incarnation is None else int(incarnation)
+        # one per connection object, kept across its reconnects (resend dedup)
+        self.stream = secrets.randbits(63) | 1 if stream is None else int(stream)
         self.key = key if key is not None else island_hmac_key_from_env()
         self.timeout = float(timeout)
         self.sock: socket.socket | None = None
@@ -175,7 +192,8 @@ class RelayConnection:
         self.sock = sock
         try:
             write_frame(sock, MSG_RELAY_HELLO,
-                        encode_relay_hello(self.role, self.channel, self.client, self.incarnation, self.key))
+                        encode_relay_hello(self.role, self.channel, self.client, self.incarnation, self.key,
+                                           self.stream))
             msg_type, payload = self._read(1 << 16)
         except BaseException:
             self.close()
@@ -232,12 +250,21 @@ class RelayConnection:
 
 
 class RelayProducer:
-    """Put items into one channel; reconnects and resends on a broken link."""
+    """Put items into one channel; reconnects and resends on a broken link.
+    ``incarnation``: the process's member incarnation (default
+    ``task_dispense.member_incarnation()``, shared with its subscriber and
+    task dispenser connections)."""
 
     def __init__(self, addr: tuple[str, int], channel: int, producer: int, *,
                  key: bytes | None = None, timeout: float = 120.0, retry_s: float = 2.0,
-                 max_attempts: int | None = None, sleep=time.sleep) -> None:
-        self.conn = RelayConnection(addr, ROLE_PRODUCER, channel, producer, key=key, timeout=timeout)
+                 max_attempts: int | None = None, sleep=time.sleep,
+                 incarnation: int | None = None) -> None:
+        if incarnation is None:
+            from yeto.rl.engine.task_dispense import member_incarnation
+
+            incarnation = member_incarnation()
+        self.conn = RelayConnection(addr, ROLE_PRODUCER, channel, producer, key=key, timeout=timeout,
+                                    incarnation=incarnation)
         self.seq = 0
         self.retry_s = float(retry_s)
         self.max_attempts = max_attempts

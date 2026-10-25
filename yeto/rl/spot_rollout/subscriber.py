@@ -6,8 +6,10 @@ streams) with SUBSCRIBE instead of HELLO:
 
 * body = the HELLO body (``encode_hello``) with learner id
   ``SUBSCRIBER_ID_BIT | 31 bits`` (``release_store.subscriber_id_for``: the task
-  dispenser's sampler holder id) and session dtype bf16 (2), sealed with the
-  subscribe MAC domain; the syncer admits at most ``--max-subscribers`` at once;
+  dispenser's sampler holder id) and session dtype bf16 (2), then the trailer
+  ``YSI1 | incarnation u64`` (the process's member incarnation,
+  ``task_dispense.member_incarnation``), sealed with the subscribe MAC domain;
+  the syncer admits at most ``--max-subscribers`` at once;
 * the syncer checks the layout and fingerprint against the running session
   (not the session contract or the compat group: a subscriber never merges,
   so it may run on another card type), and never puts it in the roster:
@@ -20,6 +22,14 @@ streams) with SUBSCRIBE instead of HELLO:
 
 A reconnect (new generation) gets every fragment again. The session is
 never blocked by a subscriber: the syncer only queues versions for it.
+
+Members (docs/PROTOCOL.md "Sampler members"): the subscriber is the member
+``(id, incarnation)`` of the syncer's island member table, shared with the
+task dispenser and the sample relay. A HEARTBEAT every ``heartbeat_s``
+renews its lease. A newer incarnation of the same sampler (on any of the
+three channels) retires it: the syncer sends ERROR ``fenced: subscriber ...``
+and the client stops (:meth:`SubscriberClient.fenced`); a fenced process
+does not come back under the same incarnation.
 """
 
 from __future__ import annotations
@@ -37,10 +47,13 @@ from yeto.protocol import (
     SUBSCRIBER_ID_BIT,
     BcastFragment,
     SyncerClient,
+    encode_subscribe_incarnation,
 )
 from yeto.rl.engine.full_parameter_sync import merged_version
 
 RUN_FINISHED = "subscriber: run finished"
+FENCED_PREFIX = "fenced: subscriber"  # syncer subscriber.rs FENCED_PREFIX
+DEFAULT_HEARTBEAT_S = 10.0  # well under the member lease (--dispense-lease-s, 300 s)
 
 
 class SubscriberClient(SyncerClient):
@@ -52,20 +65,64 @@ class SubscriberClient(SyncerClient):
     def __init__(self, addr: tuple[str, int], subscriber_id: int, layout: FragmentLayout, *,
                  num_streams: int = 4, connect_timeout: float = 900.0,
                  hmac_key: bytes | None = None, syncer_profile_hash: bytes | None = None,
+                 incarnation: int | None = None, heartbeat_s: float | None = DEFAULT_HEARTBEAT_S,
                  **kwargs) -> None:
         """``subscriber_id``: the wire id, ``SUBSCRIBER_ID_BIT`` set
-        (``release_store.subscriber_id_for(sampler_id)``)."""
+        (``release_store.subscriber_id_for(sampler_id)``). ``incarnation``: the
+        process's member incarnation (default
+        :func:`~yeto.rl.engine.task_dispense.member_incarnation`, the one its task
+        dispenser and relay connections use). ``heartbeat_s``: lease renewal
+        period (None: no heartbeats, for tests)."""
         if not SUBSCRIBER_ID_BIT <= int(subscriber_id) <= 0xFFFF_FFFF:
             raise ValueError(f"subscriber_id must have the subscriber bit 2^31 set, got {subscriber_id}")
+        if incarnation is None:
+            from yeto.rl.engine.task_dispense import member_incarnation
+
+            incarnation = member_incarnation()
+        self.incarnation = int(incarnation)
+        self._trailer = encode_subscribe_incarnation(self.incarnation)
         super().__init__(addr, int(subscriber_id), layout, dtype=DTYPE_BF16,
                          num_streams=num_streams, connect_timeout=connect_timeout,
                          hmac_key=hmac_key, syncer_profile_hash=syncer_profile_hash, **kwargs)
         self.subscriber_id = int(subscriber_id)
+        self.heartbeat_s = None if heartbeat_s is None else float(heartbeat_s)
+        self._beats = threading.Event()
+
+    def _hello_body_suffix(self) -> bytes:
+        return self._trailer
+
+    def start(self) -> None:
+        super().start()
+        if self.heartbeat_s is not None:
+            threading.Thread(target=self._heartbeat_loop, name="subscriber-heartbeat", daemon=True).start()
+
+    def _heartbeat_loop(self) -> None:
+        # The member lease is shared with the process's other channels; a
+        # subscriber has nothing else to send, so it renews it here.
+        while not self._beats.wait(self.heartbeat_s):
+            if self.run_finished() or self.fenced():
+                return
+            try:
+                self.heartbeat(0)
+            except Exception:  # noqa: BLE001 - the client's supervisor redials or reports
+                pass
+
+    def close(self) -> None:
+        self._beats.set()
+        super().close()
+
+    def _error_text(self) -> str:
+        error = getattr(self, "_err", None) or getattr(self, "_last_err", None)
+        return "" if error is None else str(error)
 
     def run_finished(self) -> bool:
         """True once the syncer said the run ended (the client is closed)."""
-        error = getattr(self, "_err", None) or getattr(self, "_last_err", None)
-        return error is not None and RUN_FINISHED in str(error)
+        return RUN_FINISHED in self._error_text()
+
+    def fenced(self) -> bool:
+        """True once the syncer retired this member (a newer incarnation of the
+        sampler joined, or its lease expired; the client is closed)."""
+        return FENCED_PREFIX in self._error_text()
 
 
 @dataclass(frozen=True)

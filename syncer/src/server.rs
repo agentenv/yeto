@@ -205,6 +205,10 @@ pub struct Config {
     /// S27 G-EA: limits of the sample relay (`sample_relay.rs`); None = off
     /// (RELAY_HELLO is refused). Not in the semantic profile hash.
     pub sample_relay: Option<crate::sample_relay::RelayConfig>,
+    /// Lease of the shared member table (`members.rs`) when the task
+    /// dispenser is off (`--dispense-lease-s`; with the dispenser its lease
+    /// is the table's). Used by the subscribers and the relay producers.
+    pub member_lease: Duration,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -532,6 +536,9 @@ fn append_tensor_bytes(
 struct SubscriberConn {
     group: Arc<Group>,
     subscriber_id: u32,
+    /// The sampler process's member (`members.rs`): wire id and the
+    /// incarnation of its SUBSCRIBE trailer.
+    holder: crate::members::Holder,
     pending: Mutex<crate::subscriber::Pending>,
     notify: tokio::sync::Notify,
     /// Set at SUBSCRIBE: the next publish offers every fragment.
@@ -554,6 +561,8 @@ impl SubscriberConn {
 /// S27 G-EA: every subscriber connection of this syncer, by subscriber id.
 struct SubscriberHub {
     max: u32,
+    /// The syncer's shared member table (subscribers are members).
+    members: crate::members::SharedMembers,
     conns: Mutex<HashMap<u32, Arc<SubscriberConn>>>,
     /// Groups of SUBSCRIBE connections still waiting for the session (their
     /// data streams may already attach).
@@ -561,16 +570,26 @@ struct SubscriberHub {
 }
 
 impl SubscriberHub {
-    fn new(max: u32) -> Self {
+    fn new(max: u32, members: crate::members::SharedMembers) -> Self {
         SubscriberHub {
             max,
+            members,
             conns: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
         }
     }
 
+    /// The `fenced:` text when the member table retired `holder`.
+    fn fenced(&self, holder: crate::members::Holder) -> Option<String> {
+        let members = self.members.lock().unwrap();
+        members
+            .is_retired(holder)
+            .then(|| format!("{} {}", crate::subscriber::FENCED_PREFIX, members.fenced_text(holder)))
+    }
+
     /// Register a connection; a live older connection of the same id is
-    /// closed (the newer generation wins, like a learner reconnect).
+    /// closed (the newer generation wins, like a learner reconnect; an
+    /// older incarnation was retired by the member join and is told so).
     fn register(&self, conn: Arc<SubscriberConn>) {
         let old = self.conns.lock().unwrap().insert(conn.subscriber_id, conn.clone());
         if let Some(old) = old {
@@ -699,11 +718,14 @@ async fn subscriber_forwarder(conn: Arc<SubscriberConn>) {
     }
 }
 
-/// A subscriber stream accepts only HEARTBEAT and LEAVE (ignored); the
-/// connection ends at EOF, on any other frame, or when the hub closes it.
+/// A subscriber stream accepts only HEARTBEAT (renews the member's lease)
+/// and LEAVE (ignored); the connection ends at EOF, on any other frame, when
+/// the hub closes it, or when the member table retires its member (then it
+/// is told `fenced: subscriber ...` first).
 async fn subscriber_read_loop(
     rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
     conn: &Arc<SubscriberConn>,
+    hub: &SubscriberHub,
 ) -> Result<()> {
     loop {
         let read = read_frame_limited(rd, |msg_type| match msg_type {
@@ -713,18 +735,54 @@ async fn subscriber_read_loop(
         });
         let frame = tokio::select! {
             frame = read => frame,
-            _ = async {
-                while !conn.is_closed() {
+            fenced = async {
+                loop {
+                    if let Some(message) = hub.fenced(conn.holder) {
+                        break Some(message);
+                    }
+                    if conn.is_closed() {
+                        break None;
+                    }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-            } => return Ok(()),
+            } => return subscriber_fenced(conn, fenced).await,
         };
         match frame {
-            Ok(_) => {}
+            Ok(frame) => {
+                if frame.msg_type == MSG_HEARTBEAT {
+                    let renewed = {
+                        let mut members = hub.members.lock().unwrap();
+                        let now = Instant::now();
+                        members.expire(now);
+                        members.touch(conn.holder, now)
+                    };
+                    if !renewed {
+                        return subscriber_fenced(conn, hub.fenced(conn.holder)).await;
+                    }
+                }
+            }
             Err(error) if error.downcast_ref::<std::io::Error>().is_some() => return Ok(()),
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Close a subscriber connection; with a `fenced:` text, send it first.
+async fn subscriber_fenced(conn: &Arc<SubscriberConn>, fenced: Option<String>) -> Result<()> {
+    let Some(message) = fenced else {
+        conn.close();
+        return Ok(());
+    };
+    info!(subscriber = conn.subscriber_id, incarnation = conn.holder.incarnation, "{message}");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.group.send_small(MSG_ERROR, bytes::Bytes::from(message.clone().into_bytes())),
+    )
+    .await;
+    conn.close();
+    // Let the writer task flush the ERROR before the socket is dropped.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    bail!(message)
 }
 
 enum Event {
@@ -1005,7 +1063,10 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 /// The task dispenser of `cfg` (S27 P2): restored from the record next to
 /// the checkpoint on `--resume`, which retires every island process of the
 /// record and puts their unreported positions back first.
-fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
+fn initial_dispense(
+    cfg: &Config,
+    members: &crate::members::SharedMembers,
+) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
     let Some(dispense) = cfg.dispense.clone() else { return Ok(None) };
     if cfg.shard.index != 0 {
         bail!("--dispense runs on shard 0 of a sharded head only");
@@ -1018,6 +1079,7 @@ fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::
         cfg.syncer_epoch,
         cfg.island_hmac_key.clone(),
         restore,
+        members.clone(),
     )?;
     info!(restored = restore.is_some(), "task dispenser on");
     Ok(Some(Arc::new(service)))
@@ -1685,14 +1747,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
-    let dispense = initial_dispense(&cfg)?;
-    let subscribers = (cfg.max_subscribers > 0).then(|| Arc::new(SubscriberHub::new(cfg.max_subscribers)));
+    // S27: one member table for the dispenser, the subscribers and the relay
+    // producers, so one sampler process is one member on all three channels.
+    let members = crate::members::shared(cfg.dispense.as_ref().map_or(cfg.member_lease, |d| d.lease));
+    let dispense = initial_dispense(&cfg, &members)?;
+    let subscribers =
+        (cfg.max_subscribers > 0).then(|| Arc::new(SubscriberHub::new(cfg.max_subscribers, members.clone())));
     if let Some(hub) = &subscribers {
         info!(max_subscribers = hub.max, "receive-only subscribers enabled");
     }
     let relay = cfg
         .sample_relay
-        .map(|relay_cfg| crate::sample_relay::RelayHub::new(relay_cfg, cfg.island_hmac_key.clone()));
+        .map(|relay_cfg| crate::sample_relay::RelayHub::new(relay_cfg, cfg.island_hmac_key.clone(), members.clone()));
     if let Some(hub) = &relay {
         let relay_cfg = hub.state.lock().unwrap().config();
         info!(
@@ -1702,6 +1768,24 @@ pub async fn run(cfg: Config) -> Result<()> {
             "sample relay enabled"
         );
         hub.spawn_reporter(Duration::from_secs(60));
+    }
+    if let (Some(service), true) = (&dispense, subscribers.is_some() || relay.is_some()) {
+        // A subscriber or relay connection of a newer incarnation retires the
+        // old one in the shared table; reclaim its rows now, not at the next
+        // dispense request (with the dispenser alone nothing changes).
+        let service = service.clone();
+        let members = members.clone();
+        tokio::spawn(async move {
+            let mut seen = members.lock().unwrap().retirements();
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let now = members.lock().unwrap().retirements();
+                if now != seen {
+                    seen = now;
+                    service.with(|_, _| ());
+                }
+            }
+        });
     }
     let registry: Registry = Arc::new(Mutex::new(RegistryState {
         membership_record,
@@ -2352,8 +2436,9 @@ async fn serve_subscriber(
         bail!(message);
     };
     let parsed = open_subscribe(hello_auth.key.as_deref(), payload)
-        .and_then(|body| parse_hello_body(body, u32::MAX));
-    let parsed = match parsed {
+        .and_then(crate::subscriber::split_incarnation)
+        .and_then(|(body, incarnation)| Ok((parse_hello_body(body, u32::MAX)?, incarnation)));
+    let (parsed, incarnation) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
             let message = format!("subscriber refused: invalid SUBSCRIBE: {error:#}");
@@ -2362,7 +2447,10 @@ async fn serve_subscriber(
         }
     };
     let subscriber_id = parsed.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
-    let refusal = if !crate::subscriber::is_subscriber_id(parsed.learner_id) {
+    let holder = crate::members::Holder { learner_id: parsed.learner_id, incarnation };
+    let refusal = if let Some(fenced) = hub.fenced(holder) {
+        Some(fenced)
+    } else if !crate::subscriber::is_subscriber_id(parsed.learner_id) {
         Some("subscriber refused: the SUBSCRIBE id lacks the subscriber bit".to_string())
     } else if hub.live_others(subscriber_id) >= hub.max as usize {
         Some(format!("subscriber refused: {} subscribers are connected (--max-subscribers {})", hub.max, hub.max))
@@ -2404,9 +2492,35 @@ async fn serve_subscriber(
     let admitted = admit_subscriber(&mut wr, &parsed, &session).await;
     hub.waiting.lock().unwrap().remove(&member);
     admitted?;
+    // Join the shared member table: a new incarnation of this sampler retires
+    // its old one on every channel (its relay producer and its dispenser
+    // holder too); the same incarnation (a reconnect) keeps everything.
+    let joined = {
+        let mut members = hub.members.lock().unwrap();
+        let now = Instant::now();
+        members.expire(now);
+        match members.is_retired(holder) {
+            true => Err(format!("{} {}", crate::subscriber::FENCED_PREFIX, members.fenced_text(holder))),
+            false => Ok(members.join(holder, now)),
+        }
+    };
+    match joined {
+        Err(message) => {
+            let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+            bail!(message);
+        }
+        Ok(crate::members::Join::Joined { superseded: Some(old) }) => info!(
+            subscriber = subscriber_id,
+            incarnation,
+            superseded = old.incarnation,
+            "subscriber superseded an older incarnation of its sampler"
+        ),
+        Ok(_) => {}
+    }
     let conn = Arc::new(SubscriberConn {
         group,
         subscriber_id,
+        holder,
         pending: Mutex::new(crate::subscriber::Pending::new(num_fragments)),
         notify: tokio::sync::Notify::new(),
         needs_snapshot: std::sync::atomic::AtomicBool::new(true),
@@ -2418,11 +2532,12 @@ async fn serve_subscriber(
     info!(
         subscriber = subscriber_id,
         generation = member.generation,
+        incarnation,
         num_streams = parsed.num_streams,
         "subscriber connected (receive-only; not in the roster)"
     );
     tokio::spawn(subscriber_forwarder(conn.clone()));
-    let result = subscriber_read_loop(&mut rd, &conn).await;
+    let result = subscriber_read_loop(&mut rd, &conn, &hub).await;
     hub.remove(&conn);
     info!(
         subscriber = subscriber_id,
@@ -7509,6 +7624,7 @@ mod tests {
             dispense_log: None,
             max_subscribers: 0,
             sample_relay: None,
+            member_lease: Duration::from_secs(300),
             shard: Default::default(),
         }
     }

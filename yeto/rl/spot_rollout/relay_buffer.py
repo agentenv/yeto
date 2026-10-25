@@ -261,11 +261,15 @@ def relay_sampler_buffer(environ: Mapping[str, str] | None = None) -> "RelaySamp
     addr = env.get(RELAY_ADDR_ENV)
     if not addr:
         return None
+    from yeto.rl.engine.task_dispense import member_incarnation
+
     from .release_store import subscriber_id_for
 
     sampler_id = env.get("YETO_SAMPLE_BUFFER_SAMPLER_ID") or "sampler"
+    # the sampler process's member incarnation (YETO_SAMPLER_INCARNATION, which
+    # the rollout workers inherit): the one its subscriber and dispenser use
     producer = RelayProducer(parse_addr(addr), int(env.get(RELAY_CHANNEL_ENV, "0")),
-                             subscriber_id_for(sampler_id))
+                             subscriber_id_for(sampler_id), incarnation=member_incarnation(env))
     return RelaySampleBuffer(producer)
 
 

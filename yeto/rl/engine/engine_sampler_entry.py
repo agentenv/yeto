@@ -57,13 +57,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import importlib
 import inspect
 import json
 import sys
 import time
 import types
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -167,7 +168,8 @@ class JsonlPrompts:
 
 def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key: str,
                       label_key: str | None, groups_per_round: int,
-                      render: Callable[[Any], str] = str, key: bytes | None = None) -> "Any":
+                      render: Callable[[Any], str] = str, key: bytes | None = None,
+                      environ: Any = None) -> "Any":
     """The engine sampler's prompts from the task dispenser (S27 P4): the
     sibling of :class:`JsonlPrompts` that a sampler island of any backend uses
     (``task_dispense.DispensedPrompts``). ``config``: ``prompts.dispense`` of the
@@ -175,7 +177,8 @@ def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key:
     from .task_dispense import DispensedPrompts
 
     return DispensedPrompts.open(path, config, input_key=input_key, label_key=label_key,
-                                 groups_per_round=groups_per_round, render=render, key=key)
+                                 groups_per_round=groups_per_round, render=render, key=key,
+                                 environ=environ)
 
 
 def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False) -> Callable[[Any], str]:
@@ -191,7 +194,7 @@ def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False) -> Ca
     return render
 
 
-def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
+def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
     prompts = _require(spec, "prompts")
     fmt = str(prompts.get("format", "text"))
     if fmt not in PROMPT_FORMATS:
@@ -212,7 +215,7 @@ def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
                                  input_key=str(_require(prompts, "input_key", "prompts")),
                                  label_key=prompts.get("label_key"),
                                  groups_per_round=int(_require(prompts, "groups_per_round", "prompts")),
-                                 render=render, key=island_hmac_key_from_env())
+                                 render=render, key=island_hmac_key_from_env(), environ=environ)
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
                         groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
@@ -323,6 +326,43 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     (S27 G-EA: a spot sampler follows the syncer and writes to the relay)."""
     import os  # noqa: PLC0415
 
+    from .sampler_resume import new_incarnation  # noqa: PLC0415
+
+    env = os.environ if environ is None else environ
+    spec = apply_rollout_quant(spec)
+    config = island_config(spec)
+    incarnation = incarnation or new_incarnation()
+    with _member_incarnation_env(env, incarnation):
+        return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
+                    stop=stop, on_event=on_event, stores=stores)
+
+
+@contextlib.contextmanager
+def _member_incarnation_env(env: Any, incarnation: str):
+    """S27: the member incarnation of every channel this process opens to the
+    head (task dispenser, spot subscriber, relay) derives from the process
+    incarnation (``task_dispense.member_incarnation``), as on a Miles sampler
+    island; the variable is restored afterwards (in-process callers, tests)."""
+    from .task_dispense import SAMPLER_INCARNATION_ENV  # noqa: PLC0415
+
+    if not isinstance(env, MutableMapping):
+        yield
+        return
+    previous = env.get(SAMPLER_INCARNATION_ENV)
+    env[SAMPLER_INCARNATION_ENV] = incarnation
+    try:
+        yield
+    finally:
+        if previous is None:
+            env.pop(SAMPLER_INCARNATION_ENV, None)
+        else:
+            env[SAMPLER_INCARNATION_ENV] = previous
+
+
+def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
+         environ: Mapping[str, str] | None, resource_sampler: Callable[[Callable[..., None]], Any] | None,
+         stop: Callable[[], bool] | None, on_event: Callable[..., None] | None,
+         stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None) -> int:
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .sampler_resume import (  # noqa: PLC0415
@@ -330,16 +370,11 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         ReclaimWatcher,
         SamplerMembership,
         install_marker_signals,
-        new_incarnation,
         reclaim_marker,
         reclaim_requested,
         resume_point,
     )
 
-    env = os.environ if environ is None else environ
-    spec = apply_rollout_quant(spec)
-    config = island_config(spec)
-    incarnation = incarnation or new_incarnation()
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
     write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
 
@@ -349,7 +384,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
             on_event(event, **fields)
 
     releases, buffer = build_stores(spec, environ) if stores is None else stores(incarnation, emit)
-    prompts, reward = build_prompts(spec), build_reward(spec)
+    prompts, reward = build_prompts(spec, env), build_reward(spec)
     checks = PostLoadChecks(**dict(spec.get("checks") or {}))
     reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
     if env.get(RECLAIM_MARKER_ENV):

@@ -275,6 +275,7 @@ def test_a_subscriber_that_never_reads_does_not_slow_the_merges(syncer_binary, t
         DTYPE_BF16,
         encode_data_hello,
         encode_hello,
+        encode_subscribe_incarnation,
         seal_hello,
         write_frame,
     )
@@ -286,7 +287,7 @@ def test_a_subscriber_that_never_reads_does_not_slow_the_merges(syncer_binary, t
     lay = layout(numel)
     stuck = socket.create_connection(("127.0.0.1", port))
     stuck.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-    body = encode_hello(SUBSCRIBER_ID_BIT | 0, DTYPE_BF16, lay, 1, 77)
+    body = encode_hello(SUBSCRIBER_ID_BIT | 0, DTYPE_BF16, lay, 1, 77) + encode_subscribe_incarnation(77)
     write_frame(stuck, MSG_SUBSCRIBE, seal_hello(body, KEY.encode(), SUBSCRIBE_MAC_DOMAIN))
     data = socket.create_connection(("127.0.0.1", port))
     data.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)

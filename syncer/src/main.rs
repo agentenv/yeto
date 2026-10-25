@@ -262,8 +262,9 @@ struct Args {
     /// dispenser"). Off by default.
     #[arg(long)]
     dispense: bool,
-    /// Dispenser lease: an island process silent this long loses its
-    /// unreported rows to the other islands.
+    /// Lease of the island member table (dispenser, spot subscribers, sample
+    /// relay producers): an island process silent this long on all of them
+    /// is retired and loses its unreported rows to the other islands.
     #[arg(long, default_value_t = 300.0)]
     dispense_lease_s: f64,
     /// Passes over the rows before the data ends; unset = unlimited (every
@@ -362,6 +363,7 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     let dispense = dispense_config(&args)?;
+    let member_lease = member_lease(&args)?;
     let shard = args.shard_plan()?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
@@ -473,6 +475,7 @@ fn main() -> anyhow::Result<()> {
         final_cut_manifest_only: args.final_cut_payload == "manifest",
         dispense,
         dispense_log: args.dispense_log.clone(),
+        member_lease,
         max_subscribers: args.max_subscribers,
         sample_relay: args.sample_relay.then_some(sample_relay::RelayConfig {
             max_items: args.sample_relay_max_items,
@@ -484,6 +487,18 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+/// The island member table's lease (`--dispense-lease-s`), checked when a
+/// service that uses the table is on.
+fn member_lease(args: &Args) -> anyhow::Result<std::time::Duration> {
+    if args.dispense_lease_s.is_finite() && args.dispense_lease_s > 0.0 {
+        return Ok(std::time::Duration::from_secs_f64(args.dispense_lease_s));
+    }
+    if args.dispense || args.max_subscribers > 0 || args.sample_relay {
+        anyhow::bail!("--dispense-lease-s must be positive");
+    }
+    Ok(std::time::Duration::from_secs(300))
 }
 
 fn dispense_config(args: &Args) -> anyhow::Result<Option<dispense::DispenseConfig>> {

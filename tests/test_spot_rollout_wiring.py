@@ -142,6 +142,45 @@ def test_wire_constants_match_the_syncer():
     assert 'b"yeto-relay-hello-mac-v1\\0"' in rust and relay.RELAY_MAC_DOMAIN == b"yeto-relay-hello-mac-v1\0"
     for role in ("ROLE_PRODUCER", "ROLE_CONSUMER", "ROLE_BOARD"):
         assert f"pub const {role}: u8 = {getattr(relay, role)};" in rust
+    # S27 dispatch merge: the shared member table (stream, incarnation trailer, fences)
+    from yeto.rl.spot_rollout import subscriber
+
+    assert f"pub const RELAY_VERSION: u16 = {relay.RELAY_VERSION};" in rust and relay.RELAY_VERSION == 2
+    assert relay._HELLO.size == 2 + 1 + 4 + 4 + 8 + 8
+    assert f'pub const FENCED_PREFIX: &str = "{relay.FENCED_PREFIX}";' in rust
+    assert f'pub const FENCED_PREFIX: &str = "{subscriber.FENCED_PREFIX}";' in rust
+    assert 'pub const INCARNATION_MAGIC: &[u8; 4] = b"YSI1";' in rust
+    assert protocol.SUBSCRIBE_INCARNATION_MAGIC == b"YSI1"
+    members = (root / "members.rs").read_text()
+    from yeto.rl.engine.task_dispense import SUPERSEDED_MARK
+
+    assert f'Retired::Superseded => "{SUPERSEDED_MARK[1:-1]}"' in members
+
+
+def test_one_sampler_process_has_one_member_incarnation_on_every_channel(monkeypatch):
+    """The relay producer and the subscriber of a sampler process take the
+    member incarnation its task dispenser takes (the process incarnation)."""
+    from yeto.rl.engine import task_dispense as td
+    from yeto.rl.spot_rollout.relay import RelayProducer
+    from yeto.rl.spot_rollout.relay_buffer import relay_sampler_buffer
+    from yeto.rl.spot_rollout.subscriber import SubscriberClient
+
+    from test_spot_rollout_syncer import layout
+
+    monkeypatch.setenv(td.SAMPLER_INCARNATION_ENV, "ab12cd34")
+    expected = td.member_incarnation()
+    assert expected == td.member_incarnation({td.SAMPLER_INCARNATION_ENV: "ab12cd34"})
+    assert td.member_incarnations()() == expected
+    producer = RelayProducer(("127.0.0.1", 1), 0, td.sampler_holder_id("s"))
+    other = RelayProducer(("127.0.0.1", 1), 0, td.sampler_holder_id("s"))
+    assert producer.incarnation == other.incarnation == expected
+    assert producer.conn.stream != other.conn.stream  # two writers never share a sequence
+    buffer = relay_sampler_buffer({"YETO_SAMPLE_RELAY_ADDR": "127.0.0.1:1",
+                                   td.SAMPLER_INCARNATION_ENV: "ab12cd34"})
+    assert buffer.producer.incarnation == expected
+    client = SubscriberClient(("127.0.0.1", 1), td.sampler_holder_id("s"), layout(), num_streams=1)
+    assert client.incarnation == expected
+    assert client._hello_body_suffix() == b"YSI1" + expected.to_bytes(8, "little")
 
 
 def test_spot_sampler_island_gets_the_subscriber_and_relay_env(monkeypatch):

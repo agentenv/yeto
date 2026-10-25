@@ -798,14 +798,29 @@ rule.
   channel the process opens (TASK_HELLO, SUBSCRIBE, RELAY_HELLO):
   `task_dispense.member_incarnation()` (from `YETO_SAMPLER_INCARNATION`, the
   sampler process id that Ray workers inherit).
-- A new incarnation of an id supersedes the current one at once; a member
-  silent on every channel for the lease (`--dispense-lease-s`) expires. A
-  superseded or expired member is retired: its later requests on any channel
-  are refused (`fenced: ...`); each service returns what the member held (the
-  dispenser: its unreported positions, to the front of the queue).
-- A fenced process opens again with a new incarnation on all its channels.
-- One `Members` table per head process (target; today the dispenser owns its
-  own table and the spot rollout services keep their connection state).
+- One table per head process (`members::SharedMembers`), shared by the
+  task dispenser, the subscribers and the relay producers. A member joins
+  on whichever channel it opens first; the same incarnation on another
+  channel is the same member (nothing is superseded).
+- A new incarnation of an id supersedes the current one at once, on every
+  channel; a member silent on every channel for the lease
+  (`--dispense-lease-s`, also when the dispenser is off) expires. What
+  renews the lease: every TASK_* request, a subscriber's HEARTBEAT (the
+  client sends one every 10 s), every relay request of a producer.
+- A superseded or expired member is retired: its later requests on any
+  channel are refused with an ERROR that starts with `fenced: dispense`,
+  `fenced: subscriber` or `fenced: relay` and ends with the reason in
+  brackets (`(superseded)`, `(lease expired)`, `(from before a syncer
+  restart)`). The syncer also closes the member's idle subscriber and relay
+  connections within 0.2 s with that ERROR. Each service returns what the
+  member held: the dispenser its unreported positions, to the front of the
+  queue (with subscribers or relay on, within 0.25 s of the retirement;
+  otherwise at the next dispense request); items it stored in the relay stay.
+- A process fenced as `(superseded)` stops: a newer process of the same
+  island holds the id (its task source, subscriber and relay producer all
+  end). A process fenced for another reason opens again with a new
+  incarnation (the task source does; a fenced subscriber or relay producer
+  ends its process, whose relaunch has a new incarnation).
 
 Sampler islands (S27 P4) claim like training islands; their `learner_id` is
 `2^31` plus 31 bits of SHA-256 of their sampler id (buffer shard name), so a
@@ -860,9 +875,11 @@ A sampler island on any cloud can follow the global weights without being a
 learner. It opens the usual connection group, but its control socket's first
 frame is SUBSCRIBE (type 67) instead of HELLO:
 
-- body: exactly a HELLO body with `learner_id = 2^31 | 31 bits` (the
+- body: a HELLO body with `learner_id = 2^31 | 31 bits` (the
   SHA-256 of `yeto-sampler:<sampler id>`, the task dispenser's sampler
-  holder id) and dtype 2 (bf16); with a key it ends in
+  holder id) and dtype 2 (bf16), then the trailer `b"YSI1"` |
+  incarnation:u64 (the process's member incarnation, "Sampler members";
+  required); with a key it ends in
   HMAC-SHA256(key, `b"yeto-subscribe-mac-v1\0"` | body);
 - data streams attach with the ordinary DATA_HELLO under the same id;
 - the syncer waits until a learner has established the session, then
@@ -880,9 +897,10 @@ broadcast). The scheduler only puts the newest version of each fragment in
 the subscriber's pending set (it never awaits a subscriber); a forwarder
 task per subscriber sends at the link's pace, oldest version first, so a
 slow link skips versions instead of slowing merges. A subscriber is never in
-the roster or the membership: no PULL, no quorum or K, no lease, no final
-cut, no SHUTDOWN, no event-tape or status record. It may send HEARTBEAT and
-LEAVE (ignored). When the run ends every subscriber gets ERROR
+the roster or the learner membership: no PULL, no quorum or K, no final
+cut, no SHUTDOWN, no event-tape or status record. It is a sampler member
+("Sampler members"): HEARTBEAT renews the member lease, LEAVE is ignored,
+and a retired member gets ERROR `fenced: subscriber ...`. When the run ends every subscriber gets ERROR
 `subscriber: run finished`. Refusals are ERRORs that start with
 `subscriber refused:`. Unsharded syncers only.
 
@@ -895,7 +913,7 @@ learner session and never touches merge state (not in the profile hash).
 
 | type | name | payload |
 |---:|---|---|
-| 60 | RELAY_HELLO | version:u16 (=1), role:u8 (1 producer, 2 consumer, 3 board), channel:u32, client:u32, incarnation:u64; then HMAC-SHA256(key, `b"yeto-relay-hello-mac-v1\0"` \| body) with a key |
+| 60 | RELAY_HELLO | version:u16 (=2), role:u8 (1 producer, 2 consumer, 3 board), channel:u32, client:u32, incarnation:u64, stream:u64; then HMAC-SHA256(key, `b"yeto-relay-hello-mac-v1\0"` \| body) with a key |
 | 61 | RELAY_WELCOME | version:u16, relay_epoch:u64, max_item_bytes:u64, max_items:u32, max_bytes:u64, depth |
 | 62 | RELAY_PUT | seq:u64, item bytes |
 | 63 | RELAY_PUT_ACK | seq:u64, status:u8 (0 stored, 1 duplicate, 2 full), item_id:u64, depth |
@@ -908,9 +926,13 @@ learner session and never touches merge state (not in the profile hash).
 - Channels: one per consuming training island; any number of producers; one
   consumer (a newer consumer connection supersedes the older one, whose next
   TAKE gets ERROR `relay superseded:`).
-- Producer: sequence numbers start at 1 per (client, incarnation); a resend
-  of the last number gets the same answer; FULL (`--sample-relay-max-items`,
-  `--sample-relay-max-mib`) stores nothing and the producer retries.
+- Producer: a sampler member (`client` = its id, `incarnation` = the
+  process's member incarnation, "Sampler members"); `stream` is random per
+  producer object. Sequence numbers start at 1 per (client, incarnation,
+  stream); a resend of the last number gets the same answer; FULL
+  (`--sample-relay-max-items`, `--sample-relay-max-mib`) stores nothing and
+  the producer retries. A retired producer gets ERROR `fenced: relay ...`.
+  Consumers and boards are not members.
 - Consumer: TAKE returns items with id > `after` and deletes items with id
   <= `ack_through`; unacknowledged items are delivered again to a new
   connection. TAKE waits up to `wait_ms` (at most 60 s) for an item.

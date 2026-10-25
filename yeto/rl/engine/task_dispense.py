@@ -120,6 +120,18 @@ class DispenseFenced(ConnectionError):
     """This incarnation's lease is gone; its unreported positions went to others."""
 
 
+# The syncer's member table names why it retired a member (syncer members.rs
+# ``Retired::name``). A superseded member has a newer process of the same
+# island on the head: it must not come back under a new incarnation (that
+# would supersede the newer process on every channel), so it stops.
+SUPERSEDED_MARK = "(superseded)"
+
+
+def is_superseded(error: BaseException) -> bool:
+    """The fence names a newer incarnation of this island (not a lease expiry)."""
+    return str(error).endswith(SUPERSEDED_MARK)
+
+
 class DispenseEnded(RuntimeError):
     """Every pass was given out and reported (``--rl-data-passes``): the data ended."""
 
@@ -922,6 +934,16 @@ class TaskSource:
                 if self._conn is not None:
                     self._conn.close()
                 self._conn = None
+                if is_superseded(error):
+                    # S27: a newer process of this island joined (on any channel
+                    # of the head's member table); this one stops for good.
+                    with self._cv:
+                        self._fatal = error
+                        self._cv.notify_all()
+                    logger.error("task dispenser: a newer incarnation superseded this island: %s", error)
+                    self._emit("rl_dispense_superseded", incarnation=f"{self.incarnation:016x}",
+                               error=str(error))
+                    return
                 self._reset_after_fence(error)
                 continue
             except DispenseError as error:
@@ -1132,8 +1154,8 @@ class DispensedPrompts(DispensedRows):
     @classmethod
     def open(cls, path: str | os.PathLike[str], config: Mapping[str, Any], *, input_key: str,
              label_key: str | None, groups_per_round: int, render: Callable[[Any], str] = str,
-             key: bytes | None = None, connect: Callable[[int], DispenseConnection] | None = None
-             ) -> "DispensedPrompts":
+             key: bytes | None = None, connect: Callable[[int], DispenseConnection] | None = None,
+             environ: Any = None) -> "DispensedPrompts":
         """Open the island's connection (``config``: ``address``, ``learner_id``,
         ``seed``, ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for
         the streams) and start taking rows."""
@@ -1152,7 +1174,7 @@ class DispensedPrompts(DispensedRows):
             key=key, streams=None if table is None else table.decl(), accept=accept)
         tasks = TaskSource(connect=connect, block=int(groups_per_round),
                            prefetch_blocks=int(config.get("prefetch_blocks", 2) or 2),
-                           incarnation=member_incarnations())
+                           incarnation=member_incarnations(environ))
         seed = int(config.get("seed", 0) or 0)
         positions = PositionMap(rows, seed=seed) if table is None else PositionMap(seed=seed, table=table)
         tasks.start()
