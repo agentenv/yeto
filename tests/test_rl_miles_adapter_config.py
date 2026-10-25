@@ -971,8 +971,9 @@ def test_precision_aware_optimizer_only_without_the_full_parameter_sync():
     argv = list(mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec(),
                                    full_parameter_sync=False).argv)
     i = argv.index("--use-precision-aware-optimizer")
-    assert argv[i:i + 5] == list(mc.PRECISION_AWARE_ARGV)
-    assert "--optimizer-cpu-offload" not in argv
+    assert argv[i:i + 7] == list(mc.PRECISION_AWARE_ARGV)
+    assert "--main-grads-dtype" in argv and "--accumulate-allreduce-grads-in-fp32" not in argv
+    assert "--grad-reduce-in-bf16" not in argv and "--optimizer-cpu-offload" not in argv
     with pytest.raises(mc.MilesConfigError, match="drop --rl-precision-aware-optimizer"):
         mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec())
 

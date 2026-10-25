@@ -909,10 +909,10 @@ def translate_run_config(
         # algorithm (D7): the only place AlgorithmSpec becomes Miles args
         "--advantage-estimator", algorithm.advantage_estimator,
         "--lr", str(config.algorithm.lr),
-        # bf16 gradient buffers (--rl-grad-reduce-bf16): Megatron asserts that
+        # bf16 gradient buffers (--rl-grad-reduce-bf16, or the bf16 main grads of
+        # --rl-precision-aware-optimizer): Megatron asserts that
         # --accumulate-allreduce-grads-in-fp32 is absent then
-        *(("--grad-reduce-in-bf16",) if getattr(config.train_memory, "grad_reduce_bf16", False)
-          else ("--accumulate-allreduce-grads-in-fp32",)),
+        *_gradient_dtype_argv(config.train_memory),
         "--attention-softmax-in-fp32",
         "--attention-backend", recipe.training_attention_backend,
         *(() if config.train_memory.gradient_accumulation_fusion else ("--no-gradient-accumulation-fusion",)),
@@ -1213,11 +1213,23 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
-# --rl-precision-aware-optimizer (no-sync islands only): bf16 Adam moments on the
-# device; Megatron keeps the FP32 masters as 16-bit remainders of the bf16 params
-# (store_param_remainders, its default). G-DF T1 measured it on 8 x H100 80 GB.
-PRECISION_AWARE_ARGV = ("--use-precision-aware-optimizer", "--exp-avg-dtype", "bf16",
-                        "--exp-avg-sq-dtype", "bf16")
+# --rl-precision-aware-optimizer (no-sync islands only): bf16 main grads and bf16
+# Adam moments on the device; Megatron keeps the FP32 masters as 16-bit remainders
+# of the bf16 params (store_param_remainders, its default). G-DF T1 job H4 measured
+# exactly these flags on 8 x H100 80 GB (Nemotron-3 Nano TP1/EP8/DP8, 8192 tokens
+# per GPU: PyTorch peak 64.6 GiB allocated, actor MFU 16.7%).
+PRECISION_AWARE_ARGV = ("--use-precision-aware-optimizer", "--main-grads-dtype", "bf16",
+                        "--exp-avg-dtype", "bf16", "--exp-avg-sq-dtype", "bf16")
+
+
+def _gradient_dtype_argv(memory: Any) -> tuple[str, ...]:
+    """fp32 gradient accumulation by default; none of it with bf16 main grads
+    (precision-aware optimizer) and ``--grad-reduce-in-bf16`` with --rl-grad-reduce-bf16."""
+    if getattr(memory, "precision_aware_optimizer", False):
+        return ()  # PRECISION_AWARE_ARGV sets --main-grads-dtype bf16
+    if getattr(memory, "grad_reduce_bf16", False):
+        return ("--grad-reduce-in-bf16",)
+    return ("--accumulate-allreduce-grads-in-fp32",)
 
 
 def megatron_moe_layer_freq(layer_freq: Any) -> str:
