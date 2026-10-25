@@ -30,6 +30,18 @@ GUARD_DIR_ENV = "YETO_RL_STORE_GUARD_DIR"  # where the per-Volume lock files liv
 # where the island mounts the store Volume (yeto.launch.storage.MODAL_CHECKPOINT_STORE_MOUNT)
 MOUNT_ENV = "YETO_RL_STORE_MODAL_MOUNT"
 DEFAULT_MOUNT = "/root/yeto-checkpoint-store"
+# How put_directory / put_files reach the Volume (S27 G-DR). "mount" (the default):
+# write under the store root through this container's mount, then commit. "upload":
+# Volume.batch_upload from the local files, which Modal bills as network egress
+# (S27 G-DE: about $2.79 per 63 GB HF export of the Y-1 run). "mount" is used only
+# while the Volume is mounted at the mount path (volume_mounted); otherwise the
+# store uploads when it can reach the Modal client (as before).
+PUT_ENV = "YETO_RL_STORE_MODAL_PUT"
+PUT_MOUNT = "mount"
+PUT_UPLOAD = "upload"
+PUT_MODES = (PUT_MOUNT, PUT_UPLOAD)
+MOUNTINFO = "/proc/self/mountinfo"
+MODAL_VOLUMES_DIR = "/__modal/volumes"  # where a Modal container mounts its Volumes
 _UPLOAD_SCRIPT = """
 import json, sys, modal
 volume = modal.Volume.from_name(sys.argv[1])
@@ -70,6 +82,44 @@ _REMOVE_SCRIPT = "\n".join([
     inspect.getsource(_remove_if_present),
     "_remove_if_present(modal.Volume.from_name(sys.argv[1]), sys.argv[2])",
 ])
+
+
+def _unescape_mountinfo(field: str) -> str:
+    """A path field of /proc/self/mountinfo: space, tab, newline and backslash
+    are written as octal escapes (``\\040``)."""
+    import re
+
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def volume_mounted(path: str | os.PathLike[str], *, mountinfo: str = MOUNTINFO) -> bool:
+    """Whether a Volume is mounted at ``path`` in this container.
+
+    A Modal container (gVisor) mounts its Volumes under :data:`MODAL_VOLUMES_DIR`
+    (one 9p filesystem) and makes each mount path of the function a symlink to
+    ``/__modal/volumes/<volume id>`` (S27 G-DR, checked in a container: the mount
+    path is in no line of /proc/self/mountinfo). Elsewhere: ``path`` is on another
+    device than its parent directory, or a filesystem is mounted exactly there
+    (the mount table of this process; ``os.path.ismount`` when it cannot be read)."""
+    raw = os.path.abspath(os.fspath(path))
+    target = os.path.realpath(raw)
+    if os.path.dirname(target) == MODAL_VOLUMES_DIR and os.path.isdir(target):
+        return True
+    try:
+        if os.stat(target).st_dev != os.stat(os.path.dirname(raw)).st_dev:
+            return True
+    except OSError:
+        return False
+    try:
+        with open(mountinfo, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return os.path.ismount(target)
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 4 and _unescape_mountinfo(fields[4]) == target:
+            return True
+    return False
 
 
 def _guard_path(volume: str) -> str:
@@ -117,19 +167,34 @@ class ModalVolumeStore(CheckpointStore):
     """A Modal Volume (v1) mounted into the island container. Writes become visible
     to another container only after ``commit()`` (Modal docs: background commits every
     few seconds + a final commit at exit); a cut counts as written only after we
-    committed once ``LATEST`` is on disk."""
+    committed once ``LATEST`` is on disk.
+
+    :meth:`put_directory`, :meth:`put_files` and :meth:`remove_tree` (HF exports,
+    staged policy releases) go through the mount by default (:data:`PUT_ENV`,
+    :attr:`put_path`): the files are written under temporary names and renamed,
+    then committed once, under the writer guard; a reader in another container
+    sees them after its own reload. Round cuts always write through the mount."""
 
     kind = "modal-volume"
 
     def __init__(self, root: str | os.PathLike[str], volume_name: str,
                  volume_factory: Callable[[str], Any] | None = None,
-                 mount: str | os.PathLike[str] | None = None) -> None:
+                 mount: str | os.PathLike[str] | None = None, *,
+                 put_mode: str | None = None, mounted: bool | None = None) -> None:
         """``mount``: where the Volume root is mounted (the store root lies under it);
-        None: no direct upload, :meth:`put_directory` writes through the mount."""
+        None: no direct upload, :meth:`put_directory` writes through the mount.
+        ``put_mode``: :data:`PUT_MOUNT` (None) or :data:`PUT_UPLOAD`.
+        ``mounted``: whether the Volume is mounted at ``mount`` in this container;
+        None: :func:`volume_mounted` decides (once)."""
         super().__init__(root)
         self.volume_name = volume_name
         self._factory = volume_factory
         self.mount = None if mount is None else os.fspath(mount)
+        mode = PUT_MOUNT if put_mode in (None, "") else str(put_mode).strip().lower()
+        if mode not in PUT_MODES:
+            raise ValueError(f"{PUT_ENV}={put_mode!r}: expected one of {PUT_MODES}")
+        self.put_mode = mode
+        self._mounted = mounted
 
     def _volume(self) -> Any:
         if self._factory is not None:
@@ -187,7 +252,7 @@ class ModalVolumeStore(CheckpointStore):
             raise RuntimeError(f"modal volume {verb} via the runner interpreter failed "
                                f"(rc {done.returncode}): {done.stderr[-2000:]}")
 
-    # -- direct upload (policy releases staged on local disk) -------------------
+    # -- puts of whole local directories (HF exports, staged policy releases) ----
     def _volume_path(self, relative: str) -> str | None:
         """``relative`` (under the store root) as a path in the Volume; None when the
         store root is not under the known mount (then the mount is written)."""
@@ -199,12 +264,34 @@ class ModalVolumeStore(CheckpointStore):
             return None
         return "/" + (inside / relative).as_posix().lstrip("/")
 
+    def _direct(self) -> bool:
+        """Whether this process can reach the Modal client (a test double, or the
+        runner interpreter of a Modal container) to upload or remove by API."""
+        return self._factory is not None or bool(os.environ.get("YETO_MODAL_PYTHON"))
+
+    def _volume_is_mounted(self) -> bool:
+        if self._mounted is None:
+            self._mounted = self.mount is not None and volume_mounted(self.mount)
+        return bool(self._mounted)
+
+    @property
+    def put_path(self) -> str:
+        """How :meth:`put_directory`, :meth:`put_files` and :meth:`remove_tree`
+        reach the Volume: :data:`PUT_UPLOAD` (Modal API: ``batch_upload``,
+        ``remove_file``; this host's mount does not change) or :data:`PUT_MOUNT`
+        (this host's mount + one commit; the base store's code).
+
+        Upload only when the API is reachable, the store root is under the mount
+        and either ``put_mode`` asks for it or the Volume is not mounted here."""
+        if self._volume_path("") is None or not self._direct():
+            return PUT_MOUNT
+        if self.put_mode == PUT_UPLOAD or not self._volume_is_mounted():
+            return PUT_UPLOAD
+        return PUT_MOUNT
+
     @property
     def puts_bypass_mount(self) -> bool:
-        return self.mount is not None and self._volume_path("") is not None
-
-    def _direct(self) -> bool:
-        return self._factory is not None or bool(os.environ.get("YETO_MODAL_PYTHON"))
+        return self.put_path == PUT_UPLOAD
 
     def _upload(self, ops: list[tuple[str, str, str]]) -> None:
         """One ``batch_upload`` (all or nothing): the files are durable and visible
@@ -216,17 +303,28 @@ class ModalVolumeStore(CheckpointStore):
             return
         self._runner_script(_UPLOAD_SCRIPT, json.dumps(ops), verb="batch_upload", timeout_s=3600.0)
 
+    def _log_put_path(self) -> str:
+        """:attr:`put_path`, logged once per store object (evidence on the island)."""
+        path = self.put_path
+        if not self.__dict__.get("_put_logged"):
+            self._put_logged = True
+            logging.getLogger(__name__).info(
+                "modal volume %s: puts go through %s (put_mode %s, mount %s, mounted %s)",
+                self.volume_name, path, self.put_mode, self.mount, self._mounted)
+        return path
+
     def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
-        remote = self._volume_path(relative)
-        if remote is None or not self._direct():
+        if self._log_put_path() == PUT_MOUNT:
             return super().put_directory(local, relative)
-        self._upload([("dir", os.fspath(local), remote)])
+        self._upload([("dir", os.fspath(local), str(self._volume_path(relative)))])
 
     def put_files(self, files: Mapping[str, bytes]) -> None:
-        """All of ``files`` in one upload (a reader sees all or none of them)."""
-        remotes = {relative: self._volume_path(relative) for relative in files}
-        if None in remotes.values() or not self._direct():
+        """Upload: all of ``files`` in one upload (a reader sees all or none of
+        them). Mount: each file renamed into place in the given order, then one
+        commit (a reader that follows the last file sees the earlier ones)."""
+        if self._log_put_path() == PUT_MOUNT:
             return super().put_files(files)
+        remotes = {relative: self._volume_path(relative) for relative in files}
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="yeto-put-") as tmp:
@@ -239,9 +337,9 @@ class ModalVolumeStore(CheckpointStore):
             self._upload(ops)
 
     def remove_tree(self, relative: str) -> None:
-        remote = self._volume_path(relative)
-        if remote is None or not self._direct():
+        if self.put_path == PUT_MOUNT:
             return super().remove_tree(relative)
+        remote = str(self._volume_path(relative))
         if self._factory is not None:
             _remove_if_present(self._volume(), remote)
             return
@@ -289,7 +387,8 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str],
     if not volume:
         raise ValueError(f"modal-volume checkpoint store selected but {MODAL_VOLUME_ENV} is not set")
     return ModalVolumeStore(path, volume, volume_factory=volume_factory,
-                            mount=environ.get(MOUNT_ENV) or DEFAULT_MOUNT)
+                            mount=environ.get(MOUNT_ENV) or DEFAULT_MOUNT,
+                            put_mode=environ.get(PUT_ENV) or None)
 
 
 def parse_modal_volume_uri(value: str) -> tuple[str, str]:
