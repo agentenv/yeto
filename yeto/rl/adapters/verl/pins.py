@@ -93,7 +93,7 @@ VERL_MEGATRON_IMAGE = f"verl-{MEGATRON_IMAGE_VARIANT}-build:{VERL_COMMIT}"
 MAMBA_SSM_VERSION = "2.3.2.post1"
 CAUSAL_CONV1D_VERSION = "1.6.2.post1"
 EXPECTED_VERSIONS_MEGATRON = {
-    "megatron_core": "0.19.2",
+    "megatron_core": "0.19.2+4b4acac9a",  # the lock builds Megatron-LM at 4b4acac9a (local version)
     "megatron_bridge": "0.6.2",
     "transformer_engine": "2.16.1",
     "mamba_ssm": MAMBA_SSM_VERSION,
