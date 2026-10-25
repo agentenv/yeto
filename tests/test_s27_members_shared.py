@@ -193,3 +193,36 @@ def test_a_sampler_process_is_one_member_on_three_channels(syncer_binary, tmp_pa
         sampler.close()
         gate.set()
     finish(process, learner)
+
+
+@needs_cargo
+def test_a_superseded_task_source_stops_instead_of_superseding_back(syncer_binary, tmp_path):
+    """The old process's task source, fenced as superseded, does not reopen under
+    a new incarnation (that would supersede the newer process on every channel);
+    a lease expiry still reopens (P2 behavior, test_s27_dispense)."""
+    from test_s27_dispense import FP as DISPENSE_FP, KEY as DISPENSE_KEY, Syncer
+
+    syncer = Syncer(syncer_binary, tmp_path, lease_s=600.0)
+    island = td.sampler_holder_id("spot-2")
+    try:
+        events: list = []
+        connect = td.tcp_connector(("127.0.0.1", syncer.port), learner_id=island, rows=100,
+                                   fingerprint=DISPENSE_FP, key=DISPENSE_KEY, timeout_s=5.0)
+        old = td.TaskSource(connect=connect, block=4, prefetch_blocks=1, retry_s=0.05,
+                            incarnation=lambda: 0x4444, emit=lambda kind, **f: events.append(kind)).start()
+        assert len(old.take(4, timeout_s=5)) == 4
+        new = td.DispenseConnection(("127.0.0.1", syncer.port), learner_id=island, incarnation=0x5555,
+                                    rows=100, fingerprint=DISPENSE_FP, key=DISPENSE_KEY)
+        assert new.welcome.superseded == 0x4444
+        with pytest.raises(td.DispenseFenced, match=r"\(superseded\)$"):
+            while True:
+                old.take(4, timeout_s=5)
+        assert "rl_dispense_superseded" in events and old.stats["fenced"] == 0
+        time.sleep(0.5)
+        opens = [r for r in syncer.records() if r.get("kind") == "dispense_open"]
+        assert [r["incarnation"] for r in opens] == [f"{0x4444:016x}", f"{0x5555:016x}"]
+        new.heartbeat()  # still the island's live incarnation
+        old.close(release=False)
+        new.close()
+    finally:
+        syncer.stop()

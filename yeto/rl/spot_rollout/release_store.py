@@ -144,4 +144,6 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
     return SubscriberReleaseStore(
         WeightFollower(client, layout.num_fragments),
         lambda cut: materialize(layout, cut, base_model=base_model, out_root=out, model_name=model_name),
-        read_position=getattr(buffer, "read_position", lambda: None), finished=client.run_finished)
+        read_position=getattr(buffer, "read_position", lambda: None),
+        # fenced: a newer process of this sampler took its id on the head
+        finished=lambda: client.run_finished() or client.fenced())

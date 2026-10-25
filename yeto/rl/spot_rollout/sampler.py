@@ -107,7 +107,8 @@ class SpotChannels:
         return now - self._lost_since >= self.syncer_lost_s
 
     def stopping(self) -> bool:
-        return self.client.run_finished() or self.syncer_lost()
+        # fenced: a newer process of this sampler took its id on the head
+        return self.client.run_finished() or self.client.fenced() or self.syncer_lost()
 
     def close(self) -> None:
         try:
