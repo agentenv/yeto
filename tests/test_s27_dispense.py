@@ -7,8 +7,6 @@ Covers ``syncer/src/dispense.rs`` + ``dispense_service.rs`` (via the binary),
 from __future__ import annotations
 
 import hashlib
-import hmac
-import json
 import os
 import random
 import socket

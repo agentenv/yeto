@@ -43,7 +43,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .data_split import pass_order
@@ -301,12 +301,6 @@ class DispenseConnection:
 
 
 # ----------------------------------------------------------------- task source
-
-
-@dataclass
-class _Report:
-    kind: int
-    positions: list[int] = field(default_factory=list)
 
 
 class TaskSource:

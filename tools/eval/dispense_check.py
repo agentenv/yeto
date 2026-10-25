@@ -38,8 +38,6 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-SETTLED_KINDS = ("trained", "dropped")
-
 
 def read_records(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -77,7 +75,6 @@ def check(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         lambda: {"granted": 0, "trained": 0, "dropped": 0, "requeued": 0, "released": 0,
                  "reclaimed": 0, "blocks": 0, "incarnations": set(), "passes": set()})
     restores = rolled_back = 0
-    trained_reports: Counter[int] = Counter()
     for n, record in enumerate(records):
         kind = record.get("kind")
         if not isinstance(kind, str) or not kind.startswith("dispense_"):
@@ -118,7 +115,6 @@ def check(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                     continue
                 del st.holder[p]
                 if report == "trained":
-                    trained_reports[p] += 1
                     if p in st.trained_by:
                         problems.append(f"line {n}: position {p} trained twice (islands "
                                         f"{st.trained_by[p]} and {island})")
