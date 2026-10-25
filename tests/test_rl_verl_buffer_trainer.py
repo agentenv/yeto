@@ -360,7 +360,8 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
     section = sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s",
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
-    assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
+    assert section == {"store": "/s", "wait_s": 60.0, "lane": None,
+                       "release_delta_full_every": 0}  # G-EQ3: staged bf16 deltas, off here
     # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
     assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
@@ -374,7 +375,8 @@ def test_island_entry_plans_a_synced_trainer_lane_and_refuses_partial_flags():
 
     synced = ("--rl-sample-role", "trainer", "--syncer", "h:1", "--rl-max-policy-age", "2")
     section = sample_buffer_section(_entry_args(*synced, "--rl-sample-store", "/s", "--rl-sample-lanes", "2"))
-    assert section == {"store": "/s", "wait_s": None, "lane": "0/2"}
+    assert section == {"store": "/s", "wait_s": None, "lane": "0/2",
+                       "release_delta_full_every": 0}
     for extra, message in ((("--rl-sample-store", "/s"), "needs --rl-sample-store and --rl-sample-lanes"),
                            (("--rl-sample-store", "/s", "--rl-sample-lanes", "2", "--rl-resume-store", "/s"),
                             "not --rl-resume-store")):
