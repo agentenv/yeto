@@ -1,9 +1,10 @@
 """S27 P4 (G-DB): two verl full-parameter islands + the unified Rust syncer on Modal.
 
 Usage (local, yeto-test-venv):
-  python tools/probes/s27_verl_full/modal_p4.py plan RUN_ID   # PLAN_ONLY: no Modal call
-  python tools/probes/s27_verl_full/modal_p4.py run  RUN_ID   # needs the plan; spawns, waits, pulls, stops
-  python tools/probes/s27_verl_full/modal_p4.py pull RUN_ID   # results Volume -> run dir (files < 50 MB)
+  python tools/probes/s27_verl_full/modal_p4.py plan  RUN_ID  # PLAN_ONLY (yeto-test-venv): no Modal call
+  ( flock 9; python .../modal_p4.py spawn RUN_ID 9>&- ) 9>/tmp/GPU-LAUNCH-2.lock   # modal venv: deploy + spawn
+  python tools/probes/s27_verl_full/modal_p4.py watch RUN_ID  # wait, hard stop, stop the app, pull
+  python tools/probes/s27_verl_full/modal_p4.py pull  RUN_ID  # results Volume -> run dir (files < 50 MB)
 
 What runs (one detached app ``yeto-gdb-<RUN_ID>``):
 
@@ -392,7 +393,9 @@ def _wait_calls(calls: dict, deadline: float, log: Path) -> dict[str, Any]:
     return results
 
 
-def run(run_id: str) -> dict[str, Any]:
+def spawn(run_id: str) -> dict[str, Any]:
+    """Count S27's H200 containers, then deploy and spawn in a detached app and
+    return at once (the only step that holds the GPU launch lock)."""
     import modal
 
     run_dir = RUNS / run_id
@@ -409,18 +412,31 @@ def run(run_id: str) -> dict[str, Any]:
     control[f"{run_id}/started"] = time.time()
     app, fns = build_app(run_id, plan_doc)
     with modal.enable_output(), app.run(detach=True):
-        app_id = app.app_id
-        (run_dir / "app_id.txt").write_text(f"{app_id}\n")
-        began = time.time()
         calls = {"syncer": fns["syncer"].spawn(run_id, plan_doc)}
         for learner_id in range(plan_doc["cfg"]["islands"]):
             calls[f"island{learner_id}"] = fns["island"].spawn(run_id, plan_doc, learner_id)
-        _log(log, f"spawned {sorted(calls)} app {APP_PREFIX + run_id} ({app_id})")
-        results = _wait_calls(calls, began + plan_doc["cfg"]["hard_stop_s"], log)
-    wall = time.time() - began
-    stopped = _modal_cli("app", "stop", "-y", app_id, timeout=120)
+        record = {"app_id": app.app_id, "spawned_at": time.time(),
+                  "calls": {name: call.object_id for name, call in calls.items()}}
+    (run_dir / "spawn.json").write_text(json.dumps(record, indent=1))
+    _log(log, f"spawned {sorted(record['calls'])} app {APP_PREFIX + run_id} ({record['app_id']})")
+    return record
+
+
+def watch(run_id: str) -> dict[str, Any]:
+    """Wait for the spawned calls; stop the app at the hard stop; pull the results."""
+    import modal
+
+    run_dir = RUNS / run_id
+    plan_doc = json.loads((run_dir / "plan.json").read_text())
+    record = json.loads((run_dir / "spawn.json").read_text())
+    log = run_dir / "driver.log"
+    calls = {name: modal.FunctionCall.from_id(call_id) for name, call_id in record["calls"].items()}
+    results = _wait_calls(calls, record["spawned_at"] + plan_doc["cfg"]["hard_stop_s"], log)
+    wall = time.time() - record["spawned_at"]
+    stopped = _modal_cli("app", "stop", "-y", record["app_id"], timeout=120)
     _log(log, f"app stop rc={stopped.returncode} after {wall:.0f}s")
-    summary = {"calls": results, "wall_s": round(wall, 1), "stop_rc": stopped.returncode, "app_id": app_id}
+    summary = {"calls": results, "wall_s": round(wall, 1), "stop_rc": stopped.returncode,
+               "app_id": record["app_id"]}
     (run_dir / "driver.json").write_text(json.dumps(summary, indent=1, default=str))
     summary["pull"] = pull(run_id)
     return summary
@@ -434,16 +450,11 @@ def pull(run_id: str) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or argv[0] not in ("plan", "run", "pull") or not re.fullmatch(r"[a-z0-9-]+", argv[1]):
+    commands = {"plan": plan, "spawn": spawn, "watch": watch, "pull": pull}
+    if len(argv) != 2 or argv[0] not in commands or not re.fullmatch(r"[a-z0-9-]+", argv[1]):
         print(__doc__, file=sys.stderr)
         return 2
-    command, run_id = argv
-    if command == "plan":
-        print(json.dumps(plan(run_id), indent=1))
-    elif command == "run":
-        print(json.dumps(run(run_id), indent=1, default=str))
-    else:
-        print(json.dumps(pull(run_id), indent=1))
+    print(json.dumps(commands[argv[0]](argv[1]), indent=1, default=str))
     return 0
 
 
