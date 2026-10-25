@@ -404,3 +404,21 @@ def test_sync_trainer_is_required_only_by_the_sync_island():
     # the buffer trainer path never asks
     buffer_body = source.split("def run_fully_async_island(", 1)[1]
     assert "require_sync_trainer()" not in buffer_body
+
+
+def test_island_takes_a_staged_model_directory(tmp_path, monkeypatch):
+    """S27 G-EQ2: an on-prem island loads weights already on the node (npu1's
+    n2-n4 cannot reach the hub); a repo id still goes through the hub."""
+    from yeto.rl.adapters.verl import island_entry
+
+    staged = tmp_path / "nano"
+    staged.mkdir()
+    with pytest.raises(SystemExit, match="config.json"):
+        island_entry.island_model_path(str(staged), "a" * 40)
+    (staged / "config.json").write_text("{}")
+    assert island_entry.island_model_path(str(staged), "a" * 40) == str(staged)
+    calls = []
+    fake = SimpleNamespace(snapshot_download=lambda model, revision=None: calls.append((model, revision)) or "/hub/x")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    assert island_entry.island_model_path("org/repo", "b" * 40) == "/hub/x"
+    assert calls == [("org/repo", "b" * 40)]
