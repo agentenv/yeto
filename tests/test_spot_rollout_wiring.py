@@ -213,6 +213,18 @@ def test_materialize_joins_row_slices_and_strips_the_wire_prefix(tmp_path):
     tensors = load_file(str(out / "model.safetensors"))
     assert sorted(tensors) == ["decoder.w"] and tensors["decoder.w"].float().tolist() == weight.tolist()
     assert (out / "tokenizer.json").is_file() and (out / "config.json").is_file()
+    # With base weights in the directory, the HF names must equal them (G-EE): a
+    # missing weight would keep its old value in the engine after the reload.
+    from safetensors.torch import save_file
+
+    save_file({"decoder.w": weight.to(torch.bfloat16)}, str(base / "model.safetensors"))
+    named = materialize(lay, cut, base_model=base, out_root=tmp_path / "named", convert=identity_converter)
+    assert sorted(load_file(str(named / "model.safetensors"))) == ["decoder.w"]
+    save_file({"decoder.w": weight.to(torch.bfloat16), "decoder.v": weight.to(torch.bfloat16)},
+              str(base / "model.safetensors"))
+    with pytest.raises(MaterializeError, match=r"missing \['decoder.v'\]"):
+        materialize(lay, cut, base_model=base, out_root=tmp_path / "missing", convert=identity_converter)
+    (base / "model.safetensors").unlink()
     # A sharded trainer's layout (two shard ids) is refused: it needs param_layout.
     other = f"actor::tp1-of-2.pp0-of-1.ep0-of-1.cp0-of-1.dp0-of-1::decoder.w#rows=2:4"
     two = FragmentLayout([lay.fragments[0], Fragment(MERGE_AVG, [(other, 6)], identity_shapes={other: (2, 3)})])

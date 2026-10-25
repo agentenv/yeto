@@ -30,6 +30,7 @@ from yeto.rl.eval.cut_to_hf import (
     _WEIGHT_SUFFIXES,
     MaterializeError,
     canonical_name,
+    check_base_names,
     convert_model,
     megatron_args,
     miles_converter,
@@ -88,7 +89,8 @@ def materialize(layout: FragmentLayout, cut: WeightCut, *, base_model: str | os.
                 model_name: str | None = None, keep: int = 2) -> Path:
     """Write ``<out_root>/v<merged>-<digest>`` (config/tokenizer from ``base_model``
     plus ``model.safetensors``) and return it. Keeps the newest ``keep`` such
-    directories under ``out_root`` (this module's own outputs only)."""
+    directories under ``out_root`` (this module's own outputs only). The HF names
+    must equal the base model's weight names (``cut_to_hf.check_base_names``)."""
     import hashlib
 
     import torch
@@ -106,6 +108,9 @@ def materialize(layout: FragmentLayout, cut: WeightCut, *, base_model: str | os.
     tensors = convert_model(megatron_model(layout, cut), megatron_args(config), convert, dtype=torch.bfloat16)
     if config.get("tie_word_embeddings"):
         tensors.pop("lm_head.weight", None)
+    # every base weight is written (a missing one would keep its old value in the engine
+    # after update_weights_from_disk, without an error) and no other name
+    check_base_names(tensors, base, config, f"cut v{cut.merged_version}")
     staging = target.with_name(f".{target.name}.tmp")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)

@@ -740,7 +740,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         # trainer whose samplers follow it reads its own sub-store (one lane)
         substore = getattr(args, "rl_sample_substore", None)
         sample_store = resume_store[0] if substore is None else substore_uri(resume_store[0], substore)
-        lanes = 1 if substore else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
+        # S27 G-EE: a relay trainer reads its own relay channel through a local buffer
+        # that only it fills, so it reads that whole buffer (one lane)
+        own = substore or getattr(args, "rl_sample_relay", False)
+        lanes = 1 if own else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
         flags += f" --rl-sample-store {shlex.quote(sample_store)} --rl-sample-lanes {lanes}"
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
