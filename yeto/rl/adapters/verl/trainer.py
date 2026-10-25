@@ -59,29 +59,8 @@ def _fingerprint(cfg: dict) -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-class _TestExitPublisher:
-    """TEST ONLY (V2 leave/rejoin): end this island's process right after it published
-    ``version``.  Armed only on a first incarnation (its first publication is policy
-    version 0); a relaunched island starts from the syncer's committed version > 0 and
-    never exits again."""
-
-    def __init__(self, inner, version: int | None, tape):
-        self.inner, self.version, self.tape = inner, version, tape
-        self.armed: bool | None = None if version is not None else False
-
-    def publish(self, state):
-        result = self.inner.publish(state)
-        published = int(state.policy_version)
-        if self.armed is None:
-            self.armed = published == 0
-            self.tape.append({"event": "rl_test_exit_armed", "armed": self.armed,
-                              "first_published_version": published, "exit_after_version": self.version})
-        if self.armed and published == self.version:
-            self.tape.append({"event": "rl_test_island_exit", "policy_version": self.version,
-                              "time_unix": time.time()})
-            print(f"[yeto-verl] TEST exit after publishing v{self.version}", flush=True)
-            os._exit(17)
-        return result
+# TEST ONLY (V2 leave/rejoin; S27 G-EC moved it to the CPU-testable .driver_extras).
+from .driver_extras import TestExitPublisher as _TestExitPublisher  # noqa: E402
 
 
 def check_asserted(asserted: dict, cfg: dict) -> dict:
@@ -314,7 +293,8 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
-        publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
+        publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape,
+                                     rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
