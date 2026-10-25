@@ -75,10 +75,10 @@ CFG: dict[str, Any] = {
     "seed": 1,
     "gpu_mem": 0.5,             # vLLM share of the card (YETO_VERL_GPU_MEM)
     "wait_timeout_s": 900,
-    "timeout_s": 3600,          # per container
-    "hard_stop_s": 4200,        # local watchdog: stop the app this long after the spawn
+    "timeout_s": 3900,          # per container
+    "hard_stop_s": 3600,        # local watchdog: stop the app this long after the spawn
     "rate_per_island_h": 6.0,   # $ per island container hour (H200 + 64 GiB + 16 CPU, estimate)
-    "rate_syncer_h": 0.3,
+    "rate_syncer_h": 0.4,
 }
 
 
@@ -335,7 +335,7 @@ def build_app(run: str, plan_doc: dict):
         "island": app.function(image=verl_image, gpu=f"{cfg['gpu']}:1", cpu=16.0, memory=65536,
                                timeout=timeout, retries=0, volumes={RESULTS: results}, secrets=[hmac],
                                name="island", serialized=True)(island),
-        "syncer": app.function(image=syncer_image, cpu=2.0, memory=8192, timeout=timeout, retries=0,
+        "syncer": app.function(image=syncer_image, cpu=4.0, memory=16384, timeout=timeout, retries=0,
                                volumes={RESULTS: results}, secrets=[hmac], name="syncer",
                                serialized=True)(syncer),
     }
