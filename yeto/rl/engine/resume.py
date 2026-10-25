@@ -703,7 +703,11 @@ class ResumeController:
         self.journal = _JournalShim()
         self.last_store_sync: dict[str, Any] | None = None
         self._wall = wall_clock
-        store.root.mkdir(parents=True, exist_ok=True)
+        guard = store.hold_writer()  # no Volume remount by another process meanwhile (EPERM)
+        try:
+            store.root.mkdir(parents=True, exist_ok=True)
+        finally:
+            guard.release()
         store.reload()
         self.restored: dict[str, Any] | None = None
         # E1: the files of a first round cut that never committed, deleted at start

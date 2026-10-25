@@ -141,8 +141,9 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
     the index, and reads like a trainer. ``shards``: the sampler shards of a
     launch with several sampler islands (a sampler writes the one named by its
     sampler id, the trainer merges them all). ``lane``: a synced trainer's
-    buffer lane. ``data_slot``: a sampler's slot of the prompt data
-    (``sample_roles.DataSlot``; several sampler islands draw disjoint prompts)."""
+    buffer lane. ``data_slot``: a sampler's or a convertible node's slot of the
+    prompt data (``sample_roles.DataSlot``; several sampler islands, or the nodes of
+    a convertible pool, draw disjoint prompts)."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -171,8 +172,8 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
             raise ValueError("only a trainer reads a buffer lane")
         env[LANE_ENV] = lane.env()
     if data_slot:
-        if role != SAMPLER:
-            raise ValueError("only a sampler island draws a data slot")
+        if role not in (SAMPLER, CONVERTIBLE):
+            raise ValueError("only a sampler island or a convertible node draws a data slot")
         env[DATA_SLOT_ENV] = DataSlot.parse(data_slot).env()
     return env
 
@@ -618,6 +619,12 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
         raise SampleBufferRolloutError(f"convertible rollout mode {mode!r}: expected "
                                        f"{SAMPLER} or {TRAINER}")
     previous, _MODE[CONVERTIBLE] = _MODE[CONVERTIBLE], mode
+    reader = _ACTIVE.get(TRAINER)
+    if mode == SAMPLER and reader is not None:
+        # the trainer stint is over: its read-ahead would poll the index (a Volume
+        # reload every poll) through the rollout and the next stint's start, whose
+        # store writes then fail on the remount (EPERM, GPU run s27-eg-b1)
+        reader._stop_prefetching()
     return previous
 
 
