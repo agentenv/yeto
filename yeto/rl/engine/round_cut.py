@@ -150,9 +150,12 @@ class CutSource:
             data["buffer_length"] = int(exported["buffer_groups"])
             summary["carried_over"] = len(in_flight)
             summary["max_policy_age"] = limit
+        # S27 G-ED: a peer-recovered trainer continues the donor's scheduler, so its
+        # steps count from the restored position (FullParameterSync.start sets it)
+        base_steps = int(getattr(driver, "recovered_scheduler_samples", None) or 0) // self.global_batch_size
         progress = CutProgress(
-            local_step=int(driver.local_step),
-            scheduler_samples=int(driver.local_step) * self.global_batch_size,
+            local_step=base_steps + int(driver.local_step),
+            scheduler_samples=(base_steps + int(driver.local_step)) * self.global_batch_size,
             global_batch_size=self.global_batch_size,
             next_rollout_id=int(version),
             policy_version=int(state.policy_version),

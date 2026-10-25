@@ -183,8 +183,10 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
     With an outer sync (``plan["full_parameter"]``): the engine-neutral
     ``FullParameterSync`` over the verl role stream.  Without one
     (``--rl-single-island-no-sync``): the local-only sync over a policy state
-    that exports whole cuts.  Round cuts and the LoRA publish self-test do not
-    apply to a full-parameter island and are refused."""
+    that exports whole cuts.  Round cuts (``plan["resume"]``, S27 G-ED) are
+    wired by ``run_island`` as on a LoRA island: the FSDP2 rank files hold every
+    parameter shard and its Adam state.  The LoRA publish self-test does not
+    apply to a full-parameter island and is refused."""
     from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.local_learner import ComponentIdentity
 
@@ -192,8 +194,6 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
                                         VerlFullParameterLocalState, build_full_parameter_sync)
     from .ports_impl import VerlFullParameterPublisher
 
-    if plan.get("resume"):
-        raise ValueError("round cuts of a full-parameter verl island are not wired (V9)")
     if plan.get("publish_selftest"):
         raise ValueError("the publish self-test checks a LoRA read-back; a full-parameter island has none")
     island.full_group = VerlFullParameterGroup(island)
@@ -289,7 +289,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
             else AlgorithmSpec())
     # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
-    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
@@ -386,7 +386,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     if buffer_ports is not None and plan.get("resume"):
         raise ValueError("round cuts are not wired for a verl buffer trainer")
     # S26 E9.2: round cuts as on the sync path; restored before the driver is built
-    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,

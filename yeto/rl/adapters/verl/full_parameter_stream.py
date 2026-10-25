@@ -36,8 +36,11 @@ Differences from the Miles binding, all deliberate:
   the workers and compares with the target (the proof that the trainer holds
   the target); verl offers no optimizer-state receipts, so the stream's
   optimizer proof is off (``_optimizer_states`` returns None);
-* not offered: sync/train overlap, MoE expert token weights and peer recovery
-  (refused at configuration);
+* not offered: sync/train overlap and MoE expert token weights (refused at
+  configuration);
+* peer recovery (S27 G-ED): the engine-neutral stream island
+  (:mod:`yeto.rl.engine.stream_recovery`) over the FSDP2 rank files of
+  :mod:`.cut` (:mod:`.peer_recovery`);
 * bf16 broadcast deltas (``--bcast-delta``, S27 G-DS) need nothing here: the
   ``SyncerClient`` decodes them into the f32 fragment before the inbound sink
   sees a byte (``yeto.downlink`` module doc), so the sink stays f32-only.
@@ -107,7 +110,6 @@ def refuse_unsupported(config: RoleStreamConfig) -> None:
     refused = [name for name, on in (
         ("sync/train overlap (--sweep-overlap)", config.overlap),
         ("MoE expert token weights", config.expert_token_weights),
-        ("peer recovery", config.peer_recovery is not None),
     ) if on]
     if config.algorithm != "grpo" or config.role != "actor":
         refused.append(f"{config.algorithm}/{config.role} (verl trains the GRPO actor only)")
@@ -930,6 +932,15 @@ class VerlFullParameterRoleStream(FullParameterRoleStream):
             print(f"[yeto-full-parameter] rank stats op={phase} role={self.config.role} rank=0 "
                   f"{json.dumps({phase: stats}, sort_keys=True)}", file=sys.stderr, flush=True)
 
+    def _recovery_island(self, group, adapter, *, recovering: bool):
+        """S27 G-ED: peer recovery over the FSDP2 rank files (:mod:`.peer_recovery`)."""
+        from yeto.rl.engine.stream_recovery import StreamRecoveryIsland
+
+        from .peer_recovery import VerlRankShards
+
+        return StreamRecoveryIsland(self, VerlRankShards(group, adapter), asyncio.get_running_loop(),
+                                    recovering=recovering)
+
 
 # ----------------------------------------------------------------------------- island wiring
 PLAN_KEY = "full_parameter"
@@ -981,6 +992,7 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
                        model_revision: str) -> RoleStreamConfig:
     """The actor's :class:`RoleStreamConfig` from the island plan's full-parameter section."""
 
+    from yeto.rl.engine.stream_recovery import PeerRecoveryOptions
     from yeto.rl.local_learner import ComponentIdentity
 
     async_rounds = bool(section["async_rounds"])
@@ -1020,7 +1032,10 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
         local_init=bool(section["local_init"]),
         matrix_merge=section["matrix_merge"],
         bcast_delta=bool(section.get("bcast_delta", False)),
-        **({"island_lease_s": float(pool["lease_s"]), "syncer_epoch": int(pool["syncer_epoch"])} if pool else {}),
+        peer_recovery=PeerRecoveryOptions.from_plan(section.get("peer_recovery")),
+        **({"island_lease_s": float(pool["lease_s"]), "syncer_epoch": int(pool["syncer_epoch"])} if pool
+           # S27 G-ED: a fixed roster with peer recovery names the syncer epoch in its HELLO
+           else {"syncer_epoch": int(section["syncer_epoch"])} if "syncer_epoch" in section else {}),
     )
 
 
@@ -1096,7 +1111,7 @@ class VerlFullParameterLocalState:
 
     def apply(self, state, *, optimizer: str, local_step: int) -> None:
         raise RuntimeError("a full-parameter verl island without an outer sync never applies a cut "
-                           "(round-cut resume of full-parameter islands is not wired, V9)")
+                           "(a round-cut resume restores the trainer's rank files instead)")
 
 
 def add_island_flags(parser) -> None:
@@ -1134,6 +1149,10 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--sweep-overlap", action="store_true")
     parser.add_argument("--sweep-expert-token-weights", action="store_true")
     parser.add_argument("--rl-peer-recovery-store", default=None)
+    # S27 G-ED: peer recovery (launch.peer_recovery.island_flags; Miles island spellings)
+    parser.add_argument("--rl-peer-recovery-ttl-s", type=float, default=None)
+    parser.add_argument("--rl-peer-recover", action="store_true")
+    parser.add_argument("--rl-peer-recovery-staging", default=None)
     # S27 G-DS: the island's HF exports and data position (Miles island spellings;
     # see full_parameter_extras). Added only when the island parser has none yet:
     # the verl Megatron island (S27 G-DC) parses the export flags itself.
@@ -1207,6 +1226,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         raise ValueError("full-parameter model has no config.json")
     model_config_sha256 = file_sha256(config_path)
     out: dict[str, Any] = {"model_config_sha256": model_config_sha256, **full_parameter_extras(args, sync=sync)}
+    recovery = _peer_recovery(args, sync=sync)
     if sync == "none":
         return out
     async_rounds = args.full_parameter_rounds == "async"
@@ -1225,7 +1245,6 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     refused = [flag for flag, on in (
         ("--sweep-overlap", getattr(args, "sweep_overlap", False)),
         ("--sweep-expert-token-weights", getattr(args, "sweep_expert_token_weights", False)),
-        ("--rl-peer-recovery-store", getattr(args, "rl_peer_recovery_store", None) is not None),
     ) if on]
     if refused:
         raise ValueError("verl 全参数岛不支持: " + ", ".join(refused))
@@ -1272,4 +1291,23 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     }
     if getattr(args, "bcast_delta", False):  # S27 G-DS: absent when off (plans unchanged)
         out["full_parameter"]["bcast_delta"] = True
+    if recovery is not None:  # S27 G-ED: absent when off (plans unchanged)
+        if not async_rounds or getattr(args, "bcast_delta", False):
+            raise ValueError("--rl-peer-recovery-store needs --full-parameter-rounds async without "
+                             "--bcast-delta (the syncer resends whole fragments)")
+        out["full_parameter"]["peer_recovery"] = recovery.to_plan()
+        if pool is None:
+            out["full_parameter"]["syncer_epoch"] = int(getattr(args, "rl_syncer_epoch", 0) or 0)
     return out
+
+
+def _peer_recovery(args: Any, *, sync: str):
+    """S27 G-ED: the island's peer recovery options (``--rl-peer-recovery-*``,
+    and the launcher's relaunch marker), or None; refused on an island
+    without an outer sync."""
+    from yeto.rl.engine.stream_recovery import peer_recovery_options
+
+    recovery = peer_recovery_options(args)
+    if recovery is not None and sync == "none":
+        raise ValueError("--rl-peer-recovery-store belongs to a synced full-parameter island")
+    return recovery

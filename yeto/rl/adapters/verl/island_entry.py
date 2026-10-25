@@ -99,6 +99,10 @@ def parse_args(argv):
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
+    # S27 G-ED: island cuts of a synced island (S27 R-2) and the timed cut interval
+    p.add_argument("--rl-island-cut-store", default=None)
+    p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
+    p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     # S27 B10: a full-parameter island and its outer sync (Miles island spellings)
@@ -417,8 +421,6 @@ def main(argv=None) -> int:
 
         from .full_parameter_stream import plan_section
 
-        if resume:
-            raise SystemExit("round cuts of a full-parameter verl island are not wired (V9)")
         try:
             full_plan = plan_section(
                 args, run.to_dict(), model_path=model_path, sync=sync,
