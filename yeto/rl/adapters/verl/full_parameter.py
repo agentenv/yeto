@@ -45,6 +45,18 @@ through ``VerlIsland.call_workers``.
 Every export and apply is collective: all ranks must call it with the same
 fragment, because ``DTensor.full_tensor`` and ``distribute_tensor`` are
 collectives over the device mesh.
+
+Two additions for the HF export (S27 G-EQ3):
+
+* the manifest also lists the module's **persistent buffers** (``buffers``),
+  and :func:`remote_export_fragment` reads them by name.  A buffer is part of
+  the checkpoint (a MoE router's ``e_score_correction_bias`` is one: the
+  loader fills it, no optimizer updates it); an export without it loads with
+  the buffer's initial value.  The sync layout stays parameters only.
+* a parameter whose local shard lives on the host (FSDP2 ``CPUOffloadPolicy``,
+  ``--rl-fsdp-offload``) is moved to the mesh's device before the gather
+  (:func:`_whole`, as ``torch.distributed._state_dict_utils`` does), so the
+  all-gather runs on the accelerator's collective backend, not on the host.
 """
 
 from __future__ import annotations
@@ -158,6 +170,48 @@ def _named_full_parameters(module):
     return sorted(named, key=lambda item: item[0])
 
 
+def _named_persistent_buffers(module):
+    """``[(canonical name, buffer)]`` of every persistent buffer (the ones in
+    ``state_dict``), sorted; a buffer shared by two modules is listed once."""
+
+    named, seen = [], set()
+    for prefix, submodule in module.named_modules():
+        skip = getattr(submodule, "_non_persistent_buffers_set", set())
+        for name, buffer in submodule._buffers.items():
+            if buffer is None or name in skip or id(buffer) in seen:
+                continue
+            seen.add(id(buffer))
+            named.append((base_to_canonical(f"{prefix}.{name}" if prefix else name), buffer))
+    if len({name for name, _buffer in named}) != len(named):
+        raise VerlFullParameterError("规范化后出现重名 buffer")
+    return sorted(named, key=lambda item: item[0])
+
+
+def _exportable(module) -> dict:
+    """Parameters and persistent buffers by canonical name (a name is never both)."""
+
+    by_name = dict(_named_full_parameters(module))
+    buffers = dict(_named_persistent_buffers(module))
+    clash = sorted(set(by_name) & set(buffers))
+    if clash:
+        raise VerlFullParameterError(f"参数与 buffer 同名: {clash[:4]}")
+    by_name.update(buffers)
+    return by_name
+
+
+def _whole(tensor):
+    """The whole value of a parameter or buffer (collective for a ``DTensor``).
+    A host-resident shard (FSDP2 CPU offload) goes to the mesh's device first,
+    so the all-gather uses the device backend (module doc)."""
+
+    if not hasattr(tensor, "full_tensor"):
+        return tensor
+    device_type = tensor.device_mesh.device_type
+    if tensor.device.type != device_type:
+        tensor = tensor.to(device_type)
+    return tensor.full_tensor()
+
+
 def remote_manifest(worker_dict) -> dict:
     """This worker's full-parameter manifest: shapes, dtype and mesh facts.
 
@@ -167,7 +221,9 @@ def remote_manifest(worker_dict) -> dict:
 
     import torch.distributed as dist
 
-    named = _named_full_parameters(_trainable_module(worker_dict))
+    module = _trainable_module(worker_dict)
+    named = _named_full_parameters(module)
+    buffers = _named_persistent_buffers(module)
     dtypes = sorted({str(parameter.dtype) for _name, parameter in named})
     if dtypes != [MASTER_DTYPE]:
         raise VerlFullParameterError(
@@ -177,6 +233,8 @@ def remote_manifest(worker_dict) -> dict:
     return {
         "shapes": {name: list(_global_shape(parameter)) for name, parameter in named},
         "param_dtypes": dtypes,
+        "buffers": {name: list(_global_shape(buffer)) for name, buffer in buffers},
+        "buffer_dtypes": sorted({str(buffer.dtype) for _name, buffer in buffers}),
         "rank": int(dist.get_rank()) if initialized else 0,
         "world_size": int(dist.get_world_size()) if initialized else 1,
         "sharded": any(hasattr(parameter, "device_mesh") for _name, parameter in named),
@@ -201,15 +259,14 @@ def remote_export_fragment(worker_dict, names: Sequence[str], return_tensors: bo
     import torch
 
     module = _trainable_module(worker_dict)
-    by_name = dict(_named_full_parameters(module))
+    by_name = _exportable(module)
     missing = sorted(set(names) - set(by_name))
     if missing:
         raise VerlFullParameterError(f"分片引用了模型里没有的参数: {missing[:4]}")
     tensors = {}
     with torch.no_grad():
         for name in names:  # the island's order, the same on every rank
-            parameter = by_name[name]
-            whole = parameter.full_tensor() if hasattr(parameter, "full_tensor") else parameter
+            whole = _whole(by_name[name])
             if return_tensors:
                 tensors[name] = whole.detach().to("cpu", torch.float32).clone()
             del whole
@@ -286,8 +343,7 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
     with torch.no_grad():
         for name in names:  # the island's order, the same on every rank
             mark = time.perf_counter()
-            parameter = by_name[name]
-            whole = parameter.full_tensor() if hasattr(parameter, "full_tensor") else parameter
+            whole = _whole(by_name[name])
             gather_s += time.perf_counter() - mark
             if reader:
                 mark = time.perf_counter()
@@ -381,14 +437,17 @@ def _reset_moments(worker_dict) -> int:
     return zeroed
 
 
-def agree_on_shapes(manifests: Sequence[Mapping[str, object]]) -> dict[str, tuple[int, ...]]:
-    """One ``{name: shape}`` from every worker's manifest, or an error naming the drift."""
+def agree_on_shapes(manifests: Sequence[Mapping[str, object]], *,
+                    key: str = "shapes") -> dict[str, tuple[int, ...]]:
+    """One ``{name: shape}`` from every worker's manifest, or an error naming the
+    drift. ``key``: ``"shapes"`` (parameters) or ``"buffers"`` (persistent
+    buffers; a manifest without the key has none)."""
 
     if not manifests:
         raise VerlFullParameterError("没有收到任何 worker 的全参数清单")
-    first = {name: tuple(shape) for name, shape in dict(manifests[0]["shapes"]).items()}
+    first = {name: tuple(shape) for name, shape in dict(manifests[0].get(key) or {}).items()}
     for index, manifest in enumerate(manifests[1:], start=1):
-        other = {name: tuple(shape) for name, shape in dict(manifest["shapes"]).items()}
+        other = {name: tuple(shape) for name, shape in dict(manifest.get(key) or {}).items()}
         if other != first:
             only_first = sorted(set(first) - set(other))
             only_other = sorted(set(other) - set(first))

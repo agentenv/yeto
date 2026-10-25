@@ -568,3 +568,37 @@ def test_verl_auto_class_patch_prefers_the_architecture_task():
     # a vision-to-sequence checkpoint keeps its own task key
     v2s = {"AutoModelForVision2Seq": "modeling_y.YForVision2Seq"}
     assert run(["YForVision2Seq"], v2s) == "AutoModelForVision2Seq"
+
+
+def test_ascend_island_turns_torch_compile_off(monkeypatch):
+    """S27 G-EQ2: triton-ascend has no inductor backend, so verl's default
+    torch.compile of the entropy/log-prob helpers kills the first training step."""
+    from types import SimpleNamespace as NS
+
+    from yeto.hw import catalog as cat
+    from yeto.rl.adapters.verl import island_entry
+
+    args = NS(parameter_mode="full", lora_r=0, inner_lr=1e-6, groups_per_round=4,
+              samples_per_group=8, rollout_max_response_len=2048, seed=1, global_rounds=3,
+              learner_id=0, reward_function="gsm8k_reward:score", rl_rollout_quant_tier=0,
+              trust_remote_code=False, rl_activation_recompute=False, rl_fsdp_offload="both",
+              rl_placement=None, rl_max_tokens_per_gpu=None)
+    algo = {"correction": "tis", "tis_lower": 0.0, "tis_upper": 2.0,
+            "eps_clip": None, "eps_clip_high": None}
+    monkeypatch.setattr(island_entry, "gradient_checkpointing_for", lambda *_a: True)
+    keys = ("actor_rollout_ref.actor.use_torch_compile",
+            "actor_rollout_ref.actor.fsdp_config.use_torch_compile",
+            "actor_rollout_ref.ref.fsdp_config.use_torch_compile")
+
+    def run_for(family):
+        monkeypatch.setattr(cat, "device_family", lambda *_a: family)
+        _run, overrides = island_entry.fsdp_island_run(
+            args, model_path="/m", train_file="/t", val_file="/v", out_dir="/o", algo=algo,
+            chat={}, ray_info={"before": {"NPU": 8.0}}, max_prompt=512, limit=4)
+        return overrides
+
+    ascend = run_for("ascend")
+    # the engine workers read fsdp_config.use_torch_compile, not the actor's (G-EQ3)
+    assert all(f"{key}=False" in ascend for key in keys)
+    nvidia = run_for("nvidia")
+    assert not [o for o in nvidia if o.split("=")[0] in keys]  # NVIDIA unchanged

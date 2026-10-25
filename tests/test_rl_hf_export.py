@@ -453,30 +453,49 @@ def test_verl_lora_and_elastic_launches_are_refused():
         rl_ports._check_hf_export_launch_flags(args)
 
 
-# ------------------------------------------------- S27 G-EQ: delta-friendly shard layout
-def test_base_shard_layout_reuses_the_source_checkpoints_own_files(tmp_path):
-    """The export writes the files the source checkpoint has, so a later
-    release_delta against that checkpoint compares same-name, same-size files."""
-    from yeto.rl.adapters.verl.hf_export import base_shard_layout
+# ------------------------------------------------- S27 G-EQ/G-EQ3: the base checkpoint's own layout
+def test_the_export_plan_reuses_the_source_checkpoints_own_files(tmp_path):
+    """The export writes the files the source checkpoint has, under its own tensor
+    names and dtypes, so a later release_delta against that checkpoint compares
+    same-name, same-size files (G-EQ) and a sampler loads the names it knows
+    (G-EQ3). The name conversion itself is tested in
+    tests/test_s27_hf_checkpoint_keys.py against a real nemotron_h model."""
+    from safetensors.torch import save_file
 
-    names = ["a.weight", "b.weight", "c.weight"]
+    from yeto.rl.adapters.verl.hf_checkpoint_keys import base_export
+
+    shapes = {"a.weight": (2, 2), "b.weight": (3,), "c.weight": (4,)}
+    files = {"model-00001-of-00002.safetensors": ["a.weight", "b.weight"],
+             "model-00002-of-00002.safetensors": ["c.weight"]}
+    weight_map = {}
+    for file_name, names in files.items():
+        save_file({n: torch.zeros(shapes[n], dtype=torch.bfloat16) for n in names},
+                  str(tmp_path / file_name), metadata={"format": "pt"})
+        weight_map.update({n: file_name for n in names})
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(
-        {"metadata": {"total_size": 3}, "weight_map": {"a.weight": "model-00001-of-00002.safetensors",
-                                                       "c.weight": "model-00002-of-00002.safetensors",
-                                                       "b.weight": "model-00001-of-00002.safetensors"}}))
-    groups, files = base_shard_layout(tmp_path, names)
-    assert files == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
-    assert groups == [["a.weight", "b.weight"], ["c.weight"]]
-    # the layout is reusable only when the index names exactly the exported parameters
-    assert base_shard_layout(tmp_path, [*names, "d.weight"]) is None
-    assert base_shard_layout(tmp_path, names[:2]) is None
+        {"metadata": {"total_size": 18}, "weight_map": weight_map}))
+
+    def refuse(_path):  # the names match as they are: no model is built
+        raise AssertionError("an identity layout must not build the model")
+
+    plan, why = base_export(tmp_path, shapes, conversion=refuse)
+    assert plan is not None and why
+    assert plan.files == tuple(sorted(files)) and plan.index is True
+    assert sorted(plan.names["model-00001-of-00002.safetensors"]) == ["a.weight", "b.weight"]
+    assert plan.dtypes == {"a.weight": "BF16", "b.weight": "BF16", "c.weight": "BF16"}
+    assert plan.model_names("model-00002-of-00002.safetensors") == ("c.weight",)
+    assert plan.last_use() == {"a.weight": 0, "b.weight": 0, "c.weight": 1}
+    # the layout is reusable only when the base names exactly the exported tensors
+    assert base_export(tmp_path, {**shapes, "d.weight": (1,)}, conversion=refuse)[0] is None
+    assert base_export(tmp_path, {"a.weight": (2, 2)}, conversion=refuse)[0] is None
+    assert base_export(tmp_path, {**shapes, "c.weight": (5,)}, conversion=refuse)[0] is None  # shape
 
 
-def test_base_shard_layout_declines_without_a_usable_index(tmp_path):
-    from yeto.rl.adapters.verl.hf_export import base_shard_layout
+def test_the_export_plan_declines_without_a_usable_base(tmp_path):
+    from yeto.rl.adapters.verl.hf_checkpoint_keys import base_export
 
-    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # single-file checkpoint: no index
+    assert "neither" in base_export(tmp_path, {"a.weight": (1,)})[1]  # no index, no single file
     (tmp_path / "model.safetensors.index.json").write_text("{")
-    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # torn index
+    assert "weight_map" in base_export(tmp_path, {"a.weight": (1,)})[1]  # torn index
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a.weight": "x.bin"}}))
-    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # not a safetensors shard
+    assert "not safetensors" in base_export(tmp_path, {"a.weight": (1,)})[1]
