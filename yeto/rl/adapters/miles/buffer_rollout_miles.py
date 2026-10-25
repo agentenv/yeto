@@ -49,6 +49,8 @@ from .buffer_rollout import (
 )
 from .rollout_meta_hook import data_cursor, record_round_metadata
 
+# the boat VM pools of the Harbor agentic path (``close_pools_now``, also used by .harbor_rollout)
+BOAT_POOL_MODULE = "yeto.rl.harness.harbor.boat_pool"
 
 def _flat(group: Any) -> list[Any]:
     out: list[Any] = []
@@ -92,6 +94,24 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
         cursor, _ = data_cursor(self.data_source)
         await asyncio.to_thread(self._write, input.rollout_id, output.samples, cursor)
         return output
+
+    async def dispose(self) -> None:
+        """Miles calls this at ``RolloutExecutor.dispose()`` (the island's end). The
+        Harbor agentic path leases boat VMs in this process; trials that are still
+        suspended between rounds (a convertible node keeps them through its trainer
+        stints) hold theirs. Delete them here, as :mod:`.harbor_rollout` does for
+        the stock rollout function; otherwise they live until their boat TTL."""
+        import sys
+
+        try:
+            await super().dispose()
+        finally:
+            pools = sys.modules.get(BOAT_POOL_MODULE)  # imported only by a Harbor trial
+            if pools is not None:
+                deleted = await asyncio.to_thread(pools.close_pools_now)
+                if deleted:
+                    print(f"[sample-buffer] boat pool: deleted {deleted} VM(s) at rollout dispose",
+                          flush=True)
 
     def _write(self, rollout_id: int, groups: list[Any], cursor: dict[str, int] | None) -> None:
         finished = []
