@@ -323,6 +323,10 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     zmq = tmp_path / patch_verl.ZMQ_TARGET
     zmq.parent.mkdir(parents=True, exist_ok=True)
     zmq.write_text("".join("def g(self):\n" + anchor + "        pass\n" for _t, anchor, *_r in patch_verl.ZMQ_SUB))
+    # S27 G-EQ2: the auto-class patch (its own file)
+    auto = tmp_path / patch_verl.AUTO_CLASS[0]
+    auto.parent.mkdir(parents=True, exist_ok=True)
+    auto.write_text("def h(hf_config):\n" + patch_verl.AUTO_CLASS[1] + "    return auto_class\n")
     patch_verl.apply(tmp_path)
     patch_verl.apply(tmp_path)  # idempotent
     text = target.read_text()

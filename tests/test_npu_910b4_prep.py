@@ -535,3 +535,36 @@ def test_fsdp_offload_is_selectable(monkeypatch):
     for value in ("param", "optimizer", "both"):
         args, _ = island_entry.parse_args([*base, "--rl-fsdp-offload", value])
         assert args.rl_fsdp_offload == value
+
+
+def test_verl_auto_class_patch_prefers_the_architecture_task():
+    """S27 G-EQ2: verl walks the checkpoint's auto_map and takes the first key that
+    mentions architectures[0]. Nemotron-3 Nano maps AutoModel to its CausalLM class,
+    so verl built the base model and the first training step raised
+    "'BaseModelOutputWithPast' object has no attribute 'logits'"."""
+    from yeto.rl.adapters.verl import patch_verl
+
+    assert patch_verl.AUTO_CLASS in patch_verl.PROFILES["fsdp"]
+    assert patch_verl.AUTO_CLASS in patch_verl.PROFILES["megatron"]
+    target, anchor, hook, mode = patch_verl.AUTO_CLASS
+    assert target == "verl/utils/model.py" and mode == "replace"
+    # the hook replaces the first-match walk, so the anchor must not survive
+    assert "next(k for k, v in hf_config.auto_map.items()" in anchor
+    body = "\n".join(line[8:] for line in hook.splitlines())  # the hook is indented inside verl
+    picked = {}
+
+    def run(architectures, auto_map):
+        ns = {"hf_config": SimpleNamespace(architectures=architectures, auto_map=auto_map)}
+        exec(body, ns)  # noqa: S102 - the patch body under test
+        return ns["auto_class"]
+
+    nano = {"AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+            "AutoModel": "modeling_nemotron_h.NemotronHForCausalLM",
+            "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"}
+    picked["nano"] = run(["NemotronHForCausalLM"], nano)
+    assert picked["nano"] == "AutoModelForCausalLM"
+    # a checkpoint that really is a backbone keeps the first match
+    assert run(["SomeBackbone"], {"AutoModel": "modeling_x.SomeBackbone"}) == "AutoModel"
+    # a vision-to-sequence checkpoint keeps its own task key
+    v2s = {"AutoModelForVision2Seq": "modeling_y.YForVision2Seq"}
+    assert run(["YForVision2Seq"], v2s) == "AutoModelForVision2Seq"

@@ -145,6 +145,36 @@ ZMQ_WAIT_HOOK = "        time.sleep(1.0)  # yeto S27 G-DC: let the subscription 
 ZMQ_SUB = ((ZMQ_TARGET, ZMQ_REUSE_ANCHOR, ZMQ_REUSE_HOOK, "replace"),
            (ZMQ_TARGET, ZMQ_WAIT_ANCHOR, ZMQ_WAIT_HOOK, "after"))
 
+# Seventh patch (S27 G-EQ2, local, not pushed; every profile): verl picks the HF auto
+# class by walking the checkpoint's ``auto_map`` and taking the FIRST key whose value
+# mentions ``architectures[0]``. Nemotron-3 Nano's auto_map is
+#   {"AutoConfig": ..., "AutoModel": "modeling_nemotron_h.NemotronHForCausalLM",
+#    "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"}
+# so the first match is "AutoModel" and verl builds NemotronHModel -- the base model.
+# The island then dies twice over: NemotronHModel refuses gradient checkpointing, and
+# its forward returns BaseModelOutputWithPast, so verl's
+# ``prepare_model_outputs`` raises "'BaseModelOutputWithPast' object has no attribute
+# 'logits'" on the first training step (npu1, 19:26Z). The patch prefers the auto_map
+# entry whose key matches the architecture suffix (``...ForCausalLM`` ->
+# "AutoModelForCausalLM") and only then falls back to the first match.
+AUTO_CLASS_TARGET = "verl/utils/model.py"
+AUTO_CLASS_ANCHOR = (
+    '        auto_class = next(k for k, v in hf_config.auto_map.items() '
+    'if hf_config.architectures[0] in v)\n'
+)
+AUTO_CLASS_HOOK = (
+    "        # yeto S27 G-EQ2: prefer the auto_map key that matches the architecture's\n"
+    "        # task suffix; a first-match walk picks AutoModel for Nemotron-H (base model).\n"
+    "        _yeto_matches = [k for k, v in hf_config.auto_map.items()\n"
+    "                         if hf_config.architectures[0] in v]\n"
+    "        _yeto_task = \"AutoModel\" + hf_config.architectures[0].split(\"For\", 1)[1] \\\n"
+    "            if \"For\" in hf_config.architectures[0] else None\n"
+    "        auto_class = (\"AutoModelFor\" + hf_config.architectures[0].split(\"For\", 1)[1]\n"
+    "                      if _yeto_task and (\"AutoModelFor\" + hf_config.architectures[0].split(\"For\", 1)[1])\n"
+    "                      in _yeto_matches else _yeto_matches[0])\n"
+)
+AUTO_CLASS = (AUTO_CLASS_TARGET, AUTO_CLASS_ANCHOR, AUTO_CLASS_HOOK, "replace")
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
 # "before" in front of it, "replace" substitutes it.
 READBACK = (TARGET, ANCHOR, HOOK, "after")
@@ -158,7 +188,8 @@ PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB), "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB)}
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS),
+            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
