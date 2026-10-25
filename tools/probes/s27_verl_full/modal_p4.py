@@ -371,11 +371,20 @@ def s27_h200_containers() -> tuple[int, str]:
     return cards, listing.stdout
 
 
+def _failed(result: Any) -> bool:
+    return not isinstance(result, dict) or "error" in result or result.get("rc") not in (0, None)
+
+
 def _wait_calls(calls: dict, deadline: float, log: Path) -> dict[str, Any]:
+    """Results of ``calls``; stops waiting at ``deadline`` or as soon as one
+    island failed (the syncer and the other island would only wait for it)."""
     import modal
 
     results: dict[str, Any] = {}
     while len(results) < len(calls) and time.time() < deadline:
+        if any(name.startswith("island") and _failed(result) for name, result in results.items()):
+            _log(log, "an island failed: stop waiting")
+            break
         for name, call in calls.items():
             if name in results:
                 continue
@@ -389,7 +398,7 @@ def _wait_calls(calls: dict, deadline: float, log: Path) -> dict[str, Any]:
                 _log(log, f"{name} failed: {results[name]['error']}")
         time.sleep(10)
     for name in calls:
-        results.setdefault(name, {"error": "watchdog: hard stop before the call returned"})
+        results.setdefault(name, {"error": "watchdog: stopped before the call returned"})
     return results
 
 
