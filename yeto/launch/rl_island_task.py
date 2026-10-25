@@ -607,20 +607,7 @@ def make_miles_island_task(
         workdir=code_workdir(args),
         file_mounts=file_mounts or None,
     )
-    resources = {
-        "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
-        "accelerators": spec.accelerators,
-        "cpus": rl_island_cpus(args, spec.cloud),
-        "instance_type": args.learner_instance_type,
-        "use_spot": args.spot,
-        "disk_size": args.disk_size,
-    }
-    if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
-        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
-    if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
-        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
-        if tier:
-            resources["network_tier"] = tier
+    resources = island_sky_resources(args, spec, in_vm_docker=in_vm_docker)
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
     storage_mounts = {}
@@ -653,6 +640,26 @@ def make_miles_island_task(
     if storage_mounts:
         task.set_storage_mounts(storage_mounts)
     return task
+
+
+def island_sky_resources(args, spec, *, in_vm_docker: bool) -> dict:
+    """``sky.Resources`` fields of an island cluster of shape ``spec``. A two-cluster
+    island (yeto.launch.engine_cluster) builds one set per cluster with this rule."""
+    resources = {
+        "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
+        "accelerators": spec.accelerators,
+        "cpus": rl_island_cpus(args, spec.cloud),
+        "instance_type": args.learner_instance_type,
+        "use_spot": args.spot,
+        "disk_size": args.disk_size,
+    }
+    if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
+        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
+    if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources["network_tier"] = tier
+    return resources
 
 
 STORE_CLIENT_SETUP = (

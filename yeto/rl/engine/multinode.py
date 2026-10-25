@@ -745,3 +745,38 @@ def stale_incarnation_rejection(baseline_flat: Sequence[str] | None, observed_fl
         return ("old incarnation(s) still hold GPU(s) " + ", ".join(f"{u}@{inc}" for u, inc in stale)
                 + "; a new incarnation must not re-enter on them: run `yeto down` first")
     return None
+
+
+# S27 G-DI two-cluster island (yeto.launch.engine_cluster): the engine cluster's nodes
+# join the trainer cluster's Ray head after both clusters finished setup, possibly long
+# after the driver started. With this variable (seconds) the driver waits for every
+# island node before the head pin, the remote-code prewarm and the placement group.
+# Unset (every other island): no wait, unchanged.
+ISLAND_NODE_WAIT_ENV = "YETO_ISLAND_NODE_WAIT_S"
+
+
+def wait_for_island_nodes(nodes: int, *, environ: Mapping[str, str], ray_nodes: Any,
+                          clock: Any, sleep: Any, log: Any = print,
+                          poll_s: float = 10.0) -> dict[str, Any] | None:
+    """Wait until ``nodes`` alive Ray nodes with GPUs are in the island's Ray.
+
+    Returns None without ``ISLAND_NODE_WAIT_ENV``; else ``{"nodes", "waited_s"}``.
+    Raises RuntimeError at the deadline (fail closed: a placement group asking for
+    the missing node's GPUs would stay pending forever)."""
+    raw = environ.get(ISLAND_NODE_WAIT_ENV)
+    if not raw:
+        return None
+    timeout = float(raw)
+    start = clock()
+    while True:
+        alive = [n for n in ray_nodes()
+                 if n.get("Alive") and float((n.get("Resources") or {}).get("GPU", 0) or 0) > 0]
+        waited = clock() - start
+        if len(alive) >= nodes:
+            log(f"[rl] island Ray has {len(alive)}/{nodes} GPU nodes after {waited:.0f}s")
+            return {"nodes": len(alive), "waited_s": round(waited, 1)}
+        if waited >= timeout:
+            raise RuntimeError(f"island Ray has {len(alive)} of {nodes} GPU nodes after "
+                               f"{waited:.0f}s ({ISLAND_NODE_WAIT_ENV}={raw}); the engine "
+                               "cluster never joined")
+        sleep(poll_s)
