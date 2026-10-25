@@ -4017,7 +4017,9 @@ async fn scheduler(
                 }
             }
             Some(CatchUpStep::Done(done)) => {
-                if !finish_catch_up(&cfg, &st, &registry, &done.group, done.tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await {
+                if !finish_catch_up(&cfg, &st, &registry, &done.group, done.tail, &st.versions, dynamic, &mut inflight, fixed_roster, &budget_cutoff)
+                    .await
+                {
                     cutoff_established = true;
                     break 'outer;
                 }
@@ -4025,7 +4027,8 @@ async fn scheduler(
         }
         // S27 G-EL: background resends (catch-ups and recovery replays sent by
         // a forwarder task per learner). The scheduler only checks which ones
-        // are drained and runs their tails here.
+        // have handed over the versions they owed (S27 G-EY) and runs their
+        // tails here.
         for member in resends.drop_superseded(&registry) {
             warn!(
                 learner_id = member.learner_id,
@@ -4033,14 +4036,15 @@ async fn scheduler(
                 "superseded learner resend dropped"
             );
         }
-        for done in resends.take_drained(&registry) {
-            let finished = match done.tail {
-                ResendTail::CatchUp(tail) => {
-                    finish_catch_up(&cfg, &st, &registry, &done.group, tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await
+        for due in resends.take_due(&registry, &st) {
+            let finished = match due {
+                DueTail::CatchUp { group, tail, floor } => {
+                    finish_catch_up(&cfg, &st, &registry, &group, tail, &floor, dynamic, &mut inflight, fixed_roster, &budget_cutoff)
+                        .await
                 }
-                ResendTail::Recovery { replayed } => {
+                DueTail::Recovery { group, replayed } => {
                     finish_recovery_replay(
-                        &cfg, &st, &registry, &mut recovery, &done.group, replayed, dynamic, &mut inflight, fixed_roster, &budget_cutoff,
+                        &cfg, &st, &registry, &mut recovery, &group, replayed, dynamic, &mut inflight, fixed_roster, &budget_cutoff,
                     )
                     .await
                 }
@@ -4468,9 +4472,10 @@ async fn scheduler(
                         }
                     };
                     if background_resend {
-                        // S27 G-EL: a forwarder task sends the replay; merges go on
-                        // and offer it every newer version until it is drained,
-                        // then the tail promotes the island (`take_drained`).
+                        // S27 G-EL: a forwarder task sends the replay while merges go
+                        // on. Once the replayed versions are handed over, the tail
+                        // promotes the island (`take_due`, S27 G-EY); the versions
+                        // published meanwhile follow on the same forwarder.
                         resends.start(&registry, &st, member, group, replay.iter().copied(),
                                       ResendTail::Recovery { replayed: replay.len() });
                         continue;
@@ -6748,7 +6753,10 @@ const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// S27 G-EL: one learner connection whose catch-up or recovery replay a
 /// forwarder task sends (`resend.rs`). Publications offer it every newer
-/// version (no await) instead of sending to it inline.
+/// version (no await) instead of sending to it inline. S27 G-EY: the
+/// versions owed at the start are targets; the tail runs once they are
+/// handed over, and the forwarder then keeps sending newer versions until
+/// nothing is pending.
 struct ResendConn {
     group: Arc<Group>,
     dtype: u8,
@@ -6762,6 +6770,8 @@ struct ResendState {
     pending: crate::resend::Pending,
     /// A fragment was popped and is not yet in the writer queues.
     in_flight: bool,
+    /// That fragment met a target when it was popped.
+    target_in_flight: bool,
     /// The forwarder ended (stopped, or its stream failed: `error`).
     ended: bool,
     error: Option<String>,
@@ -6780,10 +6790,54 @@ impl ResendConn {
         }
     }
 
+    /// Offer the current value of each fragment in `fragments` and make every
+    /// pending entry a target. Returns (offered fragments, their bytes).
+    fn owe(&self, st: &GlobalState, fragments: impl IntoIterator<Item = usize>) -> (usize, usize) {
+        let (mut count, mut bytes) = (0usize, 0usize);
+        {
+            let mut state = self.state.lock().unwrap();
+            for p in fragments {
+                if p < st.params.len() && state.pending.offer(p, st.versions[p], st.params[p].clone()) {
+                    count += 1;
+                    bytes += tensor_nbytes(self.dtype, st.params[p].len()).unwrap_or(0);
+                }
+            }
+            state.pending.require_pending();
+        }
+        self.notify.notify_one();
+        (count, bytes)
+    }
+
+    /// Make the versions still pending targets, so they go out before any
+    /// later publication (the recovery tail names them in RECOVERY_DONE).
+    fn owe_pending(&self) {
+        self.state.lock().unwrap().pending.require_pending();
+    }
+
+    /// Every target is in the writer queues, or the forwarder ended.
+    fn caught_up(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.ended || (state.pending.unmet() == 0 && !state.target_in_flight)
+    }
+
     /// Every offered version is in the writer queues, or the forwarder ended.
     fn drained(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.ended || (state.pending.is_empty() && !state.in_flight)
+    }
+
+    /// `current` with each fragment that still has a newer version pending
+    /// lowered to the version already handed over (0: none): what the
+    /// learner is sure to receive before anything else this forwarder sends.
+    fn handed_over(&self, current: &[u64]) -> Vec<u64> {
+        let state = self.state.lock().unwrap();
+        let mut versions = current.to_vec();
+        for (p, version) in versions.iter_mut().enumerate() {
+            if state.pending.is_pending(p) {
+                *version = state.pending.sent(p).unwrap_or(0);
+            }
+        }
+        versions
     }
 }
 
@@ -6796,8 +6850,10 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
         }
         let next = {
             let mut state = conn.state.lock().unwrap();
+            let unmet = state.pending.unmet();
             let next = state.pending.pop();
             state.in_flight = next.is_some();
+            state.target_in_flight = state.pending.unmet() < unmet;
             next
         };
         let Some((p, version, values)) = next else {
@@ -6816,6 +6872,7 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
         drop(values);
         let mut state = conn.state.lock().unwrap();
         state.in_flight = false;
+        state.target_in_flight = false;
         match result {
             Ok(()) => {
                 state.sent += 1;
@@ -6829,10 +6886,11 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
     }
     let mut state = conn.state.lock().unwrap();
     state.in_flight = false;
+    state.target_in_flight = false;
     state.ended = true;
 }
 
-/// What a drained background resend still owes its learner.
+/// What a caught-up background resend still owes its learner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResendTail {
     /// Rejoin catch-up: the same tail as an inline `CatchUps` entry.
@@ -6846,9 +6904,19 @@ struct BulkResend {
     group: Arc<Group>,
     conn: Arc<ResendConn>,
     task: tokio::task::JoinHandle<()>,
-    tail: ResendTail,
+    /// The tail still owed; None once it ran (the forwarder then sends the
+    /// versions published meanwhile until nothing is pending).
+    tail: Option<ResendTail>,
     started: Instant,
     fragments: usize,
+}
+
+/// The tail of a background resend whose targets are handed over.
+enum DueTail {
+    /// `floor`: the versions handed over, recorded as the learner's catch-up
+    /// versions (`finish_catch_up`).
+    CatchUp { group: Arc<Group>, tail: CatchUpTail, floor: Vec<u64> },
+    Recovery { group: Arc<Group>, replayed: usize },
 }
 
 /// The background resends owned by the scheduler. Like `CatchUps`, a
@@ -6866,13 +6934,16 @@ impl BulkResends {
         self.entries.is_empty()
     }
 
+    /// The learner still owes a tail (it joins no new round meanwhile).
     fn holds(&self, member: Member) -> bool {
-        self.entries.iter().any(|entry| entry.member == member)
+        self.entries.iter().any(|entry| entry.member == member && entry.tail.is_some())
     }
 
     /// Offer the current value of every fragment in `fragments` to a new
-    /// forwarder of `member` (the pending publication must be durable).
-    /// A second catch-up for the same generation only adds its tail.
+    /// forwarder of `member` (the pending publication must be durable); those
+    /// versions are its targets. A second catch-up for the same generation
+    /// offers its fragments too, makes every version still pending a target
+    /// and adds its tail (or owes that tail again when the first one ran).
     fn start(
         &mut self,
         registry: &Registry,
@@ -6883,30 +6954,31 @@ impl BulkResends {
         tail: ResendTail,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.member == member) {
-            if let (ResendTail::CatchUp(existing), ResendTail::CatchUp(more)) = (&mut entry.tail, tail) {
-                existing.rejoin |= more.rejoin;
-                existing.rebind |= more.rebind;
+            let ResendTail::CatchUp(more) = tail else { return };
+            match &mut entry.tail {
+                Some(ResendTail::CatchUp(existing)) => {
+                    existing.rejoin |= more.rejoin;
+                    existing.rebind |= more.rebind;
+                }
+                Some(ResendTail::Recovery { .. }) => return,
+                None => entry.tail = Some(tail),
             }
+            entry.conn.owe(st, fragments);
             return;
         }
         let dtype = bulk_dtype(st.wire_dtype);
-        let mut pending = crate::resend::Pending::new(st.params.len());
-        let mut count = 0usize;
-        let mut bytes = 0usize;
-        for p in fragments {
-            if p < st.params.len() && pending.offer(p, st.versions[p], st.params[p].clone()) {
-                count += 1;
-                bytes += tensor_nbytes(dtype, st.params[p].len()).unwrap_or(0);
-            }
-        }
         let (stop, stop_rx) = tokio::sync::watch::channel(false);
         let conn = Arc::new(ResendConn {
             group: group.clone(),
             dtype,
-            state: Mutex::new(ResendState { pending, ..ResendState::default() }),
+            state: Mutex::new(ResendState {
+                pending: crate::resend::Pending::new(st.params.len()),
+                ..ResendState::default()
+            }),
             notify: tokio::sync::Notify::new(),
             stop,
         });
+        let (count, bytes) = conn.owe(st, fragments);
         registry.lock().unwrap().resends.insert(member, conn.clone());
         let task = tokio::spawn(resend_forwarder(conn.clone(), stop_rx));
         info!(
@@ -6917,19 +6989,29 @@ impl BulkResends {
             kind = ?tail,
             "background resend started"
         );
-        self.entries.push(BulkResend { member, group, conn, task, tail, started: Instant::now(), fragments: count });
+        self.entries.push(BulkResend {
+            member,
+            group,
+            conn,
+            task,
+            tail: Some(tail),
+            started: Instant::now(),
+            fragments: count,
+        });
     }
 
     /// Stop and drop the resends whose learner is no longer the generation
-    /// they were started for (no tail runs); returns those learners.
+    /// they were started for (no tail runs); returns those learners. Before
+    /// its tail a recovery replay belongs to the recovering generation;
+    /// otherwise a resend belongs to the current one.
     fn drop_superseded(&mut self, registry: &Registry) -> Vec<Member> {
         let mut dropped = Vec::new();
         {
             let mut registry = registry.lock().unwrap();
             self.entries.retain(|entry| {
                 let keep = match entry.tail {
-                    ResendTail::CatchUp(_) => registry.current.get(&entry.member.learner_id) == Some(&entry.member),
-                    ResendTail::Recovery { .. } => registry.is_recovering(entry.member),
+                    Some(ResendTail::Recovery { .. }) => registry.is_recovering(entry.member),
+                    _ => registry.current.get(&entry.member.learner_id) == Some(&entry.member),
                 };
                 if !keep {
                     let _ = entry.conn.stop.send(true);
@@ -6942,14 +7024,56 @@ impl BulkResends {
         dropped
     }
 
-    /// Remove the drained resends (their learners get publications inline
-    /// again) and return them, oldest first, for their tails.
-    fn take_drained(&mut self, registry: &Registry) -> Vec<BulkResend> {
-        let mut drained = Vec::new();
+    /// Take the tails whose targets are handed over (oldest resend first),
+    /// and remove the resends with nothing pending after their tail (their
+    /// learners get publications inline again).
+    fn take_due(&mut self, registry: &Registry, st: &GlobalState) -> Vec<DueTail> {
+        let mut due = Vec::new();
         let mut registry = registry.lock().unwrap();
         let mut i = 0;
         while i < self.entries.len() {
-            if !self.entries[i].conn.drained() {
+            let entry = &mut self.entries[i];
+            if let Some(tail) = entry.tail {
+                if !entry.conn.caught_up() {
+                    i += 1;
+                    continue;
+                }
+                entry.tail = None;
+                let group = entry.group.clone();
+                due.push(match tail {
+                    ResendTail::CatchUp(tail) => {
+                        DueTail::CatchUp { group, tail, floor: entry.conn.handed_over(&st.versions) }
+                    }
+                    ResendTail::Recovery { replayed } => {
+                        // RECOVERY_DONE names the current versions: send the
+                        // ones still pending before any later publication.
+                        entry.conn.owe_pending();
+                        DueTail::Recovery { group, replayed }
+                    }
+                });
+                let state = entry.conn.state.lock().unwrap();
+                match &state.error {
+                    None => info!(
+                        learner_id = entry.member.learner_id,
+                        generation = entry.member.generation,
+                        fragments = entry.fragments,
+                        sent = state.sent,
+                        bytes = state.bytes,
+                        pending = state.pending.len(),
+                        seconds = entry.started.elapsed().as_secs_f64(),
+                        "background resend caught up; its tail runs"
+                    ),
+                    Some(error) => warn!(
+                        learner_id = entry.member.learner_id,
+                        generation = entry.member.generation,
+                        sent = state.sent,
+                        %error,
+                        "background resend ended early; its tail still runs"
+                    ),
+                }
+                drop(state);
+            }
+            if !entry.conn.drained() {
                 i += 1;
                 continue;
             }
@@ -6957,8 +7081,8 @@ impl BulkResends {
             registry.resends.remove(&entry.member);
             let _ = entry.conn.stop.send(true);
             let state = entry.conn.state.lock().unwrap();
-            match &state.error {
-                None => info!(
+            if state.error.is_none() {
+                info!(
                     learner_id = entry.member.learner_id,
                     generation = entry.member.generation,
                     fragments = entry.fragments,
@@ -6967,19 +7091,10 @@ impl BulkResends {
                     coalesced = state.pending.coalesced,
                     seconds = entry.started.elapsed().as_secs_f64(),
                     "background resend drained"
-                ),
-                Some(error) => warn!(
-                    learner_id = entry.member.learner_id,
-                    generation = entry.member.generation,
-                    sent = state.sent,
-                    %error,
-                    "background resend ended early; its tail still runs"
-                ),
+                );
             }
-            drop(state);
-            drained.push(entry);
         }
-        drained
+        due
     }
 
     /// End of the round loop: every forwarder hands over the fragment it is
@@ -7008,7 +7123,12 @@ impl BulkResends {
 }
 
 /// Tail of a finished rejoin catch-up (inline `CatchUps` or background
-/// resend). False when the budget cutoff was established.
+/// resend). `floor`: the fragment versions the learner was caught up to; a
+/// re-JOINed learner's push on an older base is fenced. The inline path
+/// passes the current versions (every one is in the writer queues); a
+/// background resend passes the versions its forwarder has handed over,
+/// which are older for fragments republished since (S27 G-EY). False when
+/// the budget cutoff was established.
 #[allow(clippy::too_many_arguments)]
 async fn finish_catch_up(
     cfg: &Config,
@@ -7016,6 +7136,7 @@ async fn finish_catch_up(
     registry: &Registry,
     group: &Arc<Group>,
     tail: CatchUpTail,
+    floor: &[u64],
     dynamic: bool,
     inflight: &mut [Round],
     fixed_roster: bool,
@@ -7026,7 +7147,7 @@ async fn finish_catch_up(
             .lock()
             .unwrap()
             .membership
-            .record_catch_up(group.member, &st.versions);
+            .record_catch_up(group.member, floor);
         if dynamic {
             append_pool_record(
                 cfg.event_tape.as_deref(),
@@ -8746,14 +8867,35 @@ mod tests {
         )
     }
 
+    /// Poll `take_due` (as the scheduler does) until it returns a tail or
+    /// `ready` holds.
+    async fn poll_due(
+        resends: &mut BulkResends,
+        registry: &Registry,
+        st: &GlobalState,
+        ready: impl Fn(&BulkResends) -> bool,
+    ) -> Vec<DueTail> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let due = resends.take_due(registry, st);
+            if !due.is_empty() || ready(resends) || Instant::now() > deadline {
+                return due;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     /// S27 G-EL: the scheduler only offers; a forwarder sends at the link's
-    /// pace. A version published while the link is full replaces the pending
-    /// one, and the resend is drained only once every offer is handed over.
+    /// pace, and a version published while the link is full replaces the
+    /// pending one. S27 G-EY: the tail runs once the versions owed at the
+    /// start are handed over, although a later publication is still pending;
+    /// the learner stays on its forwarder (publications are offered to it)
+    /// until nothing is pending.
     #[tokio::test]
-    async fn background_resend_follows_a_slow_link_and_ends_at_the_newest_versions() {
+    async fn background_resend_tail_runs_at_the_start_versions_and_later_ones_follow() {
         let mut st = resend_test_state(3);
         let learner = member(1, 7);
-        // Queue of one frame: the second fragment waits for the reader.
+        // Queue of one frame: each further fragment waits for the reader.
         let (control, mut frames) = mpsc::channel(1);
         let group = test_group_with_control(learner, control);
         let registry = registry_with_group(group.clone());
@@ -8761,33 +8903,97 @@ mod tests {
         resends.start(&registry, &st, learner, group.clone(), 0..3, ResendTail::Recovery { replayed: 3 });
         assert!(resends.holds(learner) && registry.lock().unwrap().resends.contains_key(&learner));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(resends.take_drained(&registry).is_empty(), "the link has taken one fragment only");
-        // A merge of fragment 2 is published meanwhile (publish_round offers it).
+        assert!(resends.take_due(&registry, &st).is_empty(), "the link has taken one fragment only");
+        // Merges publish fragment 2 (still owed: its pending entry gets the
+        // newer version) and fragment 0 (already handed over at version 0).
+        let conn = registry.lock().unwrap().resends[&learner].clone();
         st.versions[2] = 5;
         st.params[2] = Arc::new(vec![9.0; 4]);
-        let conn = registry.lock().unwrap().resends[&learner].clone();
         conn.offer(2, st.versions[2], st.params[2].clone());
+        st.versions[0] = 6;
+        st.params[0] = Arc::new(vec![8.0; 4]);
+        conn.offer(0, st.versions[0], st.params[0].clone());
         let mut got = Vec::new();
+        for _ in 0..2 {
+            got.push(resent_fragment(&frames.recv().await.unwrap()));
+        }
+        assert_eq!(got, vec![(0, 0, 0.0), (1, 0, 1.0)]);
+        // Fragment 2's version 5 is in the queue and fragment 0's version 6
+        // waits for the reader: every owed version is handed over.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::Recovery { replayed: 3, .. }]));
+        assert!(!resends.holds(learner), "the learner joins rounds again after its tail");
+        assert!(registry.lock().unwrap().resends.contains_key(&learner), "it keeps its forwarder");
+        // After its tail the resend belongs to the current generation (the
+        // promoted island), no longer to the recovering one.
+        assert!(resends.drop_superseded(&registry).is_empty());
+        // A later publication still goes to the forwarder.
+        st.versions[1] = 8;
+        st.params[1] = Arc::new(vec![7.0; 4]);
+        conn.offer(1, st.versions[1], st.params[1].clone());
         for _ in 0..3 {
             got.push(resent_fragment(&frames.recv().await.unwrap()));
         }
-        assert_eq!(got, vec![(0, 0, 0.0), (1, 0, 1.0), (2, 5, 9.0)]);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let drained = loop {
-            let drained = resends.take_drained(&registry);
-            if !drained.is_empty() || Instant::now() > deadline {
-                break drained;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].tail, ResendTail::Recovery { replayed: 3 });
+        assert_eq!(got[2..], [(2, 5, 9.0), (0, 6, 8.0), (1, 8, 7.0)]);
+        // Nothing pending: the resend is removed (publications go inline) and
+        // no second tail runs.
+        assert!(poll_due(&mut resends, &registry, &st, BulkResends::is_empty).await.is_empty());
         assert!(resends.is_empty() && !registry.lock().unwrap().resends.contains_key(&learner));
-        let state = drained[0].conn.state.lock().unwrap();
-        assert_eq!((state.sent, state.pending.coalesced, state.error.is_none()), (3, 1, true));
+        let state = conn.state.lock().unwrap();
+        assert_eq!((state.sent, state.pending.coalesced, state.error.is_none()), (5, 1, true));
         drop(state);
-        // Nothing else was sent: the stale version 0 of fragment 2 never went out.
+        // The stale version 0 of fragment 2 never went out.
         assert!(frames.try_recv().is_err());
+    }
+
+    /// S27 G-EY: a catch-up tail records, as the learner's catch-up floor,
+    /// the versions handed over (older than the current ones where a newer
+    /// version is still pending). A second catch-up after the tail ran owes
+    /// its tail again; after its tail a resend belongs to the current
+    /// generation.
+    #[tokio::test]
+    async fn background_catch_up_floor_second_tail_and_owner_after_the_tail() {
+        let mut st = resend_test_state(3);
+        let learner = member(3, 4);
+        let (control, mut frames) = mpsc::channel(1);
+        let group = test_group_with_control(learner, control);
+        let registry = registry_with_group(group.clone());
+        let mut resends = BulkResends::new();
+        resends.start(&registry, &st, learner, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
+        let conn = registry.lock().unwrap().resends[&learner].clone();
+        let mut publish = |st: &mut GlobalState, p: usize, version: u64| {
+            st.versions[p] = version;
+            st.params[p] = Arc::new(vec![version as f32; 4]);
+            conn.offer(p, version, st.params[p].clone());
+        };
+        // Fragment 0 is in the queue; fragment 1 waits for the reader.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Fragment 2 is not owed; fragment 0 was handed over at version 0.
+        publish(&mut st, 2, 2);
+        publish(&mut st, 0, 3);
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (0, 0, 0.0));
+        // Fragment 1 (owed) is in the queue; fragment 2 is sent next and
+        // fragment 0's version 3 still waits.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        let [DueTail::CatchUp { tail, floor, .. }] = due.as_slice() else { panic!("one catch-up tail") };
+        assert_eq!((*tail, &floor[..2]), (CatchUpTail::REJOIN, &[0, 0][..]));
+        assert!(!resends.holds(learner) && resends.drop_superseded(&registry).is_empty());
+        // The disconnect of an older generation asks for a rebind: the
+        // versions still pending are owed again.
+        resends.start(&registry, &st, learner, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REBIND));
+        assert!(resends.holds(learner));
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (1, 0, 1.0));
+        publish(&mut st, 1, 4);
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (2, 2, 2.0));
+        // Fragment 0's version 3 is in the queue; fragment 1's version 4 is
+        // not owed and waits for the reader.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::CatchUp { tail: CatchUpTail::REBIND, .. }]));
+        assert!(!resends.is_empty() && !resends.holds(learner));
+        // A newer generation now owns the learner: the resend is dropped.
+        registry.lock().unwrap().register_group(test_group(member(3, 5)), Instant::now()).unwrap();
+        assert_eq!(resends.drop_superseded(&registry), vec![learner]);
+        assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
     }
 
     /// A catch-up for a generation that is no longer current is stopped
@@ -8804,7 +9010,7 @@ mod tests {
         resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
         resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REBIND));
         assert_eq!(resends.entries.len(), 1);
-        assert_eq!(resends.entries[0].tail, ResendTail::CatchUp(CatchUpTail { rejoin: true, rebind: true }));
+        assert_eq!(resends.entries[0].tail, Some(ResendTail::CatchUp(CatchUpTail { rejoin: true, rebind: true })));
         assert!(resends.drop_superseded(&registry).is_empty());
         let newer = member(2, 2);
         registry.lock().unwrap().register_group(test_group(newer), Instant::now()).unwrap();
@@ -8812,21 +9018,17 @@ mod tests {
         assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
         drop(frames);
 
-        // Closed link: the forwarder ends with the error; the resend is drained.
+        // Closed link: the forwarder ends with the error; the tail is due and
+        // the resend is removed.
         let (control, frames) = mpsc::channel(1);
         drop(frames);
         let group = test_group_with_control(newer, control);
         resends.start(&registry, &st, newer, group, 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let drained = loop {
-            let drained = resends.take_drained(&registry);
-            if !drained.is_empty() || Instant::now() > deadline {
-                break drained;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
-        assert_eq!(drained.len(), 1);
-        assert!(drained[0].conn.state.lock().unwrap().error.is_some());
+        let conn = registry.lock().unwrap().resends[&newer].clone();
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::CatchUp { tail: CatchUpTail::REJOIN, .. }]));
+        assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
+        assert!(conn.state.lock().unwrap().error.is_some());
     }
 
     #[tokio::test]
