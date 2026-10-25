@@ -590,11 +590,22 @@ def _nemotron_h_recipe():
     return backends.module("nemotron_h_recipe", backends.DEFAULT_BACKEND)
 
 
-def _rules():
-    """Backend-specific checks of the run (decoupling 4.2): Miles -> adapters/miles/run_config_rules."""
+def _rules(backend: str | None = None):
+    """Backend-specific checks of the run (decoupling 4.2) of the selected backend.
+
+    ``backend`` is the run's ``--rl-backend`` (``args.rl_backend``); unset means
+    the default backend (Miles -> adapters/miles/run_config_rules).  The
+    environment (``$YETO_RL_BACKEND``) is not read: the rules follow the run's
+    arguments only, so a Miles island never picks up another backend's rules.
+    """
     from . import backends
 
-    return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
+    return backends.module("run_config_rules", backend or backends.DEFAULT_BACKEND)
+
+
+def _backend_of(args) -> str | None:
+    """The run's ``--rl-backend`` (None when the arguments do not name one)."""
+    return getattr(args, "rl_backend", None)
 
 
 def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
@@ -656,7 +667,7 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
 
 def _resolve_ref_load(args, model_path) -> str:
     """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
-    return _rules().resolve_ref_load(args, model_path)
+    return _rules(_backend_of(args)).resolve_ref_load(args, model_path)
 
 
 def _validate_callable_spec(spec: str) -> None:
@@ -738,7 +749,7 @@ def resolve_rl_run_config(
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
     context_parallel = int(getattr(args, "context_parallel", 1) or 1)
     model_parallel = tensor_parallel * pipeline_parallel * context_parallel
-    rules = _rules()
+    rules = _rules(_backend_of(args))
     rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
     if context_parallel < 1 or actor_gpus % model_parallel:
         raise ValueError("trainer world must be divisible by TP*PP*CP")
