@@ -46,17 +46,29 @@ def _island_dir(run_dir: Path, learner_id: int) -> Path | None:
     return hits[0] if hits else None
 
 
+def _latest(base: Path, name: str) -> Path:
+    """``name`` of the island's last container: a relaunched island's k-th
+    container mirrors its files as ``<stem>.inc<k><suffix>`` (modal_runner
+    TapeSync); its tape also holds the earlier containers' records (S27 G-EC,
+    s27-ec-a). Without relaunches this is ``base / name``."""
+    stem, dot, suffix = name.rpartition(".")
+    relaunched = sorted(base.glob(f"{stem}.inc*{dot}{suffix}"),
+                        key=lambda p: int(re.search(r"\.inc(\d+)\.", p.name).group(1))
+                        if re.search(r"\.inc(\d+)\.", p.name) else 0)
+    return relaunched[-1] if relaunched else base / name
+
+
 def island_facts(run_dir: Path, learner_id: int) -> dict:
     base = _island_dir(run_dir, learner_id)
     if base is None:
         return {"present": False}
-    tape = _jsonl(base / f"rl-island-{learner_id}.jsonl")
-    metrics = [r.get("metrics", {}) for r in _jsonl(base / f"verl-metrics-{learner_id}.jsonl")]
-    criteria = _jsonl(base / f"verl-criteria-{learner_id}.jsonl")
-    publish = _jsonl(base / f"verl-publish-{learner_id}.jsonl")
+    tape = _jsonl(_latest(base, f"rl-island-{learner_id}.jsonl"))
+    metrics = [r.get("metrics", {}) for r in _jsonl(_latest(base, f"verl-metrics-{learner_id}.jsonl"))]
+    criteria = _jsonl(_latest(base, f"verl-criteria-{learner_id}.jsonl"))
+    publish = _jsonl(_latest(base, f"verl-publish-{learner_id}.jsonl"))
     node = {}
-    if (base / "modal-node.json").is_file():
-        node = json.loads((base / "modal-node.json").read_text())
+    if _latest(base, "modal-node.json").is_file():
+        node = json.loads(_latest(base, "modal-node.json").read_text())
     rounds = [e for e in tape if e.get("event") == "rl_full_parameter_round"]
     versions = [tuple(e.get("sync/fragment_versions") or ()) for e in rounds]
     went_down = [i for i in range(1, len(versions))
