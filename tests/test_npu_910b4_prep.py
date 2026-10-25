@@ -668,7 +668,8 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
     assert not [o for o in without if "model_dtype" in o]
     assert "actor_rollout_ref.actor.entropy_checkpointing=True" in without
     assert "actor_rollout_ref.actor.entropy_from_logits_with_chunking=True" in without
-    # the activations themselves go to the host: without it the second step died
-    assert "actor_rollout_ref.model.enable_activation_offload=True" in without
+    # verl's activation offload is NOT used: it trips an assertion in the backward of
+    # transformers' NemotronH router (G-EQ3, measured on npu1)
+    assert not [o for o in without if "enable_activation_offload" in o]
     # a model that can recompute activations bounds the head itself
     assert not [o for o in ascend_memory_overrides(True) if "entropy" in o]

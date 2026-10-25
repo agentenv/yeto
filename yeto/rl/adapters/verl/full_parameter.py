@@ -373,6 +373,28 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
     return result
 
 
+def remote_release_memory(worker_dict) -> dict:
+    """Give the device allocator's cached blocks back (S27 G-EQ3).
+
+    Why: a full export gathers every parameter whole on the device
+    (:func:`_whole`), and the biggest ones are large -- a Nemotron Nano MoE
+    layer's stacked expert tensor is 1.28e9 values. The allocator keeps those
+    blocks cached, so the step *after* an export starts with a much smaller
+    free pool: on npu1 the first step peaked at 63.1 of 65.5 GiB and the step
+    after the first release died asking for 9.00 GiB. Returns the allocator's
+    numbers before and after, for the island's tape.
+    """
+
+    del worker_dict  # the allocator is per process, not per parameter
+    import torch
+
+    device = torch.npu if hasattr(torch, "npu") and torch.npu.is_available() else torch.cuda
+    before = {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}
+    device.empty_cache()
+    return {"before": before,
+            "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}
+
+
 def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_optimizer: bool) -> dict:
     """Write ``tensors`` into the parameters this worker holds a shard of.
 

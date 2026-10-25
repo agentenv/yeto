@@ -181,10 +181,25 @@ class VerlHfWriter:
         else:
             total = self._write_regrouped(shapes, directory)
         self.last_layout = {"layout": "base" if plan is not None else "regrouped", "why": why,
-                            "bytes": total}
+                            "bytes": total, "freed": self._release_memory()}
         print(f"[yeto hf export] {self.last_layout['layout']} layout: {why}", flush=True)
         copy_model_files(self.model_path, directory)
         (directory / COMPLETE_MARKER).write_text("")
+
+    def _release_memory(self) -> dict | None:
+        """Give the workers' cached device blocks back after the export
+        (``full_parameter.remote_release_memory``; the gathers leave large blocks
+        cached and the next training step needs the room). Returns the largest
+        reserved bytes before and after, or None when the group cannot do it."""
+        release = getattr(self.group, "release_memory", None)
+        if release is None:
+            return None
+        results = [dict(result) for result in (self.run(release()) or ())]
+        if not results:
+            return None
+        return {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
+                "reserved_after": max(int(r["after"]["reserved"]) for r in results),
+                "workers": len(results)}
 
     def _write_base_layout(self, plan: BaseExport, directory: Path) -> int:
         """The source checkpoint's own files (module doc, step 2). A stacked model
