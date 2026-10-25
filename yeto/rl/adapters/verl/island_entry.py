@@ -127,6 +127,9 @@ def parse_args(argv):
     p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
+    # S27 G-EZ: FSDP2 CPUOffloadPolicy for a full-parameter island whose resident
+    # state does not fit the cards (config.VerlRunConfig.fsdp_cpu_offload)
+    p.add_argument("--rl-fsdp-cpu-offload", action="store_true", default=False)
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)
@@ -615,6 +618,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
+        fsdp_cpu_offload=bool(getattr(args, "rl_fsdp_cpu_offload", False)),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)

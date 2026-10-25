@@ -77,6 +77,19 @@ class VerlRunConfig:
     max_model_len: int | None = None
     n_gpus: int = 1
     model_dtype: str = "fp32"
+    # S27 G-EZ: FSDP2 CPUOffloadPolicy. The sharded parameters, gradients and
+    # optimizer state live on the host and the optimizer steps there, so device
+    # memory holds only the all-gathered working set and the activations. Needed
+    # when the resident state does not fit: a 120.67B bf16 full-parameter island
+    # needs 16 bytes/parameter resident (bf16 parameters and gradients, fp32
+    # master weights, fp32 Adam m and v) = 112.4 GiB per card on 16 cards, over a
+    # 64 GiB card. verl's own param_offload / optimizer_offload do not help there:
+    # they park state on the host between phases and load it back before the
+    # step, so the step still needs it all on the device
+    # (verl/utils/fsdp_utils.py offload_fsdp_optimizer / load_fsdp_optimizer).
+    # verl ignores both of those when offload_policy is set
+    # (workers/engine/fsdp/transformer_impl.py) and pins the host memory.
+    fsdp_cpu_offload: bool = False
     reward_path: str = ""
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
@@ -183,6 +196,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.actor.entropy_coeff=0",
         "actor_rollout_ref.actor.fsdp_config.param_offload=False",
         "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        f"actor_rollout_ref.actor.fsdp_config.offload_policy={cfg.fsdp_cpu_offload}",
         f"actor_rollout_ref.actor.data_loader_seed={cfg.seed}",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
@@ -236,4 +250,7 @@ ASSERTED_KEYS = (
     "algorithm.rollout_correction.bypass_mode",
     "actor_rollout_ref.rollout.full_determinism",
     "actor_rollout_ref.actor.strategy",
+    # S27 G-EZ: a silently dropped offload_policy would only show up as an
+    # out-of-memory failure deep into the first step, so assert it resolved.
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
 )

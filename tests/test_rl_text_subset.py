@@ -278,3 +278,57 @@ def test_check_loaded_fails_on_a_reshaped_parameter(vl_checkpoint):
     loaded = {name: (2, 2) for name in subset.renames.values()}
     with pytest.raises(TextSubsetError, match="shape the checkpoint does not record"):
         check_loaded(loaded, subset, shapes={"lm_head.weight": (8, 4)})
+
+
+# ------------------------------------------- the FSDP2 CPU offload knob (G-EZ)
+
+
+def _full_run(**kw):
+    from yeto.rl.adapters.verl.config import VerlRunConfig
+
+    base = dict(
+        model_path="/m", train_file="t", val_file="v", out_dir="o",
+        parameter_mode="full", lora_rank=0, lora_alpha=0, model_dtype="fp32",
+    )
+    base.update(kw)
+    return VerlRunConfig(**base)
+
+
+def test_cpu_offload_off_by_default():
+    from yeto.rl.adapters.verl.config import build_overrides
+
+    overrides = build_overrides(_full_run())
+    assert "actor_rollout_ref.actor.fsdp_config.offload_policy=False" in overrides
+
+
+def test_cpu_offload_sets_the_fsdp2_offload_policy():
+    from yeto.rl.adapters.verl.config import build_overrides
+
+    overrides = build_overrides(_full_run(fsdp_cpu_offload=True))
+    assert "actor_rollout_ref.actor.fsdp_config.offload_policy=True" in overrides
+    # verl ignores these two when offload_policy is set, but the island still
+    # states them, so the resolved config cannot depend on their defaults.
+    assert "actor_rollout_ref.actor.fsdp_config.param_offload=False" in overrides
+    assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False" in overrides
+
+
+def test_offload_policy_is_asserted_after_hydra_composition():
+    """A dropped override must fail at startup, not as an OOM mid-step."""
+    from yeto.rl.adapters.verl.config import ASSERTED_KEYS
+
+    assert "actor_rollout_ref.actor.fsdp_config.offload_policy" in ASSERTED_KEYS
+
+
+def test_island_flag_reaches_the_run_config():
+    from yeto.rl.adapters.verl.island_entry import parse_args
+
+    argv = [
+        "--model", "/m", "--model-revision", "r", "--data", "d", "--learner-id", "0",
+        "--reward-function", "math", "--global-rounds", "3", "--groups-per-round", "1",
+        "--samples-per-group", "2", "--rollout-max-response-len", "8",
+        "--event-tape", "/tmp/tape", "--inner-lr", "1e-6", "--seq-len", "64", "--seed", "1",
+    ]
+    args, _ignored = parse_args(argv)
+    assert args.rl_fsdp_cpu_offload is False
+    args, _ignored = parse_args(argv + ["--rl-fsdp-cpu-offload"])
+    assert args.rl_fsdp_cpu_offload is True
