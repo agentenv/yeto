@@ -12,6 +12,11 @@ Scope (refused otherwise): one role and one shard id in the layout, i.e. a
 trainer with TP = PP = EP = 1 (the whole model in one rank's copy). A
 sharded trainer needs the per-shard ``param_layout`` record (global names,
 TP split) to merge slices, which the layout record does not carry yet.
+
+S27 G-EV: a verl full-parameter trainer's layout names its parameters by their
+HF names under the shard id ``global`` (``adapters/verl/full_parameter.py``: the
+FSDP2 layout carries no shard identity). Those names are written as they are,
+without the Megatron conversion (:func:`hf_named_layout`).
 """
 
 from __future__ import annotations
@@ -51,8 +56,30 @@ def _split_wire(name: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+# The shard id of a layout whose names are the model's HF names (verl's FSDP2 layout).
+HF_NAMED_SHARD = "global"
+
+
+def hf_named_layout(layout: FragmentLayout) -> bool:
+    """Every wire name of ``layout`` is ``<role>::global::<HF name>`` (verl, module doc)."""
+    shards = {_split_wire(name)[1] for fragment in layout.fragments for name, _numel in fragment.tensors}
+    return shards == {HF_NAMED_SHARD}
+
+
 def megatron_model(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
     """``{module.module.<name>: bf16 tensor}`` of the whole model (module doc)."""
+    return {canonical_name(name): tensor for name, tensor in _whole_tensors(layout, cut).items()}
+
+
+def hf_model(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
+    """``{HF name: bf16 tensor}`` of a :func:`hf_named_layout` cut (S27 G-EV)."""
+    if not hf_named_layout(layout):
+        raise MaterializeError(f"the layout does not name HF parameters (shard {HF_NAMED_SHARD!r})")
+    return _whole_tensors(layout, cut)
+
+
+def _whole_tensors(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
+    """``{name: bf16 tensor}``: each parameter's row slices joined, the wire prefix stripped."""
     import torch
 
     if len(cut.fragments) != layout.num_fragments:
@@ -80,7 +107,7 @@ def megatron_model(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
         parts.sort(key=lambda p: p[0])
         tensors = [flat.reshape(shape) for _start, flat, shape in parts]
         tensor = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
-        model[canonical_name(_split_wire(base)[2])] = tensor
+        model[_split_wire(base)[2]] = tensor
     return model
 
 
@@ -98,14 +125,18 @@ def materialize(layout: FragmentLayout, cut: WeightCut, *, base_model: str | os.
 
     base = Path(base_model)
     config = json.loads((base / "config.json").read_text())
-    if convert is None:
+    hf_names = convert is None and hf_named_layout(layout)  # S27 G-EV: verl names the HF parameters
+    if convert is None and not hf_names:
         convert = miles_converter(model_name or str(config["model_type"]))
     tag = hashlib.sha256(json.dumps(list(cut.versions)).encode()).hexdigest()[:12]
     target = Path(out_root) / f"v{cut.merged_version:08d}-{tag}"
     marker = target / DONE
     if marker.is_file():
         return target
-    tensors = convert_model(megatron_model(layout, cut), megatron_args(config), convert, dtype=torch.bfloat16)
+    if hf_names:
+        tensors = {name: tensor.to(torch.bfloat16) for name, tensor in hf_model(layout, cut).items()}
+    else:
+        tensors = convert_model(megatron_model(layout, cut), megatron_args(config), convert, dtype=torch.bfloat16)
     if config.get("tie_word_embeddings"):
         tensors.pop("lm_head.weight", None)
     # every base weight is written (a missing one would keep its old value in the engine

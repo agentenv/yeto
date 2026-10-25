@@ -88,10 +88,18 @@ def full_parameter_problems(args) -> list[str]:
                         "on the same cards, or in verl's separate mode on its own trainer and rollout cards)")
     if placement == "fixed-partition" and int(getattr(args, "rl_standby_gpus", 0) or 0):
         problems.append("no --rl-standby-gpus (verl's separate mode has no standby cards)")
-    if is_synced_trainer(args):
-        problems.append("no --rl-sample-role trainer (a verl full-parameter island generates its own samples)")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0):
-        problems.append("--rl-max-policy-age 0 (the verl full-parameter island runs the synchronous trainer)")
+    if is_synced_trainer(args) and placement == "fixed-partition":  # S27 G-EW (VERL-PARITY #14)
+        problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (a verl buffer "
+                        "trainer starts no engine; the sampler islands generate)")
+    # S27 G-EW: a synced buffer trainer runs verl's fully_async trainer over the sample buffer
+    # (--rl-max-policy-age >= 1, sample_roles). S27 G-EV: with --rl-rollout-ahead 1 the limit
+    # bounds the one-version lag of the separate mode's synchronous trainer (VERL-PARITY #10);
+    # without it a limit > 0 runs verl's fully_async trainer and rollouter (VERL-PARITY #11),
+    # the rollouter on its own cards
+    if (int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args)
+            and placement != "fixed-partition"):
+        problems.append("--rl-placement fixed-partition with --rl-max-policy-age > 0 (the fully_async "
+                        "rollouter, or the rollout servers of --rl-rollout-ahead, generate on their own cards)")
     if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
         problems.append("no --rl-rollout-quant-tier")
     if int(getattr(args, "expert_full_count", 0) or 0):
@@ -118,6 +126,9 @@ def full_parameter_problems(args) -> list[str]:
 # S27 G-DS: options the launcher forwards to every island that the verl island
 # entry does not parse (parse_known_args would drop them without a word):
 # (args dest, value when off, option). Refused instead, before any cloud work.
+# S27 G-EU: the island refuses them too when they reach a full-parameter island the
+# launcher's preset check does not cover (a no-sync island:
+# train_options.refuse_unmapped_argv); --rl-debug-dump is mapped (train_options.debug_plan).
 # S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
 # constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
 # --rl-observe-timeline, --rl-resource-sample-interval) and S27 G-EN one more
@@ -131,19 +142,21 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_lora_dropout", None, "--rl-lora-dropout"),
     ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
     ("rl_profile_trainer", False, "--rl-profile-trainer"),
-    ("rl_debug_dump", False, "--rl-debug-dump"),
 )
 # Why each option above has no verl mapping yet (the launcher's refusal says it).
 NOT_MAPPED_REASONS = {
     "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
-                               "(VERL-PARITY #25)",
+                               "(VERL-PARITY #25; the island refuses it as well, train_options.verify_plan)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
-    "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",
+    "--rl-async-buffer-rounds": "Miles' fully_async buffer depth; verl's fully_async rollouter has no such "
+                                "option (its staleness_threshold follows --rl-max-policy-age)",
     "--rl-lora-dropout": "a full-parameter island has no LoRA adapter",
     "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
     "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
                             "there",
-    "--rl-debug-dump": "Miles' rollout/train data dump has no verl counterpart (the island writes its own "
-                       "verl-dump criteria tensors)",
 }
+# S27 G-EU (VERL-PARITY #35): the options above that do not apply to a full-parameter
+# FSDP2 island at all (the rest wait for a mapping or for #11 / #25)
+NOT_APPLICABLE_ON_FULL_PARAMETER = ("--rl-gradient-accumulation-fusion", "--rl-lora-dropout",
+                                    "--rl-lora-expert-rank")
