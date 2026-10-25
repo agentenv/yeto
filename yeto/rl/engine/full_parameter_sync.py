@@ -1345,10 +1345,15 @@ class FullParameterSync(RoundCutHooks):
         self._upload_before = self._stream_snapshots()
         outcome = getattr(self.actor, "recovery_outcome", None)
         if outcome is not None:
+            samples = getattr(self.actor, "recovered_scheduler_samples", None)
+            # S27 G-ED: the restored trainer's LR scheduler continues the donor's;
+            # the island's round cuts count their progress from there (round_cut.CutSource)
+            driver.recovered_scheduler_samples = samples
             driver.emit("rl_peer_recovery", path=outcome.path, donor=outcome.donor, t_s=outcome.t_s,
                         done_step=outcome.done_step, steps=outcome.steps, replayed=outcome.replayed,
                         refused_sources=outcome.refused_sources, seconds=outcome.seconds,
-                        versions=list(outcome.versions))
+                        versions=list(outcome.versions),
+                        **({} if samples is None else {"scheduler_samples": int(samples)}))
         self.joined_running_pool = outcome is not None or any(
             int(version) > 0 for version in self.pairing.fragment_versions())
         self._publish_outer_version(driver)

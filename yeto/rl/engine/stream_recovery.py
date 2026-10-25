@@ -150,6 +150,9 @@ class RankShardSnapshot:
         self.parameter_layout_hash = parameter_layout_hash
         self.log = log
         self._tag: str | None = None
+        # The LR scheduler position every rank reports after a restore (the
+        # donor's, in the backend's ``scheduler_samples`` unit); None before.
+        self.restored_scheduler_samples: int | None = None
 
     # -- backend verbs ----------------------------------------------------------
     async def rank_layout(self) -> Mapping[str, int]:
@@ -207,6 +210,9 @@ class RankShardSnapshot:
         # Every rank must re-export the donor's digests (as a cut restore
         # checks); else the trainer is not the donor's and must not train.
         fingerprint = check_restored_digests(files, results, self.digest_keys)
+        positions = {int(r["scheduler_samples"]) for r in results if r.get("scheduler_samples") is not None}
+        if len(positions) == 1:
+            self.restored_scheduler_samples = positions.pop()
         if fingerprint is not None:
             checked = sum(1 for f in files if all(k in f for k in self.digest_keys))
             self.log(f"{LOG_PREFIX}restored {checked}/{len(files)} rank shard(s): state, RNG and LR "
@@ -235,6 +241,11 @@ class StreamRecoveryIsland:
         self.resent: dict[int, Any] = {}
         self.restored = False
         self._tag: str | None = None
+
+    @property
+    def scheduler_samples(self) -> int | None:
+        """The restored trainer's LR scheduler position (None: not restored, or unknown)."""
+        return getattr(self.shards, "restored_scheduler_samples", None)
 
     def _call(self, coro: Awaitable[Any]) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()

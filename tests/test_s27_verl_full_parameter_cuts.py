@@ -337,3 +337,26 @@ def test_run_fingerprint_names_the_full_parameter_mode():
     plan = _plan()
     assert round_cuts.run_fingerprint_of(plan, AlgorithmSpec())["parameter_mode"] == "full"
     assert json.dumps(round_cuts.run_fingerprint_of(plan, AlgorithmSpec()), sort_keys=True)
+
+
+@pytest.mark.parametrize("handed_over", [True, False])
+def test_island_cuts_after_a_peer_recovery_count_from_the_restored_scheduler(tmp_path, handed_over):
+    """GPU s27-ed-a: the relaunched island 1 restored the donor's LR scheduler, and
+    every island cut was refused ("scheduler at 31 samples, cut says 8"): the cut
+    counted only this process's rounds. FullParameterSync.start now hands the
+    restored position to the driver (``recovered_scheduler_samples``)."""
+    store = tmp_path / "store" / "island-cuts" / "island1"
+    plan = _plan(store, tmp_path / "a", sync="pool", write_only=True, every=2)
+    driver, island, checkpoint, tape = _island(tmp_path, plan, name="a", sync=_Synced(ROUNDS), learner_id=1)
+    for round_id in range(3):  # the donor's trainer state, as a peer restore leaves it
+        island.train_round(0, 100 + round_id)
+    if handed_over:
+        driver.recovered_scheduler_samples = 3
+    round_cuts.run_driver(driver, None)
+    if not handed_over:
+        refused = [e["error"] for e in _events(tape, "rl_round_cut") if not e.get("ok", True)]
+        assert refused and "scheduler at 5 samples, cut says 2" in refused[0]
+        return
+    assert [e["rollout_id"] for e in _events(tape, "rl_cut_saved")] == [2, 4]
+    manifest = load_manifest(str(store / "round-cuts"), checkpoint.pointer()["cut_id"])
+    assert (manifest.progress.local_step, manifest.progress.scheduler_samples) == (3 + 4, 3 + 4)

@@ -255,6 +255,7 @@ def _train(learner_id, plan, results, *, stop_after=None, pace=lambda: 0.05, max
     try:
         state = sync.start(driver).state
         record["outcome"] = stream.recovery_outcome
+        record["recovered_scheduler_samples"] = getattr(driver, "recovered_scheduler_samples", None)
         record["adam_steps_at_start"] = island.adam_steps()
         record["optimizer_at_start"] = _optimizer_snapshot(island)
         record["values_at_start"] = model.values()
@@ -380,6 +381,11 @@ def test_a_relaunched_verl_island_recovers_adam_state_from_a_peer_through_the_re
     checkpoint = _Model(seed=0).values()
     assert any(not torch.equal(restarted["values_at_start"][n], checkpoint[n]) for n in SHAPES)
     assert max(outcome.versions) >= 1
+
+    # The driver learns where the restored LR scheduler stands (its round cuts count from there).
+    assert restarted["recovered_scheduler_samples"] == at_snapshot["scheduler"]["last_epoch"] >= 1
+    assert [f.get("scheduler_samples") for e, f in restarted["events"] if e == "rl_peer_recovery"] == [
+        at_snapshot["scheduler"]["last_epoch"]]
 
     # The first round after the restore continues the donor's Adam step count.
     assert restarted["adam_steps_after_first_round"] == {s + 1 for s in restarted["adam_steps_at_start"]}
