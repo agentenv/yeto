@@ -137,7 +137,7 @@ def _assert_same(left, right):
 
 
 def test_fill_mode_parses_and_rejects_unknown_values():
-    assert probe.fill_mode({}) == "legacy"
+    assert probe.fill_mode({}) == "serial" == probe.DEFAULT_FILL
     assert probe.fill_mode({probe.FILL_ENV: " AB "}) == "ab"
     with pytest.raises(probe.TrainGapConfigError):
         probe.fill_mode({probe.FILL_ENV: "fast"})
@@ -274,7 +274,7 @@ def _call_fill(module, *, args=None):
 def test_probe_prints_one_record_per_fill_and_keeps_legacy_result():
     calls = []
     module = _fake_module(calls)
-    assert _install(module, {}, rollout_id=4)
+    assert _install(module, {probe.FILL_ENV: "legacy"}, rollout_id=4)
     records, replays = _call_fill(module)
     assert calls == ["iter", "legacy"]
     (record,) = records
@@ -330,6 +330,27 @@ def test_compact_refusal_runs_legacy_and_says_why():
     records, _ = _call_fill(module)
     assert calls == ["iter", "legacy"]
     assert records[0]["mode"] == "legacy" and records[0]["compact_refused"] == "context parallel > 1"
+
+
+def test_default_fill_is_serial_and_installs_without_the_probe():
+    calls, seen = [], []
+    module = _fake_module(calls)
+    inner = module.fill_replay_data
+
+    def fill_replay_data(**kwargs):
+        seen.append(torch.get_num_threads())
+        return inner(**kwargs)
+
+    module.fill_replay_data = fill_replay_data
+    before = torch.get_num_threads()
+    torch.set_num_threads(2)
+    try:
+        assert _install(module, {probe.PROBE_ENV: "0"}, rollout_id=0) is True
+        records, replays = _call_fill(module)
+        assert records == [] and seen == [1] and torch.get_num_threads() == 2
+        assert all(len(r.top_indices_list) == 2 for r in replays)
+    finally:
+        torch.set_num_threads(before)
 
 
 def test_check_count_parses_and_rejects_bad_values():
@@ -512,7 +533,7 @@ def test_install_off_leaves_miles_untouched_and_is_idempotent():
     calls = []
     module = _fake_module(calls)
     original = module.fill_replay_data
-    assert _install(module, {probe.PROBE_ENV: "0"}, rollout_id=0) is False
+    assert _install(module, {probe.PROBE_ENV: "0", probe.FILL_ENV: "legacy"}, rollout_id=0) is False
     assert module.fill_replay_data is original
     assert _install(module, {}, rollout_id=0) is True
     wrapped = module.fill_replay_data
@@ -608,4 +629,37 @@ def test_shadow_check_against_miles_fill_replay_data():
         assert record["mode"] == "compact" and record["check"] == {**record["check"], "equal": True, "tensors": 16}
         assert "rollout_routed_experts" not in rollout_data
     finally:
+        parallel.set_parallel_state(None)
+
+
+def test_serial_equals_multithreaded_miles_fill_on_nano_like_shapes():
+    """The serial fill is Miles' own fill on one thread; with tensors above torch's parallel grain
+    (52 streams x topk 6, hundreds of rows per sample) the multi-threaded run takes the OpenMP
+    paths, and the recorded tensors must not change."""
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    parallel = pytest.importorskip("miles.backends.training_utils.parallel")
+    state = _state()
+    parallel.set_parallel_state(state)
+    before = torch.get_num_threads()
+    try:
+        rng = random.Random(23)
+        lengths = [rng.randint(200, 900) for _ in range(16)]
+        gen = torch.Generator().manual_seed(23)
+        data = {"rollout_routed_experts": [torch.randint(0, 128, (n, 52, 6), generator=gen, dtype=torch.int32)
+                                           for n in lengths],
+                "tokens": [torch.zeros(n + 1, dtype=torch.long) for n in lengths]}
+        chunks = [list(range(i, 16, 4)) for i in range(4)]
+        kwargs = dict(data=data, chunks=chunks, args=_args(multiplier=128, sp=False), state=state,
+                      stream_idx=list(range(0, 52, 2)), register=replay_data.register_replay_list_sequential)
+
+        def miles_fill(*, parallel_state, **call):
+            return replay_data.fill_replay_data(**call)
+
+        torch.set_num_threads(4)
+        threaded = _run(miles_fill, **kwargs)
+        serial = _run(lambda **call: probe._serial(miles_fill, **call), **kwargs)
+        assert torch.get_num_threads() == 4
+        _assert_same(threaded, serial)
+    finally:
+        torch.set_num_threads(before)
         parallel.set_parallel_state(None)

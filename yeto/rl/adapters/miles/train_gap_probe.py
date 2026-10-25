@@ -29,7 +29,12 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
 
 ``YETO_REPLAY_FILL`` selects the fill itself:
 
-* ``legacy`` (default): Miles' own ``fill_replay_data``;
+* ``serial`` (default since S27 G-DJ): Miles' own ``fill_replay_data`` with
+  ``torch.set_num_threads(1)`` for the call; the same code as ``legacy``, and
+  the fill is pure fill/cat/slice/copy (no reduction), so the thread count does
+  not change the tensors (a CPU test pins this on Nano-like shapes; the GPU
+  shadow check, ``YETO_REPLAY_FILL_CHECK``, has not run on serial yet);
+* ``legacy``: Miles' own ``fill_replay_data`` on the process's torch threads;
 * ``compact``: :func:`compact_fill_replay_data` -- per micro-batch one
   stream-major buffer (pinned when CUDA is available) with per-stream row
   copies from the source arrays and -1 in the padding rows only; each replay
@@ -39,8 +44,6 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
   equal the legacy fill (tests pin this).  Used only for the case it covers
   (THD, context parallel 1, sequential stream registration, routing indices);
   any other call runs the legacy fill;
-* ``serial``: the legacy fill with ``torch.set_num_threads(1)`` for the call
-  (separates the OpenMP cost from the copy and allocation volume);
 * ``ab``: ``compact`` on odd rollout ids, ``legacy`` on even ones;
 * ``serial-ab``: ``serial`` on odd rollout ids, ``legacy`` on even ones;
 * ``cycle``: ``legacy``, ``compact``, ``serial`` by rollout id modulo 3.
@@ -76,6 +79,7 @@ from typing import Any
 
 PROBE_ENV = "YETO_TRAIN_GAP_PROBE"
 FILL_ENV = "YETO_REPLAY_FILL"
+DEFAULT_FILL = "serial"  # S27 G-DJ: the legacy fill spent ~12 s a round on idle OpenMP threads
 CHECK_ENV = "YETO_REPLAY_FILL_CHECK"
 FILL_MODES = ("legacy", "compact", "serial", "ab", "serial-ab", "cycle")
 LOG_PREFIX = "[yeto-train-gap]"
@@ -96,7 +100,7 @@ def probe_enabled(env: Mapping[str, str] = os.environ) -> bool:
 
 
 def fill_mode(env: Mapping[str, str] = os.environ) -> str:
-    mode = (env.get(FILL_ENV, "") or "legacy").strip().lower()
+    mode = (env.get(FILL_ENV, "") or DEFAULT_FILL).strip().lower()
     if mode not in FILL_MODES:
         raise TrainGapConfigError(f"{FILL_ENV}={mode!r} is not one of {', '.join(FILL_MODES)}")
     return mode
