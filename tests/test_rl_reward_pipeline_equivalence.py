@@ -21,9 +21,15 @@ from yeto.rl.algos import grpo_knobs, reward_pipeline as rp  # noqa: E402
 from yeto.rl.engine.algorithm import AlgorithmSpec  # noqa: E402
 
 # sha256 of miles/ray/rollout/train_data_conversion.py at MILES_NEXT_COMMIT
-# 03947150 (identical at 9e4260d). A Miles upgrade that touches the built-in
-# reward post-processing fails here: re-review grpo_default against it.
-TRAIN_DATA_CONVERSION_SHA256 = "ff7448c017c01ce18533fc986c571aa69f7e438ac02fdfaba95d38aa5b72296e"
+# 7402a53d5. Re-reviewed for it (S27 G-CR): `git diff 03947150 7402a53d5 --
+# miles/ray/rollout/train_data_conversion.py` is 58 added lines, 0 removed --
+# the segment_ids / tokens_after / gae_length / positive_example_success
+# train-data fields and their value specs; _post_process_rewards,
+# _normalize_rewards_by_rollout and _reward_group_segments are unchanged.
+# (Previous pin: ff7448c0... at 03947150, identical at 9e4260d.) A Miles
+# upgrade that touches the built-in reward post-processing fails here:
+# re-review grpo_default against it.
+TRAIN_DATA_CONVERSION_SHA256 = "22c168bdd2524e2325b0b87835573b7afbbf29346d79e41e3760f27001c25bc1"
 
 
 def test_upstream_source_pinned():
