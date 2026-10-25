@@ -327,10 +327,15 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     auto = tmp_path / patch_verl.AUTO_CLASS[0]
     auto.parent.mkdir(parents=True, exist_ok=True)
     auto.write_text("def h(hf_config):\n" + patch_verl.AUTO_CLASS[1] + "    return auto_class\n")
+    # S27 G-EZ2: the meta-init patch (the FSDP engine's module builder)
+    meta = tmp_path / patch_verl.META_INIT[0]
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("def build(self):\n" + patch_verl.META_INIT[1] + "        return module\n")
     patch_verl.apply(tmp_path)
     patch_verl.apply(tmp_path)  # idempotent
     text = target.read_text()
     assert text.count("_yeto_after_add_lora(self, VLLM_LORA_INT_ID)") == 1
+    assert meta.read_text().count('init_context, "__name__"') == 1  # replaced once, not twice
     target.write_text("nothing here\n")
     with pytest.raises(SystemExit):
         patch_verl.apply(tmp_path)

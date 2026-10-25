@@ -449,6 +449,12 @@ class VerlFullParameterGroup:
             raise RuntimeError(f"verl export returned {len(readers)} reader results, expected 1")
         return {name: _owned(array) for name, array in readers[0]["arrays"].items()}
 
+    async def release_memory(self) -> list[dict]:
+        """Free the workers' cached device blocks (:func:`.full_parameter.remote_release_memory`);
+        the island calls it after an export, whose gathers leave large blocks cached."""
+
+        return await asyncio.to_thread(self.island.call_workers, fp.remote_release_memory)
+
     async def export_fragment(self, units: Sequence[tuple[str, int, int]], numel: int, *,
                               payload: bool, sha256: bool) -> dict[str, Any]:
         """One fragment read on the workers (:func:`.full_parameter.remote_export_flat`):
@@ -1141,7 +1147,16 @@ class VerlFullParameterLocalState:
 
     def _adapter(self) -> VerlChunkedFullParameterAdapter:
         if self.adapter is None:
-            shapes = fp.agree_on_shapes(self.runner.run(self.group.manifests()))
+            manifests = self.runner.run(self.group.manifests())
+            # S27 G-EQ3: a persistent buffer is not sharded, so a rank whose copy did
+            # not come from the checkpoint computes wrong log-probs with perfectly
+            # fine parameters; this raises before any training happens.
+            digests = fp.agree_on_buffers(manifests)
+            emit = getattr(getattr(self.group, "island", None), "emit", None)
+            if callable(emit) and digests:
+                emit("rl_verl_buffer_digests", buffers=len(digests),
+                     values={name: digests[name] for name in sorted(digests)[:64]})
+            shapes = fp.agree_on_shapes(manifests)
             layout = fp.plan_layout(fp.island_specs(shapes), component=self.component, minimum_fragments=1,
                                     max_fragment_bytes=self.max_fragment_bytes, matrix_merge=self.matrix_merge)
             self.adapter = VerlChunkedFullParameterAdapter(layout, max_chunk_bytes=self.max_chunk_bytes)

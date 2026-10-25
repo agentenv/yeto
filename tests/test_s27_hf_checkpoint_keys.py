@@ -359,3 +359,32 @@ def test_delta_releases_need_a_base_whose_files_are_readable(tmp_path):
     chain = delta_chain_for(store, 2, emit=emit)  # an empty store: the first release is full
     assert chain is not None and chain.base() is None
     assert events[-1]["adopted"] is False and "no full release" in events[-1]["reason"]
+
+
+def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
+    """S27 G-EQ3: the gathers leave large blocks in the device allocator, and the
+    step after a release needs that room (npu1: the step after the first release
+    died asking for 9.00 GiB)."""
+    base = tmp_path / "base"
+    parameters, buffers = _base_checkpoint(base, files=2)
+    group = _Group(parameters, buffers)
+    calls = []
+
+    async def release_memory():
+        calls.append(True)
+        return [{"before": {"allocated": 1, "reserved": 40}, "after": {"allocated": 1, "reserved": 8}},
+                {"before": {"allocated": 1, "reserved": 36}, "after": {"allocated": 1, "reserved": 4}}]
+
+    group.release_memory = release_memory
+    writer = VerlHfWriter(group, base, run=_run)
+    writer(1, tmp_path / "out")
+    assert calls == [True]
+    assert writer.last_layout["freed"] == {"reserved_before": 40, "reserved_after": 8, "workers": 2}
+
+
+def test_an_export_without_a_release_memory_port_still_works(tmp_path):
+    base = tmp_path / "base"
+    parameters, buffers = _base_checkpoint(base, files=2)
+    writer = VerlHfWriter(_Group(parameters, buffers), base, run=_run)
+    writer(1, tmp_path / "out")
+    assert writer.last_layout["freed"] is None
