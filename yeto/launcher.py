@@ -929,6 +929,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     f"Terminate them from the cloud console, then: yeto down {prefix}",
                     file=sys.stderr,
                 )
+        if getattr(args, "training_mode", None) == "rl" and not getattr(args, "dry_run", False):
+            # S27 P2: the dispenser log of a syncer on this machine, with its check
+            from .launch.dispense_evidence import collect_dispense_log
+
+            collect_dispense_log(args, _modal_tape_run_dir(args),
+                                 since_unix=None if head_mode else run_started_unix)
         if head_mode:
             # The head VM cannot tear itself down here (the teardown would
             # kill this very process mid-flight). With a remote --output the

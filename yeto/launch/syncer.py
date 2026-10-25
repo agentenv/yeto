@@ -666,8 +666,18 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
         f"{_syncer_weighted_fold(args)}"
+        f"{_syncer_dispense(args, syncer, shard_plan)}"
         f"{shard_flags}"
     )
+
+
+def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | None) -> str:
+    """S27 P2: the task dispenser runs in the actor syncer (shard 0) only."""
+    if syncer.role != "actor" or (shard_plan is not None and shard_plan[0] != 0):
+        return ""
+    from .data_split_plan import dispense_syncer_flags
+
+    return dispense_syncer_flags(args)
 
 
 def syncer_shard_count(args) -> int:

@@ -1610,6 +1610,9 @@ def cmd_launch_head(args) -> int:
         _print_detach_hints(name)
         return 0
     _record_head_result(name, head_cluster, job_id)
+    from .launch.dispense_evidence import pull_from_head
+
+    pull_from_head(args, head_cluster, runs.run_dir(name))  # S27 P2 (no-op without it)
     print(
         f"[yeto] head job ended; the head cluster {head_cluster} is still up — "
         f"tear everything down with: yeto down {name}"

@@ -188,6 +188,12 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// S27 P2 task dispenser (`dispense.rs`): islands claim the rows they
+    /// train over TASK_* connections. Hands out data only, never changes a
+    /// merge, so it is not in the semantic profile hash. None: off.
+    pub dispense: Option<crate::dispense::DispenseConfig>,
+    /// JSONL log of every dispenser event (`task-dispense.jsonl`).
+    pub dispense_log: Option<std::path::PathBuf>,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -633,6 +639,8 @@ struct RegistryState {
     /// Where the membership record (syncer epoch, retired generations) is
     /// persisted next to the checkpoint; None: not persisted.
     membership_record: Option<std::path::PathBuf>,
+    /// The task dispenser (S27 P2); its record is a checkpoint sidecar.
+    dispense: Option<Arc<crate::dispense_service::DispenseService>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -764,6 +772,27 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// The task dispenser of `cfg` (S27 P2): restored from the record next to
+/// the checkpoint on `--resume`, which retires every island process of the
+/// record and puts their unreported positions back first.
+fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
+    let Some(dispense) = cfg.dispense.clone() else { return Ok(None) };
+    if cfg.shard.index != 0 {
+        bail!("--dispense runs on shard 0 of a sharded head only");
+    }
+    let record = cfg.checkpoint_path.as_deref().map(crate::dispense_service::record_path);
+    let restore = record.as_deref().filter(|p| cfg.resume && p.exists());
+    let service = crate::dispense_service::DispenseService::new(
+        dispense,
+        cfg.dispense_log.clone(),
+        cfg.syncer_epoch,
+        cfg.island_hmac_key.clone(),
+        restore,
+    )?;
+    info!(restored = restore.is_some(), "task dispenser on");
+    Ok(Some(Arc::new(service)))
 }
 
 /// Registry membership for `cfg`: on resume the persisted record restores
@@ -1385,8 +1414,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
+    let dispense = initial_dispense(&cfg)?;
     let registry: Registry = Arc::new(Mutex::new(RegistryState {
         membership_record,
+        dispense: dispense.clone(),
         ..RegistryState::new(membership)
     }));
     registry.lock().unwrap().persist_membership();
@@ -1417,6 +1448,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
                     let hello_auth = hello_auth.clone();
+                    let dispense = dispense.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -1429,6 +1461,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             tx,
                             budget_cutoff,
                             hello_auth,
+                            dispense,
                         )
                         .await
                         {
@@ -1704,12 +1737,14 @@ async fn handle_connection(
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
+    dispense: Option<Arc<crate::dispense_service::DispenseService>>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {other}"),
+        MSG_TASK_HELLO => Ok(4096),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {other}"),
     })
     .await
     {
@@ -1954,7 +1989,15 @@ async fn handle_connection(
                 .await
                 .context("BW_PROBE timed out")?
         }
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {t}"),
+        MSG_TASK_HELLO => match dispense {
+            Some(service) => crate::dispense_service::serve(rd, wr, &first.payload, service).await,
+            None => {
+                let message = "dispense refused: this syncer has no task dispenser (--dispense)";
+                let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                bail!(message)
+            }
+        },
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {t}"),
     }
 }
 
@@ -2673,6 +2716,9 @@ async fn scheduler(
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
                     let mut st = new_state_for(&group, &cfg)?;
+                    if let Some(service) = registry.lock().unwrap().dispense.clone() {
+                        st.checkpoint_sidecars.push(service);
+                    }
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
                             if let Err(error) = st.load_checkpoint(path) {
@@ -6860,6 +6906,8 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            dispense: None,
+            dispense_log: None,
             shard: Default::default(),
         }
     }
