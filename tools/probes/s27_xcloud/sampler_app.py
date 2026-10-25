@@ -28,6 +28,9 @@ the round in progress, as PREEMPTED, and writes no data end):
    ``>= stop_version`` (phase B: enough groups of the new weights);
 3. ``wall``: ``max_s`` seconds after the container started.
 
+``--store`` (default ``/root/yeto-checkpoint-store/xc``): another root on the same Volume
+for a rehearsal of the release path (``rehearsal_release.py`` writes a release there).
+
     PLAN_ONLY=1 python tools/probes/s27_xcloud/sampler_app.py
     YETO_ES_APP=yeto-s27-es-n1 modal run --detach tools/probes/s27_xcloud/sampler_app.py --tag s27-es-n1/a
 
@@ -64,7 +67,7 @@ GPU_NAME = "NVIDIA H200"
 TP = 2
 RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"  # sampler_resume.DEFAULT_RECLAIM_MARKER
 TIMEOUT_S = int(os.environ.get("YETO_ES_TIMEOUT_S", "3600"))
-DEFAULTS = {"groups_per_round": 16, "samples_per_group": 8, "max_tokens": 2048, "max_backlog_groups": 64,
+DEFAULTS = {"store": STORE, "groups_per_round": 16, "samples_per_group": 8, "max_tokens": 2048, "max_backlog_groups": 64,
             "num_rollouts": 600, "idle_s": 60.0, "stop_version": -1, "stop_groups": 0, "max_s": 3000.0,
             "poll_s": 20.0, "mem_fraction": 0.8}
 # Post-load probe (as the spot sampler): teacher-forced continuations; a wrong release moves
@@ -91,7 +94,7 @@ def spec(prompts: str, out: str, *, engine_version: str, cfg: dict) -> dict:
                      "n": int(cfg["samples_per_group"])},
         "num_rollouts": int(cfg["num_rollouts"]), "max_backlog_groups": int(cfg["max_backlog_groups"]),
         "max_prompt_tokens": 1024, "base_version": 0, "base_dir": BASE_DIR, "poll_s": float(cfg["poll_s"]),
-        "store": STORE, "buffer_shards": [SHARD],
+        "store": str(cfg["store"]), "buffer_shards": [SHARD],
         "prompts": {"path": prompts, "input_key": "prompt", "label_key": "label",
                     "groups_per_round": int(cfg["groups_per_round"]), "format": "text"},
         "reward": "yeto.rl.numeric_answer_reward:score", "reward_kind": "miles",
@@ -106,7 +109,7 @@ def spec(prompts: str, out: str, *, engine_version: str, cfg: dict) -> dict:
 def plan(**overrides: object) -> dict:
     cfg = {**DEFAULTS, **overrides}
     return {"model": MODEL, "revision": MODEL_REVISION, "base_dir": BASE_DIR, "volume": XC_VOLUME,
-            "store": STORE, "shard": SHARD, "image": IMAGE, "gpu": f"H200:{TP}", "timeout_s": TIMEOUT_S,
+            "store": cfg["store"], "shard": SHARD, "image": IMAGE, "gpu": f"H200:{TP}", "timeout_s": TIMEOUT_S,
             "spec": spec("/tmp/xc-prompts.jsonl", "/data/logs/<tag>", engine_version="<sglang>", cfg=cfg),
             "stop": {k: cfg[k] for k in ("idle_s", "stop_version", "stop_groups", "max_s")}}
 
@@ -294,9 +297,11 @@ def sampler(tag: str, cfg: dict) -> int:
 
 
 @app.local_entrypoint()
-def main(tag: str, max_backlog_groups: int = 64, stop_version: int = -1, stop_groups: int = 0,
+def main(tag: str, store: str = STORE, max_backlog_groups: int = 64, stop_version: int = -1, stop_groups: int = 0,
          idle_s: float = 60.0, max_s: float = 3000.0) -> None:
-    cfg = {**DEFAULTS, "max_backlog_groups": max_backlog_groups, "stop_version": stop_version,
+    if not store.startswith(STORE_MOUNT + "/"):
+        raise SystemExit(f"--store must lie under {STORE_MOUNT}")
+    cfg = {**DEFAULTS, "store": store, "max_backlog_groups": max_backlog_groups, "stop_version": stop_version,
            "stop_groups": stop_groups, "idle_s": idle_s, "max_s": max_s}
     call = sampler.spawn(tag, cfg)
     print(f"spawned sampler {call.object_id}")
