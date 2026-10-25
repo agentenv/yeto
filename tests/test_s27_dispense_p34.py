@@ -298,9 +298,10 @@ def test_data_mix_becomes_one_prompt_file_and_the_islands_get_the_weights(tmp_pa
     assert "data mix (2 sources" in capsys.readouterr().err
     table = td.StreamTable.from_prompts(args.data, mix=["0.7", "0.3"])
     assert [len(s.rows) for s in table.streams] == [5, 3]
-    # the mix needs the dispenser
+    # the mix needs the dispenser (S27 G-DH: auto is the dispenser now; stride refuses the mix)
     with pytest.raises(ValueError, match="--data-mix needs --rl-data-split dispense"):
-        _commands(_launch(tmp_path, monkeypatch, TWO_ISLANDS, mix=f"{a}=1,{b}=1"))
+        _commands(_launch(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "stride",
+                          mix=f"{a}=1,{b}=1"))
     with pytest.raises(ValueError, match="two or more"):
         _launch(tmp_path, monkeypatch, TWO_ISLANDS, mix=f"{a}=1")
     with pytest.raises(ValueError, match="positive"):
@@ -336,7 +337,8 @@ def test_task_labels_reach_the_islands_and_bad_specs_fail_at_launch(tmp_path, mo
          r"no row of --data has task label\(s\) \['crypto'\]"),
         (("--rl-data-split", "dispense", "--rl-island-task-labels", "l5=web"), TWO_ISLANDS,
          r"names island\(s\) \[5\]"),
-        (("--rl-island-task-labels", "l0=web;l1=pwn"), TWO_ISLANDS, "needs --rl-data-split dispense"),
+        (("--rl-data-split", "stride", "--rl-island-task-labels", "l0=web;l1=pwn"), TWO_ISLANDS,
+         "needs --rl-data-split dispense"),
         (("--rl-data-split", "dispense", "--rl-dispense-labels", "web"), TWO_ISLANDS, "set by the launcher"),
         (("--rl-data-split", "dispense", "--rl-dispense-mix", "1,1"), TWO_ISLANDS, "set by the launcher"),
     ]
