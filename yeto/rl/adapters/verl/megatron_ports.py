@@ -427,9 +427,10 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         profile=_execution_profile(spec, plan), layout=LAYOUT_FRAGMENTS)
     driver.data_slot = plan.get("data_slot")
     driver.hf_exports = hf_exports_for(plan, island)
-    from .train_options import wire_verify  # S27 G-EU (VERL-PARITY #26): --rl-verify-every N
+    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #26, #35)
 
     wire_verify(driver, driver.policy_state, plan)
+    wire_debug(island, plan)
     state = driver.run()
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,

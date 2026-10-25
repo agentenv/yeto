@@ -421,12 +421,13 @@ def main(argv=None) -> int:
     from huggingface_hub import snapshot_download
 
     from .task_dispense import DispenseIslandError, dispense_section, island_dispense
-    from .train_options import verify_plan
+    from .train_options import debug_plan, refuse_unmapped_argv, verify_plan
 
     try:  # S27 G-EU (VERL-PARITY #31, #25, #26): refused paths stop before any model or data work
         dispense = island_dispense(args, engine=engine, buffer_trainer=buffer_section is not None)
-        verify = verify_plan(args, full=(args.parameter_mode == vconf.FULL_PARAMETER_MODE
-                                         or engine == megatron_engine.ENGINE_MEGATRON))
+        full_mode = args.parameter_mode == vconf.FULL_PARAMETER_MODE or engine == megatron_engine.ENGINE_MEGATRON
+        refuse_unmapped_argv(ignored, full=full_mode)
+        verify = {**verify_plan(args, full=full_mode), **debug_plan(args)}
     except ValueError as error:
         raise SystemExit(str(error)) from None
     model_path = snapshot_download(args.model, revision=args.model_revision)
@@ -555,7 +556,7 @@ def main(argv=None) -> int:
         # S27 task assignment (rl_driver_start); "dispense": the rows come from the dispenser (G-EU)
         "data_slot": "dispense" if dispense_plan else args.rl_data_slot,
         **({"dispense": dispense_plan} if dispense_plan else {}),
-        **verify,  # S27 G-EU: verify_every / verify_every_round (absent when off)
+        **verify,  # S27 G-EU: verify_every / verify_every_round / debug_dump (absent when off)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),

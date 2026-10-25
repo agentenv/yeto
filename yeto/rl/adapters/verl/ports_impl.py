@@ -418,6 +418,8 @@ class VerlTrainerGroup(CutPorts):
         if t.use_reference_policy:
             kv = t._compute_ref_log_prob(kv, metrics=metrics)
         kv = t._compute_advantage(kv, metrics=metrics)
+        if getattr(isl, "debug_dump", False):  # S27 G-EU (VERL-PARITY #35): --rl-debug-dump
+            debug_dump(isl, kv, batch.rollout_id)
         kv = t._update_actor(kv, metrics=metrics)
         try:
             t._compute_metrics(kv, metrics, timing, global_steps=t.global_steps, epoch=0)
@@ -659,6 +661,45 @@ class VerlPlacement:
     def describe(self) -> PlacementDescription:
         return PlacementDescription("colocated", ("cuda:0",), ("cuda:0",),
                                     extra={"weight_transport": "verl-colocated-memory"})
+
+
+DEBUG_DUMP_FIELDS = ("uid", "prompts", "responses", "response_mask", "rm_scores", "advantages")
+
+
+def debug_dump(isl: VerlIsland, kv_batch, rollout_id: int, *, get=None, save=None) -> dict:
+    """S27 G-EU (``--rl-debug-dump``, ``train_options.debug_plan``): the round's
+    samples and train data after the advantage step, as
+    ``verl-debug-<id>-r<round>.pt`` at the top of the output dir (the tape mirror
+    picks it up). Archival: a field verl does not hold is skipped and named in the
+    file, an error is recorded on the tape; training never fails on it."""
+    out = isl.out / f"verl-debug-{isl.learner_id}-r{int(rollout_id):04d}.pt"
+    record: dict = {"rollout_id": int(rollout_id), "global_step": int(getattr(isl.trainer, "global_steps", -1))}
+    try:
+        if get is None:
+            import transfer_queue as tq
+
+            def get(fields):
+                return tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id,
+                                       select_fields=list(fields))
+        if save is None:
+            import torch
+
+            save = torch.save
+        tensors, missing = {}, []
+        for name in DEBUG_DUMP_FIELDS:
+            try:
+                data = get([name])
+                value = data.to_padded_tensor()[name] if hasattr(data, "to_padded_tensor") else data[name]
+            except Exception as exc:  # noqa: BLE001 - archival: one field at a time
+                missing.append(f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+            tensors[name] = value.cpu() if hasattr(value, "cpu") else list(value)
+        save({**record, **tensors, "missing": missing}, out)
+        record.update(path=out.name, fields=sorted(tensors), missing=missing)
+    except Exception as exc:  # noqa: BLE001 - archival, training continues
+        record["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+    isl.emit("rl_verl_debug_dump", **record)
+    return record
 
 
 def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:

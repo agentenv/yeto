@@ -58,6 +58,8 @@ def add_island_flags(parser) -> None:
         # S27 G-EU (VERL-PARITY #25, #26): the publication checks (verify_plan)
         ("--rl-verify-every-round", {"action": "store_true"}),
         ("--rl-verify-every", {"type": int, "default": None}),
+        # S27 G-EU (VERL-PARITY #35): Miles' debug dump (debug_plan)
+        ("--rl-debug-dump", {"action": "store_true"}),
     ):
         if flag not in parser._option_string_actions:
             parser.add_argument(flag, **kwargs)
@@ -195,3 +197,38 @@ def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
         if not callable(allow):
             raise ValueError("--rl-verify-every: this policy state cannot skip its digest")
         allow()
+
+
+def debug_plan(args: Any) -> dict[str, Any]:
+    """S27 G-EU (VERL-PARITY #35): ``--rl-debug-dump`` as on a Miles island, the
+    round's rollout samples and train data next to the event tape: the island
+    already writes the log-prob tensors of every step (``verl-dump-<id>-stepNNN.pt``,
+    the mismatch criteria); with the option every round also writes
+    ``verl-debug-<id>-rNNNN.pt`` (uid, prompt and response tokens, reward, advantage
+    and the response mask, read from the transfer queue after the advantage step;
+    ``ports_impl.debug_dump``). Absent when off."""
+
+    return {"debug_dump": True} if getattr(args, "rl_debug_dump", False) else {}
+
+
+def wire_debug(island: Any, plan: dict) -> None:
+    """The trainer side of :func:`debug_plan` (``VerlTrainerGroup.train_step`` reads it)."""
+
+    island.debug_dump = bool(plan.get("debug_dump"))
+
+
+def refuse_unmapped_argv(ignored: Sequence[str], *, full: bool) -> None:
+    """S27 G-EU: a full-parameter island refuses the Miles options it has no mapping
+    for when they reach it anyway (the launcher checks them on a synced full-parameter
+    preset only; a no-sync island, e.g. the Megatron island, got them dropped by
+    ``parse_known_args``). Raises ValueError with each option's reason."""
+
+    if not full:
+        return
+    from .launch_flags import NOT_MAPPED_REASONS
+
+    seen = [option for option in NOT_MAPPED_REASONS
+            if any(token == option or token.startswith(option + "=") for token in ignored)]
+    if seen:
+        raise ValueError("verl full-parameter island: no mapping for " + "; ".join(
+            f"{option} ({NOT_MAPPED_REASONS[option]})" for option in seen))

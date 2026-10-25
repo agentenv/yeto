@@ -565,7 +565,6 @@ def test_syncer_checkpoint_options_reach_the_syncer_and_leave_the_verl_islands_u
 @pytest.mark.parametrize("extra", [
     ("--rl-verify-every-round",), ("--rl-deterministic-trainer",), ("--rl-gradient-accumulation-fusion",),
     ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-profile-trainer",),
-    ("--rl-debug-dump",),
 ])
 def test_options_a_verl_full_parameter_island_would_ignore_are_refused(extra):
     """Each of these reached the verl island and was dropped by parse_known_args

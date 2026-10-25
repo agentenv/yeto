@@ -174,3 +174,51 @@ def test_the_megatron_state_publishes_the_identity_on_unverified_rounds(monkeypa
     with pytest.raises(WeightsChanged):
         identity.check_holds()
     assert asyncio  # keep the import (the FSDP2 test's runner uses an event loop)
+
+
+# ------------------------------------------------- #35: the debug dump and the island guard
+
+
+def test_the_debug_dump_option_maps_and_reaches_the_trainer():
+    assert to.debug_plan(SimpleNamespace(rl_debug_dump=False)) == {}
+    assert to.debug_plan(SimpleNamespace(rl_debug_dump=True)) == {"debug_dump": True}
+    island = SimpleNamespace()
+    to.wire_debug(island, {"debug_dump": True})
+    assert island.debug_dump is True
+    to.wire_debug(island, {})
+    assert island.debug_dump is False
+
+
+def test_the_debug_dump_writes_what_verl_holds_and_never_fails_the_round(tmp_path):
+    from yeto.rl.adapters.verl.ports_impl import DEBUG_DUMP_FIELDS, debug_dump
+
+    events, saved = [], {}
+    island = SimpleNamespace(out=tmp_path, learner_id=1, trainer=SimpleNamespace(global_steps=4),
+                             emit=lambda event, **f: events.append((event, f)))
+    held = {"uid": ["a", "b"], "prompts": [1, 2], "responses": [3, 4], "rm_scores": [0.0, 1.0]}
+
+    def get(fields):
+        (name,) = fields
+        if name not in held:
+            raise KeyError(name)
+        return {name: held[name]}
+
+    record = debug_dump(island, None, 3, get=get, save=lambda obj, path: saved.update(obj=obj, path=path))
+    assert saved["path"].name == "verl-debug-1-r0003.pt"
+    assert saved["obj"]["uid"] == ["a", "b"] and saved["obj"]["rollout_id"] == 3
+    assert record["fields"] == sorted(held) and len(record["missing"]) == len(DEBUG_DUMP_FIELDS) - len(held)
+    assert events[0][0] == "rl_verl_debug_dump"
+    broken = debug_dump(island, None, 4, get=get, save=lambda obj, path: 1 / 0)
+    assert broken["error"].startswith("ZeroDivisionError"), "archival: recorded, never raised"
+
+
+def test_a_full_parameter_island_refuses_the_options_it_cannot_honour_even_without_the_launcher():
+    from yeto.rl.adapters.verl import launch_flags
+
+    to.refuse_unmapped_argv(["--rl-profile-trainer"], full=False)  # LoRA islands: unchanged
+    to.refuse_unmapped_argv(["--source-sha256", "x"], full=True)  # Miles-only flags: as before
+    with pytest.raises(ValueError, match="rl-async-buffer-rounds") as error:
+        to.refuse_unmapped_argv(["--rl-async-buffer-rounds", "2", "--rl-profile-trainer"], full=True)
+    assert launch_flags.NOT_MAPPED_REASONS["--rl-profile-trainer"] in str(error.value)
+    assert set(launch_flags.NOT_APPLICABLE_ON_FULL_PARAMETER) <= set(launch_flags.NOT_MAPPED_REASONS)
+    assert "--rl-debug-dump" not in launch_flags.NOT_MAPPED_REASONS, "mapped (debug_plan)"

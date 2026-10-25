@@ -319,9 +319,10 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         **driver_options,
         **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment ("dispense" with the dispenser)
-    from .train_options import wire_verify  # S27 G-EU (VERL-PARITY #25, #26)
+    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #25, #26, #35)
 
     wire_verify(driver, policy_state, plan)
+    wire_debug(island, plan)
     if dispense is not None and plan["dispense"].get("data_streams"):
         driver.data_streams = plan["dispense"]["data_streams"]  # S27 P3 streams (rl_driver_start)
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
