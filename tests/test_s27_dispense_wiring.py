@@ -303,6 +303,8 @@ UNSUPPORTED = {
                           str(ROOT / "tools/eval/efficiency/algo-eff-miles.json")),
     "island_round_cuts": ("--rl-cut-every", "2", "--rl-checkpoint-store", "/tmp/gdh-store"),
     "sharded_head": ASYNC_FULL + ("--syncer-shards", "2"),
+    # G-DS catch-up: the store keeps only the data positions (no peer recovery)
+    "catch_up_store": ASYNC_FULL + ("--rl-checkpoint-store", "/tmp/gdh-store", "--no-rl-peer-recovery"),
 }
 
 
