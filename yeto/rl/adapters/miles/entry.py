@@ -862,6 +862,13 @@ def compose_island(
     )
     # E1: publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
+    # S27 C5: --rl-verify-every N (no-sync island): hash the policy only every N-th version
+    verify_every = getattr(miles_args, "yeto_rl_verify_every", None)
+    if verify_every is not None:
+        driver.verify_every = int(verify_every)
+        allow = getattr(driver.policy_state, "allow_unverified_rounds", None)
+        if callable(allow):
+            allow()
     # S27: the engines generate the next round's batch while the trainer trains
     driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
     if elastic is not None:
