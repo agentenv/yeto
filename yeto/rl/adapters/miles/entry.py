@@ -1931,17 +1931,15 @@ def attach_engine_outage(driver: Any, topology: Any, *, environ: Mapping[str, st
     """S27 G-DI design v2: with ``YETO_ISLAND_ENGINE_RECOVERY_S`` (the launcher sets it
     for a two-cluster island) the driver survives the loss of its engine nodes
     (:mod:`yeto.rl.engine.engine_outage`, :mod:`.engine_recovery`). Unset: nothing."""
-    from yeto.rl.engine.engine_outage import EngineOutage, outage_budget_s
+    from yeto.rl.engine.engine_outage import arm_engine_outage, outage_budget_s
 
     budget = outage_budget_s(os.environ if environ is None else environ)
     if budget is None or topology is None or int(topology.nodes) <= 1:
         return None
     from .engine_recovery import MilesEngineRecovery
 
-    driver.engine_outage = EngineOutage(MilesEngineRecovery(driver.rollout, nodes=int(topology.nodes)),
-                                        wait_s=budget, emit=driver.emit)
-    driver.emit("rl_engine_outage", phase="armed", budget_s=budget, nodes=int(topology.nodes))
-    return driver.engine_outage
+    return arm_engine_outage(driver, MilesEngineRecovery(driver.rollout, nodes=int(topology.nodes)),
+                             budget_s=budget, nodes=int(topology.nodes))
 
 
 def wait_island_nodes(nodes: int) -> dict[str, Any] | None:

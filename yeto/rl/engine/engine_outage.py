@@ -26,8 +26,9 @@ The driver calls this object at three points (``IslandDriver`` with ``engine_out
   (the deferred one, else the last published) and regenerates the lost batch.
 
 The backend port (:class:`EngineRecoveryPort`) owns the engine verbs. Miles:
-``yeto.rl.adapters.miles.engine_recovery``. verl: no port; the launcher refuses a
-two-cluster island on verl.
+``yeto.rl.adapters.miles.engine_recovery``. verl (S27 G-EW): ``yeto.rl.adapters.verl.
+engine_recovery``, for a separate-mode island (standalone vLLM replicas); the
+launcher still refuses a two-cluster island on verl (VERL-PARITY #15).
 
 Unset (every other island): the driver has no ``engine_outage`` and nothing changes.
 """
@@ -172,6 +173,16 @@ class EngineOutage:
     def take_deferred(self) -> tuple[Any, int] | None:
         deferred, self.deferred = self.deferred, None
         return deferred
+
+
+def arm_engine_outage(driver: Any, port: EngineRecoveryPort, *, budget_s: float, **fields: Any) -> EngineOutage:
+    """Give ``driver`` an engine outage over the backend ``port`` with ``budget_s``
+    seconds of waiting, and record it (``phase="armed"`` with ``fields``). Both
+    backends arm through here (Miles ``entry.attach_engine_outage``, verl
+    ``engine_recovery.arm_verl_engine_outage``)."""
+    driver.engine_outage = EngineOutage(port, wait_s=budget_s, emit=driver.emit)
+    driver.emit(OUTAGE_EVENT, phase="armed", budget_s=budget_s, **fields)
+    return driver.engine_outage
 
 
 def outage_budget_s(environ) -> float | None:
