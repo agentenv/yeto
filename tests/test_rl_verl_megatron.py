@@ -589,3 +589,49 @@ def test_master_ports_are_drawn_at_random_below_the_ephemeral_range():
             taken = busy.getsockname()[1]
             busy.listen()
             ray_ports.pick_free_port(taken, taken + 1)
+
+
+def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(tmp_path, monkeypatch):
+    """--rl-export-hf-rounds on the Megatron island (s27-dc-train1 round 3 failed with "the writer
+    left no .complete"): rank 0 of the real ``remote_hf_export`` writes the round, leaves the
+    marker after every rank finished, and ``HfRoundExports`` puts it into the store; another
+    rank only joins the collective write."""
+    torch = pytest.importorskip("torch")
+    import tempfile
+
+    from yeto.rl.adapters.verl import megatron_ports as mp
+    from yeto.rl.engine.resume import STORE_IMPL_ENV
+
+    monkeypatch.delenv(STORE_IMPL_ENV, raising=False)
+    staging_root = tmp_path / "tmp"
+    staging_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(staging_root))
+    model = tmp_path / "base"
+    model.mkdir()
+    for name in ("config.json", "tokenizer.json"):
+        (model / name).write_text("{}")
+    (model / "model-00001-of-00013.safetensors").write_bytes(b"base")  # base weights are not copied
+
+    class _Bridge:
+        def save_hf_weights(self, module, path):
+            (Path(path) / "model-00001-of-00001.safetensors").write_bytes(b"w" * 8)
+
+    worker = SimpleNamespace(actor=SimpleNamespace(engine=SimpleNamespace(module=[object()], bridge=_Bridge())))
+    store = tmp_path / "store"
+    config = {"rounds": "1,final", "store": str(store)}
+    record = mp.remote_hf_export(worker, config, 0, 1, True, str(model))
+    assert record["ok"] and record["round"] == 1 and record["files"] == 3, record
+    out = store / "round-1"
+    assert (out / ".complete").is_file() and (out / "config.json").is_file()
+    assert (out / "model-00001-of-00001.safetensors").read_bytes() == b"w" * 8
+    assert not (out / "model-00001-of-00013.safetensors").exists()
+    assert json.loads((store / "final.json").read_text())["path"] == "round-1"
+    assert not (staging_root / mp.HF_STAGING / "round-1").exists()  # the staging copy is deleted
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
+    assert mp.remote_hf_export(worker, config, 1, 2, False, str(model)) is None
+    joined = staging_root / mp.HF_STAGING / "round-2"
+    assert (joined / "model-00001-of-00001.safetensors").is_file()
+    assert not (joined / ".complete").exists() and not (joined / "config.json").exists()

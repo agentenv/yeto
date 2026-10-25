@@ -135,10 +135,14 @@ HF_STAGING = "yeto-verl-hf-export"
 def _save_hf(worker, directory: Path, model_path: str, rank: int) -> None:
     """Megatron-Bridge writes the HF weights of the current model into ``directory``
     (collective: every trainer rank calls it); rank 0 adds the checkpoint's config,
-    tokenizer and generation files, so the directory loads as the base repo does."""
+    tokenizer and generation files, so the directory loads as the base repo does.
+    After every rank finished, rank 0 leaves the writer's completion marker that
+    ``HfRoundExports`` takes out (as ``adapters/verl/hf_export.py`` on FSDP2)."""
     import shutil
 
     import torch
+
+    from yeto.rl.engine.hf_export import COMPLETE_MARKER
 
     engine = worker.actor.engine
     directory.mkdir(parents=True, exist_ok=True)
@@ -150,6 +154,8 @@ def _save_hf(worker, directory: Path, model_path: str, rank: int) -> None:
                 shutil.copy2(src, directory / src.name)
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
+    if rank == 0:
+        (directory / COMPLETE_MARKER).write_text("")
 
 
 def remote_hf_export(worker_dict, config: dict, rollout_id: int, policy_version: int, final: bool,
