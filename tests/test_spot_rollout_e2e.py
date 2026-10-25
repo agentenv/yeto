@@ -7,6 +7,11 @@ the sampler subscribes, generates and sends groups through the relay. The
 trainer side is the relay pump into a local sample buffer, read with the
 trainer's ``BatchReader`` (policy age gate). The sampler is killed with
 SIGKILL (a reclaim without notice) and a new incarnation starts.
+
+S27 G-EM: every sample the pump delivers names the merged cut that generated
+it (the digest the sampler loaded for that version; the base checkpoint digest
+for version 0), and the second sampler leaves by itself on the syncer's
+end-of-run notice (its ``syncer_lost_s`` is far longer than the wait).
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ def _spec(tmp_path: Path, port: int) -> Path:
                                                   "num_attention_heads": 1, "vocab_size": 8,
                                                   "num_hidden_layers": 1}))
     (base / "tokenizer.json").write_text("{}")
+    (base / "pytorch_model.bin").write_bytes(b"base weights")  # named by its digest (version 0)
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text("".join(json.dumps({"q": f"question {i}", "a": str(i)}) + "\n" for i in range(8)))
     spec = {
@@ -63,7 +69,8 @@ def _spec(tmp_path: Path, port: int) -> Path:
         "syncer": f"127.0.0.1:{port}", "channel": 0, "telemetry": False,
         "base_model": str(base), "work_dir": str(tmp_path / "work"),
         "converter": "yeto.rl.spot_rollout.materialize:identity_converter",
-        "num_streams": 1, "poll_s": 0.05, "layout_timeout_s": 60, "syncer_lost_s": 60,
+        "num_streams": 1, "poll_s": 0.05, "layout_timeout_s": 60, "syncer_lost_s": 600,
+        "relay_gone_s": 600,
     }
     path = tmp_path / "spot-spec.json"
     path.write_text(json.dumps(spec))
@@ -102,6 +109,7 @@ class PacedLearner(Learner):
 @needs_cargo
 def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tmp_path, monkeypatch):
     from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+    from yeto.rl.engine.external_policy import CUT_METADATA_KEY, base_cut_digest
     from yeto.rl.engine.resume import CheckpointStore
     from yeto.rl.engine.sample_buffer import FileSampleBuffer
     from yeto.rl.spot_rollout import layout_manifest
@@ -126,6 +134,7 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
     spec = _spec(tmp_path, port)
     first = _start_sampler(spec, tmp_path / "sampler-1.log")
     taken: list[tuple[int, int, int]] = []  # (rollout id, behavior version, trainer merged version)
+    cuts: dict[int, set[str]] = {}  # behavior version -> cut digests the samples name
     stale = 0
     try:
         rollout = 0
@@ -139,6 +148,11 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
                 for _position, group in groups:
                     versions = {int(s["metadata"]["weight_version"]) for s in group}
                     assert len(versions) == 1
+                    for s in group:
+                        cut = s["metadata"][CUT_METADATA_KEY]
+                        assert cut["kind"] == "external-merged-cut"
+                        assert cut["merged_version"] == int(s["metadata"]["weight_version"])
+                        cuts.setdefault(cut["merged_version"], set()).add(cut["digest"])
                     taken.append((rollout, versions.pop(), current))
                 rollout += 1
 
@@ -159,7 +173,7 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
         learner.pace.set()
         learner.join(timeout=120)
         assert process.wait(timeout=60) == 0
-        assert second.wait(timeout=60) == 0
+        assert second.wait(timeout=30) == 0  # the end-of-run notice, not syncer_lost_s (600 s)
     finally:
         pump.stop()
         for proc in (first,):
@@ -192,3 +206,15 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
         rounds = [e for e in events if e["event"] == "rl_sampler_engine_round"]
         assert rounds and all(r["groups"] >= 1 for r in rounds)
     assert "subscriber connected" in syncer_log.read_text()
+    # Each version names one cut: the digest the samplers loaded for it (the base digest for 0).
+    loaded: dict[int, set[str]] = {}
+    for events in tapes:
+        for e in events:
+            if e["event"] == "rl_sampler_policy_loaded":
+                loaded.setdefault(int(e["policy_version"]), set()).add(e["policy_hash"])
+    for version, digests in cuts.items():
+        if version == 0:
+            assert digests == {base_cut_digest(tmp_path / "base")}
+        else:
+            assert digests <= loaded[version]
+    assert any(v >= 1 for v in cuts)

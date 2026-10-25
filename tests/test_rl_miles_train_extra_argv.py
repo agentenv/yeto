@@ -30,3 +30,8 @@ def test_other_recipes_refuse_a_set_value():
 def test_commas_split_like_spaces():
     assert train_extra_argv("nemotron_h", "--recompute-modules,moe,layernorm") == (
         "--recompute-modules", "moe", "layernorm")
+
+
+def test_log_prob_chunking_is_allowed():
+    # S27 G-EF: the colocated agentic run ran out of memory in the full fp32 log-prob block
+    assert train_extra_argv("nemotron_h", "--log-probs-chunk-size,4096") == ("--log-probs-chunk-size", "4096")

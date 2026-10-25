@@ -9,10 +9,13 @@ writers use (``GroupWriter``, the Miles buffer writer) and that
 
 ``header``: ``sample_id``, ``behavior_version`` (oldest engine version of any
 token: the policy version the trainer gates on), ``tokens``, ``provenance``,
-``sampler_round``, ``sampler_id``, ``fragment_versions`` (the subscriber's
-version vector when it generated), ``written_at``. ``payload``: the buffer
-payload of the group (``encode_group``: ``Sample.to_dict()`` mappings with
-per-token ``rollout_log_probs`` and ``metadata.weight_version``).
+``sampler_round``, ``sampler_id``, ``fragment_versions`` (the version vector
+of the cut that generated the oldest tokens), ``cuts`` (S27 G-EM: for every
+engine version in the group, the merged cut the sampler loaded for it:
+``merged_version``, ``digest``, ``fragment_versions``), ``written_at``.
+``payload``: the buffer payload of the group (``encode_group``:
+``Sample.to_dict()`` mappings with per-token ``rollout_log_probs`` and
+``metadata.weight_version``).
 
 Trainer side: :class:`RelayPump` moves items into the trainer's own
 :class:`~yeto.rl.engine.sample_buffer.FileSampleBuffer` on a local directory
@@ -23,6 +26,14 @@ pump takes items only while the reader has fewer than ``prefetch_groups``
 unread groups, so the relay depth a sampler sees is the trainer's real
 backlog. A sample id already in the local buffer is acknowledged and
 skipped (an item delivered again after a pump restart).
+
+S27 G-EM: the pump writes each sample's external merged cut into its metadata
+(``yeto.rl.engine.external_policy.CUT_METADATA_KEY``: the cut of the sample's
+oldest engine version, from the item's ``cuts``), so the trainer's evidence
+names the weights that generated every trajectory. An item without the cut of
+one of its versions, or whose versions disagree with its header, is rejected
+(acknowledged, not trained). The pump stops when the relay is gone
+(:class:`~.relay.RelayGone`).
 """
 
 from __future__ import annotations
@@ -36,9 +47,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from yeto.rl.engine.buffer_payload import behavior_versions, decode_group, encode_group
+from yeto.rl.engine.external_policy import CUT_METADATA_KEY, cut_record
 from yeto.rl.engine.sample_buffer import PAYLOADS, SampleBufferError, SampleIndexEntry, payload_name
 
-from .relay import PUT_FULL, RelayConsumer, RelayProducer
+from .relay import PUT_FULL, RelayConsumer, RelayGone, RelayProducer, RelayStopped
 
 MAGIC = b"YRG1"
 HEADER_SCHEMA = "yeto.rl.relay-group/v1"
@@ -94,22 +107,44 @@ class RelaySampleBuffer:
 
     def __init__(self, producer: RelayProducer, *, fragment_versions: Callable[[], Sequence[int]] = lambda: (),
                  should_stop: Callable[[], bool] = lambda: False, full_wait_s: float = 2.0,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 cut_of: Callable[[int], Mapping[str, Any] | None] | None = None) -> None:
+        """``cut_of(version)``: the identity of the cut loaded for an engine
+        version (``SubscriberReleaseStore.cut_identity``); None: items carry no
+        ``cuts`` (a relay trainer rejects them)."""
         self.producer = producer
         self.fragment_versions = fragment_versions
         self.should_stop = should_stop
         self.full_wait_s = float(full_wait_s)
         self.clock = clock
+        self.cut_of = cut_of
         self._payloads: dict[str, bytes] = {}
         self._depth = None
         self.written = 0
         self.dropped = 0  # groups not stored because the sampler is stopping
+        self.uncut = 0  # groups not sent: a version without a known cut
+        self.gone = False  # the relay did not answer for gone_s (RelayGone)
+        # a stopping sampler ends the producer's retries of a broken link
+        self.producer.should_stop = lambda: self.should_stop()
 
     # writing (GroupWriter: payload first, then the index entry)
     def write_payload(self, sample_id: str, data: bytes) -> str:
         ref = f"relay/{sample_id}"
         self._payloads[ref] = bytes(data)
         return ref
+
+    def _cuts(self, payload: bytes) -> dict[str, dict[str, Any]] | None:
+        """{engine version: cut identity} of every version in the group; None when
+        one version has no known cut."""
+        assert self.cut_of is not None
+        versions = {v for sample in decode_group(payload) for v in behavior_versions(sample)}
+        cuts = {}
+        for version in sorted(versions):
+            cut = self.cut_of(version)
+            if cut is None:
+                return None
+            cuts[str(version)] = dict(cut)
+        return cuts
 
     def append(self, entry: SampleIndexEntry) -> None:
         payload = self._payloads.pop(entry.payload_ref)
@@ -121,8 +156,28 @@ class RelaySampleBuffer:
             "fragment_versions": [int(v) for v in self.fragment_versions()],
             "written_at": float(self.clock()),
         }
-        ack = self.producer.put_blocking(encode_item(header, payload), should_stop=self.should_stop,
-                                         wait_s=self.full_wait_s)
+        if self.cut_of is not None:
+            cuts = self._cuts(payload)
+            if cuts is None:
+                self.uncut += 1
+                if self.uncut == 1:
+                    print(f"[yeto-relay] group {entry.sample_id} has an engine version without a loaded "
+                          "cut; not sent (a relay trainer names the cut of every sample)", flush=True)
+                return
+            header["cuts"] = cuts
+            header["fragment_versions"] = list(cuts[str(int(entry.behavior_version))]["fragment_versions"])
+        if self.gone:
+            self.dropped += 1
+            return
+        try:
+            ack = self.producer.put_blocking(encode_item(header, payload), should_stop=self.should_stop,
+                                             wait_s=self.full_wait_s)
+        except RelayStopped:
+            ack = None
+        except RelayGone as error:
+            self.gone = True
+            print(f"[yeto-relay] {error}; the sampler stops writing", flush=True)
+            ack = None
         if ack is None or ack.status == PUT_FULL:
             self.dropped += 1
             return
@@ -138,7 +193,15 @@ class RelaySampleBuffer:
 
     # reading (the loop's backlog and the resume point)
     def refresh(self) -> int:
-        self._depth = self.producer.depth()
+        if self.gone:
+            return len(self)
+        try:
+            self._depth = self.producer.depth()
+        except RelayStopped:
+            pass  # stopping: the last known depth stands
+        except RelayGone as error:
+            self.gone = True
+            print(f"[yeto-relay] {error}; the sampler stops", flush=True)
         return len(self)
 
     def __len__(self) -> int:
@@ -212,6 +275,15 @@ class RelayPump:
                 self.consumer.ack(item.item_id)
                 continue
             try:
+                payload = with_cut_metadata(header, payload)
+            except (RelayItemError, ValueError, KeyError, TypeError) as error:
+                self.rejected += 1
+                print(f"[yeto-relay] item {item.item_id} ({sample_id}) rejected: {str(error)[:300]}", flush=True)
+                if self.emit is not None:
+                    self.emit("rl_relay_item_rejected", item_id=item.item_id, error=str(error)[:300])
+                self.consumer.ack(item.item_id)
+                continue
+            try:
                 ref = self.buffer.write_payload(sample_id, payload)
             except SampleBufferError:
                 # A pump that stopped between the payload and its index entry:
@@ -234,6 +306,12 @@ class RelayPump:
             try:
                 if self.step() == 0:
                     self._stop.wait(min(1.0, self.wait_s))
+            except RelayGone as error:  # the head is gone: nothing more will arrive
+                self.error = error
+                print(f"[yeto-relay] pump stopped: {error}", flush=True)
+                if self.emit is not None:
+                    self.emit("rl_relay_pump_error", error=f"RelayGone: {str(error)[:300]}")
+                return
             except Exception as error:  # noqa: BLE001 - recorded; the reader sees no new data
                 self.error = error
                 if self.emit is not None:
@@ -248,6 +326,31 @@ class RelayPump:
     def stop(self) -> None:
         self._stop.set()
         self.consumer.close()
+
+
+def with_cut_metadata(header: Mapping[str, Any], payload: bytes) -> bytes:
+    """The payload with every sample's external merged cut in its metadata
+    (module doc): the cut of the sample's oldest engine version, from the
+    item's ``cuts``. Raises when a cut is missing or the versions disagree."""
+    cuts = header.get("cuts")
+    if not isinstance(cuts, Mapping) or not cuts:
+        raise RelayItemError("relay item names no merged cut (a sampler without cut identities)")
+    samples = decode_group(payload)
+    oldest_of_group = None
+    for sample in samples:
+        oldest = min(behavior_versions(sample))
+        cut = cuts.get(str(oldest))
+        if not isinstance(cut, Mapping) or int(cut.get("merged_version", -1)) != oldest:
+            raise RelayItemError(f"relay item names no merged cut for engine version {oldest}")
+        meta = sample.setdefault("metadata", {})
+        if not isinstance(meta, dict):
+            raise RelayItemError("relay sample metadata is not an object")
+        meta[CUT_METADATA_KEY] = cut_record(oldest, str(cut.get("digest")))
+        oldest_of_group = oldest if oldest_of_group is None else min(oldest_of_group, oldest)
+    if oldest_of_group != int(header["behavior_version"]):
+        raise RelayItemError(f"relay item behavior version {header['behavior_version']} != its samples' "
+                             f"oldest version {oldest_of_group}")
+    return encode_group(samples)
 
 
 SPOT_SYNCER_ENV = "YETO_SPOT_SYNCER"  # sampler island: subscribe to this syncer (host:port)

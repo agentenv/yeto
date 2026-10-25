@@ -901,7 +901,9 @@ the roster or the learner membership: no PULL, no quorum or K, no final
 cut, no SHUTDOWN, no event-tape or status record. It is a sampler member
 ("Sampler members"): HEARTBEAT renews the member lease, LEAVE is ignored,
 and a retired member gets ERROR `fenced: subscriber ...`. When the run ends every subscriber gets ERROR
-`subscriber: run finished`. Refusals are ERRORs that start with
+`subscriber: run finished`; the syncer closes the connections about 500 ms
+after sending it (S27 G-EM), and a client honours the notice on any
+connection generation. Refusals are ERRORs that start with
 `subscriber refused:`. Unsharded syncers only.
 
 ## Sample relay (S27 G-EA, `--sample-relay`)
@@ -941,3 +943,12 @@ learner session and never touches merge state (not in the profile hash).
   publishes its fragment layout on board 1 for the subscribers.
 - Items live only in head memory; a head restart gives a new `relay_epoch`
   and the clients reset their cursors. Refusals: ERROR `relay refused:`.
+- Clients (Python, S27 G-EM): a producer or consumer that has had no
+  successful request for `gone_s` (default 900 s) gives up (`RelayGone`).
+- Item payload (application level, `yeto.rl.spot_rollout.relay_buffer`):
+  `YRG1 | u32 header length | header JSON | group payload`. The header's
+  `cuts` maps every engine version in the group to the merged cut the
+  sampler loaded for it (`merged_version`, `digest`, `fragment_versions`);
+  the training island's pump writes each sample's cut into its metadata
+  (`yeto_behavior_cut`) and rejects an item without it. The trajectory
+  evidence of a relay trainer is schema 5 (`yeto.rl.trajectory_evidence`).

@@ -245,6 +245,20 @@ async def running_members(controller: Any) -> frozenset[str]:
 
 
 def require_policy_tokens(batch: RolloutBatchHandle, expected_token: str) -> None:
+    external = getattr(batch, "external_cut", None)
+    if external is not None:
+        # S27 G-EM relay mode: the groups name the merged versions of external cuts
+        # (yeto.rl.engine.external_policy); the same age rule the driver applied.
+        from yeto.rl.engine.external_policy import ExternalMergedCuts
+
+        merged, limit = external
+        problems, _ages = ExternalMergedCuts.check_groups(batch.groups, int(merged), int(limit))
+        if problems:
+            raise PolicyTokenMismatch(f"merged version {merged} (max_policy_age={limit})",
+                                      tuple(g for g in batch.groups if any(
+                                          p.startswith((f"{g.group_id}=", f"{g.group_id}:"))
+                                          for p in problems)))
+        return
     # A group carrying version segments (limit > 0, 4.1) names its oldest version;
     # the driver checked it against the policy-age window before training.
     bad = tuple(g for g in batch.mismatched_groups(expected_token) if not g.policy_versions)

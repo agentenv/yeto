@@ -872,6 +872,12 @@ def _prepare_rl_args(
         _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
     if callable(over_sampling_check):
         over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
+    # S27 G-EF: island environment options the backend's colocated placement cannot run
+    env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_island_env", None)
+    if callable(env_check):
+        for iargs in rl_island_placement_args(args):
+            env_check(placement=getattr(iargs, "rl_placement", "colocated"),
+                      env_pairs=getattr(args, "modal_env", None) or ())
     # S25 N10.4: a backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):

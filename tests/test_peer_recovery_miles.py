@@ -518,3 +518,18 @@ def test_a_rank_refusing_the_background_copy_refuses_the_snapshot(tmp_path, stub
     assert "not at a step boundary" in reason
     # The rank that did start writing was drained before the refusal.
     assert group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.FINISH_CUT_SHARD]
+
+
+def test_the_neutral_island_captures_only_over_a_capturing_trainer():
+    # s27-next2 merge: s27-elastic-fix's capture-then-write moved into engine.stream_recovery;
+    # the Miles rank shards capture (cut_plugin background="host"), the verl rank files do not
+    from yeto.rl.adapters.miles.full_parameter.peer_recovery import MilesRankShards
+    from yeto.rl.adapters.verl.peer_recovery import VerlRankShards
+    from yeto.rl.engine.stream_recovery import CapturingStreamRecoveryIsland, recovery_island
+    from yeto.rl.peer_recovery import captures_snapshots
+
+    assert MilesRankShards.captures is True and VerlRankShards.captures is False
+    miles = recovery_island(None, MilesRankShards(object(), LAYOUT_HASH), None, recovering=False)
+    assert isinstance(miles, CapturingStreamRecoveryIsland) and captures_snapshots(miles)
+    verl = recovery_island(None, VerlRankShards.__new__(VerlRankShards), None, recovering=False)
+    assert not isinstance(verl, CapturingStreamRecoveryIsland) and not captures_snapshots(verl)

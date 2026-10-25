@@ -934,12 +934,13 @@ class VerlFullParameterRoleStream(FullParameterRoleStream):
 
     def _recovery_island(self, group, adapter, *, recovering: bool):
         """S27 G-ED: peer recovery over the FSDP2 rank files (:mod:`.peer_recovery`)."""
-        from yeto.rl.engine.stream_recovery import StreamRecoveryIsland
+        from yeto.rl.engine.stream_recovery import recovery_island
 
         from .peer_recovery import VerlRankShards
 
-        return StreamRecoveryIsland(self, VerlRankShards(group, adapter), asyncio.get_running_loop(),
-                                    recovering=recovering)
+        # VerlRankShards does not capture: the donor writes its rank files at the safe point
+        return recovery_island(self, VerlRankShards(group, adapter), asyncio.get_running_loop(),
+                               recovering=recovering)
 
 
 # ----------------------------------------------------------------------------- island wiring
