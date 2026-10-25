@@ -526,3 +526,13 @@ def test_watcher_relaunches_a_lost_engine_cluster_once(monkeypatch):
     island.engine_lost = engine_lost
     island.watch(sky, threading.Event(), poll_s=0.0)
     assert island.engine_relaunches == 1
+
+
+def test_on_demand_trainer_with_preemptible_engines(monkeypatch):
+    sky = _fake_sky(monkeypatch)
+    args = _rl_args(extra=("--on-demand", "--rl-engine-cluster-spot"))
+    (split,) = _plan(args).values()
+    tasks = ec.build_tasks(sky, args, split, _make(args))
+    assert tasks.trainer.resources.use_spot is False
+    assert tasks.engine_setup.resources.use_spot is True and tasks.engine_run.resources.use_spot is True
+    assert args.spot is False  # the launch args are not changed

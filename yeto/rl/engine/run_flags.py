@@ -472,6 +472,9 @@ _PLACEMENT = (
              "trainer keeps running and waits up to S seconds; the launcher relaunches only "
              "the engine cluster, the engines restart and get the current policy (declared "
              "rollout cells). 0 = off: losing the engine cluster fails the island"),
+    cli_flag("--rl-engine-cluster-spot", action="store_true",
+             help="two-cluster island: the engine cluster is preemptible even when the "
+             "trainer cluster is on demand (--on-demand); default: both follow --spot"),
     cli_flag("--rl-island-network-tier", choices=("auto", "none"), default="auto",
              help="multi-node RL island: auto = ask sky for network_tier=best where the cloud "
              "honors it (Nebius H100:8/H200:8 -> InfiniBand GPU cluster on a fixed fabric); "

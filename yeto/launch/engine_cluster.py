@@ -231,9 +231,14 @@ def _add_envs(task, envs: dict[str, str]) -> None:
         task.envs = {**(getattr(task, "envs", None) or {}), **envs}
 
 
-def _shape(sky, args, task, spec: ClusterSpec) -> None:
+def _shape(sky, args, task, spec: ClusterSpec, *, engine: bool = False) -> None:
+    import copy
+
     from .rl_island_task import island_sky_resources
 
+    if engine and getattr(args, "rl_engine_cluster_spot", False):
+        args = copy.copy(args)  # design v2: preemptible engines next to an on-demand trainer
+        args.spot = True
     task.num_nodes = spec.num_nodes
     task.set_resources(sky.Resources(**island_sky_resources(args, spec, in_vm_docker=False)))
 
@@ -284,10 +289,10 @@ def build_tasks(sky, args, split: EngineSplit, make_task: Callable[[], Any]) -> 
         trainer.run = with_declared_cells(trainer.run, engine_cell_names(args, split), module)
         _add_envs(trainer, {ENGINE_RECOVERY_ENV: str(int(recover_s(args)))})
     setup = make_task()
-    _shape(sky, args, setup, split.engine)
+    _shape(sky, args, setup, split.engine, engine=True)
     setup.run = None
     run = make_task()
-    _shape(sky, args, run, split.engine)
+    _shape(sky, args, run, split.engine, engine=True)
     run.run = run_for(run.run, engine=True, rank_offset=split.rank_offset)
     _add_envs(run, dict(NCCL_SOCKET_ENVS))
     return SplitTasks(trainer=trainer, engine_setup=setup, engine_run=run)
