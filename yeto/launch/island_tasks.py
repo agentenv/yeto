@@ -186,9 +186,6 @@ def _check_dispense(args, plan) -> None:
         # engine-neutral DispensedPrompts / the Miles data source either way)
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense: the training islands run different backends "
                          f"({', '.join(sorted(backends))}); their prompt files differ")
-    if plan.islands and "verl" in backends and int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
-        raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover verl fully_async training islands "
-                         "(--rl-max-policy-age > 0: verl's rollouter draws the rows) yet")
 
 
 def dispensing_islands(args, plan) -> list[int]:

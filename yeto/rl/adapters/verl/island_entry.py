@@ -424,8 +424,7 @@ def main(argv=None) -> int:
     from .train_options import verify_plan
 
     try:  # S27 G-EU (VERL-PARITY #31, #25, #26): refused paths stop before any model or data work
-        dispense = island_dispense(args, engine=engine, fully_async=bool(int(args.rl_max_policy_age or 0)),
-                                   buffer_trainer=buffer_section is not None)
+        dispense = island_dispense(args, engine=engine, buffer_trainer=buffer_section is not None)
         verify = verify_plan(args, full=(args.parameter_mode == vconf.FULL_PARAMETER_MODE
                                          or engine == megatron_engine.ENGINE_MEGATRON))
     except ValueError as error:

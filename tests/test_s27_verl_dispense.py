@@ -107,7 +107,7 @@ def test_the_verl_island_refuses_the_dispenser_where_it_does_not_belong():
         "--rl-data-slot": (dict(rl_data_slot="0/2"), {}),
         "no syncer": (dict(rl_single_island_no_sync=True, syncer=None), {}),
         "megatron island": ({}, dict(engine="megatron")),
-        "fully_async": ({}, dict(fully_async=True)),
+        "fully_async": (dict(rl_max_policy_age=1), {}),
         "buffer trainer": ({}, dict(buffer_trainer=True)),
         "--rl-data-position-store": (dict(rl_data_position_store="/store"), {}),
     }
@@ -335,18 +335,24 @@ def test_an_explicit_dispense_gives_verl_training_islands_the_dispenser(tmp_path
     assert "data split (dispense)" in capsys.readouterr().err
 
 
-def test_auto_takes_the_dispenser_on_verl_and_keeps_the_row_slots_on_verl_fully_async(
+def test_auto_takes_the_dispenser_on_verl_and_keeps_the_row_slots_on_fully_async(
         tmp_path, monkeypatch):
     """Main agent 17:1x: the auto split's verl fallback becomes the dispenser; only
-    verl fully_async (the rollouter draws the rows) keeps the row slots."""
+    fully_async (verl's rollouter draws the rows) keeps the row slots."""
     plan, islands, syncer = _plan(tmp_path, monkeypatch)
     assert plan["data_split"]["mode"] == DISPENSE and plan["data_split"]["requested"] == "auto"
     assert all("--rl-data-dispense" in c for c in islands) and " --dispense " in syncer
     from yeto.launch.data_split_plan import dispense_blockers
 
-    verl_async = SimpleNamespace(rl_backend="verl", rl_max_policy_age=1, rl_rollout_ahead=1)
-    assert any("verl fully_async" in b for b in dispense_blockers(verl_async))
+    verl_async = SimpleNamespace(rl_backend="verl", rl_max_policy_age=1)
+    assert any("fully_async" in b for b in dispense_blockers(verl_async))
     assert not dispense_blockers(SimpleNamespace(rl_backend="verl"))
+    # with rollout ahead (G-EV, VERL-PARITY #10) the synchronous trainer draws the rows
+    assert not dispense_blockers(SimpleNamespace(rl_backend="verl", rl_max_policy_age=1, rl_rollout_ahead=1))
+    ahead = SimpleNamespace(rl_data_dispense=True, syncer="h:1", rl_single_island_no_sync=False,
+                            rl_data_slot=None, rl_data_position_store=None, rl_max_policy_age=1,
+                            rl_rollout_ahead=1)
+    assert vd.island_dispense(ahead)
 
 
 def test_islands_of_two_backends_cannot_share_the_dispenser(tmp_path, monkeypatch):

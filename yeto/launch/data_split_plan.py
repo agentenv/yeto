@@ -114,13 +114,12 @@ def dispense_blockers(args) -> list[str]:
     if getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET:
         out.append(f"--rl-sync-preset {SAO_STREAMING_SYNC_PRESET} (no GPU check with the dispenser)")
     # S27 G-EU (VERL-PARITY #31): verl training islands of the synchronous trainer take
-    # their rows from the dispenser (adapters/verl/task_dispense.py), as Miles islands do
+    # their rows from the dispenser (adapters/verl/task_dispense.py), as Miles islands do;
+    # the fully_async rule below covers verl's fully_async path as well
     backends = island_backends(args)
     if len(backends) > 1:
         out.append(f"training islands of different backends ({', '.join(sorted(backends))}: their "
                    "prompt files differ)")
-    if "verl" in backends and int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
-        out.append("verl fully_async (--rl-max-policy-age > 0: verl's rollouter draws the rows)")
     if getattr(args, "rl_single_island_no_sync", False):
         out.append("--rl-single-island-no-sync (no syncer)")
     if getattr(args, "rl_elastic", False):

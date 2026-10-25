@@ -75,12 +75,16 @@ class DispenseIslandError(ValueError):
 # ----------------------------------------------------------------- island entry
 
 
-def island_dispense(args: Any, *, engine: str = "fsdp2", fully_async: bool = False,
-                    buffer_trainer: bool = False) -> bool:
+def island_dispense(args: Any, *, engine: str = "fsdp2", buffer_trainer: bool = False) -> bool:
     """Whether this verl island claims its rows from the dispenser
     (``--rl-data-dispense``); raises :class:`DispenseIslandError` where it does
-    not apply (module doc). A sampler island never reaches here (it runs the
+    not apply (module doc). The fully_async path is ``--rl-max-policy-age > 0``
+    without ``--rl-rollout-ahead`` (the launcher's rule; with rollout ahead the
+    synchronous trainer generates one batch ahead and draws through the same
+    ``_fetch_one_gen_batch``). A sampler island never reaches here (it runs the
     engine sampler, ``sampler_entry``)."""
+    fully_async = (int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1
+                   and not int(getattr(args, "rl_rollout_ahead", 0) or 0))
     if not getattr(args, "rl_data_dispense", False):
         return False
     problems = []
