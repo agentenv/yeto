@@ -13,6 +13,11 @@ The other islands keep merging and every island keeps getting PULLs. Once
 nothing is pending, the island's broadcasts are sent inline again.
 ``--inline-broadcast`` keeps the old behavior; that case shows the stall.
 
+The syncer lease (60 s) is longer than the test's slow phase: under the old
+behavior a short lease ends the stall by removing the slow island (G-EL's
+test_bulk_resend covers leases; run s27-fa-r1 had none), and the 64 MiB INIT
+at startup must not lapse one either. Here the stall itself is measured.
+
 The slow downlink is a test-only read limit on island 1's data sockets
 (``SlowDownlinkClient``); control frames (PULLs) are read at full speed, as
 in the GPU run, where the small frames still arrived. With bf16 downlink
@@ -51,6 +56,7 @@ SLOW_S = 14.0
 # half the size); merges are counted from then on.
 FILLED_S = 8.0
 FULL_EVERY = 4
+SYNCER_LEASE_S = 60
 
 
 class SlowDownlinkClient(SyncerClient):
@@ -103,6 +109,15 @@ class CountingIsland(LightIsland):
         super().apply_broadcast(update)
 
 
+def steady(tape, syncer_log) -> bool:
+    text = syncer_log.read_text()
+    if text.count("background resend started") != text.count("background resend drained"):
+        return False
+    records = tape_records(tape)
+    joined = max((r["time_unix"] for r in records if r.get("kind") == "pool_join"), default=0.0)
+    return all(merges_with(records, island, joined, time.time() + 1) >= 10 for island in (0, 1))
+
+
 def start_syncer(tmp_path, port, *extra):
     binary = build_syncer()
     tape = tmp_path / "tape.jsonl"
@@ -111,7 +126,7 @@ def start_syncer(tmp_path, port, *extra):
         [str(binary), "--port", str(port), "--learners", "2", "--quorum", "1", "--grace-ms", "50",
          "--total-steps", "1200", "--outer-lr", "0.7", "--outer-momentum", "0.0",
          "--min-round-interval-ms", "20", "--quorum-timeout-s", "30", "--event-tape", str(tape),
-         "--island-lease-s", str(LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2", *extra],
+         "--island-lease-s", str(SYNCER_LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2", *extra],
         stdout=log, stderr=subprocess.STDOUT, text=True, env={**os.environ, "TOKIO_WORKER_THREADS": "4"})
     return proc, tape, log
 
@@ -132,6 +147,9 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
         a.start()
         b.start()
         wait_until(lambda: sum(a.versions) >= 40 and sum(b.versions) >= 40, 60, "no early rounds")
+        # Both islands are ordinary members: a late joiner's catch-up is done
+        # and both pushes are being merged.
+        wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
         generations = (a.client.connection_generation, b.client.connection_generation)
         slow.set()  # island 1's downlink is slow from now on
         slow_from = time.time()
@@ -170,10 +188,9 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
     # and island 1 kept getting PULLs.
     assert during >= 60, during
     assert pulls_to_slow >= 10, pulls_to_slow
-    # From the slow phase on nobody lost its lease or redialed (a skipped
-    # bf16 delta would make the slow island resync, that is redial). The
-    # startup may lapse a lease once (see test_bulk_resend).
-    assert not [r for r in records if r.get("kind") == "pool_leave" and r["time_unix"] > slow_from]
+    # Nobody lost its lease or redialed (a skipped bf16 delta would make the
+    # slow island resync, that is redial).
+    assert not [r for r in records if r.get("kind") == "pool_leave"]
     assert (a.client.connection_generation, b.client.connection_generation) == generations
     assert a.heartbeat.errors == [] and b.heartbeat.errors == []
     # The slow island went to a forwarder and back to inline broadcasts.
