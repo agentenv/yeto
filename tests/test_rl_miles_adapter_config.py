@@ -950,3 +950,26 @@ def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
     argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     at = argv.index("--mamba-training-ssm-states-dtype")
     assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain
+
+
+def _session_config():
+    return sub(make_config(), "agent", use_session_server=True, session_server_port=(30000,),
+               session_server_workers=4)
+
+
+def test_session_server_gets_a_finite_upstream_timeout():
+    # S27 G-EF: Miles' default --miles-router-timeout is None (a call to a dead engine hangs)
+    argv = list(mc.translate_run_config(_session_config(), AlgorithmSpec()).argv)
+    assert argv.count("--miles-router-timeout") == 1
+    assert flag_value(argv, "--miles-router-timeout") == str(mc.SESSION_UPSTREAM_TIMEOUT_S) == "600"
+
+
+def test_extra_argv_sets_its_own_upstream_timeout():
+    argv = list(mc.translate_run_config(_session_config(), AlgorithmSpec(),
+                                        extra_argv=["--miles-router-timeout", "120"]).argv)
+    assert argv.count("--miles-router-timeout") == 1 and flag_value(argv, "--miles-router-timeout") == "120"
+
+
+def test_no_session_server_keeps_the_argv_without_a_timeout():
+    argv = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--miles-router-timeout" not in argv
