@@ -534,7 +534,6 @@ struct SubscriberHub {
     /// Groups of SUBSCRIBE connections still waiting for the session (their
     /// data streams may already attach).
     waiting: Mutex<HashMap<Member, Arc<Group>>>,
-    snapshot_wanted: std::sync::atomic::AtomicBool,
 }
 
 impl SubscriberHub {
@@ -543,7 +542,6 @@ impl SubscriberHub {
             max,
             conns: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
-            snapshot_wanted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -554,7 +552,6 @@ impl SubscriberHub {
         if let Some(old) = old {
             old.close();
         }
-        self.snapshot_wanted.store(true, Ordering::Release);
     }
 
     fn remove(&self, conn: &Arc<SubscriberConn>) {
@@ -592,7 +589,6 @@ impl SubscriberHub {
     /// scheduler never waits for a subscriber link). New subscribers also get
     /// every other fragment at its current version.
     fn publish(&self, st: &GlobalState, p: usize) {
-        let snapshot = self.snapshot_wanted.swap(false, Ordering::AcqRel);
         for conn in self.live() {
             if conn.is_closed() {
                 continue;
@@ -600,7 +596,7 @@ impl SubscriberHub {
             let mut queued = false;
             {
                 let mut pending = conn.pending.lock().unwrap();
-                if snapshot && conn.needs_snapshot.swap(false, Ordering::AcqRel) {
+                if conn.needs_snapshot.swap(false, Ordering::AcqRel) {
                     for q in 0..st.params.len() {
                         if conn.group.layout.fragments.get(q).and_then(|f| f.numel().ok()) == Some(st.params[q].len()) {
                             queued |= pending.offer(q, st.versions[q], st.params[q].clone());
