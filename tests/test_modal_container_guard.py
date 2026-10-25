@@ -569,6 +569,17 @@ def test_pending_containers_do_not_count_for_the_double_billing_limit_of_relaunc
     assert stop is not None and "for 601 s" in stop[1] and "beside old ones" in stop[1]
 
 
+def test_the_state_tells_the_islands_containers_from_the_pending_ones():
+    """A run script that counts started containers (poll/guard-state.json) can count the islands' own."""
+    guard = _guard()
+    guard.observe(0.0, EX_BUILD1, names=_names())
+    state = guard.state()
+    assert state["present"] == [EX_B1] and state["originals_present"] == []
+    assert list(state["unnamed_present"]) == [EX_B1]
+    guard.observe(30.0, EX_BUILD1 + [EX_ISLANDS[0]], names=_names([EX_I0]))
+    assert guard.state()["present"] == [EX_B1, EX_I0] and guard.state()["originals_present"] == [EX_I0]
+
+
 def test_a_pending_container_gets_one_warning_after_the_limit():
     from tools.modal_container_guard import unnamed_to_warn
 
@@ -611,6 +622,7 @@ def test_cli_build_containers_before_the_islands_do_not_stop_the_run(tmp_path):
     assert guard_log.count("WARNING: container") == 4  # each pending container once (the islands' too, at -1 s)
     state = json.loads((run / "poll/guard-state.json").read_text())
     assert state["originals"] == [EX_I0, EX_I1] and state["unnamed_present"] == {} and state["by_name"] is True
+    assert state["present"] == state["originals_present"] == [EX_I0, EX_I1]
     assert [g["container_id"] for g in state["unnamed_gone"]] == [EX_B1, EX_B2]
     assert (run / "poll/seen.txt").read_text().split() == [EX_B1, EX_B2, EX_I0, EX_I1]
 

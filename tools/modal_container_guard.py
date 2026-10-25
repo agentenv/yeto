@@ -353,6 +353,7 @@ class ContainerGuard:
         return {"originals": self.originals, "extras_present": self.extras, "extras_gone": self.extras_gone,
                 "unnamed_present": self.unnamed, "unnamed_gone": self.unnamed_gone, "by_name": self.by_name,
                 "originals_gone": sorted(self.originals_gone), "present": self.present,
+                "originals_present": [o for o in self.originals if o in self.present],
                 "seen": self.seen, "containers_usd": round(self.containers_usd, 2),
                 "progress_lines": self.progress, "last_progress_utc": utc(self.last_progress),
                 "stopped": self.stopped}
