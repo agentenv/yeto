@@ -813,7 +813,10 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     if host:
         captured["capture"] = {**captured["capture"], "reason": "host_background"}
     if not background:
-        return _write_refusing(captured, directory=directory, cut_id=cut_id)
+        try:
+            return _write_refusing(captured, directory=directory, cut_id=cut_id)
+        finally:
+            _release_capture(captured, cut_id)
     from concurrent.futures import ThreadPoolExecutor
 
     if cut_id in _PENDING_SHARDS:
@@ -835,13 +838,37 @@ def poll_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
 
 
 def _write_host_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
-    """Thread of the trainer process: :func:`_write_refusing` of a host capture."""
+    """Thread of the trainer process: :func:`_write_refusing` of a host capture,
+    then the host copy is released (:func:`_release_capture`) before the
+    summary is ready."""
     try:
         result = _write_refusing(captured, directory=directory, cut_id=cut_id)
     except BaseException:
         _remove_partial(directory, captured["coord"])
         raise
+    finally:
+        _release_capture(captured, cut_id)
     return {**result, "writer": {"mode": "host_thread"}}
+
+
+def _release_capture(captured: dict[str, Any], cut_id: str) -> None:
+    """Drop the host copy of a written (or refused) host capture and give its
+    memory back to the OS (S27 G-EY, :mod:`yeto.rl.engine.host_memory`). The
+    caller holds the last reference: the capture is emptied in place."""
+    from yeto.rl.engine.host_memory import anonymous_rss_mib
+
+    held = anonymous_rss_mib()
+    captured.clear()
+    _release_host_memory(f"released {cut_id}", rss_anon_mib_with_copy=held)
+
+
+def _release_host_memory(what: str, **fields: Any) -> None:
+    """:func:`yeto.rl.engine.host_memory.release_host_memory`, logged for the driver."""
+    import json
+
+    from yeto.rl.engine.host_memory import release_host_memory
+
+    print(f"yeto cut host memory {what} " + json.dumps({**fields, **release_host_memory()}), flush=True)
 
 
 def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
@@ -1454,6 +1481,10 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
         # are told apart by REFUSAL_KIND; the trainer side raises CutError for both.
         kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
         return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
+    finally:
+        # S27 G-EY: the loaded shard's host tensors are garbage once the trainer
+        # holds their values (or the restore was refused).
+        _release_host_memory(f"after restoring {cut_id}")
 
 
 def _inject_restore_sleep(actor: Any) -> None:
