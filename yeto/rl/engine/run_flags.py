@@ -457,6 +457,16 @@ _PLACEMENT = (
              "at /mnt/yeto-models on every node (needs nebius@<region>) and points "
              "HF_HUB_CACHE at it when it holds a completed --model@--model-revision "
              "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download"),
+    # S27 G-DI two-cluster island (yeto.launch.engine_cluster)
+    cli_flag("--rl-engine-cluster", default=None, metavar="SPEC",
+             help="two-cluster RL island (Nebius sky islands): the LAST n nodes of the "
+             "--gpu island (n = SPEC's node count) run as a second sky cluster of SPEC's "
+             "machine type (cloud:[n]xGPUSxCARD@region, e.g. nebius:8xh100@eu-north1), "
+             "joined to the trainer cluster's Ray over the private network; the rollout "
+             "engines run there and get the weights over NCCL sockets. --gpu stays the "
+             "logical island (node count, GPUs per node; its card is the trainer "
+             "cluster's). One entry for every island, or one per --gpu entry with 'none' "
+             "for an island that stays one cluster. Unset = one cluster per island"),
     cli_flag("--rl-island-network-tier", choices=("auto", "none"), default="auto",
              help="multi-node RL island: auto = ask sky for network_tier=best where the cloud "
              "honors it (Nebius H100:8/H200:8 -> InfiniBand GPU cluster on a fixed fabric); "

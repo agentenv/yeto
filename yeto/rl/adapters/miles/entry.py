@@ -1917,6 +1917,19 @@ def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
     return [list(r) for r in rows]
 
 
+def wait_island_nodes(nodes: int) -> dict[str, Any] | None:
+    """S27 G-DI: :func:`yeto.rl.engine.multinode.wait_for_island_nodes` on this Ray."""
+    from yeto.rl.engine.multinode import ISLAND_NODE_WAIT_ENV, wait_for_island_nodes
+
+    if not os.environ.get(ISLAND_NODE_WAIT_ENV):
+        return None
+    import ray
+
+    return wait_for_island_nodes(int(nodes), environ=os.environ, ray_nodes=ray.nodes,
+                                 clock=time.monotonic, sleep=time.sleep,
+                                 log=lambda line: print(line, flush=True))
+
+
 def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
     """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
     built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
@@ -2100,6 +2113,11 @@ def run_ports_island(
     connect_island_ray(miles_args=miles_args)
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
+        # S27 G-DI two-cluster island: every node in the Ray before anything below
+        # (None without YETO_ISLAND_NODE_WAIT_S: no wait, no event)
+        nodes_ready = wait_island_nodes(topology.nodes)
+        if nodes_ready is not None:
+            append_tape_event(miles_args, {"event": "rl_island_nodes_ready", **nodes_ready})
         # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
         # must fail closed here; a placement group asking for the dead node's GPUs
         # would stay PENDING forever
