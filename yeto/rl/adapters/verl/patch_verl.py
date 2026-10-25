@@ -119,6 +119,31 @@ SEQ_IDX_ENGINE_HOOK = (
     "    )\n"
 )
 
+# Sixth patch (S27 G-DC, megatron profile): the NCCL checkpoint engine sends each bucket's
+# metadata over zmq PUB/SUB, and every update made each consumer open a NEW SUB socket and
+# connect it just before the first bucket. A SUB socket that is not subscribed yet when the
+# publisher sends drops the message ("slow joiner"): s27-dc-smoke3's second update hung with
+# one consumer waiting in recv_string and the rest in the NCCL broadcast. The consumer now
+# keeps one SUB socket per publisher address, and waits once after the first connect.
+ZMQ_TARGET = "verl/checkpoint_engine/nccl_checkpoint_engine.py"
+ZMQ_REUSE_ANCHOR = (
+    "        assert not self.is_master, \"Master process should not connect to other processes.\"\n"
+    "        context = zmq.Context()\n"
+)
+ZMQ_REUSE_HOOK = (
+    "        assert not self.is_master, \"Master process should not connect to other processes.\"\n"
+    "        # yeto S27 G-DC: one SUB socket per publisher (zmq slow joiner, see patch_verl)\n"
+    "        _yeto_key = (metadata.zmq_ip, metadata.zmq_port)\n"
+    "        if getattr(self, \"_yeto_sub_key\", None) == _yeto_key and getattr(self, \"socket\", None) is not None:\n"
+    "            return\n"
+    "        self._yeto_sub_key = _yeto_key\n"
+    "        context = zmq.Context()\n"
+)
+ZMQ_WAIT_ANCHOR = "        self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)\n"
+ZMQ_WAIT_HOOK = "        time.sleep(1.0)  # yeto S27 G-DC: let the subscription reach the publisher\n"
+ZMQ_SUB = ((ZMQ_TARGET, ZMQ_REUSE_ANCHOR, ZMQ_REUSE_HOOK, "replace"),
+           (ZMQ_TARGET, ZMQ_WAIT_ANCHOR, ZMQ_WAIT_HOOK, "after"))
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
 # "before" in front of it, "replace" substitutes it.
 READBACK = (TARGET, ANCHOR, HOOK, "after")
@@ -129,7 +154,7 @@ SEQ_IDX = ((SEQ_IDX_TARGET, SEQ_IDX_HELPER_ANCHOR, SEQ_IDX_HELPER, "before"),
            (SEQ_IDX_TARGET, SEQ_IDX_PACKED_ANCHOR, SEQ_IDX_PACKED_HOOK, "replace"),
            (SEQ_IDX_TARGET, SEQ_IDX_ENGINE_ANCHOR, SEQ_IDX_ENGINE_HOOK, "replace"))
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
-PROFILES = {"fsdp": PATCHES, "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX)}
+PROFILES = {"fsdp": PATCHES, "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:

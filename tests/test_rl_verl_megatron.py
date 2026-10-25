@@ -498,7 +498,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
 
     from yeto.rl.adapters.verl import patch_verl
 
-    for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX}:
+    for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB}:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(VERL_FORK / rel, tmp_path / rel)
     patch_verl.apply(tmp_path, "megatron")
@@ -508,6 +508,9 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     assert util.count("def _yeto_seq_idx_args(") == 1
     compile(util, "util.py", "exec")
     assert patch_verl.SEND_HOOK not in (tmp_path / patch_verl.SEND_TARGET).read_text()
+    engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
+    assert engine.count("_yeto_sub_key") == 3 and engine.count("time.sleep(1.0)  # yeto") == 1
+    compile(engine, "nccl_checkpoint_engine.py", "exec")
     with pytest.raises(SystemExit, match="unknown profile"):
         patch_verl.apply(tmp_path, "nope")
 
