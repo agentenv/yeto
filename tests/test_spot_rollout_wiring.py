@@ -183,3 +183,39 @@ def test_subscriber_ids_are_the_dispenser_sampler_holder_ids():
     digest = hashlib.sha256(b"yeto-sampler:spot-a").digest()
     assert sid == (1 << 31) | (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF)
     assert sid >> 31 == 1 and subscriber_id_for("spot-b") != sid
+
+
+def test_materialize_joins_row_slices_and_strips_the_wire_prefix(tmp_path):
+    import torch
+    from safetensors.torch import load_file
+
+    from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
+    from yeto.rl.eval.cut_to_hf import MaterializeError
+    from yeto.rl.spot_rollout.materialize import identity_converter, materialize
+    from yeto.rl.spot_rollout.subscriber import WeightCut
+
+    shard = "tp0-of-1.pp0-of-1.ep0-of-1.cp0-of-1.dp0-of-1"
+    weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    top, bottom = f"actor::{shard}::decoder.w#rows=0:2", f"actor::{shard}::decoder.w#rows=2:4"
+    lay = FragmentLayout([Fragment(MERGE_AVG, [(top, 6)], identity_shapes={top: (2, 3)}),
+                          Fragment(MERGE_AVG, [(bottom, 6)], identity_shapes={bottom: (2, 3)})])
+
+    def raw(t):
+        return t.to(torch.bfloat16).flatten().view(torch.int16).numpy().tobytes()
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps({"model_type": "x", "hidden_size": 3, "num_attention_heads": 1,
+                                                  "vocab_size": 4, "num_hidden_layers": 1}))
+    (base / "tokenizer.json").write_text("{}")
+    cut = WeightCut((1, 2), (raw(weight[:2]), raw(weight[2:])))
+    out = materialize(lay, cut, base_model=base, out_root=tmp_path / "out", convert=identity_converter)
+    tensors = load_file(str(out / "model.safetensors"))
+    assert sorted(tensors) == ["decoder.w"] and tensors["decoder.w"].float().tolist() == weight.tolist()
+    assert (out / "tokenizer.json").is_file() and (out / "config.json").is_file()
+    # A sharded trainer's layout (two shard ids) is refused: it needs param_layout.
+    other = f"actor::tp1-of-2.pp0-of-1.ep0-of-1.cp0-of-1.dp0-of-1::decoder.w#rows=2:4"
+    two = FragmentLayout([lay.fragments[0], Fragment(MERGE_AVG, [(other, 6)], identity_shapes={other: (2, 3)})])
+    with pytest.raises(MaterializeError, match="param_layout"):
+        materialize(two, WeightCut((1, 4), cut.fragments), base_model=base, out_root=tmp_path / "out2",
+                    convert=identity_converter)
