@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -1499,32 +1498,11 @@ def _verify_eval_dataset_identity(args) -> Path | None:
             raise ValueError("--eval-only requires evaluation configuration")
         return None
     eval_only = getattr(args, "eval_only", False)
-    from yeto.rl.engine.run_config import ports_training_eval
+    from yeto.rl.engine.run_config import ports_training_eval, verify_eval_dataset_file
 
-    train_eval = ports_training_eval(args)
-    if not eval_only and not train_eval:
+    if not eval_only and not ports_training_eval(args):
         raise ValueError("evaluation configuration requires --eval-only or the ports engine")
-    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise ValueError("evaluation dataset requires an immutable SHA256")
-    source_value = args.data if eval_only else getattr(args, "eval_data", None)
-    if not isinstance(source_value, str) or not source_value:
-        raise ValueError("training-time evaluation requires --eval-data")
-    source = Path(source_value).expanduser()
-    if source.is_symlink() or not source.is_file():
-        raise ValueError("evaluation requires one regular local dataset file")
-    if train_eval and (
-        source.resolve() == Path(args.data).expanduser().resolve()
-    ):
-        raise ValueError("training-time evaluation must use a distinct heldout dataset")
-    from yeto.provenance import file_sha256
-
-    actual = file_sha256(source)
-    if actual != expected:
-        raise ValueError(
-            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
-        )
-    return source
+    return verify_eval_dataset_file(args, eval_only=eval_only)
 
 
 def miles_lr_schedule_sha256(miles_args):  # noqa: D103 - see lr_schedule.miles_lr_schedule_sha256

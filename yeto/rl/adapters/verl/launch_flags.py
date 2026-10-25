@@ -111,10 +111,11 @@ def full_parameter_problems(args) -> list[str]:
 # (args dest, value when off, option). Refused instead, before any cloud work.
 # S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
 # constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
-# --rl-observe-timeline, --rl-resource-sample-interval); the rest stay here.
+# --rl-observe-timeline, --rl-resource-sample-interval) and S27 G-EN one more
+# (--rl-eval-interval: verl's _validate behind the driver's evaluate hook,
+# verl.eval_port); the rest stay here.
 IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_verify_every_round", False, "--rl-verify-every-round"),
-    ("rl_eval_interval", None, "--rl-eval-interval"),
     ("rl_deterministic_trainer", False, "--rl-deterministic-trainer"),
     ("rl_gradient_accumulation_fusion", False, "--rl-gradient-accumulation-fusion"),
     ("rl_async_buffer_rounds", None, "--rl-async-buffer-rounds"),
@@ -127,8 +128,6 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
 NOT_MAPPED_REASONS = {
     "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
                                "(VERL-PARITY #25)",
-    "--rl-eval-interval": "no verl eval port yet (the driver's evaluate hook over verl's _validate is "
-                          "not wired or GPU-checked)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
     "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",

@@ -109,6 +109,10 @@ def parse_args(argv):
     from .full_parameter_stream import add_island_flags
 
     add_island_flags(p)
+    # S27 G-EN: the Miles island's heldout eval flags (VERL-PARITY #34, .eval_port)
+    from .eval_port import add_island_flags as add_eval_flags
+
+    add_eval_flags(p)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -438,6 +442,20 @@ def main(argv=None) -> int:
                 max_response_len=args.rollout_max_response_len)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
+    try:  # S27 G-EN: heldout eval through verl's _validate (.eval_port); the sync trainer only
+        from . import eval_port
+
+        if limit or buffer_section is not None:
+            eval_port.refuse_unwired(args, "fully_async" if limit else "buffer trainer")
+            eval_plan = None
+        else:
+            eval_plan = eval_port.eval_section(
+                args, work=work / "data", max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len, temperature=run.temperature,
+                top_p=run.top_p)
+        overrides, asserted_keys = eval_port.apply_eval_overrides(eval_plan, overrides, asserted_keys)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
@@ -472,6 +490,7 @@ def main(argv=None) -> int:
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
         "rollout_quant": quant_summary,
+        **({eval_port.PLAN_KEY: eval_plan} if eval_plan else {}),
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))

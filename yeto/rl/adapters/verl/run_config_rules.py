@@ -93,3 +93,19 @@ def hf_export_supported(args) -> bool:
 
     return (getattr(args, "training_mode", "sft") == "rl"
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
+
+
+def check_eval(args) -> None:
+    """``--rl-eval-interval`` on verl (S27 G-EN, ``eval_port``): the synchronous
+    trainer runs verl's ``_validate`` behind the driver's evaluate hook; the
+    fully_async and buffer-trainer paths have no such hook, so they refuse the
+    eval before launch (the island refuses it again)."""
+    if getattr(args, "rl_eval_interval", None) is None:
+        return
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) > 0:
+        raise ValueError("--rl-eval-interval on verl needs --rl-max-policy-age 0: verl's _validate runs "
+                         "on the synchronous trainer; the fully_async path has no evaluate hook")
+    if ((getattr(args, "rl_sample_role", None) or "both") != "both"
+            or getattr(args, "rl_island_sample_role", None)):
+        raise ValueError("--rl-eval-interval on verl does not cover sampler / buffer-trainer islands "
+                         "(no evaluate hook on that path)")

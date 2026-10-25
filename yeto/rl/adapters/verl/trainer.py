@@ -221,7 +221,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
-    from . import round_cuts
+    from . import eval_port, round_cuts
     from .identity import backend_identity
     from .ports_impl import (VerlIsland, VerlPlacement, VerlPolicyState, VerlPublisher,
                              VerlRolloutPool, VerlTrainerGroup)
@@ -296,7 +296,8 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape,
                                      rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
-        sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
+        sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
+        **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras

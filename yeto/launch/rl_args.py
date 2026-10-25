@@ -876,6 +876,10 @@ def _prepare_rl_args(
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):
         agentic_check(args)
+    # S27 G-EN: a backend whose eval hook covers only some of its paths refuses the rest.
+    eval_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_eval", None)
+    if callable(eval_check):
+        eval_check(args)
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
