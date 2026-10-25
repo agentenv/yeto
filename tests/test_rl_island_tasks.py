@@ -211,15 +211,9 @@ def test_without_the_flag_every_island_shares_the_data_file_and_reads_its_row_sl
     commands = [i["learner_command"] for i in launcher.dry_run_plan(args)["island_requests"]]
     assert {_flag(c, "--data") for c in commands} == {"org/data"}
     assert all("--data-sha256" not in c for c in commands)
-    # S27 P2 (G-DH): the default split hands the rows out through the syncer's dispenser
-    assert all("--rl-data-slot" not in c and "--rl-data-dispense" in c for c in commands)
-    assert launcher._island_tasks_manifest(args) == {}
-    # --rl-data-split stride: each island its own rows of the file (P1)
-    args = _launcher_args("ports", ("--rl-data-split", "stride"), gpu=TWO_ISLANDS)
-    args.controller = "local"
-    launcher._prepare_rl_args(args)
-    commands = [i["learner_command"] for i in launcher.dry_run_plan(args)["island_requests"]]
+    # S27 task assignment: the default split gives each island its own rows of the file
     assert [_flag(c, "--rl-data-slot") for c in commands] == ["0/2", "1/2"]
+    assert launcher._island_tasks_manifest(args) == {}
 
 
 def test_json_spec_is_rewritten_inline_for_the_head(catalog, tmp_path, monkeypatch):

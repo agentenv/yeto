@@ -10,10 +10,8 @@ order the rows are read, before any split):
   island would read.
 * Same-card training islands (sample role ``both``: they generate and train)
   of a launch with two or more of them: by default (``--rl-data-split auto``)
-  they claim their rows from the dispenser (below) when the launch can use it;
-  otherwise, and with ``--rl-data-split stride``, the island with learner id
-  ``k`` reads the slot ``k/N``, where ``N`` is the number of those islands at
-  launch (the launch log names why the dispenser does not apply). ``--rl-island-tasks`` replaces the slots
+  the island with learner id ``k`` reads the slot ``k/N``, where ``N`` is the
+  number of those islands at launch. ``--rl-island-tasks`` replaces the slots
   with the user's task lists. ``--rl-data-split shared`` gives every island
   every row, in the same order (the behaviour before S27 G-AV); it is for
   controlled experiments only and the launch warns.
@@ -38,9 +36,8 @@ order the rows are read, before any split):
   of ``--data`` but trains only the rows it claims, a block per round; a fast
   island claims more often, the rows of an island that leaves go to the
   others, a relaunched or added island just claims, and passes after the
-  first are reshuffled (:func:`pass_order` over the whole data). The
-  default (``auto``) since its GPU checks (S27 G-DH: 0.6B and Nano, two
-  islands each); ``--rl-data-split stride`` keeps the slots.
+  first are reshuffled (:func:`pass_order` over the whole data). Opt-in
+  until it has passed its GPU check; ``auto`` stays ``stride``.
 * Resume and relaunch: every data cursor counts rows of the island's own slot,
   so a resumed or relaunched island with the same slot continues at the same
   row. A full-parameter island keeps its position in the run store
@@ -171,8 +168,7 @@ class DataSplitPlan:
         if self.mode == STRIDE:
             return (f"{n} training islands split --data by row number: island k reads the "
                     f"rows i with i % {n} == k, in data order; after its last row an island "
-                    "starts the next pass over its own rows, reshuffled"
-                    + (f" ({self.reason})" if self.reason else ""))
+                    "starts the next pass over its own rows, reshuffled")
         if self.mode == SHARED:
             return (f"{n} training islands read every row of --data in the same order "
                     f"({self.reason})")
@@ -215,17 +211,14 @@ class DataSplitPlan:
 
 
 def plan_data_split(requested: str | None, *, islands: Sequence[int], tasks: bool = False,
-                    sample_roles: bool = False, external_learners: int = 0,
-                    dispense_blockers: Sequence[str] | None = None) -> DataSplitPlan:
+                    sample_roles: bool = False, external_learners: int = 0) -> DataSplitPlan:
     """The data split of a launch (module doc). Raises ``ValueError`` on a request
     the launch shape cannot honour.
 
     ``islands``: learner ids of the same-card training islands the launch builds;
     ``tasks``: ``--rl-island-tasks`` is given; ``sample_roles``: the islands have
     sampler/trainer roles; ``external_learners``: islands of other launches that
-    join the same syncer (their data is not this launch's to split);
-    ``dispense_blockers``: why this launch cannot use the dispenser (empty: it
-    can; None: not checked, so ``auto`` keeps the slots)."""
+    join the same syncer (their data is not this launch's to split)."""
     requested = AUTO if requested is None else str(requested)
     if requested not in DATA_SPLITS:
         raise ValueError(f"{DATA_SPLIT_FLAG} {requested!r}: expected one of {DATA_SPLITS}")
@@ -261,12 +254,6 @@ def plan_data_split(requested: str | None, *, islands: Sequence[int], tasks: boo
                              "(they read their own data)")
         return DataSplitPlan(SHARED, requested, islands,
                              reason="--external-learners: their rows are not this launch's to split")
-    if requested == AUTO:
-        if dispense_blockers is not None and not dispense_blockers:
-            return DataSplitPlan(DISPENSE, requested, islands)
-        reason = ("; ".join(dispense_blockers) if dispense_blockers
-                  else "the launch was not checked for the dispenser")
-        return DataSplitPlan(STRIDE, requested, islands, reason=f"no dispenser: {reason}")
     return DataSplitPlan(STRIDE, requested, islands)
 
 

@@ -173,7 +173,7 @@ def _args(tmp_path, monkeypatch, gpu, *extra):
 def test_dry_run_gives_each_island_its_row_slot(tmp_path, monkeypatch, capsys, gpu, count):
     from yeto import launcher
 
-    args = _args(tmp_path, monkeypatch, gpu, "--rl-data-split", "stride")  # auto: the dispenser (G-DH)
+    args = _args(tmp_path, monkeypatch, gpu)
     launcher._prepare_rl_args(args)
     plan = launcher.dry_run_plan(args)
     commands = [i["learner_command"] for i in plan["island_requests"]]

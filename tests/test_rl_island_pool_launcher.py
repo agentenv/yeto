@@ -50,9 +50,6 @@ def test_fixed_roster_syncer_command_is_byte_identical(head_launcher):
     island HMAC key check in front (the key itself is a secret env); SFT only
     gains the explicit --allow-unauthenticated-islands."""
     args = _args()
-    # S27 G-DH: the default data split (the dispenser) adds --dispense flags on purpose;
-    # the row slots keep the line this test compares
-    args.rl_data_split = "stride"
     assert not launcher.island_pool(args)
     for n in (1, 2, 4):
         assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(

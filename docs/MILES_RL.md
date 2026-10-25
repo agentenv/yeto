@@ -374,12 +374,8 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
 (`data_slot`). The rules are in `yeto/rl/engine/data_split.py`.
 
 - Islands that generate and train (the default sample role), two or more of
-  them: by default (`--rl-data-split auto`) they claim their rows from the
-  task dispenser (below) when the launch can use it. Otherwise (verl, the
-  SAO streaming preset, no syncer, `--rl-elastic`, `--syncer-shards > 1`, Miles fully_async, island
-  round cuts, `--eval-only`; the launch log names the reason), and with
-  `--rl-data-split stride`, the island with learner id `k` of `N` reads the
-  rows with `i % N == k`, in data order. The
+  them: the island with learner id `k` of `N` reads the rows with
+  `i % N == k`, in data order (`--rl-data-split auto`, the default). The
   launcher sends each island `--rl-data-slot k/N`; the island keeps only those
   rows when it writes its prompt file, for a local JSONL file and a Hub
   dataset, on Miles and on verl. Each kept row carries its row number as
@@ -409,7 +405,7 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
   continues at the next row of its slot (`rl_data_position_restored`). Without
   a store a relaunched island reads its rows from the first row again (the
   launch warns for an island pool).
-- `--rl-data-split dispense` (S27 P2; the `auto` choice since its GPU checks): the actor
+- `--rl-data-split dispense` (S27 P2, opt-in until its GPU check): the actor
   syncer hands out the rows (`--dispense`, docs/PROTOCOL.md "Task
   dispenser"). Every island writes every row into its prompt file, then claims
   a block of positions per round from the syncer and trains those rows only.
