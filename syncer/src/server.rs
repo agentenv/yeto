@@ -327,6 +327,8 @@ struct Group {
     msg_id: AtomicU64,
     rr: AtomicUsize,
     reasm: Mutex<HashMap<u64, PartialMsg>>,
+    /// Wire bytes of this learner (shared by every generation of the learner).
+    wire: Arc<WireCounter>,
 }
 
 impl Group {
@@ -1828,6 +1830,7 @@ async fn handle_connection(
                 msg_id: AtomicU64::new(0),
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
+                wire: wire_counter(learner_id),
             });
             let registration =
                 { registry.lock().unwrap().register_group_with(group.clone(), Instant::now(), ext) };
@@ -1859,7 +1862,7 @@ async fn handle_connection(
                     bail!(message);
                 }
             };
-            tokio::spawn(writer_task(wr, rx, learner_id));
+            tokio::spawn(writer_task(wr, rx, group.wire.clone()));
             info!(
                 learner_id,
                 generation, num_streams, "learner connected (layout: {} fragments)", num_fragments
@@ -1880,11 +1883,10 @@ async fn handle_connection(
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             registry.lock().unwrap().unregister(member);
-            let counts = wire_bytes().lock().unwrap().clone();
-            if let Some(line) = wire_bytes_line(&counts) {
+            event_tx.send(Event::Disconnected { member }).await.ok();
+            if let Some(line) = wire_bytes_line(&wire_bytes_snapshot()) {
                 info!(learner_id, generation, "learner control connection closed; wire bytes per learner: {line}");
             }
-            event_tx.send(Event::Disconnected { member }).await.ok();
             res
         }
         MSG_DATA_HELLO => {
@@ -1936,7 +1938,7 @@ async fn handle_connection(
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                 bail!(message);
             }
-            tokio::spawn(writer_task(wr, rx, learner_id));
+            tokio::spawn(writer_task(wr, rx, group.wire.clone()));
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
         MSG_BW_PROBE => {
@@ -2047,6 +2049,13 @@ async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> R
 /// frames this syncer wrote to an island (`sent`, the downlink a head pays
 /// egress for) and frames it read from it (`recv`), 13-byte frame header
 /// included. Bandwidth probes and refused connections are not counted.
+/// Lock-free on the frame path: each connection holds its learner's counter.
+#[derive(Debug, Default)]
+struct WireCounter {
+    sent: AtomicU64,
+    recv: AtomicU64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct WireBytes {
     sent: u64,
@@ -2056,16 +2065,25 @@ struct WireBytes {
 /// Interval of the `wire bytes per learner` log line (only when a count changed).
 const WIRE_BYTES_LOG_EVERY: Duration = Duration::from_secs(60);
 
-fn wire_bytes() -> &'static Mutex<BTreeMap<u32, WireBytes>> {
-    static WIRE_BYTES: std::sync::OnceLock<Mutex<BTreeMap<u32, WireBytes>>> = std::sync::OnceLock::new();
-    WIRE_BYTES.get_or_init(Default::default)
+fn wire_counters() -> &'static Mutex<BTreeMap<u32, Arc<WireCounter>>> {
+    static WIRE: std::sync::OnceLock<Mutex<BTreeMap<u32, Arc<WireCounter>>>> = std::sync::OnceLock::new();
+    WIRE.get_or_init(Default::default)
 }
 
-fn count_wire_bytes(learner_id: u32, sent: u64, recv: u64) {
-    let mut counts = wire_bytes().lock().unwrap();
-    let entry = counts.entry(learner_id).or_default();
-    entry.sent += sent;
-    entry.recv += recv;
+/// The counter of `learner_id`, created on first use (looked up once per connection).
+fn wire_counter(learner_id: u32) -> Arc<WireCounter> {
+    wire_counters().lock().unwrap().entry(learner_id).or_default().clone()
+}
+
+fn wire_bytes_snapshot() -> BTreeMap<u32, WireBytes> {
+    wire_counters()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(learner, c)| {
+            (*learner, WireBytes { sent: c.sent.load(Ordering::Relaxed), recv: c.recv.load(Ordering::Relaxed) })
+        })
+        .collect()
 }
 
 /// `learner 0 sent=<B> recv=<B>; learner 1 ...`, None before any frame.
@@ -2089,7 +2107,7 @@ async fn wire_bytes_logger() {
     let mut last: Option<BTreeMap<u32, WireBytes>> = None;
     loop {
         tokio::time::sleep(WIRE_BYTES_LOG_EVERY).await;
-        let counts = wire_bytes().lock().unwrap().clone();
+        let counts = wire_bytes_snapshot();
         if last.as_ref() == Some(&counts) {
             continue;
         }
@@ -2100,7 +2118,7 @@ async fn wire_bytes_logger() {
     }
 }
 
-async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>, learner_id: u32) {
+async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>, wire: Arc<WireCounter>) {
     while let Some(frame) = rx.recv().await {
         let len: usize = frame.parts.iter().map(|p| p.len()).sum();
         let mut header = [0u8; 13];
@@ -2115,7 +2133,9 @@ async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>, l
             std::io::Result::Ok(())
         };
         match tokio::time::timeout(WRITE_TIMEOUT, write).await {
-            Ok(Ok(())) => count_wire_bytes(learner_id, len as u64 + 13, 0),
+            Ok(Ok(())) => {
+                wire.sent.fetch_add(len as u64 + 13, Ordering::Relaxed);
+            }
             Ok(Err(e)) => {
                 warn!("write failed: {e}");
                 return;
@@ -2167,7 +2187,7 @@ async fn read_loop(
                 return Err(error);
             }
         };
-        count_wire_bytes(group.member.learner_id, 0, frame.payload.len() as u64 + 13);
+        group.wire.recv.fetch_add(frame.payload.len() as u64 + 13, Ordering::Relaxed);
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
                 Ok(Some((inner, recv_seconds))) => {
@@ -6546,12 +6566,11 @@ mod hello_auth_tests {
             wire_bytes_line(&counts).unwrap(),
             "learner 0 sent=10 recv=2; learner 1 sent=30 recv=4; total sent=40 recv=6"
         );
-        count_wire_bytes(4_000_000_001, 7, 0);
-        count_wire_bytes(4_000_000_001, 6, 5);
-        assert_eq!(
-            wire_bytes().lock().unwrap().get(&4_000_000_001),
-            Some(&WireBytes { sent: 13, recv: 5 })
-        );
+        let counter = wire_counter(4_000_000_001);
+        counter.sent.fetch_add(7, Ordering::Relaxed);
+        wire_counter(4_000_000_001).sent.fetch_add(6, Ordering::Relaxed);
+        counter.recv.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(wire_bytes_snapshot().get(&4_000_000_001), Some(&WireBytes { sent: 13, recv: 5 }));
     }
 
     #[test]
@@ -6709,6 +6728,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         })
     }
 
@@ -6731,6 +6751,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         })
     }
 
@@ -6762,6 +6783,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         });
         (group, if data_stream { data_rx } else { control_rx })
     }
