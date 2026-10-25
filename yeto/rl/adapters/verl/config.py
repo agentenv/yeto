@@ -91,6 +91,12 @@ class VerlRunConfig:
     # full-parameter boundary still reads masters (full_parameter.MASTER_DTYPE).
     param_offload: bool = False
     optimizer_offload: bool = False
+    # FSDP2's own CPU offload (torch CPUOffloadPolicy). This is the key that
+    # actually offloads an fsdp2 island: verl reads param_offload /
+    # optimizer_offload only on the FSDP1 path, and forces both off when
+    # offload_policy is set (fork acad9875,
+    # workers/engine/fsdp/transformer_impl.py:459-463).
+    offload_policy: bool = False
     # S27 G-EQ2: activation recomputation, when the model's implementation
     # supports it (``island_entry.gradient_checkpointing_for``). The HF
     # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
@@ -209,6 +215,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.actor.entropy_coeff=0",
         f"actor_rollout_ref.actor.fsdp_config.param_offload={cfg.param_offload}",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={cfg.optimizer_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.offload_policy={cfg.offload_policy}",
         f"actor_rollout_ref.actor.data_loader_seed={cfg.seed}",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",

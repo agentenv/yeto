@@ -699,6 +699,8 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
         gradient_checkpointing=gradient_checkpointing_for(args, model_path),
         param_offload=offload in ("param", "both"), optimizer_offload=offload in ("optimizer", "both"),
+        # fsdp2 offloads through CPUOffloadPolicy; the two flags above are the FSDP1 path
+        offload_policy=offload in ("param", "both"),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)

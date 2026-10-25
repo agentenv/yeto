@@ -520,9 +520,11 @@ def test_fsdp_offload_is_selectable(monkeypatch):
     off = overrides()
     assert "actor_rollout_ref.actor.fsdp_config.param_offload=False" in off
     assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False" in off
-    both = overrides(param_offload=True, optimizer_offload=True)
+    assert "actor_rollout_ref.actor.fsdp_config.offload_policy=False" in off
+    both = overrides(param_offload=True, optimizer_offload=True, offload_policy=True)
     assert "actor_rollout_ref.actor.fsdp_config.param_offload=True" in both
     assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True" in both
+    assert "actor_rollout_ref.actor.fsdp_config.offload_policy=True" in both
     # the island flag maps the four spellings
     base = ["--model", "m", "--model-revision", "r", "--data", "d", "--learner-id", "0",
             "--reward-function", "gsm8k_reward:score", "--global-rounds", "1",
