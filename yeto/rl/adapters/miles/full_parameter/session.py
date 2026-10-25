@@ -17,11 +17,11 @@ from yeto.rl.adapters.miles.full_parameter.role_stream import (
     RoleStreamConfig,
 )
 from yeto.rl.engine.full_parameter_sync import (
+    FullParameterPolicyState,
     FullParameterSync,
     FullParameterSyncProfile,
     RolePairing,
 )
-from yeto.rl.engine.policy_digest import TrainerResidentState
 from yeto.rl.trajectory_evidence import (
     TrajectoryBatchEvidence,
     read_trajectory_batch_evidence,
@@ -84,32 +84,6 @@ def build_full_parameter_sync(
     )
 
 
-class MilesFullParameterPolicyState:
-    """``PolicyState`` of a full-parameter island: the actor stream's cut.
-
-    Tensors never leave the trainer (P0-D1).  Applying a cut happens only
-    inside the role streams, so :meth:`apply` refuses.
-    """
-
-    def __init__(self, sync: FullParameterSync) -> None:
-        self._sync = sync
-        self.policy_version = 0
-
-    @property
-    def _actor(self) -> MilesFullParameterRoleStream:
-        return self._sync.actor  # type: ignore[return-value]
-
-    @property
-    def layout_hash(self) -> str:
-        if self._actor.adapter is None:
-            raise RuntimeError("full-parameter layout requested before the sync started")
-        return self._actor.adapter.layout.layout_hash
-
-    def export(self, *, policy_version: int | None = None) -> TrainerResidentState:
-        return self._actor.resident_state(self.policy_version if policy_version is None else policy_version)
-
-    def export_digest(self, *, policy_version: int | None = None) -> TrainerResidentState:
-        return self.export(policy_version=policy_version)
-
-    def apply(self, state: Any, *, optimizer: str, local_step: int) -> None:
-        raise RuntimeError("full-parameter cuts are applied only through the role streams")
+class MilesFullParameterPolicyState(FullParameterPolicyState):
+    """``PolicyState`` of a Miles full-parameter island: the actor stream's cut
+    (:class:`~yeto.rl.engine.full_parameter_sync.FullParameterPolicyState`)."""

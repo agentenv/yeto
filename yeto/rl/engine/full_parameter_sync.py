@@ -1675,3 +1675,35 @@ class FullParameterSync(RoundCutHooks):
             )
         if failures:
             raise RuntimeError("full-parameter role close failed: " + "; ".join(failures))
+
+
+class FullParameterPolicyState:
+    """``PolicyState`` of a full-parameter island: the actor stream's cut.
+
+    Tensors never leave the trainer (P0-D1).  Applying a cut happens only
+    inside the role streams, so :meth:`apply` refuses.
+    """
+
+    def __init__(self, sync: FullParameterSync) -> None:
+        self._sync = sync
+        self.policy_version = 0
+
+    @property
+    def _actor(self) -> RoleStream:
+        return self._sync.actor
+
+    @property
+    def layout_hash(self) -> str:
+        adapter = getattr(self._actor, "adapter", None)
+        if adapter is None:
+            raise RuntimeError("full-parameter layout requested before the sync started")
+        return adapter.layout.layout_hash
+
+    def export(self, *, policy_version: int | None = None) -> Any:
+        return self._actor.resident_state(self.policy_version if policy_version is None else policy_version)
+
+    def export_digest(self, *, policy_version: int | None = None) -> Any:
+        return self.export(policy_version=policy_version)
+
+    def apply(self, state: Any, *, optimizer: str, local_step: int) -> None:
+        raise RuntimeError("full-parameter cuts are applied only through the role streams")

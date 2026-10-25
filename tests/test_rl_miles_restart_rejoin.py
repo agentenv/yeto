@@ -176,7 +176,9 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
 
         monkeypatch.setattr(MilesChunkedFullParameterAdapter, "initialize", classmethod(initialize))
         sent_init = []
-        real_client = role_stream_module.SyncerClient
+        from yeto.rl.engine import full_parameter_stream
+
+        real_client = full_parameter_stream.SyncerClient
 
         def client_factory(*args, **kwargs):
             client = real_client(*args, **kwargs)
@@ -184,7 +186,7 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
             client.send_initial_fragments = lambda parts: sent_init.append(1) or original(parts)
             return client
 
-        monkeypatch.setattr(role_stream_module, "SyncerClient", client_factory)
+        monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", client_factory)
         stream = MilesFullParameterRoleStream(config, ray_module=ray)
         profile = FullParameterSyncProfile.from_configs({"actor": config})
         session = FullParameterSync(

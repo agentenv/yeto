@@ -250,6 +250,19 @@ def _eval_checkpoint_problems(args, *, async_rounds: bool, checkpoint_every: int
     return problems
 
 
+def _full_parameter_backend(args):
+    """S27 G-DN: the selected backend's ``launch_flags`` module when it gives the
+    full-parameter preset its own shape (``full_parameter_problems``), else None
+    (Miles: the preset's fixed-partition shape, unchanged)."""
+    flags = _rl_backend_module(args, "launch_flags")
+    return flags if callable(getattr(flags, "full_parameter_problems", None)) else None
+
+
+def _full_parameter_backend_problems(args) -> list[str] | None:
+    backend = _full_parameter_backend(args)
+    return None if backend is None else list(backend.full_parameter_problems(args))
+
+
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     """full-parameter preset (P0-D8): one actor role synced as whole-model fragments.
 
@@ -259,18 +272,24 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     the syncer runs ordinary fragment rounds (H local RL rounds per fragment,
     at most two rounds in flight, the decoupled preset's outer Nesterov), and
     the outer-merge options (quorum K, grace, weights, base lag, RDA) apply.
-    The fragment count P comes from the Miles layout probe.
+    The fragment count P comes from the Miles layout probe (verl: the verl
+    layout planner, see the backend's ``full_parameter_problems``).
 
-    Placement: islands with engines on the island need dedicated engine GPUs
-    (``--rl-placement fixed-partition``). Synced trainers that read their samples
-    from the store (``--rl-sample-role trainer``) start no engine, so they take
-    no placement (their sampler islands are their own engine partitions)."""
+    Placement (Miles): islands with engines on the island need dedicated engine
+    GPUs (``--rl-placement fixed-partition``). Synced trainers that read their
+    samples from the store (``--rl-sample-role trainer``) start no engine, so they
+    take no placement (their sampler islands are their own engine partitions).
+    A backend that gives the preset its own shape (S27 G-DN, verl: colocated
+    islands) replaces this placement rule with its own problems."""
     from ..rl.engine.sample_roles import is_synced_trainer
 
     async_rounds = rl_full_parameter_async(args)
     problems = []
     fixed_partition = getattr(args, "rl_placement", "colocated") == "fixed-partition"
-    if is_synced_trainer(args):
+    backend_problems = _full_parameter_backend_problems(args)
+    if backend_problems is not None:
+        problems += backend_problems
+    elif is_synced_trainer(args):
         if fixed_partition:
             problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (the "
                             "trainers start no engine; the sampler islands generate)")
@@ -547,6 +566,9 @@ def _peer_recovery_applies(args) -> bool:
             or syncer_shard_count(args) > 1
             or getattr(args, "rl_sync_bcast_delta_full_every", 0)):
         return False
+    backend = _full_parameter_backend(args)
+    if backend is not None and not getattr(backend, "FULL_PARAMETER_PEER_RECOVERY", True):
+        return False  # S27 G-DN: the backend's stream has no peer recovery (verl)
     from .peer_recovery import snapshot_store_path
 
     return snapshot_store_path(args) is not None

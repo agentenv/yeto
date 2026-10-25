@@ -124,7 +124,7 @@ def _run(monkeypatch, *, retire: bool):
         return adapter, adapter.validate_cut(cut, policy_version, 0)
 
     monkeypatch.setattr(MilesChunkedFullParameterAdapter, "initialize", classmethod(initialize))
-    monkeypatch.setattr(role_stream_module, "SyncerClient", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", lambda *_args, **_kwargs: client)
     stream = MilesFullParameterRoleStream(_config(), ray_module=ray)
     profile = FullParameterSyncProfile.from_configs({"actor": stream.config})
     assert profile.partial_quorum and profile.effective_pipeline_depth == P

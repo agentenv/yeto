@@ -403,7 +403,7 @@ def _run_miles(monkeypatch, *, background: bool, horizon: int = 1, trainer_base=
         return adapter, adapter.validate_cut(cut, policy_version, 0)
 
     monkeypatch.setattr(MilesChunkedFullParameterAdapter, "initialize", classmethod(initialize))
-    monkeypatch.setattr(role_stream_module, "SyncerClient", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", lambda *_args, **_kwargs: client)
     config = fast._config()
     from dataclasses import replace
 
