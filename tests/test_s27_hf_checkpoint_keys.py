@@ -32,8 +32,10 @@ from yeto.rl.adapters.verl.hf_export import VerlHfWriter, write_like  # noqa: E4
 
 # Big enough that one shard is over release_delta.MIN_DELTA_BYTES (1 MiB), so a
 # delta release of this checkpoint encodes words instead of copying files whole.
+# The block pattern uses only M (mamba), * (attention) and E (MoE): transformers
+# 5.3, which the Ascend image carries, does not know the "-" (dense MLP) block.
 TINY = dict(vocab_size=4096, hidden_size=256, intermediate_size=256, num_hidden_layers=4,
-            hybrid_override_pattern="M*E-", num_attention_heads=8, num_key_value_heads=4, head_dim=32,
+            hybrid_override_pattern="M*EE", num_attention_heads=8, num_key_value_heads=4, head_dim=32,
             mamba_num_heads=8, mamba_head_dim=32, ssm_state_size=16, n_groups=1, conv_kernel=4,
             n_routed_experts=4, n_shared_experts=1, moe_intermediate_size=128,
             moe_shared_expert_intermediate_size=128, num_experts_per_tok=2, tie_word_embeddings=False,
