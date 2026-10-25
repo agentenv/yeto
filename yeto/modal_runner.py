@@ -104,7 +104,13 @@ TAPE_SYNC_INTERVAL_S = 30.0
 # Files outside the tape directory that the tape also mirrors (flattened to
 # "<parent dir>.<file>"): a full-parameter island's trajectory evidence lives
 # in a private mkdtemp directory under ~/yeto-rl that ends with the container.
-TAPE_MIRROR_GLOBS = ("/root/yeto-rl/trajectory-evidence-*/rollout-*.json",)
+TAPE_MIRROR_GLOBS = (
+    "/root/yeto-rl/trajectory-evidence-*/rollout-*.json",
+    # Harbor agent trials (HARBOR_TRIALS_DIR under the tape directory, S27 G-DA):
+    # the trial result (verifier reward, timings, exception) and Codex's output.
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/result.json",
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/agent/codex.txt",
+)
 TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")  # .pt: verl raw log-prob dumps
 TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
@@ -441,6 +447,14 @@ def cluster_rank_and_ips(info) -> tuple[int, list[str]]:
     return int(info.rank), ipv4 or list(info.container_ips)
 
 
+def mirror_base(pattern: str) -> Path:
+    """The directory above a mirror glob's first wildcard: a mirrored file is named
+    by its path below it, ``/`` -> ``.`` (``<dir>-*/x.json`` -> ``<dir>-abc.x.json``)."""
+    wild = min((i for i, ch in enumerate(pattern) if ch in "*?["), default=len(pattern))
+    prefix = pattern[:wild]
+    return Path(prefix) if prefix.endswith("/") else Path(prefix).parent
+
+
 class TapeSync:
     """Mirror tape files of ``src`` into ``dst`` and commit the Volume,
     every ``interval_s`` in a daemon thread and once more on ``stop()``.
@@ -497,9 +511,10 @@ class TapeSync:
                     copied += self._copy_if_changed(f, f.name)
         for pattern in self.mirror_globs:
             root = Path(pattern).anchor or "."
+            base = mirror_base(pattern)
             for f in sorted(Path(root).glob(str(Path(pattern).relative_to(root)))):
                 if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
-                    copied += self._copy_if_changed(f, f"{f.parent.name}.{f.name}")
+                    copied += self._copy_if_changed(f, ".".join(f.relative_to(base).parts))
         self.commit()
         self.syncs += 1
         return copied
