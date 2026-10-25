@@ -405,6 +405,23 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
   continues at the next row of its slot (`rl_data_position_restored`). Without
   a store a relaunched island reads its rows from the first row again (the
   launch warns for an island pool).
+- `--rl-data-split dispense` (S27 P2, opt-in until its GPU check): the actor
+  syncer hands out the rows (`--dispense`, docs/PROTOCOL.md "Task
+  dispenser"). Every island writes every row into its prompt file, then claims
+  a block of positions per round from the syncer and trains those rows only.
+  No row goes to two islands; a fast island claims more often, so it trains
+  more rows and never waits for a slow one; the rows a relaunched, preempted
+  or silent island did not finish go first to the next claim of any island;
+  an island added later just claims. Position `p` is row
+  `pass_order(rows, --seed, p // rows)[p % rows]`: pass 0 in data order, every
+  later pass reshuffled. A row whose group is too stale to train can be given
+  out again (`--rl-dispense-max-redo`, default 1); `--rl-data-passes N` ends
+  the data after N passes (default: unlimited). The syncer logs every grant
+  and report in `~/yeto-output/task-dispense.jsonl`;
+  `python -m tools.eval.dispense_check` replays it (no row granted twice,
+  none trained twice, every row accounted for). Miles only, not with
+  fully_async rollouts, island round cuts or a sharded head (refused at
+  launch).
 
 ### Clouds, controller and images
 

@@ -846,9 +846,29 @@ _SCHEDULING = (
              "such islands, the island with learner id k reads the rows i with i %% N == k, "
              "in data order; after its last row it starts the next pass over its own rows, "
              "reshuffled; a relaunched island keeps its rows. --rl-island-tasks replaces this. "
-             "stride: the same as auto, and refused where auto would not split. shared: "
+             "stride: the same as auto, and refused where auto would not split. dispense "
+             "(S27 P2, opt-in): the actor syncer hands out the rows, a block per island round; "
+             "no row goes to two islands, a fast island claims more, the rows of an island "
+             "that leaves go to the others, a relaunched or added island just claims. shared: "
              "every island reads every row in the same order (the old behaviour; controlled "
              "experiments only, the launch warns)"),
+    cli_flag("--rl-data-passes", type=int, default=None, metavar="N",
+             help="--rl-data-split dispense: the data ends after N passes over the rows "
+             "(the islands stop with a clear error); default: unlimited, every pass after the "
+             "first reshuffled"),
+    cli_flag("--rl-dispense-max-redo", type=int, default=1, metavar="N",
+             help="--rl-data-split dispense: how often one row may be given out again after "
+             "its group was too stale to train (default 1)"),
+    cli_flag("--rl-dispense-lease-s", type=float, default=300.0, metavar="S",
+             help="--rl-data-split dispense: an island process silent this long loses its "
+             "unreported rows to the other islands (default 300; a relaunched process "
+             "takes over at once)"),
+    shared_flag("--rl-data-dispense", action="store_true", default=False,
+                help="this training island claims its rows from the actor syncer's dispenser "
+                "(set by the launcher from --rl-data-split dispense; not a launch option)"),
+    shared_flag("--rl-dispense-prefetch-blocks", type=int, default=2, metavar="N",
+                help="--rl-data-split dispense: blocks (rounds of rows) an island keeps ready "
+                "ahead, so it trains on through a short head outage (default 2)"),
     shared_flag("--rl-data-slot", default=None, metavar="I/N",
                 help="this training island reads only the rows i of --data with i %% N == I "
                 "(set by the launcher from --rl-data-split; not a launch option)"),

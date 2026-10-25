@@ -205,7 +205,6 @@ type DResult<T> = std::result::Result<T, DispenseError>;
 pub enum ReclaimReason {
     Expired,
     Superseded,
-    Restored,
 }
 
 impl ReclaimReason {
@@ -213,7 +212,6 @@ impl ReclaimReason {
         match self {
             Self::Expired => "lease_expired",
             Self::Superseded => "superseded",
-            Self::Restored => "restored",
         }
     }
 }
@@ -388,6 +386,7 @@ impl Dispenser {
         std::mem::take(&mut self.events)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn is_live(&self, holder: Holder) -> bool {
         self.live.contains_key(&holder)
     }
@@ -407,6 +406,7 @@ impl Dispenser {
     }
 
     /// Blocks in flight (granted, not fully reported).
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn blocks_in_flight(&self) -> usize {
         self.blocks.len()
     }
@@ -735,6 +735,7 @@ impl Dispenser {
         gone
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn next_expiry(&self) -> Option<Instant> {
         self.live.values().map(|live| live.last_seen + self.cfg.lease).min()
     }
@@ -852,6 +853,7 @@ impl Dispenser {
 
     /// Accounting invariant: every position below `next` is reported
     /// (trained, dropped, redo exhausted), queued, or outstanding exactly once.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn check_invariants(&self) -> Result<()> {
         let mut covered: Vec<(u64, u64)> = self.queue.iter().map(|s| (s.start, s.end)).collect();
         for block in self.blocks.values() {

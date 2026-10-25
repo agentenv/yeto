@@ -45,6 +45,7 @@ pub struct TaskHello {
 }
 
 /// The TASK_HELLO body (without the HMAC).
+#[cfg_attr(not(test), allow(dead_code))] // the island side encodes (yeto/rl/engine/task_dispense.py)
 pub fn encode_task_hello(hello: &TaskHello) -> Vec<u8> {
     let mut out = Vec::with_capacity(54);
     out.extend_from_slice(&TASK_PROTOCOL_VERSION.to_le_bytes());
@@ -142,6 +143,7 @@ pub fn encode_grant(claim: &Claim) -> Vec<u8> {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // the island side encodes (yeto/rl/engine/task_dispense.py)
 pub fn encode_report(seq: u64, entries: &[ReportEntry]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&seq.to_le_bytes());
@@ -171,6 +173,7 @@ pub fn decode_report(payload: &[u8]) -> Result<(u64, Vec<ReportEntry>)> {
     Ok((seq, entries))
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // the island side encodes (yeto/rl/engine/task_dispense.py)
 pub fn encode_claim(seq: u64, count: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     out.extend_from_slice(&seq.to_le_bytes());
