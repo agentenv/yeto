@@ -101,6 +101,10 @@ def parse_args(argv):
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
+    # S27 B10: a full-parameter island and its outer sync (Miles island spellings)
+    from .full_parameter_stream import add_island_flags
+
+    add_island_flags(p)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -370,9 +374,14 @@ def main(argv=None) -> int:
     chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
     max_prompt = 512
     limit = int(args.rl_max_policy_age or 0)
+    full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
+    if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
+        raise SystemExit("verl 全参数岛只接同步共置路径：不支持 --rl-max-policy-age > 0、"
+                         "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
-        lora_rank=args.lora_r, lora_alpha=args.lora_r, lr=args.inner_lr,
+        parameter_mode=args.parameter_mode,
+        lora_rank=0 if full else args.lora_r, lora_alpha=0 if full else args.lora_r, lr=args.inner_lr,
         groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
         max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
         total_rounds=args.global_rounds, correction=algo["correction"],
@@ -402,6 +411,21 @@ def main(argv=None) -> int:
         resume = resume_config(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    full_plan: dict = {}
+    if full:  # S27 B10: model identity, and the outer full-parameter sync when synced
+        from yeto.rl.engine.algorithm import AlgorithmSpec
+
+        from .full_parameter_stream import plan_section
+
+        if resume:
+            raise SystemExit("round cuts of a full-parameter verl island are not wired (V9)")
+        try:
+            full_plan = plan_section(
+                args, run.to_dict(), model_path=model_path, sync=sync,
+                algorithm_spec_sha256=(AlgorithmSpec.from_dict(spec_dict) if spec_dict
+                                       else AlgorithmSpec()).sha256())
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
@@ -420,7 +444,8 @@ def main(argv=None) -> int:
     plan = {
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
-        "model_path": model_path, "model_revision": args.model_revision, "lora_rank": args.lora_r,
+        "model_path": model_path, "model_revision": args.model_revision, "lora_rank": run.lora_rank,
+        "parameter_mode": args.parameter_mode, **full_plan,
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "bcast_delta": bool(args.bcast_delta),

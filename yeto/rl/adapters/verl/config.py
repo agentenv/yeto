@@ -28,10 +28,10 @@ MODES = ("train", "diagnose")
 SUPPORTED_CORRECTIONS = ("none", "tis")
 DESIGNED_NOT_MAPPED = ("icepop",)  # in design D7, mapping to verl not verified yet
 # ``parameter_mode``: the island's trainable set. "lora" is the original
-# one-card adapter island; "full" (S27 B10 phase 1) trains every parameter on
+# one-card adapter island; "full" (S27 B10) trains every parameter on
 # ``n_gpus`` cards with FSDP2 data parallelism and FP32 masters
-# (:mod:`.full_parameter`).  A full-parameter island has no outer sync yet, so
-# the launcher pairs it with ``--rl-single-island-no-sync``.
+# (:mod:`.full_parameter`), alone (``--rl-single-island-no-sync``) or synced
+# through the unified full-parameter syncer (:mod:`.full_parameter_stream`).
 PARAMETER_MODES = ("lora", "full")
 FULL_PARAMETER_MODE = "full"
 

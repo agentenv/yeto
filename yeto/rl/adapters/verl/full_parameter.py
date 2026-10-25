@@ -33,13 +33,10 @@ Two properties of the verl FSDP2 boundary, both different from Miles:
   layout instead names every rank's TP/PP/EP/CP/DP shard, so its hash changes
   with the parallel shape (``full_parameter_state.FullParameterShardSpec``).
 
-Not wired yet (GOAL B10, phase 2): the fragment-streaming role stream that
-answers the syncer's PULL permits. The operations here are its trainer side;
-``yeto.rl.engine.full_parameter_sync`` drives it for Miles through
-``yeto.rl.adapters.miles.full_parameter.role_stream``, which is Miles-specific
-(it owns the Ray chunk transport and the Megatron commit protocol). A verl
-island therefore has no outer full-parameter sync yet: a full-parameter verl
-run is a single island (``--rl-single-island-no-sync``).
+The fragment-streaming role stream that answers the unified syncer's PULL
+permits is the engine-neutral ``yeto.rl.engine.full_parameter_stream``; its
+verl binding (:mod:`.full_parameter_stream`) calls the worker operations here
+through ``VerlIsland.call_workers``.
 
 Every export and apply is collective: all ranks must call it with the same
 fragment, because ``DTensor.full_tensor`` and ``distribute_tensor`` are
@@ -213,6 +210,15 @@ def remote_export_fragment(worker_dict, names: Sequence[str], return_tensors: bo
                 tensors[name] = whole.detach().to("cpu", torch.float32).clone()
             del whole
     return {"tensors": tensors, "names": list(names)} if return_tensors else {"names": list(names)}
+
+
+def remote_export_for_reader(worker_dict, names: Sequence[str]) -> dict:
+    """:func:`remote_export_fragment` where only rank 0 (the reader) keeps the tensors."""
+
+    import torch.distributed as dist
+
+    reader = not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
+    return remote_export_fragment(worker_dict, names, reader)
 
 
 def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_optimizer: bool) -> dict:

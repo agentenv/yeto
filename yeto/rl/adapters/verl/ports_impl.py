@@ -216,6 +216,9 @@ class VerlIsland:
         self.published: tuple[int, str] | None = None
         self.last_metrics: dict = {}
         self.last_criteria: dict = {}
+        # A full-parameter island's trainer group as its role stream sees it
+        # (``full_parameter_stream.VerlFullParameterGroup``); None on a LoRA island.
+        self.full_group = None
         self.readback_dir = Path(os.environ.get("YETO_VERL_READBACK_DIR", str(self.out / "readback")))
         self.readback_dir.mkdir(parents=True, exist_ok=True)
         (self.readback_dir / "expected_shapes.json").write_text(
@@ -227,6 +230,13 @@ class VerlIsland:
 
         workers = self.trainer.actor_rollout_wg.workers
         return ray.get([w.__ray_call__.remote(fn, *args) for w in workers])
+
+    def call_workers_shared(self, fn, *args):
+        """:meth:`call_workers` with every argument put in the object store once,
+        so a large argument (whole parameter tensors) is not serialized per worker."""
+        import ray
+
+        return self.call_workers(fn, *[ray.put(arg) for arg in args])
 
     def export_tensors(self) -> tuple[dict, dict]:
         results = self.call_workers(remote_export_lora)
@@ -412,13 +422,21 @@ class VerlTrainerGroup(CutPorts):
         if grad_norm is not None:
             self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
-        return LocalStepReceipt(
+        receipt = LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
             base_policy_version=batch.policy_version, base_policy_hash=batch.policy_hash,
             input_batch_hash=_sha("|".join(ids)), trajectory_ids=ids,
             trained_tokens=sum(g.token_count for g in batch.groups), optimizer_steps=1,
             optimizer_step_succeeded=grad_norm is not None, parameter_layout_hash=isl.layout_hash,
         )
+        if isl.full_group is not None:  # the full-parameter role stream binds the round to this
+            from .full_parameter_stream import VerlRoundEvidence
+
+            isl.full_group.record_round(receipt, VerlRoundEvidence(
+                rollout_id=batch.rollout_id, behavior_policy_hash=batch.policy_hash,
+                input_batch_hash=receipt.input_batch_hash, trained_tokens=receipt.trained_tokens,
+                trajectory_ids=ids))
+        return receipt
 
     def step_metrics(self):
         return self._metrics
@@ -571,6 +589,41 @@ class VerlPublisher:
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
             payload_hash=check.readback_checksum or sent["total"], payload_bytes=payload_bytes,
+            complete=True)
+        return PublicationResult(manifest, frozenset({MEMBER}))
+
+
+class VerlFullParameterPublisher:
+    """Publication of a full-parameter island: verl's colocated ``update_weights``
+    of the whole model into vLLM.
+
+    vLLM's copy is not read back: the LoRA read-back hook (``vllm_readback``)
+    reads a registered adapter, and no full-parameter hook exists yet.  Every
+    record says so (status ``UNVERIFIED``); nothing claims a verified engine copy."""
+
+    STATUS = "UNVERIFIED"
+    DETAIL = "full-parameter publication: vLLM's weights are not read back"
+
+    def __init__(self, island: VerlIsland):
+        self.island = island
+
+    def publish(self, state) -> PublicationResult:
+        isl, t = self.island, self.island.trainer
+        version = int(state.policy_version)
+        digest = state.policy_tensor_hash()
+        started = time.monotonic()
+        t.checkpoint_manager.update_weights(t.global_steps)
+        record = {"status": self.STATUS, "detail": self.DETAIL, "policy_version": version,
+                  "policy_tensor_hash": digest, "payload_hash": state.digest.payload_hash,
+                  "payload_bytes": int(state.digest.payload_bytes),
+                  "update_seconds": time.monotonic() - started}
+        isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", record)
+        isl.emit("rl_publication_check", **record)
+        isl.published = (version, digest)
+        manifest = InferencePublicationManifest(
+            publication_mode="full", base_policy_version=None, target_policy_version=version,
+            target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
+            payload_hash=state.digest.payload_hash, payload_bytes=int(state.digest.payload_bytes),
             complete=True)
         return PublicationResult(manifest, frozenset({MEMBER}))
 
