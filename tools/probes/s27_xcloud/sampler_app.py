@@ -67,9 +67,10 @@ GPU_NAME = "NVIDIA H200"
 TP = 2
 RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"  # sampler_resume.DEFAULT_RECLAIM_MARKER
 # delta releases (yeto.rl.engine.release_delta): DeltaMirror rebuilds each release as a full
-# HF directory on the container disk and keeps the newest 2 (Nano: 2 x 63 GB)
-MIRROR_DIR = "/root/yeto-release-mirror"
-MIRROR_DISK_GIB = 256
+# HF directory and keeps the newest 2 (Nano: 2 x 63 GB). In memory: Modal's container disk
+# request must be >= 512 GiB, so the memory request covers the mirror instead.
+MIRROR_DIR = "/dev/shm/yeto-release-mirror"
+MEMORY_MIB = 262144
 TIMEOUT_S = int(os.environ.get("YETO_ES_TIMEOUT_S", "3600"))
 DEFAULTS = {"store": STORE, "groups_per_round": 16, "samples_per_group": 8, "max_tokens": 2048, "max_backlog_groups": 64,
             "num_rollouts": 600, "idle_s": 60.0, "stop_version": -1, "stop_groups": 0, "max_s": 3000.0,
@@ -246,7 +247,7 @@ def _mark_on_signal() -> None:
 
 # Modal has no "H200!" form (H200 has no upgrade path); the function checks the GPU names itself.
 @app.function(image=image, volumes={"/models": models, STORE_MOUNT: xc, "/data/logs": logs}, gpu=f"H200:{TP}",
-              cpu=16, memory=131072, ephemeral_disk=MIRROR_DISK_GIB * 1024, timeout=TIMEOUT_S)
+              cpu=16, memory=MEMORY_MIB, timeout=TIMEOUT_S)
 def sampler(tag: str, cfg: dict) -> int:
     began = time.time()
     out = Path("/data/logs") / tag
