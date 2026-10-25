@@ -66,6 +66,10 @@ SHARD = "modal-0"
 GPU_NAME = "NVIDIA H200"
 TP = 2
 RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"  # sampler_resume.DEFAULT_RECLAIM_MARKER
+# delta releases (yeto.rl.engine.release_delta): DeltaMirror rebuilds each release as a full
+# HF directory on the container disk and keeps the newest 2 (Nano: 2 x 63 GB)
+MIRROR_DIR = "/root/yeto-release-mirror"
+MIRROR_DISK_GIB = 256
 TIMEOUT_S = int(os.environ.get("YETO_ES_TIMEOUT_S", "3600"))
 DEFAULTS = {"store": STORE, "groups_per_round": 16, "samples_per_group": 8, "max_tokens": 2048, "max_backlog_groups": 64,
             "num_rollouts": 600, "idle_s": 60.0, "stop_version": -1, "stop_groups": 0, "max_s": 3000.0,
@@ -242,7 +246,7 @@ def _mark_on_signal() -> None:
 
 # Modal has no "H200!" form (H200 has no upgrade path); the function checks the GPU names itself.
 @app.function(image=image, volumes={"/models": models, STORE_MOUNT: xc, "/data/logs": logs}, gpu=f"H200:{TP}",
-              cpu=16, memory=131072, timeout=TIMEOUT_S)
+              cpu=16, memory=131072, ephemeral_disk=MIRROR_DISK_GIB * 1024, timeout=TIMEOUT_S)
 def sampler(tag: str, cfg: dict) -> int:
     began = time.time()
     out = Path("/data/logs") / tag
@@ -277,6 +281,7 @@ def sampler(tag: str, cfg: dict) -> int:
            # yeto.cloud.modal_ckpt_store: the Volume store's commit / reload run in this interpreter
            "YETO_RL_STORE_IMPL": "yeto.cloud.modal_ckpt_store:store_from_env",
            "YETO_RL_STORE_MODAL_VOLUME": XC_VOLUME, "YETO_RL_STORE_MODAL_MOUNT": STORE_MOUNT,
+           "YETO_RL_RELEASE_MIRROR": MIRROR_DIR,  # release_delta.MIRROR_ENV
            "YETO_MODAL_PYTHON": sys.executable, "YETO_MODAL_SYSPATH": os.pathsep.join(p for p in sys.path if p)}
     Path(RECLAIM_MARKER).unlink(missing_ok=True)
     _mark_on_signal()
@@ -297,11 +302,11 @@ def sampler(tag: str, cfg: dict) -> int:
 
 
 @app.local_entrypoint()
-def main(tag: str, store: str = STORE, max_backlog_groups: int = 64, stop_version: int = -1, stop_groups: int = 0,
+def main(tag: str, store: str = STORE, groups_per_round: int = 16, max_backlog_groups: int = 64, stop_version: int = -1, stop_groups: int = 0,
          idle_s: float = 60.0, max_s: float = 3000.0) -> None:
     if not store.startswith(STORE_MOUNT + "/"):
         raise SystemExit(f"--store must lie under {STORE_MOUNT}")
-    cfg = {**DEFAULTS, "store": store, "max_backlog_groups": max_backlog_groups, "stop_version": stop_version,
+    cfg = {**DEFAULTS, "store": store, "groups_per_round": groups_per_round, "max_backlog_groups": max_backlog_groups, "stop_version": stop_version,
            "stop_groups": stop_groups, "idle_s": idle_s, "max_s": max_s}
     call = sampler.spawn(tag, cfg)
     print(f"spawned sampler {call.object_id}")
