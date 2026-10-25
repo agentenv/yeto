@@ -255,6 +255,14 @@ class ModalVolumeStore(CheckpointStore):
         makedirs of the store directory). Writers hold this until their commit."""
         return _VolumeWriterGuard(self.volume_name)
 
+    def hold_reader(self) -> StoreWriterGuard:
+        """A reload with a Volume file open in any process of the container fails
+        (ConflictError "there are open files preventing the operation", S27 G-CC
+        E2: the trainer driver's release reload hit the payload reads of the
+        buffer reader). A reader holds the same shared lock as a writer while
+        its file is open, so such a reload is skipped instead."""
+        return _VolumeWriterGuard(self.volume_name)
+
     def reload(self) -> None:
         import fcntl
 
