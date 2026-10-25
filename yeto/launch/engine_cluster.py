@@ -139,6 +139,9 @@ def plan(args, specs: list[ClusterSpec], names: list[str], *,
         return {}
     if getattr(args, "training_mode", "sft") != "rl":
         raise ValueError("--rl-engine-cluster needs --training-mode rl")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError("--rl-engine-cluster needs --rl-backend miles (the D3 head pin and the "
+                         "engine recovery port are Miles adapter code; verl has neither)")
     from ..rl.engine import island_placement
     from . import trainer_loop
     from .topology import rl_island_layout, rl_island_spec, rl_trainer_shape
@@ -228,9 +231,14 @@ def _add_envs(task, envs: dict[str, str]) -> None:
         task.envs = {**(getattr(task, "envs", None) or {}), **envs}
 
 
-def _shape(sky, args, task, spec: ClusterSpec) -> None:
+def _shape(sky, args, task, spec: ClusterSpec, *, engine: bool = False) -> None:
+    import copy
+
     from .rl_island_task import island_sky_resources
 
+    if engine and getattr(args, "rl_engine_cluster_spot", False):
+        args = copy.copy(args)  # design v2: preemptible engines next to an on-demand trainer
+        args.spot = True
     task.num_nodes = spec.num_nodes
     task.set_resources(sky.Resources(**island_sky_resources(args, spec, in_vm_docker=False)))
 
@@ -242,6 +250,30 @@ class SplitTasks:
     engine_run: Any
 
 
+def recover_s(args) -> float:
+    """``--rl-engine-cluster-recover-s``: design v2 outage budget (0 = off, v1 semantics)."""
+    return float(getattr(args, "rl_engine_cluster_recover_s", 0) or 0)
+
+
+def engine_cell_names(args, split: EngineSplit) -> list[str]:
+    per = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    return [f"e{i}" for i in range(split.engine.total_gpus // per)]
+
+
+def with_declared_cells(run: str, cells: list[str], module: str) -> str:
+    """Append the fork F-R1 cell declaration to the island's learner command (the
+    Miles recovery port starts and stops those cells)."""
+    lines = run.split("\n")
+    hits = [i for i, line in enumerate(lines) if f"-m {module}" in line]
+    if len(hits) != 1:
+        raise ValueError(f"two-cluster island: {len(hits)} learner command lines in the run script")
+    i = hits[0]
+    flags = f" --rl-elastic-declare-cells --rl-elastic-cells {','.join(cells)}"
+    head, sep, tail = lines[i].partition(" || LRC=$?")  # keep --rl-island-post-cmd's suffix last
+    lines[i] = head + flags + sep + tail
+    return "\n".join(lines)
+
+
 def build_tasks(sky, args, split: EngineSplit, make_task: Callable[[], Any]) -> SplitTasks:
     """Three sky tasks from three fresh builds of the logical island task: the trainer
     cluster's (setup + run), the engine cluster's launch (setup only) and its run."""
@@ -249,11 +281,18 @@ def build_tasks(sky, args, split: EngineSplit, make_task: Callable[[], Any]) -> 
     _shape(sky, args, trainer, split.trainer)
     trainer.run = run_for(trainer.run, engine=False)
     _add_envs(trainer, {**NCCL_SOCKET_ENVS, ISLAND_NODE_WAIT_ENV: str(NODE_WAIT_S)})
+    if recover_s(args) > 0:  # design v2: the trainer survives the engine cluster
+        from ..rl.engine.engine_outage import ENGINE_RECOVERY_ENV
+        from .rl_backend import _rl_backend_module
+
+        module = _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE
+        trainer.run = with_declared_cells(trainer.run, engine_cell_names(args, split), module)
+        _add_envs(trainer, {ENGINE_RECOVERY_ENV: str(int(recover_s(args)))})
     setup = make_task()
-    _shape(sky, args, setup, split.engine)
+    _shape(sky, args, setup, split.engine, engine=True)
     setup.run = None
     run = make_task()
-    _shape(sky, args, run, split.engine)
+    _shape(sky, args, run, split.engine, engine=True)
     run.run = run_for(run.run, engine=True, rank_offset=split.rank_offset)
     _add_envs(run, dict(NCCL_SOCKET_ENVS))
     return SplitTasks(trainer=trainer, engine_setup=setup, engine_run=run)
@@ -288,6 +327,9 @@ class MixedIsland:
         self.unlink_fn = unlink or nebius_sg_link.unlink
         self.engine_job: int | None = None
         self.on_cloud: tuple[str, str] | None = None
+        self.head: str | None = None
+        self.engine_relaunches = 0
+        self.stop_watch = False
 
     def submit(self) -> tuple[Any, Any]:
         s = self.split
@@ -314,7 +356,7 @@ class MixedIsland:
         try:
             engine = sky.stream_and_get(rids[1])
             self._wait_setup(sky, engine[0])
-            head = head_address(trainer[1])
+            head = self.head = head_address(trainer[1])
             self.on_cloud = (str(getattr(trainer[1], "cluster_name_on_cloud", s.name)),
                              str(getattr(engine[1], "cluster_name_on_cloud", s.engine_name)))
             self.link_fn(s.trainer.region, *self.on_cloud)
@@ -365,6 +407,49 @@ class MixedIsland:
             self.log(f"[launcher] relaunch of two-cluster island {s.name} failed: {exc}")
             return None
         return job
+
+    def relaunch_engine(self, sky) -> Any:
+        """Design v2: bring back only the engine cluster (the trainer job keeps
+        running): provision + setup, wait for the setup job, admit the groups again,
+        start the engine run toward the same Ray head. Returns the engine job id."""
+        s = self.split
+        if self.head is None:
+            raise RuntimeError(f"{s.name}: no trainer head address to rejoin")
+        self._cancel(sky, s.engine_name, self.engine_job)
+        engine = sky.stream_and_get(self.submit_fn(s.engine, self.tasks.engine_setup, s.engine_name))
+        self._wait_setup(sky, engine[0])
+        on_cloud = (self.on_cloud or (s.name, s.engine_name))[0]
+        self.on_cloud = (on_cloud, str(getattr(engine[1], "cluster_name_on_cloud", s.engine_name)))
+        self.link_fn(s.trainer.region, *self.on_cloud)
+        job, _h = sky.stream_and_get(sky.exec(self.tasks.engine_run, cluster_name=s.engine_name))
+        self.engine_job = job
+        self.engine_relaunches += 1
+        self.log(f"[launcher] {s.engine_name}: engine cluster back (relaunch {self.engine_relaunches}), "
+                 f"engine run job {job} joins Ray head {self.head}:6379")
+        return job
+
+    def engine_lost(self, sky) -> bool:
+        """The engine run is no longer alive (cluster gone or job ended)."""
+        if self.engine_job is None:
+            return False
+        try:
+            status = sky.get(sky.job_status(self.split.engine_name, [int(self.engine_job)])).get(
+                int(self.engine_job))
+        except Exception:  # noqa: BLE001 - the cluster is gone (preempted / terminated)
+            return True
+        return status is None or (callable(getattr(status, "is_terminal", None)) and status.is_terminal())
+
+    def watch(self, sky, stop, *, poll_s: float = 60.0, trainer_alive: Callable[[], bool] = lambda: True) -> None:
+        """Design v2 supervisor thread body: relaunch the engine cluster whenever its
+        run is lost while the trainer runs. ``stop``: a threading.Event."""
+        while not stop.wait(poll_s) and not self.stop_watch:
+            if not trainer_alive() or not self.engine_lost(sky):
+                continue
+            self.log(f"[launcher] {self.split.engine_name}: engine run lost; relaunching the engine cluster only")
+            try:
+                self.relaunch_engine(sky)
+            except Exception as exc:  # noqa: BLE001 - retried at the next poll
+                self.log(f"[launcher] {self.split.engine_name}: engine relaunch failed: {exc}")
 
     def unlink(self) -> None:
         if self.on_cloud is not None:

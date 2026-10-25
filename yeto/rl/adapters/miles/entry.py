@@ -1924,6 +1924,23 @@ def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
     return [list(r) for r in rows]
 
 
+def attach_engine_outage(driver: Any, topology: Any, *, environ: Mapping[str, str] | None = None) -> Any:
+    """S27 G-DI design v2: with ``YETO_ISLAND_ENGINE_RECOVERY_S`` (the launcher sets it
+    for a two-cluster island) the driver survives the loss of its engine nodes
+    (:mod:`yeto.rl.engine.engine_outage`, :mod:`.engine_recovery`). Unset: nothing."""
+    from yeto.rl.engine.engine_outage import EngineOutage, outage_budget_s
+
+    budget = outage_budget_s(os.environ if environ is None else environ)
+    if budget is None or topology is None or int(topology.nodes) <= 1:
+        return None
+    from .engine_recovery import MilesEngineRecovery
+
+    driver.engine_outage = EngineOutage(MilesEngineRecovery(driver.rollout, nodes=int(topology.nodes)),
+                                        wait_s=budget, emit=driver.emit)
+    driver.emit("rl_engine_outage", phase="armed", budget_s=budget, nodes=int(topology.nodes))
+    return driver.engine_outage
+
+
 def wait_island_nodes(nodes: int) -> dict[str, Any] | None:
     """S27 G-DI: :func:`yeto.rl.engine.multinode.wait_for_island_nodes` on this Ray."""
     from yeto.rl.engine.multinode import ISLAND_NODE_WAIT_ENV, wait_for_island_nodes
@@ -2256,6 +2273,7 @@ def run_ports_island(
             driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
+            attach_engine_outage(driver, topology)  # S27 G-DI v2 (no-op without the env)
             driver.start_phases = start_phases  # L0: first_step_done
             return driver
 

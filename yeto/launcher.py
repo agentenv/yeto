@@ -745,6 +745,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     modal_tape_dir=modal_tape_dir))
                 _record_trainer_start(args, events_dir)
 
+        # S27 G-DI design v2: a supervisor per two-cluster island relaunches only its
+        # engine cluster when the engine run is lost (none without the recover flag)
+        engine_watch_stop = threading.Event()
+        if engine_cluster.recover_s(args) > 0:
+            for name, island in mixed.items():
+                job = results[name][0]
+                threading.Thread(
+                    target=island.watch, args=(sky, engine_watch_stop),
+                    kwargs={"trainer_alive": lambda name=name, job=job: sky_sdk_ops.job_alive(name, job)},
+                    name=f"yeto-engine-watch-{name}", daemon=True).start()
         try:
             exit_codes = trainer_loop.run_with_trainer_loop(
                 args, controller.run,
@@ -904,6 +914,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             from .sky_patches import remove_local_pth
 
             remove_local_pth(verda["pth_written"])
+        for island in mixed.values():  # S27 G-DI v2: no engine relaunch during the teardown
+            island.stop_watch = True
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()

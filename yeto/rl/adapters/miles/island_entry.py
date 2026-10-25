@@ -196,12 +196,23 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-accept-rebind")
     from yeto.rl.adapters.miles.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
-    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
+    # S27 G-DI design v2: a two-cluster island with an engine outage budget declares its
+    # rollout cells without --rl-elastic (the launcher sets the env with the flags)
+    from yeto.rl.engine.engine_outage import outage_budget_s
+
+    outage_cells = (bool(getattr(args, "rl_elastic_declare_cells", False))
+                    and not getattr(args, "rl_elastic", False) and outage_budget_s(os.environ) is not None)
+    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False) \
+            and not outage_cells:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     _check_resume_switches(args)
     _check_hf_exports(args)
     _check_sample_store(args)
     if not getattr(args, "rl_elastic", False):
+        if outage_cells:
+            if not _elastic_cells(args.rl_elastic_cells):
+                raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
+            given = [flag for flag in given if flag != "--rl-elastic-cells"]
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
         return

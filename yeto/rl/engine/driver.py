@@ -93,6 +93,7 @@ from .execution_profile import (
     require,
     train_blockers,
 )
+from .engine_outage import EnginesLost
 from .leave_reason import leave_reason_for
 from .offpolicy_correction import OFFPOLICY_GATE_EVENT, gate_from_carry_over
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
@@ -828,6 +829,9 @@ class IslandDriver:
                 f"publication of policy version {state.policy_version} "
                 f"for rollout {rollout_id}"
             )
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and not outage.guard_publish(state, rollout_id):
+            return  # S27 G-DI: engines gone; published after the engines are back
         expected_hash = state.policy_tensor_hash()
         # refused before any engine is touched when the version names other weights
         try:
@@ -1048,6 +1052,9 @@ class IslandDriver:
         self._trainer_offloaded = True
 
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and outage.active:
+            self._recover_engines(rollout_id, where="generate", error=None)
         self._before_generate(rollout_id, policy_version=rollout_id)
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
         offload_rollout = getattr(self.rollout, "offload_after_generate", None)
@@ -1056,15 +1063,78 @@ class IslandDriver:
             self.rollout.defer_offload = True
         with self._load_sampler(rollout_id):
             # IR-3: the rollout side learns the target policy token up front.
-            batch = self.rollout.generate(
-                rollout_id, expected_policy_version=self.expected_token
-            )
+            batch = self._generate_watched(rollout_id)
         # E1: a colocated rollout that frees its memory after generating (Miles
         # --offload-rollout) does it in its own phase, not inside "generate"
         if split_offload:
             self.phase("rollout_offload", rollout_id=rollout_id)
             offload_rollout()
         return self._accept_batch(rollout_id, batch)
+
+    def _generate_watched(self, rollout_id: int) -> Any:
+        """``rollout.generate``; with an engine outage object (S27 G-DI) a generation
+        that lost its engines is rewound, the engines restored and the policy
+        republished, and the batch generated again."""
+        outage = getattr(self, "engine_outage", None)
+        if outage is None:
+            return self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
+        while True:
+            read = getattr(self.rollout, "data_cursor", None)
+            cursor = read() if callable(read) else None
+            error: BaseException | None = None
+            try:
+                with outage.watch():
+                    batch = self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
+            except Exception as exc:  # noqa: BLE001 - classified right below
+                if not outage.lost(exc):
+                    raise
+                error = exc
+            else:
+                if not outage.lost(None):
+                    return batch
+            self._rewind_lost_batch(rollout_id, cursor)
+            self._recover_engines(rollout_id, where="generate", error=error)
+
+    def _rewind_lost_batch(self, rollout_id: int, cursor: Any) -> None:
+        """The prompts of a lost batch are read again (best effort: the backend's
+        ``seek_data_cursor``, when it has one)."""
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        result: Any = "no cursor"
+        if cursor is not None and callable(seek):
+            try:
+                result = seek(cursor)
+            except Exception as exc:  # noqa: BLE001
+                result = f"seek failed: {type(exc).__name__}: {exc}"
+        self.emit("rl_engine_outage", phase="batch_lost", rollout_id=rollout_id,
+                  rewind=str(result)[:300])
+
+    def _recover_engines(self, rollout_id: int | None, *, where: str,
+                         error: BaseException | None) -> None:
+        """S27 G-DI: wait for the engines, restore them, publish the deferred policy
+        (else republish the current one) to them."""
+        outage = self.engine_outage
+        record = outage.recover(rollout_id, where=where, error=error)
+        deferred = outage.take_deferred()
+        if deferred is not None:
+            state, version = deferred
+            self.publish(state, rollout_id=version)
+        else:
+            self._republish_current()
+        self.emit("rl_engine_outage", phase="restored", rollout_id=rollout_id,
+                  policy_version=self.published_version, outage=outage.outages,
+                  **{k: v for k, v in record.items() if k not in ("phase", "rollout_id")})
+
+    def _republish_current(self) -> None:
+        """The published policy again, into engines that started without it."""
+        state = getattr(self, "published_state", None)
+        if state is None:
+            raise PublicationError("engine outage: no published policy to restore")
+        result = self.publisher.publish(state)
+        members = frozenset(self.rollout.members())
+        if result.manifest.target_policy_version != self.published_version or result.members != members:
+            raise PublicationError(
+                f"engine outage: republication of v{self.published_version} reached "
+                f"{sorted(result.members)} of {sorted(members)}")
 
     def _before_generate(self, rollout_id: int, *, policy_version: int) -> None:
         """Refuse to start the batch of ``rollout_id`` unless the engines serve the
@@ -1681,6 +1751,9 @@ class IslandDriver:
         trains ``rollout_id - 1``. Nothing starts after a known final round."""
         if not self.rollout_ahead or self._is_final_round(rollout_id - 1):
             return
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and (outage.active or not outage.port.engines_alive()):
+            return  # S27 G-DI: the next round generates serially after the engines are back
         self._before_generate(rollout_id, policy_version=rollout_id - 1)
         read = getattr(self.rollout, "data_cursor", None)
         cursor = read() if self.data_positions is not None and callable(read) else None
@@ -1709,9 +1782,13 @@ class IslandDriver:
         waited = time.monotonic()
         failure: Exception | None = None
         data_end = False
+        outage = getattr(self, "engine_outage", None)
         try:
             with pending.sampler:
-                batch = self.rollout.finish_generate(pending.handle)
+                if outage is None:
+                    batch = self.rollout.finish_generate(pending.handle)
+                else:
+                    batch = self._finish_ahead_watched(pending, stop=stop)
             if not stop:
                 pending.batch = self._accept_batch(pending.rollout_id, batch)
         except Exception as error:
@@ -1727,6 +1804,28 @@ class IslandDriver:
                          discarded=stop or data_end, failure=failure)
         if not (stop or data_end):
             self._ahead = pending
+
+    def _finish_ahead_watched(self, pending: PendingBatch, *, stop: bool) -> Any:
+        """S27 G-DI: join the batch generated ahead; lost engines -> restore them and
+        generate that batch again now, with the policy it was started with (the one
+        still published: the next publication comes after this join)."""
+        outage = self.engine_outage
+        error: BaseException | None = None
+        try:
+            with outage.watch():
+                batch = self.rollout.finish_generate(pending.handle)
+        except Exception as exc:  # noqa: BLE001 - classified right below
+            if not outage.lost(exc):
+                raise
+            error = exc
+        else:
+            if not outage.lost(None):
+                return batch
+        if stop:
+            raise error or EnginesLost("engines lost while the final batch generated ahead")
+        self._rewind_lost_batch(pending.rollout_id, pending.data_cursor)
+        self._recover_engines(pending.rollout_id, where="generate_wait", error=error)
+        return self._generate_watched(pending.rollout_id)
 
     def _emit_ahead(self, pending: PendingBatch, *, wait_seconds: float, discarded: bool,
                     failure: Exception | None) -> None:
