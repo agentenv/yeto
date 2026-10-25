@@ -289,6 +289,23 @@ def test_engine_failure_cancels_the_trainer_job(monkeypatch, fail):
     assert island.relaunch(sky) is None  # relaunch reports failure, the fleet retries
 
 
+def test_trainer_failure_waits_for_the_engine_launch(monkeypatch):
+    sky = _LaunchSky()
+    island, _ = _island(monkeypatch, sky, [])
+    real = sky.stream_and_get
+
+    def fail_trainer(rid):
+        if rid == ("launch", "run1-l0-eu-north1"):
+            raise RuntimeError("no H200 capacity")
+        return real(rid)
+
+    sky.stream_and_get = fail_trainer
+    with pytest.raises(RuntimeError, match="no H200"):
+        island.finish(sky, island.submit())
+    assert ("get", "launch", "run1-l0-eu-north1-eng") in sky.calls  # the engine launch settled
+    assert not [c for c in sky.calls if c[0] in ("exec", "cancel")]
+
+
 def test_relaunch_relaunches_both_clusters(monkeypatch):
     sky, links = _LaunchSky(), []
     island, submits = _island(monkeypatch, sky, links)

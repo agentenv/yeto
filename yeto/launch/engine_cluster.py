@@ -292,7 +292,16 @@ class MixedIsland:
         trainer cluster's ``(job_id, handle)``; on an engine-side failure the new trainer
         job is cancelled and the error raised."""
         s = self.split
-        trainer = sky.stream_and_get(rids[0])
+        try:
+            trainer = sky.stream_and_get(rids[0])
+        except Exception:
+            # let the engine launch finish too, so the teardown that follows finds a
+            # settled cluster (not one still being provisioned)
+            try:
+                sky.stream_and_get(rids[1])
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[launcher] {s.engine_name}: launch also failed ({exc})")
+            raise
         try:
             engine = sky.stream_and_get(rids[1])
             head = head_address(trainer[1])
