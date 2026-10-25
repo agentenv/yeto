@@ -244,6 +244,7 @@ def test_env_downlink_limit_names_one_learner_and_opens_at_its_pull_step(monkeyp
     assert not rate.active(), "a PULL before FROM_STEP opened the window"
     client._dispatch_live(client._gen, MSG_PULL_REQ, struct.pack("<IQI", 1, 5, 0))
     assert rate.active()
+    assert client._downlink_window.pulls_in_window == [5]
     time.sleep(0.35)
     assert not rate.active()
     client._dispatch_live(client._gen, MSG_PULL_REQ, struct.pack("<IQI", 2, 9, 0))
@@ -284,6 +285,8 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
         filled = slow_from + FILLED_S
         during = merges_with(tape_records(tape), 0, filled, slow_until)
         pulls_to_slow = sum(1 for t in b.pull_times if filled <= t <= slow_until)
+        if not inline:
+            assert len(window.pulls_in_window) >= pulls_to_slow, "the window's own PULL count is short"
         print(f"env limit inline={inline}: merges with island 0 in the last {SLOW_S - FILLED_S:.0f} s of the "
               f"window: {during}; PULLs read by the slow island meanwhile: {pulls_to_slow}")
         if inline:
