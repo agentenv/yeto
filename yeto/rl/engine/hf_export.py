@@ -158,8 +158,9 @@ class HfRoundExports:
     def export(self, rollout_id: int, *, policy_version: int, final: bool) -> dict[str, Any]:
         """Write, put and time the export of round ``rollout_id + 1`` (module doc).
         Returns the fields of its ``rl_hf_export``: round, final, policy_version,
-        path (the directory in the store), store_kind, ok, files, bytes (the
-        model files, marker excluded), write_s, upload_s, seconds,
+        path (the directory in the store), store_kind, store_put (a store
+        that has ``put_path``), ok, files, bytes (the model files, marker
+        excluded), write_s, upload_s, seconds,
         upload_attempts, and error (``write: ...`` or ``upload: ...``) when not
         ok; upload_errors (the errors of attempts retried), staging_kept and
         staging_dropped (module doc) when they apply."""
@@ -170,6 +171,9 @@ class HfRoundExports:
                                   "policy_version": int(policy_version),
                                   "path": str(Path(self.store.root) / relative),
                                   "store_kind": self.store.kind}
+        put = getattr(self.store, "put_path", None)  # a Modal Volume: "mount" or "upload"
+        if isinstance(put, str):
+            record["store_put"] = put
         shutil.rmtree(local, ignore_errors=True)  # a torn earlier attempt
         started, written = self.clock(), None
         try:
