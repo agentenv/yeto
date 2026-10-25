@@ -10,8 +10,10 @@ mod recovery;
 mod merge;
 mod downlink;
 mod protocol;
+mod sample_relay;
 mod server;
 mod state;
+mod subscriber;
 
 use clap::Parser;
 
@@ -252,6 +254,24 @@ struct Args {
     shard_index: u32,
     #[arg(long, default_value_t = 1)]
     shard_count: u32,
+    /// S27 G-EA: admit up to N receive-only subscribers (sampler islands on
+    /// any cloud that follow the global weights as bf16 broadcasts; never in
+    /// quorum, roster or final cut). 0 = off: SUBSCRIBE is refused.
+    #[arg(long, default_value_t = 0)]
+    max_subscribers: u32,
+    /// S27 G-EA: serve the sample relay (sampler islands PUT rollout
+    /// samples, a training island TAKEs them) on this port. Off by default.
+    #[arg(long)]
+    sample_relay: bool,
+    /// Sample relay: most items held per channel.
+    #[arg(long, default_value_t = 4096)]
+    sample_relay_max_items: usize,
+    /// Sample relay: most bytes held per channel, in MiB.
+    #[arg(long, default_value_t = 2048)]
+    sample_relay_max_mib: u64,
+    /// Sample relay: largest item, in MiB.
+    #[arg(long, default_value_t = 64)]
+    sample_relay_max_item_mib: u64,
 }
 
 /// Membership options of the fragment-round server; every unset flag keeps
@@ -415,6 +435,12 @@ fn main() -> anyhow::Result<()> {
         shard,
         expert_token_weights: args.expert_token_weights,
         final_cut_manifest_only: args.final_cut_payload == "manifest",
+        max_subscribers: args.max_subscribers,
+        sample_relay: args.sample_relay.then_some(sample_relay::RelayConfig {
+            max_items: args.sample_relay_max_items,
+            max_bytes: args.sample_relay_max_mib << 20,
+            max_item_bytes: args.sample_relay_max_item_mib << 20,
+        }),
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

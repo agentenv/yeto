@@ -188,6 +188,13 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// S27 G-EA: receive-only subscriber slots (subscriber ids
+    /// 0..max_subscribers); 0 = off (SUBSCRIBE is refused). Subscribers never
+    /// change a merge, so this is not in the semantic profile hash.
+    pub max_subscribers: u32,
+    /// S27 G-EA: limits of the sample relay (`sample_relay.rs`); None = off
+    /// (RELAY_HELLO is refused). Not in the semantic profile hash.
+    pub sample_relay: Option<crate::sample_relay::RelayConfig>,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -497,6 +504,203 @@ fn append_tensor_bytes(
     Ok(())
 }
 
+/// S27 G-EA: one receive-only subscriber connection (`subscriber.rs`).
+struct SubscriberConn {
+    group: Arc<Group>,
+    subscriber_id: u32,
+    pending: Mutex<crate::subscriber::Pending>,
+    notify: tokio::sync::Notify,
+    /// Set at SUBSCRIBE: the next publish offers every fragment.
+    needs_snapshot: std::sync::atomic::AtomicBool,
+    closed: std::sync::atomic::AtomicBool,
+    sent_fragments: AtomicU64,
+}
+
+impl SubscriberConn {
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+/// S27 G-EA: every subscriber connection of this syncer, by subscriber id.
+struct SubscriberHub {
+    max: u32,
+    conns: Mutex<HashMap<u32, Arc<SubscriberConn>>>,
+    /// Groups of SUBSCRIBE connections still waiting for the session (their
+    /// data streams may already attach).
+    waiting: Mutex<HashMap<Member, Arc<Group>>>,
+    snapshot_wanted: std::sync::atomic::AtomicBool,
+}
+
+impl SubscriberHub {
+    fn new(max: u32) -> Self {
+        SubscriberHub {
+            max,
+            conns: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(HashMap::new()),
+            snapshot_wanted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Register a connection; a live older connection of the same id is
+    /// closed (the newer generation wins, like a learner reconnect).
+    fn register(&self, conn: Arc<SubscriberConn>) {
+        let old = self.conns.lock().unwrap().insert(conn.subscriber_id, conn.clone());
+        if let Some(old) = old {
+            old.close();
+        }
+        self.snapshot_wanted.store(true, Ordering::Release);
+    }
+
+    fn remove(&self, conn: &Arc<SubscriberConn>) {
+        conn.close();
+        let mut conns = self.conns.lock().unwrap();
+        if conns.get(&conn.subscriber_id).is_some_and(|c| Arc::ptr_eq(c, conn)) {
+            conns.remove(&conn.subscriber_id);
+        }
+    }
+
+    fn group(&self, member: Member) -> Option<Arc<Group>> {
+        if let Some(group) = self.waiting.lock().unwrap().get(&member) {
+            return Some(group.clone());
+        }
+        let id = member.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
+        self.conns
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|c| c.group.member == member)
+            .map(|c| c.group.clone())
+    }
+
+    fn live(&self) -> Vec<Arc<SubscriberConn>> {
+        self.conns.lock().unwrap().values().cloned().collect()
+    }
+
+    /// Offer a fragment version to every subscriber (no await: the
+    /// scheduler never waits for a subscriber link). New subscribers also get
+    /// every other fragment at its current version.
+    fn publish(&self, st: &GlobalState, p: usize) {
+        let snapshot = self.snapshot_wanted.swap(false, Ordering::AcqRel);
+        for conn in self.live() {
+            if conn.is_closed() {
+                continue;
+            }
+            let mut queued = false;
+            {
+                let mut pending = conn.pending.lock().unwrap();
+                if snapshot && conn.needs_snapshot.swap(false, Ordering::AcqRel) {
+                    for q in 0..st.params.len() {
+                        if conn.group.layout.fragments.get(q).and_then(|f| f.numel().ok()) == Some(st.params[q].len()) {
+                            queued |= pending.offer(q, st.versions[q], st.params[q].clone());
+                        }
+                    }
+                }
+                queued |= pending.offer(p, st.versions[p], st.params[p].clone());
+            }
+            if queued {
+                conn.notify.notify_one();
+            }
+        }
+    }
+
+    /// End of the run: tell every subscriber, then close it.
+    async fn finish(&self) {
+        let conns = self.live();
+        for conn in &conns {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                conn.group.send_small(
+                    MSG_ERROR,
+                    bytes::Bytes::from_static(crate::subscriber::RUN_FINISHED.as_bytes()),
+                ),
+            )
+            .await;
+            conn.close();
+        }
+        if !conns.is_empty() {
+            // Let the writer tasks flush the ERROR before the process exits.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// Send pending fragment versions to one subscriber at its link's pace.
+async fn subscriber_forwarder(conn: Arc<SubscriberConn>) {
+    loop {
+        if conn.is_closed() {
+            return;
+        }
+        let next = conn.pending.lock().unwrap().pop();
+        let Some((p, version, values)) = next else {
+            conn.notify.notified().await;
+            continue;
+        };
+        let prefix = crate::subscriber::bcast_prefix(p, version);
+        if let Err(error) = conn
+            .group
+            .send_tensor_large(MSG_BCAST_FRAGMENT, &prefix, DTYPE_BF16, &values)
+            .await
+        {
+            warn!(
+                subscriber = conn.subscriber_id,
+                generation = conn.group.member.generation,
+                fragment = p,
+                "subscriber send failed: {error:#}"
+            );
+            conn.close();
+            return;
+        }
+        drop(values);
+        let sent = conn.sent_fragments.fetch_add(1, Ordering::Relaxed) + 1;
+        if sent % 64 == 1 {
+            let pending = conn.pending.lock().unwrap();
+            info!(
+                subscriber = conn.subscriber_id,
+                fragment = p,
+                version,
+                sent,
+                pending = pending.len(),
+                coalesced = pending.coalesced,
+                "subscriber fragment sent"
+            );
+        }
+    }
+}
+
+/// A subscriber stream accepts only HEARTBEAT and LEAVE (ignored); the
+/// connection ends at EOF, on any other frame, or when the hub closes it.
+async fn subscriber_read_loop(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    conn: &Arc<SubscriberConn>,
+) -> Result<()> {
+    loop {
+        let read = read_frame_limited(rd, |msg_type| match msg_type {
+            MSG_HEARTBEAT => Ok(12),
+            MSG_LEAVE => Ok(5),
+            other => bail!("a subscriber may not send message type {other}"),
+        });
+        let frame = tokio::select! {
+            frame = read => frame,
+            _ = async {
+                while !conn.is_closed() {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } => return Ok(()),
+        };
+        match frame {
+            Ok(_) => {}
+            Err(error) if error.downcast_ref::<std::io::Error>().is_some() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 enum Event {
     Fatal {
         metric: &'static str,
@@ -633,6 +837,10 @@ struct RegistryState {
     /// Where the membership record (syncer epoch, retired generations) is
     /// persisted next to the checkpoint; None: not persisted.
     membership_record: Option<std::path::PathBuf>,
+    /// S27 G-EA: receive-only subscribers (None: --max-subscribers 0). Kept
+    /// apart from `current`/`groups`/`membership`, so no round, lease, final
+    /// cut or status record ever sees them.
+    subscribers: Option<Arc<SubscriberHub>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1066,6 +1274,15 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
+    if cfg.max_subscribers > 0 && cfg.shard.is_sharded() {
+        bail!("--max-subscribers needs an unsharded syncer (--shard-count 1)");
+    }
+    if cfg.max_subscribers > crate::subscriber::SUBSCRIBER_ID_BIT {
+        bail!("--max-subscribers is too large");
+    }
+    if let Some(relay) = &cfg.sample_relay {
+        relay.validate()?;
+    }
     cfg.membership.validate(cfg.learners, cfg.quorum)?;
     if !cfg.membership.is_static() {
         // Dynamic membership needs rounds that may merge without some island.
@@ -1385,8 +1602,26 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
+    let subscribers = (cfg.max_subscribers > 0).then(|| Arc::new(SubscriberHub::new(cfg.max_subscribers)));
+    if let Some(hub) = &subscribers {
+        info!(max_subscribers = hub.max, "receive-only subscribers enabled");
+    }
+    let relay = cfg
+        .sample_relay
+        .map(|relay_cfg| crate::sample_relay::RelayHub::new(relay_cfg, cfg.island_hmac_key.clone()));
+    if let Some(hub) = &relay {
+        let relay_cfg = hub.state.lock().unwrap().config();
+        info!(
+            max_items = relay_cfg.max_items,
+            max_bytes = relay_cfg.max_bytes,
+            max_item_bytes = relay_cfg.max_item_bytes,
+            "sample relay enabled"
+        );
+        hub.spawn_reporter(Duration::from_secs(60));
+    }
     let registry: Registry = Arc::new(Mutex::new(RegistryState {
         membership_record,
+        subscribers: subscribers.clone(),
         ..RegistryState::new(membership)
     }));
     registry.lock().unwrap().persist_membership();
@@ -1408,6 +1643,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     if hello_auth.key.is_none() {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
+    let accept_relay = relay.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -1417,6 +1653,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
                     let hello_auth = hello_auth.clone();
+                    let relay = accept_relay.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -1429,6 +1666,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             tx,
                             budget_cutoff,
                             hello_auth,
+                            relay,
                         )
                         .await
                         {
@@ -1441,7 +1679,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     });
 
-    scheduler(cfg, event_rx, registry, budget_cutoff).await
+    let result = scheduler(cfg, event_rx, registry, budget_cutoff).await;
+    if let Some(hub) = subscribers {
+        hub.finish().await;
+    }
+    result
 }
 
 fn negotiated_payload_limits(layout: &Layout, dtype: u8, expert_tags: bool) -> Result<(u64, u64)> {
@@ -1704,12 +1946,14 @@ async fn handle_connection(
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
+    relay: Option<Arc<crate::sample_relay::RelayHub>>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
-        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {other}"),
+        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE | MSG_SUBSCRIBE => Ok(MAX_HELLO_FRAME),
+        crate::sample_relay::MSG_RELAY_HELLO => Ok(1024),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/SUBSCRIBE/RELAY_HELLO, got {other}"),
     })
     .await
     {
@@ -1893,10 +2137,16 @@ async fn handle_connection(
             };
             let learner_id = member.learner_id;
             let generation = member.generation;
+            let subscriber = crate::subscriber::is_subscriber_id(learner_id);
             // The control socket's HELLO may still be in flight; wait for it.
             let mut group = None;
             for _ in 0..200 {
-                group = registry.lock().unwrap().groups.get(&member).cloned();
+                group = if subscriber {
+                    let hub = registry.lock().unwrap().subscribers.clone();
+                    hub.and_then(|hub| hub.group(member))
+                } else {
+                    registry.lock().unwrap().groups.get(&member).cloned()
+                };
                 if group.is_some() {
                     break;
                 }
@@ -1932,7 +2182,25 @@ async fn handle_connection(
                 bail!(message);
             }
             tokio::spawn(writer_task(wr, rx));
+            if subscriber {
+                // Outbound only: a subscriber data stream must stay silent.
+                let read = read_frame_limited(&mut rd, |msg_type| {
+                    bail!("a subscriber data stream may not send message type {msg_type}")
+                })
+                .await;
+                return match read {
+                    Err(error) if error.downcast_ref::<std::io::Error>().is_some() => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(_) => unreachable!(),
+                };
+            }
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
+        }
+        MSG_SUBSCRIBE => {
+            serve_subscriber(rd, wr, &first.payload, registry, session, semantic_profile_hash, hello_auth).await
+        }
+        crate::sample_relay::MSG_RELAY_HELLO => {
+            crate::sample_relay::serve(&mut rd, &mut wr, &first.payload, relay).await
         }
         MSG_BW_PROBE => {
             let request = open_hello(hello_auth.key.as_deref(), &first.payload)
@@ -1954,8 +2222,163 @@ async fn handle_connection(
                 .await
                 .context("BW_PROBE timed out")?
         }
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {t}"),
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/SUBSCRIBE/RELAY_HELLO, got {t}"),
     }
+}
+
+/// How long a SUBSCRIBE waits for the first learner to establish the session.
+const SUBSCRIBE_SESSION_WAIT: Duration = Duration::from_secs(1800);
+
+/// S27 G-EA: admit one receive-only subscriber (`subscriber.rs`). Checks:
+/// the MAC (subscribe domain), the HELLO body with a subscriber id below
+/// `--max-subscribers`, dtype bf16, and the established session's layout
+/// and fingerprint (and profile hash when offered). The session contract and
+/// compat group are not compared: a subscriber never merges, so it may run
+/// another card type. Nothing here touches the roster or the scheduler.
+async fn serve_subscriber(
+    mut rd: tokio::net::tcp::OwnedReadHalf,
+    mut wr: OwnedWriteHalf,
+    payload: &[u8],
+    registry: Registry,
+    session: Session,
+    semantic_profile_hash: [u8; 32],
+    hello_auth: Arc<HelloAuth>,
+) -> Result<()> {
+    let hub = registry.lock().unwrap().subscribers.clone();
+    let Some(hub) = hub else {
+        let message = "subscriber refused: this syncer runs without --max-subscribers";
+        let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    };
+    let parsed = open_subscribe(hello_auth.key.as_deref(), payload)
+        .and_then(|body| parse_hello_body(body, u32::MAX));
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let message = format!("subscriber refused: invalid SUBSCRIBE: {error:#}");
+            let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+            return Err(error);
+        }
+    };
+    let subscriber_id = parsed.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
+    let refusal = if !crate::subscriber::is_subscriber_id(parsed.learner_id) {
+        Some("subscriber refused: the SUBSCRIBE id lacks the subscriber bit".to_string())
+    } else if subscriber_id >= hub.max {
+        Some(format!("subscriber refused: subscriber id {subscriber_id} is outside 0..{}", hub.max))
+    } else if parsed.dtype != DTYPE_BF16 {
+        Some(format!("subscriber refused: SUBSCRIBE dtype {} (subscribers receive bf16, dtype 2)", parsed.dtype))
+    } else if matches!(parsed.syncer_profile_hash, Some(offered) if offered != semantic_profile_hash) {
+        Some("subscriber refused: SUBSCRIBE syncer semantic profile does not match the running server".to_string())
+    } else {
+        None
+    };
+    if let Some(message) = refusal {
+        let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    }
+    let member = Member { learner_id: parsed.learner_id, generation: parsed.generation };
+    let num_fragments = parsed.layout.fragments.len();
+    let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
+    let group = Arc::new(Group {
+        member,
+        dtype: DTYPE_BF16,
+        expert_tokens: false,
+        layout: parsed.layout.clone(),
+        layout_fingerprint: parsed.layout_fingerprint,
+        session_contract_hash: parsed.session_contract_hash,
+        num_streams: parsed.num_streams,
+        max_init_payload: 0,
+        max_push_payload: 0,
+        max_chunked_inner: 0,
+        control: tx,
+        data: Mutex::new(HashMap::new()),
+        msg_id: AtomicU64::new(0),
+        rr: AtomicUsize::new(0),
+        reasm: Mutex::new(HashMap::new()),
+    });
+    // Its data streams may attach while it waits for the session.
+    hub.waiting.lock().unwrap().insert(member, group.clone());
+    let admitted = admit_subscriber(&mut wr, &parsed, &session).await;
+    hub.waiting.lock().unwrap().remove(&member);
+    admitted?;
+    let conn = Arc::new(SubscriberConn {
+        group,
+        subscriber_id,
+        pending: Mutex::new(crate::subscriber::Pending::new(num_fragments)),
+        notify: tokio::sync::Notify::new(),
+        needs_snapshot: std::sync::atomic::AtomicBool::new(true),
+        closed: std::sync::atomic::AtomicBool::new(false),
+        sent_fragments: AtomicU64::new(0),
+    });
+    tokio::spawn(writer_task(wr, rx));
+    hub.register(conn.clone());
+    info!(
+        subscriber = subscriber_id,
+        generation = member.generation,
+        num_streams = parsed.num_streams,
+        "subscriber connected (receive-only; not in the roster)"
+    );
+    tokio::spawn(subscriber_forwarder(conn.clone()));
+    let result = subscriber_read_loop(&mut rd, &conn).await;
+    hub.remove(&conn);
+    info!(
+        subscriber = subscriber_id,
+        generation = member.generation,
+        sent = conn.sent_fragments.load(Ordering::Relaxed),
+        "subscriber disconnected"
+    );
+    result
+}
+
+/// Wait for the first learner HELLO to establish the session, then compare
+/// the SUBSCRIBE layout with it; on a refusal the ERROR is already sent.
+async fn admit_subscriber(wr: &mut OwnedWriteHalf, parsed: &ParsedHello, session: &Session) -> Result<()> {
+    let deadline = Instant::now() + SUBSCRIBE_SESSION_WAIT;
+    let expected = loop {
+        if let Some(spec) = session.lock().unwrap().as_ref() {
+            break Some((spec.layout.clone(), spec.layout_fingerprint));
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let Some((layout, fingerprint)) = expected else {
+        let message = "subscriber refused: no learner session was established in time";
+        let _ = send_direct(wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    };
+    if layout != parsed.layout || fingerprint != parsed.layout_fingerprint {
+        let message = format!(
+            "subscriber refused: layout mismatch (session layout_fingerprint={} fragments={}, \
+             SUBSCRIBE layout_fingerprint={} fragments={})",
+            hex32(&fingerprint),
+            layout.fragments.len(),
+            hex32(&parsed.layout_fingerprint),
+            parsed.layout.fragments.len(),
+        );
+        let _ = send_direct(wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    }
+    Ok(())
+}
+
+/// With a key: verify and strip the trailing HMAC of a SUBSCRIBE (subscribe domain).
+fn open_subscribe<'a>(key: Option<&[u8]>, payload: &'a [u8]) -> Result<&'a [u8]> {
+    let Some(key) = key else { return Ok(payload) };
+    if payload.len() < crate::hmac::HMAC_LEN {
+        bail!("SUBSCRIBE shorter than its HMAC (island has no YETO_ISLAND_HMAC_KEY?)");
+    }
+    let (body, mac) = payload.split_at(payload.len() - crate::hmac::HMAC_LEN);
+    let mut framed = Vec::with_capacity(crate::subscriber::SUBSCRIBE_MAC_DOMAIN.len() + body.len());
+    framed.extend_from_slice(crate::subscriber::SUBSCRIBE_MAC_DOMAIN);
+    framed.extend_from_slice(body);
+    let expected = crate::hmac::hmac_sha256(key, &framed);
+    let diff = expected.iter().zip(mac).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    if diff != 0 {
+        bail!("SUBSCRIBE HMAC mismatch (wrong or missing island HMAC key)");
+    }
+    Ok(body)
 }
 
 /// Largest upload or download one BW_PROBE connection may ask for.
@@ -5029,6 +5452,12 @@ async fn publish_round(
             }
             None => None,
         };
+        // S27 G-EA: offer this version to the subscribers first (no await);
+        // their forwarders send it while the learners are served below.
+        let subscribers = registry.lock().unwrap().subscribers.clone();
+        if let Some(hub) = subscribers {
+            hub.publish(st, p);
+        }
         for group in current_groups(registry) {
             let sent = match &published {
                 Some(encoded) => {
@@ -6860,6 +7289,8 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            max_subscribers: 0,
+            sample_relay: None,
             shard: Default::default(),
         }
     }
