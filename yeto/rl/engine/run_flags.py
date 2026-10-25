@@ -416,7 +416,8 @@ _PLACEMENT = (
         "--rl-placement",
         choices=["colocated", "fixed-partition"],
         default="colocated",
-        help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
+        help="ports: colocated (default) or a fixed partition (rl-infra-spec 2.1); full "
+        "parameters colocate only on one island without outer sync (--rl-single-island-no-sync)",
     ),
     cli_flag(
         "--rl-rollout-gpus",
@@ -754,6 +755,27 @@ _RESUME = (
     shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
                 help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
                 "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
+    # S27 G-EA: spot rollout islands on any cloud (yeto.rl.spot_rollout)
+    shared_flag("--rl-spot-subscribers", type=int, default=0, metavar="N",
+                help="the actor syncer admits N receive-only subscribers (spot sampler islands "
+                "on any cloud that follow the merged weights as bf16 broadcasts; never in "
+                "quorum, roster or final cut) and island 0 publishes its fragment layout on the "
+                "head's relay board. 0 (default): off, commands unchanged"),
+    shared_flag("--rl-sample-relay", action="store_true", default=False,
+                help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
+                "reads the spot samplers' groups from it (a local buffer filled by the relay "
+                "pump) and makes no policy releases. Off by default"),
+    shared_flag("--rl-spot-syncer", default=None, metavar="HOST:PORT",
+                help="--rl-sample-role sampler: follow the weights as a receive-only subscriber of "
+                "this actor syncer (no policy releases from the store) and write the groups to "
+                "its sample relay (channel --rl-spot-channel); for a sampler on another cloud. "
+                "Default off"),
+    shared_flag("--rl-spot-channel", type=int, default=0, metavar="N",
+                help="--rl-spot-syncer: the relay channel (the training island's learner id) "
+                "this sampler feeds; default 0"),
+    shared_flag("--rl-sample-relay-prefetch", type=int, default=None, metavar="GROUPS",
+                help="--rl-sample-relay trainer: groups the relay pump keeps unread in the local "
+                "buffer (default 2 rounds); the samplers' backlog is what is left in the relay"),
 )
 
 _SCHEDULING = (
@@ -827,6 +849,11 @@ _SCHEDULING = (
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
              "after the launch (default: the launched islands; not with the "
              "full-parameter preset, whose session binds the roster)"),
+    cli_flag("--rl-sync-inline-resend", action="store_true", default=False,
+             help="S27 G-EL: the syncer sends a rejoin catch-up and a recovery replay from its "
+             "scheduler, waiting on the island's link for each fragment (the behavior before "
+             "G-EL; a whole-model resend then stalls every round and lease). Default: a "
+             "forwarder task per island sends them while rounds, heartbeats and leases go on"),
     cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
              help="membership: after the last step the syncer waits this long for the "
              "islands still connected to take the final cut, then finishes without the "
@@ -878,6 +905,16 @@ _SCHEDULING = (
     shared_flag("--rl-peer-recovery-ttl-s", type=float, default=None, metavar="S",
                 help="--rl-peer-recovery: snapshots older than this are removed (a donor "
                 "or recovering island died); longer than a snapshot transfer (default 3600)"),
+    shared_flag("--rl-peer-recovery-manifest-wait-s", type=float, default=None, metavar="S",
+                help="--rl-peer-recovery: a recovering island that does not find the donor's "
+                "snapshot manifest reloads the store again with backoff for up to S seconds "
+                "before it refuses the snapshot (default 120; 0: refuse at once, the behavior "
+                "before S27 G-EL)"),
+    shared_flag("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None,
+                help="--rl-peer-recovery: background (default): at its safe point the donor "
+                "copies its state to host memory and trains on while every rank writes its "
+                "shard; inline: the donor writes the shards before its next round (the "
+                "behavior before S27 G-EL)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
                 "island's strict pause budget input (default: syncer default 900)"),
@@ -942,6 +979,27 @@ _SCHEDULING = (
     shared_flag("--rl-dispense-prefetch-blocks", type=int, default=2, metavar="N",
                 help="--rl-data-split dispense: blocks (rounds of rows) an island keeps ready "
                 "ahead, so it trains on through a short head outage (default 2)"),
+    # S27 P3: the dispenser's streams (--data-mix sources, task labels)
+    cli_flag("--rl-island-task-labels", default=None, metavar="SPEC",
+             help="--rl-data-split dispense: island M takes only the rows whose task_label "
+             "(top level or metadata) is one of its labels: 'l0=web;l1=pwn,crypto' ('-' "
+             "matches rows without a label; an island not listed takes every row). The "
+             "launch fails when a row label is taken by no island or a listed label is on "
+             "no row. The rows are dispensed per (source, label) stream"),
+    shared_flag("--rl-dispense-mix", default=None, metavar="W,W,...",
+                help="the weight of each --data-mix source, in order (set by the launcher from "
+                "--data-mix; not a launch option)"),
+    shared_flag("--rl-dispense-by-label", action="store_true", default=False,
+                help="the dispenser's streams split the rows by task_label (set by the launcher "
+                "from --rl-island-task-labels; not a launch option)"),
+    shared_flag("--rl-dispense-labels", default=None, metavar="L,L,...",
+                help="this island takes only the rows with these task labels (set by the "
+                "launcher from --rl-island-task-labels; not a launch option)"),
+    # S27 P4: a sampler island claims its rows from a dispenser
+    shared_flag("--rl-dispense-addr", default=None, metavar="HOST:PORT",
+                help="the dispenser this sampler island claims its rows from (set by the "
+                "launcher for a synced group's samplers: the actor syncer; a sampler launch "
+                "that joins a running group gives the group's actor syncer address)"),
     shared_flag("--rl-data-slot", default=None, metavar="I/N",
                 help="this training island reads only the rows i of --data with i %% N == I "
                 "(set by the launcher from --rl-data-split; not a launch option)"),

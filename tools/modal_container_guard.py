@@ -17,18 +17,31 @@ Rules (one poll every ``--interval-s``):
   extra container is recorded when it appears and when it leaves
   (``poll/extra-containers.jsonl``: id, ``start_time``, poll time, the original
   containers present, the progress line count), and its recent log lines are
-  saved (``poll/extra-<id>.log``, ``modal app logs --container``), so the next
-  run has evidence where it came from.
+  saved (``poll/extra-<id>.log``, ``modal app logs --container`` with the function
+  id, over a time window around its start, once when it appears and once when it
+  leaves), so the next run has evidence where it came from.
 * The app is stopped (kind ``resched``) only when an extra container is present
   and one of these holds:
 
-  1. an original container is gone (a replacement island: mixed state);
+  1. an original container is gone (a replacement island: mixed state), unless its
+     island finished: the progress log has the island's container line
+     (``[modal-island N] rank R container <id>``) and its ``rl_learner_finalized``
+     event (s27-ek-b: island 1 finished and its container left while an idle extra
+     container of island 1's function was listed);
   2. no progress line (``--progress-re`` in ``--progress-log``) for
      ``--extra-stall-s`` seconds, counted from the later of the last progress
      line and the time the present extra containers appeared;
   3. an extra container has been present for more than ``--extra-max-s`` seconds.
 
   Without ``--progress-log`` rule 2 is off; rules 1 and 3 still apply.
+* Expected island relaunches (``--replacement-containers K``, default 0: off). A
+  run that kills an island on purpose (fault injection) and has the launcher
+  start it again gets new containers once the island's original containers are
+  gone. While at most K extra containers were ever seen, rules 1 and 3 do not
+  apply; the app is stopped only when more than ``--nodes`` started containers
+  are present for more than ``--extra-max-s`` seconds (old and new containers
+  billed together) or by rule 2. The (K+1)-th extra container brings back the
+  three rules.
 * Cost guard (kind ``cost``): the estimate is the sum over polls of (containers
   in the app, extra containers included) x ``--rate`` x seconds since the last
   poll, plus ``--head-rate`` x seconds since the guard started. A failed
@@ -69,6 +82,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +119,7 @@ class GuardConfig:
     cost_alert: float | None = None
     extra_max_s: float = DEFAULT_EXTRA_MAX_S
     extra_stall_s: float = DEFAULT_EXTRA_STALL_S
+    replacements: int = 0  # extra containers of expected island relaunches (0: none expected)
 
 
 @dataclass
@@ -120,14 +135,17 @@ class Decision:
 class ContainerGuard:
     """The rules of the module doc on plain data (no I/O, the caller passes the time).
 
-    ``observe(now, containers, progress)``: ``containers`` is the app's rows of
-    ``modal container list --json`` (dicts with ``container_id`` and
+    ``observe(now, containers, progress, finished=...)``: ``containers`` is the app's
+    rows of ``modal container list --json`` (dicts with ``container_id`` and
     ``start_time``), or None when the list failed; ``progress`` is the number of
-    progress lines so far, or None without a progress source."""
+    progress lines so far, or None without a progress source; ``finished`` holds the
+    container ids of islands that finished (:class:`IslandEnds`)."""
 
     def __init__(self, config: GuardConfig, *, started: float) -> None:
         if config.nodes < 1:
             raise ValueError("nodes must be >= 1")
+        if config.replacements < 0:
+            raise ValueError("replacements must be >= 0")
         self.config = config
         self.started = float(started)
         self.originals: list[str] = []
@@ -143,13 +161,17 @@ class ContainerGuard:
         self.last_progress = float(started)
         self.alerted = False
         self.stopped: tuple[str, str] | None = None
+        self.over_since: float | None = None  # first poll with more than nodes started containers
+        self.finished: set[str] = set()  # container ids of finished islands (last observe)
 
     def cap(self, override: float | None = None) -> float | None:
         return self.config.cost_cap if override is None else override
 
     def observe(self, now: float, containers: list[dict[str, Any]] | None,
-                progress: int | None = None, *, cap_override: float | None = None) -> Decision:
+                progress: int | None = None, *, cap_override: float | None = None,
+                finished: set[str] | frozenset[str] = frozenset()) -> Decision:
         decision = Decision()
+        self.finished = set(finished)
         if containers is not None:
             self._update_set(now, [c for c in containers if started(c)], decision)
         count = len(containers) if containers is not None else self.last_count  # queued ones too
@@ -193,14 +215,22 @@ class ContainerGuard:
             if cid not in rows and cid not in self.originals_gone:
                 self.originals_gone.add(cid)
                 decision.events.append({"event": "original_gone", "utc": utc(now), "container_id": cid,
-                                        "extras_present": sorted(self.extras)})
+                                        "extras_present": sorted(self.extras),
+                                        "island_finished": cid in self.finished})
         self.present = list(rows)
+        if len(rows) > self.config.nodes:
+            self.over_since = now if self.over_since is None else self.over_since
+        else:
+            self.over_since = None
 
     def _container_stop(self, now: float, progress: int | None) -> tuple[str, str] | None:
         if not self.extras:
             return None
         extras = sorted(self.extras)
-        missing = [o for o in self.originals if o not in self.present]
+        expected = len(self.extras) + len(self.extras_gone) <= self.config.replacements
+        if expected:
+            return self._replacement_stop(now, progress, extras)
+        missing = [o for o in self.originals if o not in self.present and o not in self.finished]
         if missing:
             return RESCHED, (f"original container(s) {missing} gone while extra container(s) {extras} "
                              "are in the app (a replacement island)")
@@ -214,6 +244,20 @@ class ContainerGuard:
         if oldest > self.config.extra_max_s:
             return RESCHED, (f"extra container(s) {extras} in the app for {oldest:.0f} s "
                              f"(limit {self.config.extra_max_s:.0f} s)")
+        return None
+
+    def _replacement_stop(self, now: float, progress: int | None, extras: list[str]) -> tuple[str, str] | None:
+        """Every extra container so far is an expected relaunch (``replacements``)."""
+        if progress is not None:
+            since = min(info["first_seen"] for info in self.extras.values())
+            quiet = now - max(self.last_progress, since)
+            if quiet > self.config.extra_stall_s:
+                return RESCHED, (f"no progress line for {quiet:.0f} s (limit {self.config.extra_stall_s:.0f} s) "
+                                 f"while relaunched container(s) {extras} are in the app")
+        if self.over_since is not None and now - self.over_since > self.config.extra_max_s:
+            return RESCHED, (f"{len(self.present)} started containers (more than {self.config.nodes}) for "
+                             f"{now - self.over_since:.0f} s (limit {self.config.extra_max_s:.0f} s): "
+                             f"relaunched container(s) {extras} run beside old ones")
         return None
 
     def _cost_stop(self, cost: float, cap_override: float | None) -> tuple[str, str] | None:
@@ -252,6 +296,42 @@ class ProgressCounter:
         self.offset += end + 1
         self.count += sum(1 for line in data[:end].split(b"\n") if self.pattern.search(line))
         return self.count
+
+
+class IslandEnds:
+    """Reads ``path`` incrementally (complete lines only) for the islands' container lines
+    and ``rl_learner_finalized`` events; ``read()`` returns the container ids of the
+    islands that finished."""
+
+    CONTAINER = re.compile(rb"\[modal-island (\d+)\] rank \d+ container (ta-[A-Za-z0-9]+)")
+    FINALIZED = re.compile(rb'"event"\s*:\s*"rl_learner_finalized"')
+    ISLAND_ID = re.compile(rb'"island_id"\s*:\s*(\d+)')
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+        self.offset = 0
+        self.island_of: dict[str, str] = {}  # container id -> island
+        self.finalized: set[str] = set()  # islands
+
+    def read(self) -> set[str]:
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self.offset)
+                data = fh.read()
+        except FileNotFoundError:
+            data = b""
+        end = data.rfind(b"\n")
+        if end >= 0:
+            self.offset += end + 1
+            for line in data[:end].split(b"\n"):
+                found = self.CONTAINER.search(line)
+                if found:
+                    self.island_of.setdefault(found.group(2).decode(), found.group(1).decode())
+                if self.FINALIZED.search(line):
+                    island = self.ISLAND_ID.search(line)
+                    if island:
+                        self.finalized.add(island.group(1).decode())
+        return {cid for cid, island in self.island_of.items() if island in self.finalized}
 
 
 def list_containers(command: list[str], app: str, *, timeout_s: float = 60.0,
@@ -311,12 +391,29 @@ class RunFiles:
             return None
 
 
-def _diagnose_extra(args: argparse.Namespace, files: RunFiles, row_app_id: str | None, cid: str) -> None:
-    """Save the extra container's recent log lines (background, bounded); best effort."""
+def _log_window(start_time: Any, now: float) -> list[str]:
+    """``--since/--until`` around a container's start, in UTC with the offset written out
+    (the CLI reads a time without offset as local time). s27-ek-b: without a window the
+    query over the whole app failed with "Logs query hit resource limit"."""
+    begin = now - 600.0
+    if start_time:
+        try:
+            begin = datetime.fromisoformat(str(start_time).replace("Z", "+00:00")).timestamp() - 60.0
+        except ValueError:
+            pass
+    fmt = "%Y-%m-%dT%H:%M:%S+00:00"
+    return ["--since", time.strftime(fmt, time.gmtime(begin)), "--until", time.strftime(fmt, time.gmtime(now + 60.0))]
+
+
+def _diagnose_extra(args: argparse.Namespace, files: RunFiles, row_app_id: str | None, cid: str,
+                    start_time: Any = None, now: float | None = None) -> None:
+    """Save the extra container's log lines with its function id (background, bounded);
+    best effort."""
     if args.no_diagnose or not row_app_id:
         return
     command = ["timeout", str(int(args.diagnose_timeout_s)), *shlex.split(args.modal), "app", "logs", row_app_id,
-               "--container", cid, "--timestamps", "--show-function-call-id", "--show-container-id",
+               "--container", cid, "--timestamps", "--show-function-id", "--show-function-call-id",
+               "--show-container-id", *_log_window(start_time, time.time() if now is None else now),
                "--tail", "200"]
     try:
         with open(files.poll / f"extra-{cid}.log", "ab") as out:
@@ -354,6 +451,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cost-alert", type=float, default=None)
     ap.add_argument("--extra-max-s", type=float, default=DEFAULT_EXTRA_MAX_S)
     ap.add_argument("--extra-stall-s", type=float, default=DEFAULT_EXTRA_STALL_S)
+    ap.add_argument("--replacement-containers", type=int, default=0,
+                    help="extra containers of expected island relaunches (fault injection runs; default 0)")
     ap.add_argument("--progress-log", default=None)
     ap.add_argument("--progress-re", default=None)
     ap.add_argument("--modal", default="modal", help="the modal CLI (default: modal on PATH)")
@@ -382,9 +481,12 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     guard = ContainerGuard(GuardConfig(nodes=args.nodes, rate=args.rate, head_rate=args.head_rate,
                                        cost_cap=args.cost_cap, cost_alert=args.cost_alert,
-                                       extra_max_s=args.extra_max_s, extra_stall_s=args.extra_stall_s),
+                                       extra_max_s=args.extra_max_s, extra_stall_s=args.extra_stall_s,
+                                       replacements=args.replacement_containers),
                            started=started)
     progress = None if args.progress_log is None else ProgressCounter(args.progress_log, args.progress_re)
+    ends = None if args.progress_log is None else IslandEnds(args.progress_log)
+    app_ids: dict[str, str] = {}  # extra container id -> app id (for the second log capture)
     command = shlex.split(args.list_cmd) if args.list_cmd else [*shlex.split(args.modal), "container", "list",
                                                                   "--json"]
     files.log(started, f"start app={args.app} nodes={args.nodes} rate={args.rate} head_rate={args.head_rate} "
@@ -403,7 +505,8 @@ def main(argv: list[str] | None = None) -> int:
         if rows is None:
             files.log(now, f"container list failed ({why}); cost counts the last {guard.last_count} container(s)")
         decision = guard.observe(now, rows, None if progress is None else progress.read(),
-                                 cap_override=files.cap_override())
+                                 cap_override=files.cap_override(),
+                                 finished=set() if ends is None else ends.read())
         if rows is not None:
             ids = [str(r["container_id"]) for r in rows if r.get("container_id")]
             files.append("containers.log", f"{utc(now)} n={len(ids)} {' '.join(ids)}".rstrip())
@@ -414,10 +517,13 @@ def main(argv: list[str] | None = None) -> int:
         for event in decision.events:
             files.append("poll/extra-containers.jsonl", json.dumps(event, sort_keys=True))
             files.log(now, json.dumps(event, sort_keys=True))
-            if event["event"] == "extra_seen":
-                app_id = next((r.get("app_id") for r in rows or () if r.get("container_id") == event["container_id"]),
-                              None)
-                _diagnose_extra(args, files, app_id, event["container_id"])
+            if event["event"] in ("extra_seen", "extra_gone"):
+                cid = event["container_id"]
+                app_id = app_ids.get(cid) or next(
+                    (r.get("app_id") for r in rows or () if r.get("container_id") == cid), None)
+                if app_id:
+                    app_ids[cid] = app_id
+                _diagnose_extra(args, files, app_id, cid, event.get("start_time"), now)
         files.write("cost.now", f"{utc(now)} est_cost_usd={decision.cost} "
                                 f"containers_usd={round(guard.containers_usd, 2)} "
                                 f"distinct_containers={len(guard.seen)} extra_present={len(guard.extras)}\n")

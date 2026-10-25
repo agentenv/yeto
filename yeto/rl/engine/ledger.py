@@ -333,3 +333,24 @@ class BatchLedger:
         self._journal.append("filtered", rollout_id=-1, group_ids=ids,
                              detail={"reason": reason, "mechanism": mechanism})
         self._replay(self._journal.records[-1])
+
+
+def island_cut_ledger(state_dir: str | Path, *, rounds_restart: bool, tag: str) -> BatchLedger:
+    """S27 G-ED: the batch ledger of a synced island that writes island cuts (S27 R-2).
+
+    The cut store's state (pointer, ledger, journal) is restored into
+    ``state_dir`` at start. A full-parameter island numbers its local rounds
+    from 0 in every process (``FullParameterSync.local_rounds_restart``), so a
+    ledger restored from an earlier process names rollout ids the new process
+    trains again, and the driver's restart check refuses them (:meth:`BatchLedger.rebase`:
+    "restart at rollout 0 is behind outer-recorded rollouts"). Such an island
+    never resumes from its cuts (the syncer is authoritative), so with
+    ``rounds_restart`` the restored ledger moves aside (``ledger.before-<tag>``,
+    kept in the state dir) and this process starts an empty one. A LoRA synced
+    island restarts at the syncer's version and keeps its restored ledger (it
+    continues its data source from there)."""
+    root = Path(state_dir).expanduser()
+    current = root / LEDGER_DIR
+    if rounds_restart and current.exists():
+        current.rename(root / f"{LEDGER_DIR}.before-{tag}")
+    return BatchLedger(root)

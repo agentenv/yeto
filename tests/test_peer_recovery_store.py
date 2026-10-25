@@ -93,7 +93,11 @@ class FileIsland(_ArrayIsland):
 def _serve(store, island, request):
     client = _ScriptedClient(requests=[request])
     donor = DonorService(client, island, store)
-    assert donor.poll() == 1
+    served = donor.poll()
+    if donor.background:  # a file island: hash + commit on the worker, reported at the next poll
+        assert donor.wait(5)
+        served += donor.poll()
+    assert served == 1
     (_, _, versions, sha256, locator), = client.sent
     return rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator)
 

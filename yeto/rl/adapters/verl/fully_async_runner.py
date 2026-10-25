@@ -15,7 +15,9 @@ the yeto ``IslandDriver`` calls through the ports of :mod:`.fully_async_ports`:
 * ``yeto_push_weights`` -- ``checkpoint_manager.update_weights(global_steps=
   current_param_version)`` + the rollouter's ``reset_staleness``;
 * ``yeto_export_lora`` / ``yeto_call_workers`` -- the LoRA hooks of
-  ``ports_impl.VerlPolicyState`` on the trainer's actor worker group (6.4b item 2).
+  ``ports_impl.VerlPolicyState`` on the trainer's actor worker group (6.4b item 2);
+  ``yeto_call_workers`` / ``yeto_call_workers_shared`` also carry a full-parameter
+  island's fragment reads and applies (S27 G-EW, :mod:`.fully_async_full`).
 
 Only exercised on a GPU (rl-verl-backend 6.6); the logic it relies on is in the
 CPU-tested :mod:`.fully_async_round` and :mod:`.fully_async_ports`.
@@ -183,6 +185,11 @@ class _YetoTrainerMixin:
     async def yeto_call_workers(self, fn, *args):
         workers = self.actor_rollout_wg.workers
         return list(await asyncio.gather(*[w.__ray_call__.remote(fn, *args) for w in workers]))
+
+    async def yeto_call_workers_shared(self, fn, *args):
+        """``yeto_call_workers`` with every argument put in the object store once
+        (S27 G-EW: whole parameter tensors of a full-parameter apply)."""
+        return await self.yeto_call_workers(fn, *[ray.put(arg) for arg in args])
 
     async def yeto_export_lora(self):
         from .ports_impl import remote_export_lora

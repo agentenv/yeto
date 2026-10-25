@@ -24,6 +24,18 @@ The resume assertions of :mod:`.cut` run on this path: the restored rank digests
 and Adam steps at restore, the landed data cursor against the cut's data
 watermark (driver ``_restore_data_cursor`` -> ``confirm_resumed_data_cursor``),
 and the Adam/scheduler advance after the first resumed round.
+
+S27 G-ED (VERL-PARITY #20, #21), as on the Miles island:
+
+* a full-parameter island cuts and resumes the same way (the rank files hold
+  every FSDP2 parameter shard, the FP32 masters, and their Adam state);
+* a synced island (an outer syncer) with ``--rl-island-cut-store`` (the
+  launcher's island cuts, S27 R-2) writes its own round cuts under
+  ``island<learner id>`` and never resumes from them (the syncer is
+  authoritative): ``plan["resume"]["write_only"]``;
+* ``--rl-cut-auto-mtbf-s`` / ``--rl-cut-max-interval-s`` give the timed
+  interval (:mod:`yeto.rl.engine.cut_interval`); without them a verl island
+  still cuts every ``--rl-cut-every`` rounds (default 1).
 """
 
 from __future__ import annotations
@@ -36,6 +48,7 @@ from typing import Any
 from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 
 RESUME_FLAGS = ("rl_cut_every", "rl_cut_keep", "rl_stop_after_rounds")
+TIMED_FLAGS = ("rl_cut_auto_mtbf_s", "rl_cut_max_interval_s")
 DEFAULT_STATE_DIR = "~/yeto-rl/resume-state"
 # VerlRunConfig fields that may change between a cut and the launch resuming it:
 # paths of this container, run length (extending a run is the normal resume),
@@ -49,23 +62,44 @@ def _flag(name: str) -> str:
 
 
 def resume_config(args: Any) -> dict[str, Any] | None:
-    """``plan["resume"]`` from the island flags (None: no resume store). Raises on
+    """``plan["resume"]`` from the island flags (None: no cut store). Raises on
     a flag combination the cut controller cannot run."""
-    timed = [_flag(n) for n in ("rl_cut_auto_mtbf_s", "rl_cut_max_interval_s")
-             if getattr(args, n, None) is not None]
-    if timed:  # S27 R-2: the timed interval is wired for the Miles island only
-        raise ValueError(", ".join(timed) + ": the timed cut interval is not wired for verl")
+    from yeto.rl.engine.cut_interval import (check_island_cut_store, cut_auto_options, cut_interval_for,
+                                             island_cut_store_for)
+
     store = getattr(args, "rl_resume_store", None)
-    given = [_flag(n) for n in RESUME_FLAGS if getattr(args, n, None) is not None]
+    island_store = getattr(args, "rl_island_cut_store", None)
+    given = [_flag(n) for n in RESUME_FLAGS + TIMED_FLAGS if getattr(args, n, None) is not None]
     if getattr(args, "rl_resume_allow_config_change", False):
         given.append("--rl-resume-allow-config-change")
     for name in RESUME_FLAGS:
         value = getattr(args, name, None)
         if value is not None and int(value) < 1:
             raise ValueError(f"{_flag(name)} must be >= 1")
+    for name in TIMED_FLAGS:
+        value = getattr(args, name, None)
+        if value is not None and not float(value) > 0:
+            raise ValueError(f"{_flag(name)} must be positive")
+    auto = cut_auto_options(args)
+    every = getattr(args, "rl_cut_every", None)
+    cut_interval_for(every=every, auto_mtbf_s=auto.get("auto_mtbf_s"),
+                     max_interval_s=auto.get("max_interval_s"))  # exclusive modes
+    # the interval: timed when asked for, else every N rounds (verl default 1)
+    interval = auto or {"every": int(every or DEFAULT_CUT_EVERY)}
+    if island_store:  # S27 R-2 on verl (G-ED): a synced island writes its cuts only
+        check_island_cut_store(args)
+        from yeto.rl.engine import sample_roles
+
+        if sample_roles.sample_role(args) == sample_roles.TRAINER:
+            raise ValueError("--rl-island-cut-store: round cuts are not wired for a verl buffer "
+                             "trainer (--rl-sample-role trainer)")
+        return {"store": island_cut_store_for(island_store, int(args.learner_id)),
+                "state_dir": str(getattr(args, "rl_resume_state_dir", None) or DEFAULT_STATE_DIR),
+                **interval, "keep": int(getattr(args, "rl_cut_keep", None) or 2),
+                "allow_config_change": False, "stop_after": None, "write_only": True}
     if not store:
         if given:
-            raise ValueError(", ".join(given) + " need --rl-resume-store")
+            raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-island-cut-store)")
         return None
     from yeto.rl.engine import sample_roles
 
@@ -84,7 +118,7 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     return {
         "store": str(store),
         "state_dir": str(getattr(args, "rl_resume_state_dir", None) or DEFAULT_STATE_DIR),
-        "every": int(getattr(args, "rl_cut_every", None) or DEFAULT_CUT_EVERY),
+        **interval,
         "keep": int(getattr(args, "rl_cut_keep", None) or 2),
         "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
         "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
@@ -110,23 +144,31 @@ class ResumeWiring:
 
 
 def resume_wiring_for(plan: Mapping[str, Any], *, runtime_fingerprint: str,
-                      environ: Mapping[str, str] | None = None) -> ResumeWiring | None:
+                      environ: Mapping[str, str] | None = None, sync: Any = None) -> ResumeWiring | None:
     """Restore the store into the state dir (before the driver is built: the
-    ledger the driver gets is the restored one). None without ``plan["resume"]``."""
+    ledger the driver gets is the restored one). None without ``plan["resume"]``.
+    ``sync``: the island's outer sync; island cuts of a sync whose local rounds
+    restart at 0 in every process start an empty ledger (``ledger.island_cut_ledger``)."""
     config = plan.get("resume")
     if not config:
         return None
-    if plan.get("sync") != "none":
+    if config.get("write_only"):
+        if plan.get("sync") == "none":
+            raise ValueError("verl island cuts (--rl-island-cut-store) belong to a synced island")
+    elif plan.get("sync") != "none":
         raise ValueError("verl round cuts need sync 'none' (--rl-single-island-no-sync)")
     if not runtime_fingerprint:
         raise ValueError("verl round cuts need a runtime fingerprint (a cut without it is refused)")
-    from yeto.rl.engine.ledger import BatchLedger
+    from yeto.rl.engine.ledger import BatchLedger, island_cut_ledger
     from yeto.rl.engine.resume import ResumeController, store_for
 
     store = store_for(config["store"], environ=environ)
     controller = ResumeController(state_dir=os.path.expanduser(config["state_dir"]), store=store,
                                   runtime_fingerprint=runtime_fingerprint, keep=int(config.get("keep", 2)))
-    return ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir), config=dict(config))
+    ledger = (island_cut_ledger(controller.state_dir, tag=controller.incarnation["id"],
+                                rounds_restart=bool(getattr(sync, "local_rounds_restart", False)))
+              if config.get("write_only") else BatchLedger(controller.state_dir))
+    return ResumeWiring(controller=controller, ledger=ledger, config=dict(config))
 
 
 def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[str, Any],
@@ -137,27 +179,37 @@ def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[s
     if resume is None:
         return None
     from yeto.rl.engine import round_cut
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.cut_interval import cut_interval_for
     from yeto.rl.engine.resume import install_preempt_handler, watch_preempt_marker
 
     controller = resume.controller
+    config = resume.config
+    write_only = bool(config.get("write_only"))
+    if write_only == isinstance(driver.sync, LocalOnlySync):
+        raise ValueError("verl island cuts need a synced island's sync" if write_only
+                         else "verl round cuts need the driver's sync to be LocalOnlySync")
     source = round_cut.CutSource(
         driver=lambda: driver, trainer=driver.trainer, rollout=driver.rollout, ledger=resume.ledger,
         algorithm=algorithm, backend_fingerprint=controller.runtime_fingerprint, cut_root="",
         global_batch_size=1)
+    interval = cut_interval_for(every=config.get("every"), auto_mtbf_s=config.get("auto_mtbf_s"),
+                                max_interval_s=config.get("max_interval_s"))
     checkpoint = round_cut.wire_round_cuts(
-        driver, controller=controller, source=source, every=int(resume.config.get("every", 1)),
+        driver, controller=controller, source=source, every=int(config.get("every") or 1),
         fingerprint=run_fingerprint_of(plan, algorithm),
-        allow_config_change=bool(resume.config.get("allow_config_change", False)))
+        allow_config_change=bool(config.get("allow_config_change", False)), interval=interval)
     if checkpoint is None:
-        raise ValueError("verl round cuts need the driver's sync to be LocalOnlySync")
-    driver.sync.stop_after = resume.config.get("stop_after")
+        raise ValueError(f"verl round cuts: {type(driver.sync).__name__} takes no round cuts")
+    if not write_only:
+        driver.sync.stop_after = config.get("stop_after")
     # the handler needs the main thread (verl: the task runner actor's); [] when it is not
     signals = install_preempt_handler(controller, emit=driver.emit) if install_signals else []
     # S26 E9.1: the signal reaches the container's main process, not this actor; the
     # Modal runner writes the reclaim marker and this thread turns it into the notice
     watcher = watch_preempt_marker(controller) if install_signals else None
     driver.emit("rl_round_cuts_wired", backend="verl", every=checkpoint.every,
-                keep=int(controller.keep), stop_after=driver.sync.stop_after,
+                keep=int(controller.keep), stop_after=getattr(driver.sync, "stop_after", None),
                 store=str(controller.checkpoint_store), preempt_signals=list(signals),
                 preempt_marker_watch=watcher is not None,
                 restored_store=controller.restored is not None)

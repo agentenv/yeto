@@ -25,7 +25,9 @@ refused before any rank writes). Each rank checks its file checksum, loads it
 into the freshly built module/optimizer (DTensors rebuilt with the fresh
 module's mesh and placements), and reports a digest of the state its optimizer
 now steps (N7.6c: read from ``optimizer.param_groups``, not the module copy)
-(must equal the one recorded at save) plus its resume state.
+and of its RNG state (S27 G-ED; both must equal the ones recorded at save)
+plus its resume state. The same rank files are the peer snapshot of a
+full-parameter island (:mod:`.peer_recovery`).
 
 Units (verl differs from Miles here): the run step is one trainer round (one
 ``update_actor`` call). verl steps the LR scheduler once per round and the
@@ -208,6 +210,19 @@ def _set_rng_state(rng: Mapping[str, Any]) -> None:
         torch.cuda.set_rng_state(rng["cuda"])
 
 
+def rng_digest(rng: Mapping[str, Any]) -> str:
+    """sha256 of the RNG states (CPU, and CUDA when present): a restore must
+    re-export the saved one (as the Miles cut summary's ``rng_digest``)."""
+    import torch
+
+    h = hashlib.sha256()
+    for key in sorted(rng):
+        value = rng[key]
+        h.update(f"{key}|".encode())
+        h.update(value.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes())
+    return h.hexdigest()
+
+
 def _rank_and_world() -> tuple[int, int]:
     import torch.distributed as dist
 
@@ -224,6 +239,7 @@ def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str) 
         "has_optimizer_state": any(s.max > 0 for s in resume.adam_steps.values()) or bool(resume.moments),
         "has_rng": True,
         "state_digest": digest,
+        "rng_digest": rng_digest(_rng_state()),
         "resume": resume.to_dict(),
     }
 
@@ -412,6 +428,8 @@ def restored_problems(manifest: CutManifest, expect: RestoreExpectation,
             problems.append(f"{r['path']}: loaded train state differs from the cut")
         if r["scheduler_samples"] != s["scheduler_samples"]:
             problems.append(f"{r['path']}: scheduler at {r['scheduler_samples']}, cut {s['scheduler_samples']}")
+        if "rng_digest" in s and r.get("rng_digest") != s["rng_digest"]:  # cuts since S27 G-ED
+            problems.append(f"{r['path']}: restored RNG state differs from the cut")
     now = ResumeManifest(int(expect.local_step), saved.data_watermark, saved.scheduler_increment,
                          _rank_states(results))
     return saved, problems + restore_problems(saved, now, check_data_watermark=False)

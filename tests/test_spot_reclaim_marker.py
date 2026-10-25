@@ -195,8 +195,10 @@ def test_container_set_poller_extra_containers_beside_claimed_ones_do_not_trip()
 
 
 def test_container_set_poller_multi_island_reschedule_after_all_claimed():
-    # S27 s27-gr-h: both islands printed their lines; Modal ended island 0's container
-    # and a third container appears.
+    # the S19 shape with two islands: both islands printed their lines, island 0's
+    # container leaves and a third container appears. (S27 s27-gr-h was first read as
+    # this case; its Modal log shows island 0 alive until the app stop and the third
+    # container idle in island 1's function, EXTRA-CONTAINER.md.)
     lists = [{"ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1"}, {"ta-1", "ta-new"}]
     g, changes, claims = _poller(lists, 2)
     g.poll_once()
@@ -248,6 +250,67 @@ def test_container_set_poller_replacement_of_a_claimed_slot_trips_even_if_old_go
     assert g.tripped and "ta-0b" in changes[0]
 
 
+# S27 s27-ek-b (2026-10-25): both islands finalized; at 14:43:25Z an idle container of
+# island 1's function started (no input); island 1's container left at its normal end;
+# the guard failed the completed run with exit 7.
+EK_I0, EK_I1, EK_X = ("ta-01M5SQHXHTE3G91GN7YZSGMPER", "ta-01M5SQHXNQ4FPENB16T90SWYTR",
+                      "ta-01M5SR86VJ7924QF3BRVTR6AXR")
+EK_LISTS = [{EK_I0, EK_I1}, {EK_I0, EK_I1, EK_X}, {EK_I0, EK_X}, set()]
+EK_CLAIMS = {EK_I0: ("0", "0"), EK_I1: ("1", "0")}
+
+
+def _ek_poller(finished):
+    from yeto.modal_runner import ContainerSetPoller
+
+    lists, changes = iter(EK_LISTS), []
+    return ContainerSetPoller(lambda: next(lists), 2, changes.append, attributed=lambda: EK_CLAIMS,
+                              finished=finished, clock=_Clock()), changes
+
+
+def test_container_set_poller_finished_island_leaving_beside_an_idle_extra_does_not_trip(capsys):
+    g, changes = _ek_poller(lambda: {EK_I1})
+    for _ in EK_LISTS:
+        g.poll_once()
+    assert not g.tripped and changes == []
+    out = capsys.readouterr().out
+    assert out.count("WARNING") == 1 and EK_X in out and "its island finished" in out
+
+
+def test_container_set_poller_unfinished_island_leaving_beside_an_extra_still_trips():
+    for finished in (None, lambda: set(), lambda: {EK_I0}):
+        g, changes = _ek_poller(finished)
+        for _ in EK_LISTS[:3]:
+            g.poll_once()
+        assert g.tripped and len(changes) == 1
+        assert f"{EK_I1} no longer listed" in changes[0] and EK_X in changes[0]
+
+
+def test_container_set_poller_finished_check_error_counts_every_claimed_container(capsys):
+    def boom():
+        raise RuntimeError("collectors")
+
+    g, changes = _ek_poller(boom)
+    for _ in EK_LISTS[:3]:
+        g.poll_once()
+    assert g.tripped and "finished-island check failed" in capsys.readouterr().out
+
+
+def test_finalized_island_containers_reads_guards_and_tapes(tmp_path):
+    from yeto.launch.modal_islands import finalized_island_containers
+    from yeto.modal_runner import ContainerIdGuard
+    from yeto.rl import event_echo
+
+    guards = {"run-l0-modal": ContainerIdGuard(), "run-l1-modal": ContainerIdGuard()}
+    tapes = {n: event_echo.TapeCollector(tmp_path / f"{n}.jsonl") for n in guards}
+    guards["run-l0-modal"].feed(f"[modal-island 0] rank 0 container {EK_I0}\n")
+    guards["run-l1-modal"].feed(f"[modal-island 1] rank 0 container {EK_I1}\n")
+    assert finalized_island_containers(guards, tapes) == set()
+    tapes["run-l1-modal"].feed(event_echo.format_record(
+        {"event": "rl_learner_finalized", "island_id": 1, "time_unix": 1.0}) + "\n")
+    assert finalized_island_containers(guards, tapes) == {EK_I1}
+    assert finalized_island_containers(guards, {}) == set()  # no tape: nothing finished
+
+
 def test_container_set_poller_attribution_error_keeps_slots_free():
     from yeto.modal_runner import ContainerSetPoller
 
@@ -292,7 +355,10 @@ def test_container_set_poller_only_when_no_new_container_is_expected():
     cfg = SimpleNamespace(num_nodes=1, envs={})
     fixed = SimpleNamespace(no_island_relaunch=True, modal_retries=0, recover_timeout=600)
     poller = launcher.container_set_poller_for(fixed, Ops(), {"l0": cfg}, None, start=False)
-    assert poller is not None and poller.expected_count == 1
+    assert poller is not None and poller.expected_count == 1 and poller.finished() == set()
+    ended = launcher.container_set_poller_for(fixed, Ops(), {"l0": cfg}, None, start=False,
+                                              finished=lambda: {"ta-0"})
+    assert ended.finished() == {"ta-0"}
     relaunch = SimpleNamespace(no_island_relaunch=False, modal_retries=None, recover_timeout=600)
     assert launcher.container_set_poller_for(relaunch, Ops(), {"l0": cfg}, None, start=False) is None
     assert launcher.container_set_poller_for(fixed, None, {"l0": cfg}, None, start=False) is None

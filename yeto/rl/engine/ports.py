@@ -106,6 +106,9 @@ class RolloutBatchHandle:
     # Groups a sample-buffer reader passed over this round as older than
     # max_policy_age (consumed, never trained); None = not a buffer reader.
     buffer_stale_groups: int | None = None
+    # S27 P4: the task-dispenser positions of those groups (row runs,
+    # ``data_split.row_runs``); None when no stale group had one.
+    buffer_stale_positions: list[list[int]] | None = None
     # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None
@@ -169,6 +172,10 @@ class RolloutBatchHandle:
     # this batch ("miles", "verl", ...), set by the adapter; it labels the
     # driver's ``offpolicy_gate`` event. None = not reported ("unknown").
     backend: str | None = field(default=None, compare=False)
+
+    # S27 G-EM relay mode: (merged version, policy-age limit) the driver checked the
+    # groups' external merged cuts against (``external_policy``); None off relay mode.
+    external_cut: tuple[int, int] | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

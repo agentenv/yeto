@@ -62,7 +62,7 @@ from .launch.tapes import (
 from .launch.modal_islands import (
     _modal_tape_run_dir, _tail_modal, _verify_modal_app_stopped, build_modal_island_config,
     container_log_follower_for, container_set_poller_for, effective_recover_timeout,
-    pull_modal_tapes, require_modal_for_gpu_exact, wan_probe_relaunches,
+    finalized_island_containers, pull_modal_tapes, require_modal_for_gpu_exact, wan_probe_relaunches,
 )
 from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
@@ -587,6 +587,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     on_change=lambda m, _r=rejoins: on_container_change(m, droppable_rejoin=_r))
                 guard.expected = rejoins
                 container_guards.append(guard)
+                modal_id_guards[name] = guard
                 thread = threading.Thread(
                     target=_tail_modal, args=(modal_ops, job_id, label, collector), kwargs={"guard": guard},
                     daemon=True
@@ -601,6 +602,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         tail_threads: list[threading.Thread] = []
         event_collectors: dict[str, EventCollector] = {}
         container_guards: list = []
+        modal_id_guards: dict = {}  # Modal island name -> its ContainerIdGuard
 
         resume_on_new_container = resumes_in_new_container(args)
 
@@ -662,8 +664,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             return {cid: key for g in list(container_guards)
                     for key, cid in dict(getattr(g, "first", None) or {}).items()}
 
-        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change,
-                                                    attributed=attributed_containers)
+        container_poller = container_set_poller_for(
+            args, modal_ops, modal_cfgs, on_container_change, attributed=attributed_containers,
+            # a finalized island's container leaving the app is its normal end (s27-ek-b)
+            finished=lambda: finalized_island_containers(modal_id_guards, event_collectors))
         if container_poller is not None:
             container_guards.append(container_poller)
 

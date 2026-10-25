@@ -96,6 +96,49 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
         raise ValueError("--rl-checkpoint-store must be a bucket URI or an absolute / ~/ path on the island")
     return value.rstrip("/") or "/", None
+def _store_root(value: str) -> str:
+    """The part of a store URI the island mounts as a whole: ``modal-volume://NAME``
+    or ``scheme://bucket``."""
+    scheme, _, rest = str(value).partition("://")
+    return f"{scheme}://{rest.strip('/').partition('/')[0]}"
+
+
+def island_store_path(args, value: str, *, flag: str) -> str:
+    """S27 G-EL: the island path of a second store option (``flag``, e.g.
+    ``--rl-peer-recovery-store``) given as a path or a URI.
+
+    The island mounts only the run's ``--rl-checkpoint-store`` (Modal: its Volume at
+    :data:`MODAL_CHECKPOINT_STORE_MOUNT`; sky: its bucket at
+    :data:`ELASTIC_CHECKPOINT_STORE_MOUNT`). So a URI must name the same Volume or
+    bucket, and becomes the same path :func:`rl_checkpoint_store_plan` gives its
+    prefix. Before this check the URI reached the island as it was and the island's
+    ``CheckpointStore`` took it for a relative directory on its local disk (run
+    s27-elastic-a: the donor's 473 GB snapshot never left the donor container).
+    A path must be absolute or ``~/``; with a ``modal-volume://`` checkpoint store
+    it must lie under the Volume mount (any other container path is local)."""
+    value = str(value)
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if "://" in value:
+        if not store or "://" not in store or _store_root(value) != _store_root(store):
+            raise ValueError(
+                f"{flag} {value!r}: an island reaches a Volume or bucket only through the mount of "
+                f"--rl-checkpoint-store ({store or 'not set'}); name the same "
+                f"{_store_root(value).partition('://')[0]} store, or give a path under its mount")
+        plan = rl_checkpoint_store_plan(type("StoreArgs", (), {"rl_checkpoint_store": value})())
+        return plan[0]
+    if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
+        raise ValueError(f"{flag} {value!r} must be a store URI or an absolute / ~/ path on the island")
+    path = value.rstrip("/") or "/"
+    if store.startswith("modal-volume://"):
+        mount = PurePosixPath(MODAL_CHECKPOINT_STORE_MOUNT)
+        if PurePosixPath(path) != mount and mount not in PurePosixPath(path).parents:
+            raise ValueError(
+                f"{flag} {value!r}: on a Modal island only {MODAL_CHECKPOINT_STORE_MOUNT} (the "
+                "--rl-checkpoint-store Volume) is shared between containers; a path elsewhere is "
+                "the container's local disk")
+    return path
+
+
 def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
     """The environment of a sky island with a sample role (sampler or trainer)
     and an ``s3://`` store: the sample buffer, the trainer commands and the policy

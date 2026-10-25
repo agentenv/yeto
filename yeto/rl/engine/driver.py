@@ -157,7 +157,14 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     ``round_delay_islands`` (learner ids it applies to; default every island).
     ``exit_at_round`` and ``exit_islands`` (the island process exits with
     code 137 before that rollout, only in its first Modal container, so a
-    re-run of the island is a fresh process that rejoins).
+    re-run of the island is a fresh process that rejoins). With
+    ``exit_rejoined_after_rounds`` n the first re-run (incarnation 1) of those
+    islands exits once more, before the n-th round it runs itself (its round
+    ids depend on where it rejoined). ``catch_up_incarnations``: re-runs of
+    those islands that rejoin by catch-up (every fragment from the syncer,
+    fresh optimizer state) although the launcher asked for peer recovery
+    (:func:`catch_up_incarnation`); together they test both state sources in
+    one run.
     """
     import os
 
@@ -168,7 +175,8 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
     unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
-                              "exit_at_round", "exit_islands"})
+                              "exit_at_round", "exit_islands", "exit_rejoined_after_rounds",
+                              "catch_up_incarnations"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
     out: dict[str, Any] = {}
@@ -194,7 +202,31 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
         out["exit_islands"] = sorted(set(islands))
     elif "exit_islands" in raw:
         raise ValueError("exit_islands needs exit_at_round")
+    if "exit_rejoined_after_rounds" in raw:
+        rounds = raw["exit_rejoined_after_rounds"]
+        if "exit_at_round" not in out:
+            raise ValueError("exit_rejoined_after_rounds needs exit_at_round")
+        if type(rounds) is not int or rounds < 1:
+            raise ValueError("exit_rejoined_after_rounds must be a positive round count")
+        out["exit_rejoined_after_rounds"] = rounds
+    if "catch_up_incarnations" in raw:
+        incarnations = raw["catch_up_incarnations"]
+        if (not isinstance(incarnations, list) or not incarnations
+                or not all(type(i) is int and i >= 1 for i in incarnations)):
+            raise ValueError("catch_up_incarnations must be a list of re-run numbers >= 1")
+        out["catch_up_incarnations"] = sorted(set(incarnations))
     return out
+
+
+def catch_up_incarnation(environ: Mapping[str, str] | None = None) -> int | None:
+    """Test-only: this island process's incarnation when the fault injection
+    makes it rejoin by catch-up instead of peer recovery, else None."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    incarnation = int(environ.get(MODAL_INCARNATION_ENV, "0") or 0)
+    injected = load_fault_injection(environ).get("catch_up_incarnations", ())
+    return incarnation if incarnation in injected else None
 
 
 class DriverError(RuntimeError):
@@ -531,6 +563,9 @@ class IslandDriver:
         # progress): set by every apply, advanced by every trained round.
         self.local_step = 0
         self.outer_version: int | None = None  # S17 M1: syncer version of the applied cut (elastic)
+        # S27 G-EM: relay mode (the groups come from external merged cuts; set by the
+        # backend's relay wiring). None (default): every identity check is unchanged.
+        self.external_policy: Any = None
         self.profile = profile
         self.observe = bool(observe)
         self.config_epoch = int(config_epoch)
@@ -540,6 +575,7 @@ class IslandDriver:
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
+        self._rounds_in_process = 0  # rounds this process started (fault injection)
         self.controller = controller
         self.ledger = ledger
         # D1/D2 wiring (6.5, d2-wire): optional ``elastic.ElasticHook``; None keeps
@@ -740,6 +776,7 @@ class IslandDriver:
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
             **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
             **({"data_slot": self.data_slot} if self.data_slot else {}),
+            **({"data_streams": dict(self.data_streams)} if self.data_streams else {}),
             **self._code_identity(),
         )
 
@@ -869,6 +906,11 @@ class IslandDriver:
         self.expected_token = policy_token(rollout_id, expected_hash)
         self.published_version = rollout_id
         self.published_state = state
+        if self.external_policy is not None:
+            # S27 G-EM relay mode: the merged version this publication gates on
+            from .merged_release import merged_version as _merged_version
+
+            self.external_policy.published(rollout_id, _merged_version(self, state))
         self.sync.published(self, rollout_id=rollout_id, policy_hash=expected_hash)
         self.emit(
             "rl_publication",
@@ -940,14 +982,24 @@ class IslandDriver:
         return dataclasses.replace(batch, groups=groups)
 
     def _inject_exit(self, rollout_id: int) -> None:
-        """Test-only: kill this island process (first Modal container only)."""
+        """Test-only: kill this island process (``exit_at_round`` in the first
+        Modal container; ``exit_rejoined_after_rounds`` in the first re-run)."""
         import os
 
-        if (self.fault_injection.get("exit_at_round") != rollout_id
-                or self.learner_id not in self.fault_injection.get("exit_islands", ())
-                or os.environ.get(MODAL_INCARNATION_ENV, "0") != "0"):
+        self._rounds_in_process += 1
+        if self.learner_id not in self.fault_injection.get("exit_islands", ()):
             return
-        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id)
+        incarnation = os.environ.get(MODAL_INCARNATION_ENV, "0")
+        if incarnation == "0":
+            hit = self.fault_injection.get("exit_at_round") == rollout_id
+        elif incarnation == "1":
+            hit = self.fault_injection.get("exit_rejoined_after_rounds") == self._rounds_in_process
+        else:
+            hit = False
+        if not hit:
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id,
+                  incarnation=int(incarnation), rounds_in_process=self._rounds_in_process)
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(137)
@@ -1161,6 +1213,8 @@ class IslandDriver:
         """Check a generated batch of ``rollout_id`` against the publication the
         engines served while they generated it (``published_version`` and
         ``expected_token``; the next publication waits for this check)."""
+        if self.external_policy is not None:
+            return self._accept_external_batch(rollout_id, batch)
         version = self.published_version
         if batch.rollout_id != rollout_id or batch.policy_version != version:
             raise PolicyIdentityError(
@@ -1172,8 +1226,11 @@ class IslandDriver:
         if stale is not None:
             # The sample-buffer reader consumed these groups without training
             # them (older than max_policy_age); one event per round, 0 included.
+            positions = getattr(batch, "buffer_stale_positions", None)
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
-                      stale_groups=int(stale), max_policy_age=self._max_policy_age())
+                      stale_groups=int(stale), max_policy_age=self._max_policy_age(),
+                      # S27 P4: the dispenser positions of those groups (row runs)
+                      **({"stale_positions": positions} if positions else {}))
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             # IR-3 (age 0): a sample generated by a policy other than the
@@ -1223,6 +1280,61 @@ class IslandDriver:
                 [g.group_id, g.policy_token,
                  None if g.policy_versions is None else sorted(set(g.policy_versions))]
                 for g in batch.groups])
+        return self._finish_accept(rollout_id, batch)
+
+    def _accept_external_batch(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """S27 G-EM relay mode (``yeto.rl.engine.external_policy``): the groups were
+        generated by merged cuts the syncer broadcast to spot samplers, not by this
+        island's publications. The batch still names the publication the round
+        trains from (``expected_token``); each group names the merged version of
+        its cut, and its age is counted in merged versions against the trainer's
+        merged version at that publication."""
+        from .external_policy import EXTERNAL_MERGED_CUT
+
+        version = self.published_version
+        if batch.rollout_id != rollout_id or batch.policy_version != version:
+            raise PolicyIdentityError(
+                f"rollout pool returned rollout {batch.rollout_id} "
+                f"(policy v{batch.policy_version}) for rollout {rollout_id}"
+            )
+        stale = getattr(batch, "buffer_stale_groups", None)
+        if stale is not None:
+            self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
+                      stale_groups=int(stale), max_policy_age=self._max_policy_age())
+        violations = getattr(batch, "policy_age_violation", None)
+        if violations:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: {violations} sample(s) not generated by "
+                f"{self.expected_token} (policy_age_violation)"
+            )
+        if policy_token(version, batch.policy_hash) != self.expected_token:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id} does not train from {self.expected_token}: {batch.policy_hash}")
+        merged = self.external_policy.merged_at(version)
+        if merged is None:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: no merged version was recorded for publication v{version}")
+        limit = self._max_policy_age()
+        problems, ages = self.external_policy.check_groups(batch.groups, merged, limit)
+        if problems:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: groups outside the merged policy-age window "
+                f"(merged version {merged}, max_policy_age={limit}): " + "; ".join(problems))
+        if not batch.groups:
+            raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        # the trainer's own check before training applies the same rule (Miles
+        # rollout.require_policy_tokens): its groups name merged versions, not publications
+        batch = dataclasses.replace(batch, external_cut=(merged, limit))
+        self.emit("rl_group_policies", rollout_id=rollout_id, kind=EXTERNAL_MERGED_CUT,
+                  merged_version=merged, max_policy_age=limit,
+                  ages={str(age): n for age, n in ages.items()}, groups=[
+                      [g.group_id, g.policy_token,
+                       None if g.policy_versions is None else sorted(set(g.policy_versions))]
+                      for g in batch.groups])
+        return self._finish_accept(rollout_id, batch)
+
+    def _finish_accept(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """The checks after the policy identity of an accepted batch."""
         if self.eval_overlap is not None:
             self.eval_overlap.after_generate(
                 rollout_id, token=self.expected_token, published_version=self.published_version
@@ -1630,6 +1742,9 @@ class IslandDriver:
     # S27 task assignment: the island's row slot "I/N" (``data_split.DataSlot``),
     # recorded in rl_driver_start only when the island reads a part of --data.
     data_slot: str | None = None
+    # S27 P3: the task dispenser's streams and the ones this island takes
+    # ({"streams": [...], "accept": [...] | None}), in rl_driver_start only when set.
+    data_streams: Mapping[str, Any] | None = None
     # rl-identity-tiering L9.1: this island's code identity, written into
     # rl_driver_start with ``semantic_sha256`` only when set.
     code_pack_digest: str | None = None

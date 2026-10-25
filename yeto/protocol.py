@@ -74,6 +74,21 @@ MSG_LEAVE = 27
 # syncer/src/local_init.rs).
 MSG_INIT_DIGEST = 28
 MSG_INIT_CONFIRM = 29
+# S27 G-EA: receive-only subscriber (syncer subscriber.rs); 60-66 are the
+# sample relay (yeto.rl.spot_rollout.relay, syncer sample_relay.rs).
+MSG_SUBSCRIBE = 67
+SUBSCRIBER_ID_BIT = 0x8000_0000
+SUBSCRIBE_MAC_DOMAIN = b"yeto-subscribe-mac-v1\0"
+# SUBSCRIBE body trailer (inside the MAC): the sampler process's member
+# incarnation (docs/PROTOCOL.md "Sampler members"; syncer subscriber.rs).
+SUBSCRIBE_INCARNATION_MAGIC = b"YSI1"
+
+
+def encode_subscribe_incarnation(incarnation: int) -> bytes:
+    """The ``YSI1 | incarnation u64`` trailer of a SUBSCRIBE body."""
+    if not 0 < int(incarnation) < 1 << 64:
+        raise ValueError("a member incarnation is a nonzero u64")
+    return SUBSCRIBE_INCARNATION_MAGIC + struct.pack("<Q", int(incarnation))
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -600,15 +615,17 @@ def island_hmac_key_from_env(environ=None) -> bytes | None:
     return value.encode() if value else None
 
 
-def seal_hello(body: bytes, key: bytes | None) -> bytes:
-    """Append HMAC-SHA256(key, HELLO_MAC_DOMAIN || body); no-op without a key.
-    The legacy syncer with a key refuses a HELLO without this trailer."""
+def seal_hello(body: bytes, key: bytes | None, domain: bytes = HELLO_MAC_DOMAIN) -> bytes:
+    """Append HMAC-SHA256(key, domain || body); no-op without a key.
+    The legacy syncer with a key refuses a HELLO without this trailer.
+    ``domain``: HELLO_MAC_DOMAIN, or another first-frame type's domain
+    (SUBSCRIBE, RELAY_HELLO)."""
     if not key:
         return body
     import hashlib
     import hmac
 
-    return body + hmac.new(key, HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
+    return body + hmac.new(key, domain + body, hashlib.sha256).digest()
 
 
 def encode_hello(
@@ -972,6 +989,15 @@ class SyncerClient:
 
     # push_fragment_parts takes ``timings`` (S27 G-AG push time split).
     push_timings_supported = True
+    # First frame and its MAC domain; a receive-only subscriber
+    # (yeto.rl.spot_rollout.subscriber) replaces both.
+    _hello_msg_type: int = MSG_HELLO
+    _hello_mac_domain: bytes = HELLO_MAC_DOMAIN
+
+    def _hello_body_suffix(self) -> bytes:
+        """Bytes after the HELLO body, inside the MAC (a subscriber's member
+        incarnation trailer); empty for a learner, whose HELLO is unchanged."""
+        return b""
 
     # Transport defaults (S26 E3b); __init__ overrides them per client.
     stream_schedule: str = "rr"
@@ -1216,7 +1242,7 @@ class SyncerClient:
             control = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
             write_frame(
                 control,
-                MSG_HELLO,
+                self._hello_msg_type,
                 seal_hello(
                     encode_hello(
                         self.learner_id,
@@ -1230,8 +1256,9 @@ class SyncerClient:
                         syncer_epoch=self.syncer_epoch,
                         recover=self._recover.is_set(),
                         expert_tokens=self.expert_tokens,
-                    ),
+                    ) + self._hello_body_suffix(),
                     self.hmac_key,
+                    self._hello_mac_domain,
                 ),
             )
             if self._init_digest_frame is not None and not self._initial_cut_received.is_set():

@@ -16,10 +16,23 @@ deletes the VM, also for ``delete=False`` (boat snapshots are off, so a
 stopped VM keeps nothing worth paying for).  With ``pool`` on (S26 E8,
 :mod:`.boat_pool`), ``stop`` instead recycles the VM for the next task,
 unless an exec or file transfer failed on it; then it is deleted.
+
+A cancelled exec or transfer (the trial was aborted: an over-sampling surplus,
+an over-age suspended trajectory, a stopped rollout) is not a failure of the
+VM (S27 G-EF, G-EB section 7.3): the boat command of a cancelled exec is stopped
+(:meth:`~.boat_sandbox.BoatSandbox.vm_exec`), and a cancelled upload can only
+finish into the staging directory, so the VM goes through the same recycle as a
+finished task.  The recycle removes every container (with any
+process still running in it), volume, user network and the staging directory
+and checks that none is left; the next task's acquire checks again and starts
+a fresh container from the image.  The container has no writable host mount
+(the Codex cache is read-only), so nothing of the aborted task reaches the next
+one.  A VM that fails either check is deleted, as before.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable
 from pathlib import Path
@@ -132,8 +145,8 @@ class BoatEnvironment(BaseEnvironment):
             await self._box().start(spec)
         try:
             await self.ensure_dirs(self._mount_targets(writable_only=True))
-        except BaseException:
-            self._failed_io = True
+        except BaseException as exc:
+            self._failed_io = not isinstance(exc, asyncio.CancelledError)
             await self.stop(delete=True)
             raise
 
@@ -147,8 +160,11 @@ class BoatEnvironment(BaseEnvironment):
 
     async def _io(self, work: Awaitable[T]) -> T:
         # A failed exec/transfer may leave the VM in an unknown state: never reuse it.
+        # A cancelled one (the trial was aborted) goes back through the recycle check.
         try:
             return await work
+        except asyncio.CancelledError:
+            raise
         except BaseException:
             self._failed_io = True
             raise

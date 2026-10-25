@@ -86,6 +86,14 @@ def parse_args(argv):
     p.add_argument("--rl-sampler-node", default=None)
     p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
     p.add_argument("--rl-sampler-data-slot", default=None)
+    # S27 P4: a sampler island claims its rows from the task dispenser (the launcher
+    # sets these; yeto.rl.engine.task_dispense.DispensedPrompts)
+    p.add_argument("--rl-data-dispense", action="store_true", default=False)
+    p.add_argument("--rl-dispense-addr", default=None)
+    p.add_argument("--rl-dispense-prefetch-blocks", type=int, default=2)
+    p.add_argument("--rl-dispense-mix", default=None)
+    p.add_argument("--rl-dispense-by-label", action="store_true", default=False)
+    p.add_argument("--rl-dispense-labels", default=None)
     # S27 task assignment: this training island's row slot of --data (data_split)
     p.add_argument("--rl-data-slot", default=None)
     p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
@@ -100,6 +108,10 @@ def parse_args(argv):
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
+    # S27 G-ED: island cuts of a synced island (S27 R-2) and the timed cut interval
+    p.add_argument("--rl-island-cut-store", default=None)
+    p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
+    p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     # S27 G-DC: the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
@@ -123,6 +135,10 @@ def parse_args(argv):
     from .full_parameter_stream import add_island_flags
 
     add_island_flags(p)
+    # S27 G-EN: the Miles island's heldout eval flags (VERL-PARITY #34, .eval_port)
+    from .eval_port import add_island_flags as add_eval_flags
+
+    add_eval_flags(p)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -413,10 +429,16 @@ def main(argv=None) -> int:
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
-        if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
-            raise SystemExit("verl 全参数岛只接同步路径：不支持 --rl-max-policy-age > 0、"
-                             "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
+        # S27 G-EW: one refusal per path, each lifted by the change that wires it
+        # (VERL-PARITY #11: fully_async with a rollouter; #14: the buffer trainer)
+        if full and limit and buffer_section is None:
+            raise SystemExit("verl 全参数岛不支持 --rl-max-policy-age > 0（全参数 fully_async 路径未接，VERL-PARITY #11）")
+        if full and args.rl_rollout_quant_tier:
+            raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
         pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
+        if pools is not None and buffer_section is not None:  # S27 G-EW: no rollout on a buffer trainer
+            raise SystemExit("verl 全参数缓冲训练岛（--rl-sample-role trainer）不接 --rl-placement fixed-partition："
+                             "它没有 rollout 卡，采样岛生成")
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
@@ -440,8 +462,6 @@ def main(argv=None) -> int:
 
         from .full_parameter_stream import plan_section
 
-        if resume:
-            raise SystemExit("round cuts of a full-parameter verl island are not wired (V9)")
         try:
             full_plan = plan_section(
                 args, run.to_dict(), model_path=model_path, sync=sync,
@@ -458,6 +478,31 @@ def main(argv=None) -> int:
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
 
         asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
+    if full and megatron is None:  # S27 G-EC: the Miles training options verl can express (.train_options);
+        # the Megatron island maps its own (megatron_engine.build_overrides)
+        from .train_options import apply_training_options
+
+        try:
+            overrides, asserted_keys = apply_training_options(
+                args, overrides, asserted_keys, max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    try:  # S27 G-EN: heldout eval through verl's _validate (.eval_port); the sync trainer only
+        from . import eval_port
+
+        if megatron is not None or limit or buffer_section is not None:
+            eval_port.refuse_unwired(args, "Megatron island" if megatron is not None
+                                     else "fully_async" if limit else "buffer trainer")
+            eval_plan = None
+        else:
+            eval_plan = eval_port.eval_section(
+                args, work=work / "data", max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len, temperature=run.temperature,
+                top_p=run.top_p)
+        overrides, asserted_keys = eval_port.apply_eval_overrides(eval_plan, overrides, asserted_keys)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
@@ -496,6 +541,7 @@ def main(argv=None) -> int:
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
         "rollout_quant": quant_summary,
+        **({eval_port.PLAN_KEY: eval_plan} if eval_plan else {}),
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))

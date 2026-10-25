@@ -344,7 +344,11 @@ def test_two_separate_verl_islands_publish_every_round_through_the_real_syncer(s
         # saw a later or a half-applied state)
         assert [rid for rid, _h in result["served"]] == list(range(result["rounds"]))
         # the stream and the policy state read and wrote the trainer workers only
-        assert {"remote_manifest", "remote_export_for_reader"} <= set(island.trainer_reads)
+        # (S27 G-EC lazy capture: the stream reads a fragment as numpy on the workers,
+        # remote_export_arrays_for_reader / remote_export_flat, s27-next2 merge)
+        reads = set(island.trainer_reads)
+        assert "remote_manifest" in reads and reads & {
+            "remote_export_for_reader", "remote_export_arrays_for_reader", "remote_export_flat"}, reads
         start = next(json.loads(line) for line in (result["out"] / "tape.jsonl").read_text().splitlines()
                      if json.loads(line)["event"] == "rl_driver_start")
         assert (start["placement"], start["execution_mode"]) == ("fixed-partition", "partitioned-serial")

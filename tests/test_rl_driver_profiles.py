@@ -372,7 +372,59 @@ def test_fault_injection_exits_only_the_first_container(monkeypatch, learner, in
         monkeypatch.setenv(module.MODAL_INCARNATION_ENV, incarnation)
     events = []
     fake = SimpleNamespace(fault_injection={"exit_at_round": 2, "exit_islands": [1]},
-                           learner_id=learner, emit=lambda *a, **k: events.append(a))
+                           learner_id=learner, emit=lambda *a, **k: events.append(a),
+                           _rounds_in_process=0)
     module.IslandDriver._inject_exit(fake, 1)
     module.IslandDriver._inject_exit(fake, 2)
     assert exited == ([137] if exits else [])
+
+
+def test_fault_injection_second_exit_and_catch_up_keys(tmp_path):
+    from yeto.rl.engine.driver import FAULT_INJECTION_ENV, MODAL_INCARNATION_ENV, catch_up_incarnation
+    from yeto.rl.engine.driver import load_fault_injection
+
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"exit_at_round": 12, "exit_islands": [1], "exit_rejoined_after_rounds": 20,
+                                "catch_up_incarnations": [2, 2]}))
+    env = {FAULT_INJECTION_ENV: str(path)}
+    assert load_fault_injection(env) == {"exit_at_round": 12, "exit_islands": [1],
+                                         "exit_rejoined_after_rounds": 20, "catch_up_incarnations": [2]}
+    assert catch_up_incarnation(env) is None  # first container
+    assert catch_up_incarnation({**env, MODAL_INCARNATION_ENV: "1"}) is None  # first re-run: peer
+    assert catch_up_incarnation({**env, MODAL_INCARNATION_ENV: "2"}) == 2
+    assert catch_up_incarnation({MODAL_INCARNATION_ENV: "2", FAULT_INJECTION_ENV: str(tmp_path / "none")}) is None
+    for bad in ({"exit_rejoined_after_rounds": 3},
+                {"exit_at_round": 2, "exit_islands": [1], "exit_rejoined_after_rounds": 0},
+                {"catch_up_incarnations": [0]}, {"catch_up_incarnations": []}):
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            load_fault_injection(env)
+
+
+@pytest.mark.parametrize(("incarnation", "rounds_run", "exit_on"),
+                         [("0", 5, 12), ("1", 25, 20), ("2", 30, None)])
+def test_fault_injection_first_rerun_exits_after_its_own_rounds(monkeypatch, incarnation, rounds_run, exit_on):
+    """Incarnation 0 exits at rollout id 12; the first re-run (incarnation 1,
+    rejoined at some rollout id) exits before its 20th round; later re-runs never."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import driver as module
+
+    exited = []
+    monkeypatch.setattr("os._exit", exited.append)
+    monkeypatch.setenv(module.MODAL_INCARNATION_ENV, incarnation)
+    events = []
+    fake = SimpleNamespace(fault_injection={"exit_at_round": 12, "exit_islands": [1],
+                                            "exit_rejoined_after_rounds": 20},
+                           learner_id=1, emit=lambda *a, **k: events.append((a, k)), _rounds_in_process=0)
+    start = 0 if incarnation == "0" else 40  # a re-run continues at the pool's rollout id
+    exit_round = None
+    for n in range(rounds_run if incarnation != "0" else 13):
+        module.IslandDriver._inject_exit(fake, start + n)
+        if exited and exit_round is None:
+            exit_round = n + 1  # rounds this process started, the exit one included
+    expected = None if exit_on is None else (13 if incarnation == "0" else exit_on)
+    assert exit_round == expected
+    if expected is not None:
+        (_, kw), = events
+        assert kw["incarnation"] == int(incarnation) and kw["rounds_in_process"] == expected

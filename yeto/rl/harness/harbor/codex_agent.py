@@ -6,7 +6,7 @@ from typing import Any
 
 from harbor.agents.installed.codex import Codex
 
-from .codex_provider import DEFAULT_STREAM_IDLE_TIMEOUT_S, provider_setup_command
+from .codex_provider import DEFAULT_MAX_RETRIES, DEFAULT_STREAM_IDLE_TIMEOUT_S, provider_setup_command
 
 
 class YetoCodex(Codex):
@@ -19,13 +19,18 @@ class YetoCodex(Codex):
     """
 
     def __init__(self, *args: Any, stream_idle_timeout_s: int = DEFAULT_STREAM_IDLE_TIMEOUT_S,
-                 **kwargs: Any) -> None:
+                 request_max_retries: int = DEFAULT_MAX_RETRIES,
+                 stream_max_retries: int = DEFAULT_MAX_RETRIES, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._stream_idle_timeout_s = int(stream_idle_timeout_s)
+        self._request_max_retries = int(request_max_retries)
+        self._stream_max_retries = int(stream_max_retries)
 
     def _build_register_mcp_servers_command(self) -> str | None:
         mcp = super()._build_register_mcp_servers_command()
         if not self._get_env("OPENAI_BASE_URL"):
             return mcp  # auth.json / default endpoint: keep Harbor's built-in provider
-        provider = provider_setup_command(self._stream_idle_timeout_s)
+        provider = provider_setup_command(self._stream_idle_timeout_s,
+                                          request_max_retries=self._request_max_retries,
+                                          stream_max_retries=self._stream_max_retries)
         return provider if mcp is None else f"{provider}\n{mcp}"

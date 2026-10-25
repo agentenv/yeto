@@ -42,7 +42,7 @@ from ..rl.engine.start_phases import SUBMITTED_ENV, shell_mark, shell_reset
 from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
-from .harness_env import check_compaction_launch
+from .harness_env import check_compaction_launch, harbor_example_pythonpath
 
 
 def submitted_unix() -> float:
@@ -501,7 +501,7 @@ def make_miles_island_task(
     setup_steps.append(prefetch)
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
     # PYTHONPATH; the pinned fork checkout must shadow it.
-    island_pythonpath = "$HOME/miles:"
+    island_pythonpath = "$HOME/miles:" + harbor_example_pythonpath(args)
     # Ports images install Megatron-LM with `pip install -e .`, whose editable
     # finder maps only megatron.core and megatron.training; megatron.
     # post_training (imported by megatron.training.get_model whenever

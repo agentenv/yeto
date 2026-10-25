@@ -231,7 +231,7 @@ def test_signed_era_evidence_written_by_old_code_is_still_readable(
 def test_unknown_schema_is_rejected(tmp_path):
     path = write_trajectory_batch_evidence(tmp_path / "private", _batch())
     value = json.loads(path.read_text())
-    value["schema"] = 5
+    value["schema"] = 6  # S27 G-EM: 5 is the external merged cut schema
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="schema is unsupported"):
         read_trajectory_batch_evidence(path)
@@ -239,7 +239,11 @@ def test_unknown_schema_is_rejected(tmp_path):
 
 def test_schema_3_records_every_layered_field():
     item = _batch().envelopes[0]
-    assert set(asdict(item)) == set(trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
+    # S27 G-EM: the external-cut fields (schema 5) are never persisted in schema 3
+    assert set(trajectory_evidence._envelope_mapping(item, 3)) == set(
+        trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
+    assert set(asdict(item)) - trajectory_evidence._EXTERNAL_CUT_FIELDS == set(
+        trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
     assert item.active_token_count == item.response_token_count
 
 

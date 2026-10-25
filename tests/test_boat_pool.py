@@ -700,3 +700,100 @@ def test_exit_signal_deletes_pool_vms_then_runs_the_previous_handler(monkeypatch
             if isinstance(handler, __import__("functools").partial):
                 signal.signal(signum, handler.keywords["previous"])
         signal.signal(signal.SIGTERM, previous)
+
+
+def _pooled_env(tmp_path, name: str, pool: BoatSandboxPool):
+    from harbor.models.task.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    from yeto.rl.harness.harbor.boat_env import BoatEnvironment
+
+    return BoatEnvironment(
+        environment_dir=tmp_path, environment_name=name, session_id=f"{name}__x__env",
+        trial_paths=TrialPaths(trial_dir=tmp_path / name),
+        task_env_config=EnvironmentConfig(docker_image="img:1", memory_mb=2048, cpus=1), pool=pool)
+
+
+async def _cancel_while_running(env, command: str) -> None:
+    task = asyncio.ensure_future(env.exec(command, timeout_sec=None))
+    for _ in range(20):  # let the exec start its boat command and poll it
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_aborted_trial_returns_its_vm_to_the_pool_through_the_recycle(tmp_path):
+    # S27 G-EF: a cancelled exec (aborted trial) is not a VM failure: the command is
+    # stopped, the VM is recycled and checked, and the next task gets a fresh container
+    pytest.importorskip("harbor")
+    fake = VmFake()
+
+    async def go():
+        pool = _pool(fake)
+        aborted = _pooled_env(tmp_path, "t1", pool)
+        await aborted.start(force_build=False)
+        vm = aborted.sandbox_id
+        fake.hang_on = "agent-runs-long"
+        await _cancel_while_running(aborted, "agent-runs-long")
+        fake.hang_on = None
+        await aborted.stop(delete=True)
+        assert pool.stats.idle == 1 and pool.stats.discarded == 0 and vm in fake.live
+        hung = next(i for i, c in enumerate(fake.commands, 1) if "agent-runs-long" in c)
+        assert hung in fake.stopped  # the cancelled boat command was stopped
+        on_vm = fake.commands_on(vm)
+        recycle = max(i for i, c in enumerate(on_vm) if "volume prune" in c)
+        assert recycle > on_vm.index(fake.commands[hung - 1])
+        assert any("echo c=" in c for c in on_vm[recycle + 1:])  # checked clean after the recycle
+        nxt = _pooled_env(tmp_path, "t2", pool)
+        await nxt.start(force_build=False)
+        assert nxt.sandbox_id == vm and fake.created == 1
+        on_vm = fake.commands_on(vm)
+        runs = [i for i, c in enumerate(on_vm) if "docker run -d --name main" in c]
+        assert len(runs) == 2 and runs[1] > recycle  # a fresh container for the next task
+        await nxt.stop(delete=True)
+        await pool.close()
+
+    asyncio.run(go())
+    assert not fake.live
+
+
+def test_aborted_trial_on_a_vm_that_stays_dirty_is_deleted(tmp_path):
+    pytest.importorskip("harbor")
+    fake = VmFake()
+
+    async def go():
+        pool = _pool(fake)
+        aborted = _pooled_env(tmp_path, "t1", pool)
+        await aborted.start(force_build=False)
+        vm = aborted.sandbox_id
+        fake.hang_on = "agent-runs-long"
+        await _cancel_while_running(aborted, "agent-runs-long")
+        fake.hang_on = None
+        fake.dirty.add(vm)  # something survived the recycle
+        await aborted.stop(delete=True)
+        assert pool.stats.idle == 0 and pool.stats.discarded == 1 and vm not in fake.live
+        await pool.close()
+
+    asyncio.run(go())
+    assert fake.deleted and not fake.live
+
+
+def test_a_failed_exec_still_deletes_the_vm_after_a_cancelled_one(tmp_path):
+    pytest.importorskip("harbor")
+    fake = VmFake()
+
+    async def go():
+        pool = _pool(fake)
+        env = _pooled_env(tmp_path, "t1", pool)
+        await env.start(force_build=False)
+        vm = env.sandbox_id
+        fake.hang_on = "slow"
+        await _cancel_while_running(env, "slow")
+        with pytest.raises(RuntimeError, match="timed out"):
+            await env.exec("slow", timeout_sec=0)  # a real failure on the same VM
+        await env.stop(delete=True)
+        assert pool.stats.idle == 0 and vm not in fake.live
+        await pool.close()
+
+    asyncio.run(go())

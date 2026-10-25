@@ -74,6 +74,9 @@ LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # buffer_stale_groups: groups the sample-buffer reader passed over this round
 # because they were older than max_policy_age (consumed, not trained)
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
+# buffer_stale_positions (S27 P4): the task-dispenser positions of those groups,
+# as row runs (data_split.row_runs); only groups whose sampler had a dispenser
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
@@ -104,15 +107,21 @@ def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> in
 
 
 def record_round_metadata(
-    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: int
+    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: Any
 ) -> None:
     """Rollout side: report this rollout's per-round counters (call once per rollout)."""
 
     del args
-    unknown = sorted(set(counts) - ROUND_METADATA_KEYS)
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS)
     if unknown:
         raise RuntimeError(f"unknown per-round metadata keys {unknown}")
     for key, value in counts.items():
+        if key in ROUND_METADATA_LIST_KEYS:
+            if not isinstance(value, list) or any(
+                    not isinstance(run, list) or any(isinstance(v, bool) or not isinstance(v, int)
+                                                     for v in run) for run in value):
+                raise RuntimeError(f"per-round metadata {key} must be a list of int runs")
+            continue
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RuntimeError(f"per-round metadata {key} must be a non-negative int")
     if isinstance(samples_or_rollout_id, int) and not isinstance(samples_or_rollout_id, bool):
