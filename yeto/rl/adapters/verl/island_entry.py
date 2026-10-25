@@ -772,6 +772,15 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
     # to None in the dataclass), so it is added, not overridden: hydra needs the "+".
     overrides = ["+actor_rollout_ref.actor.fsdp_config.mixed_precision="
                  "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
+    # One sample per micro-batch instead of packing up to the token budget (S27 G-EQ3,
+    # npu1): with packing, what fits depends on which samples a round draws -- the same
+    # island did a step with the groups at buffer position 0..3 and ran out of memory on
+    # the groups after them (8.50 GiB short of 60.96 GiB). verl requires the actor and
+    # the log-prob pass to agree on this, so both are switched.
+    overrides += ["actor_rollout_ref.actor.use_dynamic_bsz=False",
+                  "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+                  "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False",
+                  "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1"]
     if not gradient_checkpointing:
         overrides += ["actor_rollout_ref.actor.entropy_from_logits_with_chunking=True",
                       "actor_rollout_ref.actor.entropy_checkpointing=True"]

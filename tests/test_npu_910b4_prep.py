@@ -745,5 +745,11 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
     # verl's activation offload is NOT used: it trips an assertion in the backward of
     # transformers' NemotronH router (G-EQ3, measured on npu1)
     assert not [o for o in without if "enable_activation_offload" in o]
+    # one sample per micro-batch: with packing, what fits depends on the round's samples
+    for key in ("actor_rollout_ref.actor.use_dynamic_bsz=False",
+                "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+                "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False",
+                "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1"):
+        assert key in without, key
     # a model that can recompute activations bounds the head itself
     assert not [o for o in ascend_memory_overrides(True) if "entropy" in o]
