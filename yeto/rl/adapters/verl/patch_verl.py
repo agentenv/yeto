@@ -175,6 +175,49 @@ AUTO_CLASS_HOOK = (
 )
 AUTO_CLASS = (AUTO_CLASS_TARGET, AUTO_CLASS_ANCHOR, AUTO_CLASS_HOOK, "replace")
 
+# Eighth patch (S27 G-EZ2, local, not pushed; fsdp profile): one host copy of the
+# weights, not one per rank. verl's FSDP engine builds the model on every rank with
+# ``from_pretrained`` inside ``accelerate.init_empty_weights`` on every rank but the
+# mesh's coordinate 0 (``fsdp_utils.get_init_weight_context_manager``), then
+# ``fsdp2_load_full_state_dict`` broadcasts rank 0's full state dict. With
+# transformers 5.x ``from_pretrained`` still reads the weights into host memory under
+# that context, so every rank holds a whole FP32 model: npu1 n2/n3, Nemotron 120B on
+# 16 ranks, the host's available memory fell from 1432 GiB to 125 GiB at 12 % of
+# loading (G-EQ3, Nano 31.6B on 8 ranks: 993 GiB peak on n1). The hook builds the
+# meta-context ranks from the config on the meta device instead: same class, same
+# dtype (``from_config`` defaults to ``config.dtype`` -- bf16 here -- so the dtype is
+# passed), no weights read. Rank 0 still loads, and the broadcast fills parameters
+# and persistent buffers as before. ``tie_word_embeddings`` models keep verl's path
+# (verl itself turns the meta init off for them).
+META_INIT_TARGET = "verl/workers/engine/fsdp/transformer_impl.py"
+META_INIT_ANCHOR = (
+    "                module = auto_class.from_pretrained(\n"
+    "                    pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                    torch_dtype=torch_dtype,\n"
+    "                    config=self.model_config.hf_config,\n"
+    "                    trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                )\n"
+)
+META_INIT_HOOK = (
+    "                # yeto S27 G-EZ2: a meta-context rank builds from the config (no weights read);\n"
+    "                # under init_empty_weights transformers 5.x from_pretrained still loads them.\n"
+    "                if getattr(init_context, \"__name__\", \"\") == \"init_empty_weights\":\n"
+    "                    with torch.device(\"meta\"):\n"
+    "                        module = auto_class.from_config(\n"
+    "                            self.model_config.hf_config,\n"
+    "                            torch_dtype=torch_dtype,\n"
+    "                            trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                        )\n"
+    "                else:\n"
+    "                    module = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=torch_dtype,\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+)
+META_INIT = (META_INIT_TARGET, META_INIT_ANCHOR, META_INIT_HOOK, "replace")
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
 # "before" in front of it, "replace" substitutes it.
 READBACK = (TARGET, ANCHOR, HOOK, "after")
@@ -188,7 +231,7 @@ PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS),
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT),
             "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 
