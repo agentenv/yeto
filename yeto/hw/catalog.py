@@ -19,6 +19,7 @@ part of the group and never cause a refusal (user decision 2026-10-09).
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -78,6 +79,40 @@ def device_family(device_type: str | None = None) -> str:
         except Exception:  # noqa: BLE001 - torch is optional at this call site
             device_type = "cpu"
     return DEVICE_FAMILY_BY_DEVICE_TYPE.get(device_type, "nvidia")
+
+
+# Ray's accelerator resource name per identity device family (S27 G-EQ2, npu1).
+# Ray counts CUDA cards in its own built-in "GPU" resource, so a CUDA island
+# reads cluster_resources()["GPU"] and starts Ray with --num-gpus. An Ascend
+# node's cards are the custom resource "NPU" instead: cluster_resources() has
+# no "GPU" key at all, `ray start --num-gpus` does not create one that matches
+# the cards, and an actor asks for them with resources={"NPU": n}. Verified by
+# reading verl's own platform layer at fork acad9875
+# (verl/plugin/platform/platform_npu.py ray_resource_name / ray_resource_options,
+# verl/single_controller/ray/base.py _check_resource_available).
+RAY_RESOURCE_BY_DEVICE_FAMILY: Mapping[str, str] = {"nvidia": "GPU", "ascend": "NPU", "thead": "GPU"}
+
+
+def ray_accelerator_resource(device_family_name: str | None = None) -> str:
+    """Ray's resource name for this node's accelerators ("GPU" or "NPU").
+
+    ``device_family_name`` is an identity device family (:func:`device_family`);
+    None reads this node's. An unknown family reads as "GPU", the historical
+    value, so a new card never silently loses its cards to a KeyError."""
+    if device_family_name is None:
+        device_family_name = device_family()
+    return RAY_RESOURCE_BY_DEVICE_FAMILY.get(device_family_name, "GPU")
+
+
+def ray_start_accelerator_flag(count: int, device_family_name: str | None = None) -> str:
+    """``ray start`` flag that gives a restarted Ray ``count`` accelerators.
+
+    CUDA keeps ``--num-gpus=N``; an Ascend node needs ``--resources`` with the
+    custom NPU resource, because ``ray start`` has no ``--num-npus``."""
+    resource = ray_accelerator_resource(device_family_name)
+    if resource == "GPU":
+        return f"--num-gpus={int(count)}"
+    return "--resources='" + json.dumps({resource: int(count)}) + "'"
 
 
 # Phase 2 (design D9a): tolerances per (group, group) pair once calibrated.

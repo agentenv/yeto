@@ -8,6 +8,7 @@ infra-drafts/S19-NPU-910B4-BRINGUP.md ("to verify on hardware").
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import sys
 from types import SimpleNamespace
@@ -308,3 +309,98 @@ def test_fully_async_plan_sets_trainer_device_npu_on_ascend(monkeypatch):
     monkeypatch.setattr(cat, "device_family", lambda *_a: "nvidia")
     out, _ = island_entry.fully_async_plan(1, [], spec, args, "none")
     assert not any(o.startswith("trainer.device=") for o in out)
+
+
+# --- S27 G-EQ2 (npu1): Ray's accelerator resource is "NPU", not "GPU" -----------
+def test_ray_accelerator_resource_per_device_family():
+    assert catalog.ray_accelerator_resource("nvidia") == "GPU"
+    assert catalog.ray_accelerator_resource("ascend") == "NPU"
+    assert catalog.ray_accelerator_resource("thead") == "GPU"
+    # a family nobody mapped keeps the historical value instead of raising
+    assert catalog.ray_accelerator_resource("martian") == "GPU"
+
+
+def test_ray_start_flag_gives_an_ascend_node_its_cards_as_a_custom_resource():
+    # `ray start` has no --num-npus: the cards only come back under "NPU"
+    assert catalog.ray_start_accelerator_flag(8, "nvidia") == "--num-gpus=8"
+    assert catalog.ray_start_accelerator_flag(8, "ascend") == '--resources=\'{"NPU": 8}\''
+
+
+def test_island_gpus_reads_the_npu_resource_on_ascend():
+    from yeto.rl.adapters.verl.island_entry import island_gpus
+
+    npu_ray = {"before": {"CPU": 192.0, "NPU": 8.0}}
+    assert island_gpus(npu_ray, device_family="ascend") == 8
+    # the read is what used to give 1 card on an 8-card Ascend island
+    assert island_gpus(npu_ray, device_family="nvidia") == 8  # other spelling still read
+    assert island_gpus({"before": {"CPU": 32.0, "GPU": 2.0}}, device_family="ascend") == 2
+    assert island_gpus({"before": {"CPU": 32.0}}, device_family="ascend") == 1
+
+
+def test_runtime_env_forwards_hccl_but_never_the_visible_card_list(monkeypatch):
+    """S27 G-EQ2: a Ray worker of an already-running cluster inherits the raylet's
+    environment, so HCCL settings have to travel in the runtime env; the per-worker
+    card list must not, or every worker would bind the same card."""
+    import types
+
+    pkg = types.ModuleType("verl.trainer.constants_ppo")
+    pkg.get_ppo_ray_runtime_env = lambda _x: {"env_vars": {}}
+    for name in ("verl", "verl.trainer"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.trainer.constants_ppo", pkg)
+    ray_stub = types.ModuleType("ray")
+    ray_stub.remote = lambda *a, **k: (lambda cls: cls)
+    monkeypatch.setitem(sys.modules, "ray", sys.modules.get("ray") or ray_stub)
+    monkeypatch.setitem(sys.modules, "yeto.rl.adapters.verl.verl_main", None)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main")
+    from yeto.rl.adapters.verl import verl_main
+
+    monkeypatch.setenv("HCCL_SOCKET_IFNAME", "bond0")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "64")
+    monkeypatch.setenv("ASCEND_GLOBAL_LOG_LEVEL", "3")
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    monkeypatch.setenv(verl_main.NPU_NOSET_ENV, "1")
+    env = verl_main._runtime_env()["env_vars"]
+    assert env["HCCL_SOCKET_IFNAME"] == "bond0" and env["HCCL_BUFFSIZE"] == "64"
+    assert env["ASCEND_GLOBAL_LOG_LEVEL"] == "3"
+    assert "ASCEND_RT_VISIBLE_DEVICES" not in env  # Ray writes each worker's own
+    assert env[verl_main.NPU_NOSET_ENV] == "1"
+
+
+def test_verl_root_is_resolved_not_assumed(monkeypatch, tmp_path):
+    """S27 G-EQ2: verl's fully_async config search path is relative to the verl
+    checkout, so the island must find that directory in a vendor image too."""
+    monkeypatch.delenv(pins.VERL_ROOT_ENV, raising=False)
+    monkeypatch.setattr(pins, "VERL_ROOT", str(tmp_path / "absent"))
+    # no candidate holds verl/trainer/config -> None, i.e. verl's own default cwd
+    monkeypatch.setitem(sys.modules, "verl", SimpleNamespace(__file__=None))
+    assert pins.verl_root() is None
+    vendor = tmp_path / "vendor"
+    (vendor / "verl" / "trainer" / "config").mkdir(parents=True)
+    # the parent of the importable verl package is used (vendor image layout)
+    monkeypatch.setitem(sys.modules, "verl", SimpleNamespace(__file__=str(vendor / "verl" / "__init__.py")))
+    assert pins.verl_root() == str(vendor)
+    # an explicit root wins over both
+    other = tmp_path / "other"
+    (other / "verl" / "trainer" / "config").mkdir(parents=True)
+    monkeypatch.setenv(pins.VERL_ROOT_ENV, str(other))
+    assert pins.verl_root() == str(other)
+    # a wrong explicit root is not used
+    monkeypatch.setenv(pins.VERL_ROOT_ENV, str(tmp_path / "nothing"))
+    assert pins.verl_root() == str(vendor)
+
+
+def test_sync_trainer_is_required_only_by_the_sync_island():
+    """S27 G-EQ2: a vendor verl build has no verl.trainer.ppo.v1; the buffer
+    trainer island does not need it, the sync island says so clearly. Source
+    check: importing the module needs verl itself (it is the trainer subclass)."""
+    source = (importlib.resources.files("yeto.rl.adapters.verl") / "trainer.py").read_text()
+    assert "def require_sync_trainer" in source
+    # the v1 import is optional, and the sync trainer subclass is defined only with it
+    assert "except ImportError as error:" in source and "SYNC_TRAINER_IMPORT_ERROR" in source
+    # run_island asks for it before touching verl's sync internals
+    body = source.split("def run_island(", 1)[1]
+    assert body.index("require_sync_trainer()") < body.index("SkipManager")
+    # the buffer trainer path never asks
+    buffer_body = source.split("def run_fully_async_island(", 1)[1]
+    assert "require_sync_trainer()" not in buffer_body
