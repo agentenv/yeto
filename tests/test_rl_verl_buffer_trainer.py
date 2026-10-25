@@ -561,3 +561,23 @@ def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path)
     events = _lines(tmp_path / "tape.jsonl")
     exhausted = [e for e in events if e["event"] == "rl_buffer_exhausted"]
     assert [e["rollout_id"] for e in exhausted] == [2] and "SampleBufferExhausted" in exhausted[0]["error"]
+
+
+def test_a_single_buffer_trainer_continues_after_the_groups_it_trained(tmp_path):
+    """S27 G-EQ3 (gap 21): a restarted trainer without a lane used to read the
+    buffer from the first group again. The cursor log the synced trainers already
+    have now serves it too, so it continues where it stopped."""
+    from yeto.rl.engine.merged_release import lane_cursor_log
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer
+
+    store = CheckpointStore(tmp_path)
+    buffer = open_trainer_buffer(store, batch_size=1, create_index=True, shards=["modal-0"])
+    assert lane_cursor_log(buffer) is None  # no lane, no learner id: as before
+    log = lane_cursor_log(buffer, 0)
+    assert log is not None and log.last_cursor() == 0
+    log.append(0, [0, 1, 2, 3], 4)
+    log.append(1, [4, 5, 6, 7], 8)
+    assert lane_cursor_log(buffer, 0).last_cursor() == 8  # a new process reads the same log
+    assert lane_cursor_log(buffer, 1).last_cursor() == 0  # another learner has its own
+    assert log.path.name == "solo0.jsonl"

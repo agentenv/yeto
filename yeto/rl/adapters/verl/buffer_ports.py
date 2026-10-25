@@ -354,7 +354,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     ``delta_full_every`` > 0 (``--rl-release-delta-full-every``) publishes the
     releases from ``staging`` as bf16 deltas (module doc, delta releases)."""
     lane = getattr(buffer, "lane", None)
-    if (lane is None) != (cursor_log is None):
+    if lane is not None and cursor_log is None:
         raise ValueError("a synced buffer trainer needs both a lane reader and its cursor log")
     actor_call = island.call
     log = CONSUMED_LOG.format(learner=island.learner_id)
