@@ -22,9 +22,9 @@ The port only calls what verl already offers:
 * ``nodes_ready``: the GPU nodes are back and every replica's placement group is
   placed again (Ray reschedules the bundles of a dead node onto a node that joins
   with the same resources);
-* ``restore_engines``: the old replicas' actors are killed, new replicas of the same
-  class and rank start in the old replicas' placement groups (``init_standalone``
-  with the existing resource pool; a new name suffix avoids Ray name clashes), the
+* ``restore_engines``: the old replicas' actors are killed (and awaited dead, which frees
+  their Ray names), new replicas of the same class and rank start in the old
+  replicas' placement groups (``init_standalone`` with the existing resource pool), the
   load balancer swaps the server addresses and the checkpoint manager swaps the
   replicas. The trainer workers keep their NCCL checkpoint group between updates
   (verl's ``rebuild_group`` default False), so the port drops that group on them;
@@ -172,6 +172,30 @@ class VerlEngineRecovery:
                     errors.append(f"{type(exc).__name__}: {exc}"[:200])
         return errors
 
+    def _wait_dead(self, handles: list, timeout_s: float = 120.0) -> float:
+        """Wait until every killed actor is dead (its Ray name is free again)."""
+        ray, started = self.ray, time.monotonic()
+        pending = list(handles)
+        while pending:
+            alive = []
+            for handle in pending:
+                ref = handle.__ray_call__.remote(_ping)
+                ready, _ = ray.wait([ref], timeout=self.probe_s)
+                if not ready:
+                    alive.append(handle)
+                    continue
+                try:
+                    ray.get(ref)
+                    alive.append(handle)
+                except _dead_actor_error(ray):
+                    pass
+            pending = alive
+            if pending and time.monotonic() - started > timeout_s:
+                raise RuntimeError(f"{len(pending)} killed rollout actor(s) still alive after {timeout_s:.0f}s")
+            if pending:
+                time.sleep(1.0)
+        return round(time.monotonic() - started, 1)
+
     def _drop_actor_groups(self) -> list:
         """The trainer side keeps its NCCL checkpoint group between updates (verl's
         ``rebuild_group`` default False) and would reuse it with the dead replicas'
@@ -187,11 +211,14 @@ class VerlEngineRecovery:
         old = self._replicas()
         self.restores += 1
         kill_errors = self._kill(old)
+        dead_s = self._wait_dead([handle for replica in old for handle in (*replica.servers, *replica.workers)])
         dropped = self._drop_actor_groups()
-        suffix = f"yeto{self.restores}"
+        # the same actor names as the old replicas: verl's rollout worker finds its server by
+        # ``<prefix>server_<rank>_<node>`` without the replica's name suffix (s27-ew-o4), so the
+        # new replicas start only after the old actors are dead and their names are free
         new = [manager.rollout_replica_class(
             replica_rank=replica.replica_rank, config=manager.rollout_config, model_config=manager.model_config,
-            gpus_per_node=manager.rollout_config.n_gpus_per_node, name_suffix=suffix) for replica in old]
+            gpus_per_node=manager.rollout_config.n_gpus_per_node) for replica in old]
         started = time.monotonic()
 
         async def start() -> None:
@@ -213,8 +240,13 @@ class VerlEngineRecovery:
         self.aborted.clear()
         return {"replicas": [replica.replica_rank for replica in new],
                 "addresses": list(manager.server_addresses), "restore": self.restores,
-                "start_s": round(time.monotonic() - started, 1), "trainer_groups": dropped,
+                "start_s": round(time.monotonic() - started, 1), "dead_s": dead_s, "trainer_groups": dropped,
                 **({"kill_errors": kill_errors} if kill_errors else {})}
+
+
+def _ping(actor: Any) -> int:
+    del actor
+    return 0
 
 
 def _drop_checkpoint_group(worker_dict: Any, collective: Any = None) -> dict[str, Any]:

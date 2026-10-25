@@ -115,7 +115,12 @@ class _Pool:
 
 
 class _Replica:
+    """A verl RolloutReplica. A restarted replica has the same Ray names as the one it
+    replaces (verl looks its server up by name); the fake tags later generations with
+    ``@gN`` only to tell the actor objects apart."""
+
     started: list = []
+    generations: dict = {}
 
     def __init__(self, replica_rank, config, model_config, gpus_per_node, name_suffix=""):
         self.replica_rank, self.config, self.model_config = replica_rank, config, model_config
@@ -125,8 +130,11 @@ class _Replica:
 
     async def init_standalone(self, resource_pool=None):
         self.resource_pool = resource_pool or _Pool(f"rollout_pool_{self.replica_rank}")
-        self.servers = [_Actor(f"server_{self.replica_rank}_0{self.name_suffix}")]
-        self.workers = [_Actor(f"worker_{self.replica_rank}_0{self.name_suffix}")]
+        generation = _Replica.generations.get(self.replica_rank, 0)
+        _Replica.generations[self.replica_rank] = generation + 1
+        tag = f"@g{generation}" if generation else ""
+        self.servers = [_Actor(f"server_{self.replica_rank}_0{self.name_suffix}{tag}")]
+        self.workers = [_Actor(f"worker_{self.replica_rank}_0{self.name_suffix}{tag}")]
         _Replica.started.append((self.name_suffix, self.resource_pool))
 
     @property
@@ -200,7 +208,7 @@ def _trainer(replicas=1):
 def _fresh_ray():
     global RAY
     RAY = _Ray()
-    _Replica.started = []
+    _Replica.started, _Replica.generations = [], {}
     yield
 
 
@@ -245,7 +253,8 @@ def test_a_restore_starts_new_replicas_in_the_old_placement_groups():
     RAY.dead.add("server_1_0")  # one replica died; the other one is killed by the restore
     record = port.restore_engines()
     new = manager.rollout_replicas
-    assert [r.replica_rank for r in new] == [0, 1] and all(r.name_suffix == "_yeto1" for r in new)
+    assert [r.replica_rank for r in new] == [0, 1] and all(r.name_suffix == "" for r in new)  # same names
+    assert all(r not in old for r in new)
     assert [r.resource_pool for r in new] == [r.resource_pool for r in old]  # the same placement groups
     assert {"server_0_0", "worker_0_0", "server_1_0", "worker_1_0"} <= set(RAY.killed)
     assert sorted(manager.global_load_balancer.servers) == sorted(r.server_address for r in new)
@@ -256,7 +265,7 @@ def test_a_restore_starts_new_replicas_in_the_old_placement_groups():
     # every trainer worker was asked to drop its NCCL checkpoint group (no group in these fakes)
     assert record["trainer_groups"] == [{"group": None, "dropped": False}] * 2
     assert port.engines_alive()
-    assert port.restore_engines()["restore"] == 2 and manager.rollout_replicas[0].name_suffix == "_yeto2"
+    assert port.restore_engines()["restore"] == 2
 
 
 # ---------------------------------------------------------------------------- with the real driver
@@ -289,7 +298,7 @@ def test_a_round_whose_replicas_die_in_generation_is_restored_and_trained_once(t
     assert [e["phase"] for e in events] == ["batch_lost", "lost", "restoring", "restored"]
     restored = events[-1]
     assert restored["policy_version"] == 2 and restored["replicas"] == [0] and restored["restore"] == 1
-    assert trainer.standalone_server_manager.rollout_replicas[0].name_suffix == "_yeto1"
+    assert trainer.standalone_server_manager.rollout_replicas[0] is not None
 
 
 # ---------------------------------------------------------------------------- arming and the test kill
