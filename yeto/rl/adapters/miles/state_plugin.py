@@ -1773,10 +1773,18 @@ def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 def install_actor_recorders(actor: Any) -> bool:
-    """Plugin: the per-step recorders in an actor process (idempotent)."""
+    """Plugin: the per-step recorders in an actor process (idempotent).
 
-    del actor
-    return install_grad_norm_recorder()
+    Also installs the train-gap probe (``train_gap_probe``, S27 G-CT): timing
+    of the R3 replay fill before each step, and the ``YETO_REPLAY_FILL``
+    choice. A bad ``YETO_REPLAY_FILL`` stops the run here; any other probe
+    failure is printed and ignored."""
+
+    from .train_gap_probe import install_best_effort
+
+    installed = install_grad_norm_recorder()
+    install_best_effort(actor)
+    return installed
 
 
 def install_critic_recorders(actor: Any) -> bool:

@@ -350,7 +350,9 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
     """
 
     supports_deferred_digest = False  # its export_digest hashes every rank's shard eagerly
-    supports_unverified_rounds = False  # E1: every publication hashes the shards
+    # E1: every publication hashes the shards; S27 C5: --rl-verify-every N turns this on
+    # (allow_unverified_rounds) and the other rounds publish export_identity
+    supports_unverified_rounds = False
 
     def __init__(self, *, actor_model: Any, base_model_revision: str, config_hash: str,
                  expected_layout_hash: str | None, policy_version: int = 0,
@@ -377,6 +379,7 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
         version = self._export_version(policy_version)
         digest, weights = self._full_digest(self._plugin(EXPORT_FULL_DIGEST, {"policy_version": version}),
                                             version)
+        self._last_verified = digest
         return TrainerResidentState(
             layout=self.layout,
             base_model_revision=self._revision,
@@ -387,6 +390,39 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
             materialize_fn=_no_full_parameter_export,
             weights_mark=weights,
             holds_fn=self.check_holds,
+        )
+
+    def allow_unverified_rounds(self) -> None:
+        """S27 C5 (``--rl-verify-every N``): publications the driver does not verify
+        use :meth:`export_identity` (no shard hashing, about 8.4 s a round on Nano)."""
+        self.supports_unverified_rounds = True
+
+    def export_identity(self, *, policy_version: int | None = None):
+        """S27 C5: the resident state of a round whose publication is not verified: the
+        main rank reports its weights version (no shard hash); the identity is
+        :func:`~yeto.rl.engine.policy_digest.unverified_identity`. None before the first
+        verified digest (the caller then verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        version = self._export_version(policy_version)
+        mark = self.weights_version()
+        identity = unverified_identity(version, mark)
+        print(f"[rl] full-parameter publication v{version}: unverified (no shard hash; "
+              f"last verified hash {last.policy_tensor_hash[:12]})", flush=True)
+        return TrainerResidentState(
+            layout=self.layout,
+            base_model_revision=self._revision,
+            config_hash=self._config_hash,
+            layout_hash=self.layout_hash,
+            policy_version=version,
+            digest=PolicyDigest(identity, identity, last.payload_bytes, last.specs),
+            materialize_fn=_no_full_parameter_export,
+            weights_mark=mark,
+            holds_fn=self.check_holds,
+            verified=False,
         )
 
     def _current_digest(self, version: int):

@@ -141,6 +141,14 @@ def _flag(layers: frozenset[str], options: tuple[str, ...], kwargs: dict[str, An
                   MappingProxyType(dict(island or {})), cli_aliases)
 
 
+def _step_list(text: str) -> tuple[int, ...]:
+    """``T1,T2,...``: comma-separated integer steps (range checks are the launcher's)."""
+    try:
+        return tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected comma-separated integer steps, got {text!r}") from None
+
+
 def cli_flag(*options: str, **kwargs: Any) -> RlFlag:
     """A flag only ``yeto launch`` accepts (the launcher consumes it)."""
 
@@ -158,6 +166,21 @@ def shared_flag(*options: str, island: Mapping[str, Any] | None = None,
     """A flag both layers accept; ``island`` lists the island's keyword overrides."""
 
     return _flag(frozenset(LAYERS), options, kwargs, island=island, cli_aliases=cli_aliases)
+
+
+def check_verify_every(args) -> None:
+    """S27 C5: ``--rl-verify-every N`` skips the policy hash on a no-sync island only
+    (nothing outside the island reads it); N >= 1; not with --rl-verify-every-round."""
+    every = getattr(args, "rl_verify_every", None)
+    if every is None:
+        return
+    if int(every) < 1:
+        raise ValueError("--rl-verify-every needs N >= 1")
+    if not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-verify-every needs --rl-single-island-no-sync (a synced island "
+                         "always hashes its policy for the syncer)")
+    if getattr(args, "rl_verify_every_round", False):
+        raise ValueError("--rl-verify-every and --rl-verify-every-round exclude each other")
 
 
 def sha256_hex_arg(value: str) -> str:
@@ -535,6 +558,14 @@ _RUNTIME = (
                 help="ports: hash the policy and read the engine weight checksums back at every "
                 "publication (default: on the first publication and on every --rl-cut-every-th "
                 "round, which includes every round that keeps a round cut)"),
+    # S27 C5 (G-CT): a no-sync island hashes its policy only every N-th publication
+    shared_flag("--rl-verify-every", type=int, default=None, metavar="N",
+                help="--rl-single-island-no-sync: hash the policy and read the engine weight "
+                "checksums back on the first publication, every N-th policy version, the last "
+                "round and every round that keeps a round cut; the other rounds publish an "
+                "unverified identity (trainer weights version, no content hash). Saves the "
+                "full-parameter digest (about 8.4 s a round on Nano 8xH200). Default: off "
+                "(every publication is verified, or the --rl-cut-every interval for LoRA)"),
     shared_flag("--rl-profile-trainer", action="store_true",
                 help="ports, observation only (E1): per training step, print where the trainer "
                 "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
@@ -1169,6 +1200,19 @@ _SYNC = (
         help="full-parameter only: syncer checkpoint interval in fragment steps "
         "(1, or a multiple of --fragments). Above 1, only checkpointed steps are "
         "persisted before their broadcast; a crash resumes at the newest checkpoint",
+    ),
+    cli_flag(
+        "--rl-sync-checkpoint-at-steps",
+        type=_step_list,
+        default=None,
+        metavar="T1,T2,...",
+        help="full-parameter with --rl-sync-full-parameter-rounds async: the syncer also "
+        "writes the global state at these global steps to <checkpoint>.step-<t> on a "
+        "background thread while rounds keep merging (logs 'eval checkpoint written "
+        "step=<t> path=<p> ...' once the file is durable). A global step is one fragment "
+        "merge, the step= of the syncer log; a run has --total-steps x --fragments of them. "
+        "Comma-separated, strictly increasing, below that total (the final checkpoint holds "
+        "the last step); needs --rl-sync-checkpoint-every above 1",
     ),
     cli_flag(
         "--rl-sync-async-checkpoint",

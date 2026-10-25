@@ -431,11 +431,16 @@ def verify_publication(driver: Any, version: int) -> bool:
     point keeps a round cut (resume relies on its policy hash), on every K-th version
     (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
     round cuts, or with a policy state that cannot skip it, every round is verified.
+    S27 C5: ``--rl-verify-every N`` (``driver.verify_every``) replaces K by N and also
+    verifies the last round (:func:`_verify_on_interval`).
     The other rounds still check that the trainer holds the policy (weights version)."""
     if bool(getattr(driver, "verify_every_round", False)):
         return True
     if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
         return True
+    interval = getattr(driver, "verify_every", None)
+    if interval is not None:
+        return _verify_on_interval(driver, int(version), int(interval))
     cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
     every = int(getattr(cuts, "every", 0) or 0)
     if cuts is None or every <= 1:
@@ -446,6 +451,22 @@ def verify_publication(driver: Any, version: int) -> bool:
     if callable(cut_due) and cut_due(int(version)):
         return True
     return int(version) % every == 0
+
+
+def _verify_on_interval(driver: Any, version: int, interval: int) -> bool:
+    """S27 C5 (``--rl-verify-every N``, no-sync island): verify the first publication,
+    every N-th version, the policy of the last round and every round that keeps a
+    round cut (a cut needs the content hash); the round-cut interval does not apply."""
+    if interval <= 1 or getattr(driver, "published_version", None) is None:
+        return True
+    sync = getattr(driver, "sync", None)
+    cut_due = getattr(sync, "cut_due", None)
+    if callable(cut_due) and cut_due(version):
+        return True
+    final = getattr(sync, "is_final_round", None)
+    if callable(final) and final(driver, rollout_id=version - 1):
+        return True
+    return version % interval == 0
 
 
 class IslandDriver:

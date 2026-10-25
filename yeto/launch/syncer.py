@@ -198,6 +198,20 @@ def _syncer_checkpoint_every(args) -> int:
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
 
 
+def _syncer_checkpoint_at_steps(args) -> tuple[int, ...]:
+    """``--rl-sync-checkpoint-at-steps`` (asynchronous full-parameter rounds,
+    checked by rl_args): global steps whose cut the syncer also writes to
+    ``<checkpoint>.step-<t>`` off its scheduler; () for every other syncer."""
+    if not rl_full_parameter_async(args):
+        return ()
+    return tuple(getattr(args, "rl_sync_checkpoint_at_steps", None) or ())
+
+
+def _syncer_eval_checkpoints(args) -> str:
+    steps = _syncer_checkpoint_at_steps(args)
+    return f" --checkpoint-at-steps {','.join(map(str, steps))}" if steps else ""
+
+
 def outer_delayed_nesterov_period(args) -> int | None:
     """The syncer's Delayed Nesterov period; None (unset or 1) is plain Nesterov."""
     period = getattr(args, "outer_delayed_nesterov_period", None)
@@ -323,6 +337,8 @@ def rl_syncer_profile(args, num_learners: int):
         **({"grace_min_ms": _grace_floor(args)[0]} if _grace_floor(args)[0] else {}),
         **({"grace_arrival_quantile": _grace_floor(args)[1]} if _grace_floor(args)[1] else {}),
         **({"terminal_grace_ms": _terminal_grace_ms(args)} if _terminal_grace_ms(args) else {}),
+        **({"checkpoint_at_steps": list(_syncer_checkpoint_at_steps(args))}
+           if _syncer_checkpoint_at_steps(args) else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -662,6 +678,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{' --final-cut-payload manifest' if rl_full_parameter_final_cut(args) == 'ack' else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
+        f"{_syncer_eval_checkpoints(args)}"
         f"{_syncer_profile_record(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"

@@ -68,6 +68,10 @@ _GRACE_FLOOR_DOMAIN = b"yeto-syncer-grace-floor-v1\0"
 # positive value (syncer --terminal-grace-ms) appends its block.
 _TERMINAL_GRACE_MS_FIELD = "terminal_grace_ms"
 _TERMINAL_GRACE_DOMAIN = b"yeto-syncer-terminal-grace-v1\0"
+# Optional. Absent or empty = no evaluation checkpoints (byte-identical hash);
+# the listed global steps (syncer --checkpoint-at-steps) append their block.
+_CHECKPOINT_AT_STEPS_FIELD = "checkpoint_at_steps"
+_EVAL_CHECKPOINTS_DOMAIN = b"yeto-syncer-eval-checkpoints-v1\0"
 _OPTIONAL_FIELDS = {
     _DELAYED_NESTEROV_FIELD,
     _EXPERT_TOKEN_WEIGHTS_FIELD,
@@ -75,6 +79,7 @@ _OPTIONAL_FIELDS = {
     _GRACE_MIN_MS_FIELD,
     _GRACE_ARRIVAL_QUANTILE_FIELD,
     _TERMINAL_GRACE_MS_FIELD,
+    _CHECKPOINT_AT_STEPS_FIELD,
 }
 
 
@@ -95,6 +100,12 @@ def _optional_integer(
     if value is None:
         return None
     return _integer(name, value, bits=bits, minimum=minimum)
+
+
+def _steps(name: str, value: object) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"syncer profile {name} must be a list of steps")
+    return tuple(_integer(name, step, bits=64, minimum=1) for step in value)
 
 
 def _number(name: str, value: object) -> float:
@@ -162,6 +173,7 @@ class SyncerSemanticProfile:
     grace_min_ms: int = 0
     grace_arrival_quantile: float = 0.0
     terminal_grace_ms: int = 0
+    checkpoint_at_steps: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
@@ -250,6 +262,9 @@ class SyncerSemanticProfile:
             terminal_grace_ms=_integer(
                 _TERMINAL_GRACE_MS_FIELD, raw.get(_TERMINAL_GRACE_MS_FIELD, 0), bits=64
             ),
+            checkpoint_at_steps=_steps(
+                _CHECKPOINT_AT_STEPS_FIELD, raw.get(_CHECKPOINT_AT_STEPS_FIELD, ())
+            ),
         )
         profile._validate_general()
         return profile
@@ -277,6 +292,17 @@ class SyncerSemanticProfile:
                     self.checkpoint_every < 1 or self.checkpoint_every % fragments):
                 raise ValueError("syncer profile policy sweep checkpoint interval must be "
                                  "1 or a multiple of the fragment count")
+        steps = self.checkpoint_at_steps
+        if steps:
+            # Mirrors the syncer's validate_eval_checkpoints.
+            if not self.checkpoint_enabled:
+                raise ValueError("syncer profile checkpoint_at_steps requires checkpointing")
+            if any(a >= b for a, b in zip(steps, steps[1:])) or steps[-1] >= self.total_steps:
+                raise ValueError("syncer profile checkpoint_at_steps must be strictly increasing "
+                                 "and below total_steps")
+            if self.policy_sweep_fragments is not None or self.checkpoint_every == 1:
+                raise ValueError("syncer profile checkpoint_at_steps needs fragment rounds "
+                                 "with checkpoint_every != 1")
 
     def validate_sao(self) -> None:
         """Enforce the paired actor/critic fail-closed server profile."""
@@ -343,6 +369,10 @@ class SyncerSemanticProfile:
         if self.terminal_grace_ms:
             encoded.extend(_TERMINAL_GRACE_DOMAIN)
             encoded.extend(struct.pack("<Q", self.terminal_grace_ms))
+        if self.checkpoint_at_steps:
+            encoded.extend(_EVAL_CHECKPOINTS_DOMAIN)
+            encoded.extend(struct.pack("<Q", len(self.checkpoint_at_steps)))
+            encoded.extend(struct.pack(f"<{len(self.checkpoint_at_steps)}Q", *self.checkpoint_at_steps))
         return bytes(encoded)
 
     @property

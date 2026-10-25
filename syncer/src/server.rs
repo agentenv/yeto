@@ -121,6 +121,10 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
+    /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
+    /// below `total_steps`. Empty: none.
+    pub checkpoint_at_steps: Vec<u64>,
     /// Policy-sweep only: persist each per-round checkpoint on a blocking
     /// writer instead of the scheduler, and broadcast that round only after
     /// the write is durable. Merge results, versions, and checkpoint bytes
@@ -198,6 +202,7 @@ const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-we
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
 const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
 const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
+const EVAL_CHECKPOINTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-eval-checkpoints-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -254,6 +259,17 @@ impl Config {
         if self.terminal_grace_ms > 0 {
             encoded.extend_from_slice(TERMINAL_GRACE_PROFILE_DOMAIN);
             encoded.extend_from_slice(&self.terminal_grace_ms.to_le_bytes());
+        }
+        // Evaluation checkpoints change no merge, but a step that comes due
+        // during the previous write stalls the scheduler, and the list sits
+        // beside the checkpoint settings above. Appended only when set, so
+        // every existing hash stays unchanged.
+        if !self.checkpoint_at_steps.is_empty() {
+            encoded.extend_from_slice(EVAL_CHECKPOINTS_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&(self.checkpoint_at_steps.len() as u64).to_le_bytes());
+            for step in &self.checkpoint_at_steps {
+                encoded.extend_from_slice(&step.to_le_bytes());
+            }
         }
         Sha256::digest(encoded).into()
     }
@@ -1144,6 +1160,39 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.learner_budget_steps.is_some() {
             bail!("--async-checkpoint does not support --learner-budget-steps");
         }
+    }
+    validate_eval_checkpoints(cfg)
+}
+
+/// `--checkpoint-at-steps` is for fragment rounds that write their
+/// checkpoint at the quiescent cut after a round (`publish_round`).
+fn validate_eval_checkpoints(cfg: &Config) -> Result<()> {
+    if cfg.checkpoint_at_steps.is_empty() {
+        return Ok(());
+    }
+    if cfg.checkpoint_path.is_none() {
+        bail!("--checkpoint-at-steps requires --checkpoint-path (it writes <checkpoint-path>.step-<t>)");
+    }
+    crate::eval_checkpoint::validate_steps(&cfg.checkpoint_at_steps, cfg.total_steps)?;
+    // A sweep checkpoint is the commit record of its broadcast; with
+    // --async-checkpoint its own snapshot writer is already in flight.
+    if cfg.policy_sweep_fragments.is_some() {
+        bail!(
+            "--checkpoint-at-steps does not support --policy-sweep-fragments: sweep checkpoints \
+             are commit records written before their broadcast"
+        );
+    }
+    if checkpoint_before_broadcast(cfg) {
+        bail!(
+            "--checkpoint-at-steps does not support --checkpoint-every 1: every step is already \
+             written to --checkpoint-path before its broadcast, which stalls the scheduler anyway"
+        );
+    }
+    if cfg.shard.is_sharded() {
+        bail!(
+            "--checkpoint-at-steps does not support --shard-count > 1: shards advance on their \
+             own, so no shard holds the whole model at one step"
+        );
     }
     Ok(())
 }
@@ -2902,6 +2951,12 @@ async fn scheduler(
     let mut late_carry = LateCarry::new(cfg.max_base_lag, fixed_roster);
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
+    // --checkpoint-at-steps: evaluation copies written off the scheduler.
+    let mut eval_checkpoints = crate::eval_checkpoint::EvalCheckpoints::new(
+        &cfg.checkpoint_at_steps,
+        cfg.checkpoint_path.as_deref(),
+        st.global_step,
+    )?;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
@@ -3001,6 +3056,9 @@ async fn scheduler(
                     bail!("fragment {p} lost its busy ownership at commit");
                 }
             }
+            // The cut at the step just committed; later rounds keep merging
+            // while an evaluation copy of it is written.
+            eval_checkpoints.after_commit(&st).await?;
             next_commit_t = schedule.step_after(next_commit_t);
             if dynamic {
                 write_pool_status(&cfg, &registry, st.global_step, "running");
@@ -3876,6 +3934,7 @@ async fn scheduler(
         // branch has had its bounded opportunity to quiesce.
         drain_result?;
         reports_result?;
+        eval_checkpoints.finish().await?;
         save_budget_checkpoint(&cfg, &st)?;
         info!(
             cancelled_inflight,
@@ -3912,6 +3971,8 @@ async fn scheduler(
     // Explicitly drain and health-check every SVD worker before a checkpoint
     // or marker can publish the terminal cut.
     st.drain_iso_backend().await?;
+    // The final checkpoint never shares the disk with an evaluation copy.
+    eval_checkpoints.finish().await?;
 
     // The outer loop is now quiescent: every launched round has completed
     // and every computed result has committed in strict t order.
@@ -6515,6 +6576,7 @@ mod hello_auth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
 
@@ -6842,6 +6904,7 @@ mod tests {
             final_state: None,
             checkpoint_path: None,
             checkpoint_every: 0,
+            checkpoint_at_steps: Vec::new(),
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -7923,6 +7986,272 @@ mod tests {
         assert_eq!(recovered.global_step, 1);
         assert_eq!(recovered.versions, vec![1, 0]);
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    // --checkpoint-at-steps (crate::eval_checkpoint).
+
+    /// A fragment round at `step` of a two-fragment state, on the fragment's
+    /// current version.
+    fn eval_test_round(state: &GlobalState, step: u64, learner: Member) -> Round {
+        let fragment = ((step - 1) % 2) as usize;
+        let mut round = sweep_test_round(step, fragment, 1, step, learner);
+        round.base_version = state.versions[fragment];
+        for push in round.pushes.values_mut() {
+            push.base_version = round.base_version;
+        }
+        round
+    }
+
+    /// Holds every eval write before it starts: the writer reports its step
+    /// on the returned receiver, and one message on the sender lets it go.
+    fn eval_write_gate() -> (BeforeWrite, std::sync::mpsc::Receiver<u64>, std::sync::mpsc::Sender<()>) {
+        let (entered, writes) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let gate: BeforeWrite = Arc::new(move |step| {
+            entered.send(step).unwrap();
+            released.lock().unwrap().recv().unwrap();
+        });
+        (gate, writes, release)
+    }
+
+    fn eval_test_config(checkpoint: &std::path::Path, steps: &[u64]) -> Config {
+        let mut config = round_test_config(6);
+        config.checkpoint_path = Some(checkpoint.to_path_buf());
+        config.checkpoint_every = 8;
+        config.checkpoint_at_steps = steps.to_vec();
+        validate_config(&config).unwrap();
+        config
+    }
+
+    const WRITER_WAIT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn eval_checkpoint_holds_its_step_while_later_rounds_merge_and_broadcast() {
+        let directory = unique_test_directory("eval-checkpoint-cut");
+        let checkpoint = directory.join("state.ckpt");
+        let config = eval_test_config(&checkpoint, &[2]);
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut state = two_fragment_streaming_state();
+        let (gate, writes, release) = eval_write_gate();
+        let mut evals = EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), 0)
+            .unwrap()
+            .with_before_write(gate);
+        let synchronous = directory.join("synchronous-at-2.ckpt");
+        let mut sync_seconds = 0.0;
+        for step in 1..=4u64 {
+            let round = eval_test_round(&state, step, learner);
+            complete_round(&config, &mut state, &registry, &mut sync_seconds, round).await.unwrap();
+            if step == 2 {
+                state.save_checkpoint(&synchronous).unwrap();
+            }
+            evals.after_commit(&state).await.unwrap();
+            if step == 2 {
+                assert_eq!(writes.recv_timeout(WRITER_WAIT).unwrap(), 2);
+            }
+            // Steps 3 and 4 merge and broadcast while the copy of step 2 is
+            // still being written.
+            assert_eq!(chunked_inner_type(&frames.try_recv().unwrap()), MSG_BCAST_FRAGMENT);
+            assert_eq!(state.global_step, step);
+            assert_eq!(evals.is_writing(), step >= 2);
+        }
+        let written = eval_checkpoint_path(&checkpoint, 2);
+        assert_eq!(written, directory.join("state.ckpt.step-2"));
+        assert!(!written.exists(), "the file appears only once it is complete");
+        release.send(()).unwrap();
+        evals.finish().await.unwrap();
+        assert!(!evals.is_writing());
+        assert_eq!(std::fs::read(&written).unwrap(), std::fs::read(&synchronous).unwrap());
+        assert_ne!(state.encode_checkpoint().unwrap(), std::fs::read(&synchronous).unwrap());
+        let mut restored = two_fragment_streaming_state();
+        restored.load_checkpoint(&written).unwrap();
+        assert_eq!((restored.global_step, restored.versions.clone()), (2, vec![1, 2]));
+        assert!(!directory.join("state.ckpt.step-2.tmp").exists());
+        assert!(!checkpoint.exists(), "an eval copy never writes --checkpoint-path");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn one_eval_write_at_a_time_and_the_terminal_waits_for_it() {
+        let directory = unique_test_directory("eval-checkpoint-serial");
+        let checkpoint = directory.join("state.ckpt");
+        let config = eval_test_config(&checkpoint, &[1, 2]);
+        let learner = member(0, 30);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut state = two_fragment_streaming_state();
+        let (gate, writes, release) = eval_write_gate();
+        let mut evals = EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), 0)
+            .unwrap()
+            .with_before_write(gate);
+        let mut sync_seconds = 0.0;
+        let mut cuts = Vec::new();
+        for step in 1..=2u64 {
+            let round = eval_test_round(&state, step, learner);
+            complete_round(&config, &mut state, &registry, &mut sync_seconds, round).await.unwrap();
+            cuts.push(state.encode_checkpoint().unwrap());
+            if step == 2 {
+                // Step 2 is due while step 1 is still being written: it waits.
+                assert!(evals.is_writing());
+                let releaser = std::thread::spawn({
+                    let release = release.clone();
+                    move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        let at = Instant::now();
+                        release.send(()).unwrap();
+                        at
+                    }
+                });
+                evals.after_commit(&state).await.unwrap();
+                assert!(Instant::now() >= releaser.join().unwrap());
+                assert!(eval_checkpoint_path(&checkpoint, 1).exists());
+            } else {
+                evals.after_commit(&state).await.unwrap();
+            }
+            assert_eq!(writes.recv_timeout(WRITER_WAIT).unwrap(), step);
+        }
+        // The terminal cut waits for the running write of step 2.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let at = Instant::now();
+            release.send(()).unwrap();
+            at
+        });
+        evals.finish().await.unwrap();
+        assert!(Instant::now() >= releaser.join().unwrap());
+        for (step, cut) in [1u64, 2].into_iter().zip(&cuts) {
+            assert_eq!(&std::fs::read(eval_checkpoint_path(&checkpoint, step)).unwrap(), cut);
+        }
+        // Nothing is left to wait for.
+        evals.finish().await.unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn resume_reads_only_the_checkpoint_path_and_rewrites_eval_steps_after_its_cut() {
+        let directory = unique_test_directory("eval-checkpoint-resume");
+        let checkpoint = directory.join("state.ckpt");
+        let mut config = eval_test_config(&checkpoint, &[1, 3]);
+        config.resume = true;
+        let learner = member(0, 30);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut sync_seconds = 0.0;
+        let mut before_crash = two_fragment_streaming_state();
+        for step in 1..=2u64 {
+            let round = eval_test_round(&before_crash, step, learner);
+            complete_round(&config, &mut before_crash, &registry, &mut sync_seconds, round)
+                .await
+                .unwrap();
+        }
+        before_crash.save_checkpoint(&checkpoint).unwrap();
+        // Stray eval files: an older step, the step the resumed run redoes,
+        // and an unfinished temporary.
+        let stale = b"not a checkpoint".as_slice();
+        for path in [
+            eval_checkpoint_path(&checkpoint, 1),
+            eval_checkpoint_path(&checkpoint, 3),
+            directory.join("state.ckpt.step-3.tmp"),
+        ] {
+            std::fs::write(path, stale).unwrap();
+        }
+        // None of the files the syncer reads next to the checkpoint is one.
+        for sidecar in [
+            checkpoint.with_extension("tmp"),
+            profile_record_path(&checkpoint),
+            membership_record_path(&checkpoint),
+            crate::state::final_marker_path(&checkpoint),
+        ] {
+            assert!(!sidecar.to_string_lossy().contains(".step-"), "{}", sidecar.display());
+        }
+        check_resume_checkpoint(&config).unwrap();
+        let mut resumed = two_fragment_streaming_state();
+        resumed.load_checkpoint(config.checkpoint_path.as_ref().unwrap()).unwrap();
+        assert_eq!(resumed.encode_checkpoint().unwrap(), before_crash.encode_checkpoint().unwrap());
+        // Step 1 is behind the resumed cut (skipped, its file untouched);
+        // step 3 is written again over the stale file.
+        let mut evals =
+            EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), resumed.global_step)
+                .unwrap();
+        let round = eval_test_round(&resumed, 3, learner);
+        complete_round(&config, &mut resumed, &registry, &mut sync_seconds, round).await.unwrap();
+        evals.after_commit(&resumed).await.unwrap();
+        evals.finish().await.unwrap();
+        assert_eq!(std::fs::read(eval_checkpoint_path(&checkpoint, 1)).unwrap(), stale);
+        assert_eq!(
+            std::fs::read(eval_checkpoint_path(&checkpoint, 3)).unwrap(),
+            resumed.encode_checkpoint().unwrap()
+        );
+        assert!(!directory.join("state.ckpt.step-3.tmp").exists());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn eval_checkpoint_steps_are_checked_and_unsupported_profiles_refused() {
+        let error = |config: &Config| format!("{:#}", validate_config(config).unwrap_err());
+        let eval = |steps: &[u64]| {
+            let mut config = round_test_config(10);
+            config.checkpoint_path = Some(std::path::PathBuf::from("state.ckpt"));
+            config.checkpoint_at_steps = steps.to_vec();
+            config
+        };
+        // Any periodic interval but 1, including none, takes eval steps.
+        for every in [0, 2, 8, 1000] {
+            let mut config = eval(&[1, 4, 9]);
+            config.checkpoint_every = every;
+            validate_config(&config).unwrap();
+        }
+        let mut config = eval(&[3]);
+        config.checkpoint_path = None;
+        assert!(error(&config).contains("requires --checkpoint-path"));
+        for steps in [vec![0, 3], vec![3, 3], vec![7, 3]] {
+            assert!(error(&eval(&steps)).contains("positive and strictly increasing"), "{steps:?}");
+        }
+        assert!(error(&eval(&[3, 10])).contains("below --total-steps 10"));
+        let mut config = eval(&[3]);
+        config.checkpoint_every = 1;
+        assert!(error(&config).contains("does not support --checkpoint-every 1"));
+        let mut config = sweep_test_config(2, 10);
+        config.checkpoint_at_steps = vec![4];
+        assert!(error(&config).contains("does not support --policy-sweep-fragments"));
+        let mut config = eval(&[3]);
+        config.shard = crate::shard::ShardPlan::new(0, 2).unwrap();
+        assert!(error(&config).contains("does not support --shard-count > 1"));
+        // Without steps nothing changes.
+        validate_config(&eval(&[])).unwrap();
+    }
+
+    const EVAL_CHECKPOINTS_BASE_VECTOR: &str = "bcbef730a6bc46e6c1901e90b6ce5a5382b035292863ed5cfea0285da408cafe";
+    const EVAL_CHECKPOINTS_VECTOR: &str = "2e395d5104892c355f6cd2609bcf3f5011a26407848fb805b5e262bf912584f3";
+
+    #[test]
+    fn eval_checkpoint_steps_append_to_the_profile_hash_like_python() {
+        // Python: tests/test_s27_eval_checkpoints.py.
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 8;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        let hex = |config: &Config| -> String {
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect()
+        };
+        assert_eq!(hex(&config), EVAL_CHECKPOINTS_BASE_VECTOR);
+        config.checkpoint_at_steps = vec![3, 5];
+        assert_eq!(hex(&config), EVAL_CHECKPOINTS_VECTOR);
+        config.checkpoint_at_steps = vec![3, 6];
+        assert_ne!(hex(&config), EVAL_CHECKPOINTS_VECTOR);
     }
 
     #[tokio::test]
