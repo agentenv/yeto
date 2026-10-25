@@ -42,6 +42,7 @@ from yeto.rl.engine.selection import (
     SYNC_PRESETS,
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
+    ASYNC_TERMINAL_GRACE_MS,
     canonical_sync_preset,
     sync_mode_default,
 )
@@ -1212,6 +1213,33 @@ _SYNC = (
         % ASYNC_GRACE_CAP_MS,
     ),
     cli_flag(
+        "--rl-sync-grace-min-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="strict-avg / decoupled / full-parameter async: lower bound on the post-quorum grace "
+        "window (still capped by --rl-sync-grace-ms); default off",
+    ),
+    cli_flag(
+        "--rl-sync-grace-arrival-quantile",
+        type=float,
+        default=None,
+        metavar="Q",
+        help="strict-avg / decoupled / full-parameter async: the grace window is at least this "
+        "quantile (0..1] of the measured gaps between the islands' pushes of one round, late "
+        "pushes included (still capped by --rl-sync-grace-ms); default off",
+    ),
+    cli_flag(
+        "--rl-sync-terminal-grace-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="full-parameter async (and other presets with carried late pushes): the last round "
+        "of each fragment waits up to this long for every island, so a late delta still reaches "
+        "the final parameters (not capped by --rl-sync-grace-ms); default %d in --rl-sync-mode "
+        "async with the full-parameter preset, 0 = off" % ASYNC_TERMINAL_GRACE_MS,
+    ),
+    cli_flag(
         "--rl-sync-learner-weight",
         choices=("equal", "tokens2-over-steps"),
         default=sync_mode_default("equal"),
@@ -1229,6 +1257,15 @@ _SYNC = (
         "f32 fragment, applied to the trainer before the ACK (island-side eval or a bitwise "
         "check). auto (default) = ack for --rl-sync-full-parameter-rounds async in "
         "--rl-sync-mode async without --rl-eval-interval, else download",
+    ),
+    cli_flag(
+        "--rl-sync-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter preset: auto (default) = each island checks a received broadcast's "
+        "chunks (finite values, chunk hashes, fragment digest) on a background thread and the "
+        "trainer's apply skips that check, when the trainer backend supports it; "
+        "off = the trainer checks every chunk in its apply (the applied values are the same)",
     ),
     cli_flag(
         "--rl-sync-expert-token-weights",

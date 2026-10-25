@@ -17,6 +17,7 @@ from ..rl.engine.run_flags import (
 from ..rl.engine.selection import (
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
+    ASYNC_TERMINAL_GRACE_MS,
     FULL_PARAMETER_SYNC_PRESET,
     SAO_STREAMING_SYNC_PRESET,
     is_sync_mode_default,
@@ -186,6 +187,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_final_cut", "auto", "--rl-sync-final-cut"),
+    ("rl_sync_verify_ahead", "auto", "--rl-sync-verify-ahead"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
@@ -368,6 +370,7 @@ _ASYNC_MODE_VALUES = {
 _ASYNC_MODE_FULL_PARAMETER_VALUES = {
     "rl_sync_full_parameter_rounds": "async",
     "rl_sync_push_dtype": "int4",
+    "rl_sync_terminal_grace_ms": ASYNC_TERMINAL_GRACE_MS,
 }
 # Marked defaults; the strict mode keeps their (strict) value.
 _SYNC_MODE_MARKED = (
@@ -470,6 +473,9 @@ def _warn_async_mode_off(args) -> None:
 _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_quorum", "--rl-sync-quorum", None),
     ("rl_sync_grace_ms", "--rl-sync-grace-ms", None),
+    ("rl_sync_grace_min_ms", "--rl-sync-grace-min-ms", None),
+    ("rl_sync_grace_arrival_quantile", "--rl-sync-grace-arrival-quantile", None),
+    ("rl_sync_terminal_grace_ms", "--rl-sync-terminal-grace-ms", None),
     ("rl_sync_learner_weight", "--rl-sync-learner-weight", "equal"),
     ("rl_sync_max_base_lag", "--rl-sync-max-base-lag", 0),
     ("rl_sync_outer_lr", "--rl-sync-outer-lr", None),
@@ -549,6 +555,21 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
         if grace_ms < 0:
             raise ValueError("--rl-sync-grace-ms must be >= 0")
         args.grace_ms = grace_ms
+    grace_min_ms = getattr(args, "rl_sync_grace_min_ms", None)
+    if grace_min_ms is not None:
+        if grace_min_ms < 0:
+            raise ValueError("--rl-sync-grace-min-ms must be >= 0")
+        args.grace_min_ms = grace_min_ms
+    quantile = getattr(args, "rl_sync_grace_arrival_quantile", None)
+    if quantile is not None:
+        if not 0.0 < quantile <= 1.0:
+            raise ValueError("--rl-sync-grace-arrival-quantile must be in (0, 1]")
+        args.grace_arrival_quantile = quantile
+    terminal_grace_ms = getattr(args, "rl_sync_terminal_grace_ms", None)
+    if terminal_grace_ms is not None:
+        if terminal_grace_ms < 0:
+            raise ValueError("--rl-sync-terminal-grace-ms must be >= 0")
+        args.terminal_grace_ms = terminal_grace_ms
     if args.rl_sync_max_base_lag < 0:
         raise ValueError("--rl-sync-max-base-lag must be >= 0")
     outer_lr = args.rl_sync_outer_lr

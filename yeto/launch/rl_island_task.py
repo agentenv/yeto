@@ -112,6 +112,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --sweep-expert-token-weights"
     if rl_full_parameter_final_cut(args) == "ack":
         sweep += " --sweep-final-cut ack"
+    if getattr(args, "rl_sync_verify_ahead", "auto") == "off":
+        sweep += " --sweep-verify-ahead off"
     if getattr(args, "rl_sync_init_mode", "auto") != "auto":
         sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":

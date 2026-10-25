@@ -1299,6 +1299,7 @@ class FullParameterSync(RoundCutHooks):
         # push counters at the previous boundary.
         self._phase_seconds: dict[str, float] = {}
         self._push_jobs_before: dict[str, float] = {}
+        self._verify_ahead_before: dict[str, int] = {}
         # S27 task assignment: this process joined a pool that was already running
         # (fragments newer than version 0, or a peer recovery), so the island ran
         # before; the driver then continues at its recorded data position
@@ -1404,6 +1405,13 @@ class FullParameterSync(RoundCutHooks):
         # hash of that round is a label, not a content hash).
         if getattr(self.actor, "last_capture_lazy", False) is True:
             fields["sync/capture_lazy"] = True
+        # S27 G-CG: replaced fragments this boundary's applies named as checked
+        # off the trainer, and those whose check was still running.
+        verify = getattr(self.actor, "verify_ahead_counters", None)
+        if isinstance(verify, dict):
+            before, self._verify_ahead_before = self._verify_ahead_before, dict(verify)
+            fields["sync/apply_verified_ahead"] = int(verify["applied"] - before.get("applied", 0))
+            fields["sync/apply_verify_pending"] = int(verify["pending"] - before.get("pending", 0))
         counters = self.pairing.push_job_counters()
         fields["sync/push_background"] = bool(counters)
         if counters:

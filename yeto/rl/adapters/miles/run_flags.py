@@ -419,6 +419,14 @@ _ISLAND = (
         "final parameters)",
     ),
     island_flag(
+        "--sweep-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter: auto = check each received broadcast's chunks on a background "
+        "thread and let the trainer's apply skip that check (when the trainer's Miles has the "
+        "verified apply); off = the trainer checks every chunk in its apply",
+    ),
+    island_flag(
         "--sweep-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE: count the tokens each router sends to each "
