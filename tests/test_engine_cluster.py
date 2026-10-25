@@ -212,10 +212,24 @@ class _Handle(SimpleNamespace):
     pass
 
 
+class _Status:
+    def __init__(self, name):
+        self.name = name
+
+    def is_terminal(self):
+        return self.name in ("SUCCEEDED", "FAILED", "FAILED_SETUP", "CANCELLED", "FAILED_DRIVER")
+
+
 class _LaunchSky:
-    def __init__(self, fail_engine=False, fail_exec=False):
+    def __init__(self, fail_engine=False, fail_exec=False, setup=("SETTING_UP", "SUCCEEDED")):
         self.calls, self.fail_engine, self.fail_exec = [], fail_engine, fail_exec
         self.next_job = 7
+        self.setup = list(setup)
+
+    def job_status(self, cluster, job_ids):
+        self.calls.append(("job_status", cluster, tuple(job_ids)))
+        state = self.setup.pop(0) if len(self.setup) > 1 else self.setup[0]
+        return ("status", {job_ids[0]: _Status(state)})
 
     def stream_and_get(self, rid):
         kind, name = rid
@@ -223,7 +237,7 @@ class _LaunchSky:
         if kind == "launch" and name.endswith("-eng"):
             if self.fail_engine:
                 raise RuntimeError("no capacity")
-            return None, _Handle(cluster_name_on_cloud=f"{name}-abcd", cached_internal_ips=["10.0.0.9"])
+            return 2, _Handle(cluster_name_on_cloud=f"{name}-abcd", cached_internal_ips=["10.0.0.9"])
         if kind == "launch":
             self.next_job += 1
             return self.next_job, _Handle(cluster_name_on_cloud=f"{name}-abcd",
@@ -243,7 +257,7 @@ class _LaunchSky:
         return ("cancel", cluster)
 
     def get(self, rid):
-        return None
+        return rid[1] if rid and rid[0] == "status" else None
 
 
 def _island(monkeypatch, sky_rec, links):
@@ -260,7 +274,7 @@ def _island(monkeypatch, sky_rec, links):
     island = ec.MixedIsland(split, tasks, submit=submit,
                             link=lambda region, a, b: links.append(("link", region, a, b)),
                             unlink=lambda region, a, b: links.append(("unlink", region, a, b)),
-                            log=lambda line: None)
+                            log=lambda line: None, sleep=lambda s: None)
     return island, submits
 
 
@@ -274,6 +288,10 @@ def test_launch_links_then_execs_the_engine_run(monkeypatch):
     assert links == [("link", "eu-north1", "run1-l0-eu-north1-abcd", "run1-l0-eu-north1-eng-abcd")]
     (exec_call,) = [c for c in sky.calls if c[0] == "exec"]
     assert exec_call[1] == "run1-l0-eu-north1-eng" and exec_call[2][ec.HEAD_ADDR_ENV] == "10.0.0.5"
+    # the engine run starts only after the engine cluster's detached setup job SUCCEEDED
+    polls = [i for i, c in enumerate(sky.calls) if c[0] == "job_status"]
+    assert len(polls) == 2 and sky.calls[polls[0]][1:] == ("run1-l0-eu-north1-eng", (2,))
+    assert polls[-1] < sky.calls.index(exec_call)
     # the link precedes the exec (Ray join needs the rule)
     island.unlink()
     assert links[-1][0] == "unlink"
@@ -287,6 +305,15 @@ def test_engine_failure_cancels_the_trainer_job(monkeypatch, fail):
         island.finish(sky, island.submit())
     assert ("cancel", "run1-l0-eu-north1", (8,)) in sky.calls
     assert island.relaunch(sky) is None  # relaunch reports failure, the fleet retries
+
+
+def test_failed_engine_setup_cancels_the_trainer_job(monkeypatch):
+    sky = _LaunchSky(setup=("SETTING_UP", "FAILED_SETUP"))
+    island, _ = _island(monkeypatch, sky, [])
+    with pytest.raises(RuntimeError, match="setup job 2 ended FAILED_SETUP"):
+        island.finish(sky, island.submit())
+    assert ("cancel", "run1-l0-eu-north1", (8,)) in sky.calls
+    assert not [c for c in sky.calls if c[0] == "exec"]
 
 
 def test_trainer_failure_waits_for_the_engine_launch(monkeypatch):

@@ -18,7 +18,8 @@ Launch (:class:`MixedIsland`):
 
 1. ``sky.launch`` of both clusters at the same time. The trainer cluster gets the island
    task (its job starts the Ray head and the driver at once). The engine cluster gets the
-   same setup and no run.
+   same setup and no run; sky runs that setup as a detached job, and the launcher waits
+   until the job SUCCEEDED.
 2. When both are up: the two Nebius security groups admit each other
    (:mod:`yeto.cloud.nebius_sg_link`; sky's default rule admits only the cluster's own
    group). Then ``sky.exec`` submits the engine run with the trainer head's private
@@ -60,6 +61,7 @@ cluster list is unchanged.
 from __future__ import annotations
 
 import dataclasses
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -69,9 +71,14 @@ from ..rl.engine.multinode import ISLAND_NODE_WAIT_ENV
 ENGINE_SUFFIX = "-eng"
 HEAD_ADDR_ENV = "YETO_ISLAND_HEAD_ADDR"
 # The driver's wait for the engine cluster's nodes (step 3 above). The engine run is
-# submitted only after both clusters finished setup, so the wait normally lasts the
-# difference of the two setups; 30 min bounds a stuck engine cluster.
-NODE_WAIT_S = 1800
+# submitted only after the engine cluster finished setup, so the wait normally lasts
+# the difference of the two setups; 60 min bounds a stuck engine cluster.
+NODE_WAIT_S = 3600
+# sky runs a task's setup as a detached job (detach_setup, the sky 0.13 default):
+# sky.launch returns once that job is submitted. The engine run must not start before
+# the setup job ends (Miles/SGLang checkout, model prefetch), so the launcher waits.
+SETUP_WAIT_S = 3600
+SETUP_POLL_S = 15.0
 SUPPORTED_CLOUDS = frozenset({"nebius"})
 # TCP sockets between two VMs (no InfiniBand across Nebius fabrics). More threads and
 # sockets per peer than NCCL's default 1 x 1; both clusters set the same values.
@@ -271,10 +278,12 @@ class MixedIsland:
 
     def __init__(self, split: EngineSplit, tasks: SplitTasks, *, submit: Callable,
                  link: Callable | None = None, unlink: Callable | None = None,
-                 log: Callable[[str], Any] = print) -> None:
+                 log: Callable[[str], Any] = print, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], Any] = time.sleep) -> None:
         from ..cloud import nebius_sg_link
 
         self.split, self.tasks, self.submit_fn, self.log = split, tasks, submit, log
+        self.clock, self.sleep = clock, sleep
         self.link_fn = link or nebius_sg_link.link
         self.unlink_fn = unlink or nebius_sg_link.unlink
         self.engine_job: int | None = None
@@ -304,6 +313,7 @@ class MixedIsland:
             raise
         try:
             engine = sky.stream_and_get(rids[1])
+            self._wait_setup(sky, engine[0])
             head = head_address(trainer[1])
             self.on_cloud = (str(getattr(trainer[1], "cluster_name_on_cloud", s.name)),
                              str(getattr(engine[1], "cluster_name_on_cloud", s.engine_name)))
@@ -316,6 +326,25 @@ class MixedIsland:
             self._cancel(sky, s.name, trainer[0])
             raise
         return trainer
+
+    def _wait_setup(self, sky, job_id) -> None:
+        """Wait until the engine cluster's detached setup job ends; raise unless it
+        succeeded. No job id (setup ran inside the launch): nothing to wait for."""
+        if job_id is None:
+            return
+        name, start = self.split.engine_name, self.clock()
+        while True:
+            status = sky.get(sky.job_status(name, [int(job_id)])).get(int(job_id))
+            state = getattr(status, "name", str(status))
+            if status is not None and callable(getattr(status, "is_terminal", None)) and status.is_terminal():
+                if state != "SUCCEEDED":
+                    raise RuntimeError(f"{name}: setup job {job_id} ended {state}")
+                self.log(f"[launcher] {name}: setup job {job_id} SUCCEEDED after "
+                         f"{self.clock() - start:.0f}s")
+                return
+            if self.clock() - start > SETUP_WAIT_S:
+                raise RuntimeError(f"{name}: setup job {job_id} still {state} after {SETUP_WAIT_S}s")
+            self.sleep(SETUP_POLL_S)
 
     def _cancel(self, sky, cluster: str, job_id) -> None:
         if job_id is None:
