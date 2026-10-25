@@ -360,7 +360,8 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
     section = sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s",
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
-    assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
+    assert section == {"store": "/s", "wait_s": 60.0, "lane": None,
+                       "release_delta_full_every": 0}  # G-EQ3: staged bf16 deltas, off here
     # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
     assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
@@ -374,7 +375,8 @@ def test_island_entry_plans_a_synced_trainer_lane_and_refuses_partial_flags():
 
     synced = ("--rl-sample-role", "trainer", "--syncer", "h:1", "--rl-max-policy-age", "2")
     section = sample_buffer_section(_entry_args(*synced, "--rl-sample-store", "/s", "--rl-sample-lanes", "2"))
-    assert section == {"store": "/s", "wait_s": None, "lane": "0/2"}
+    assert section == {"store": "/s", "wait_s": None, "lane": "0/2",
+                       "release_delta_full_every": 0}
     for extra, message in ((("--rl-sample-store", "/s"), "needs --rl-sample-store and --rl-sample-lanes"),
                            (("--rl-sample-store", "/s", "--rl-sample-lanes", "2", "--rl-resume-store", "/s"),
                             "not --rl-resume-store")):
@@ -559,3 +561,23 @@ def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path)
     events = _lines(tmp_path / "tape.jsonl")
     exhausted = [e for e in events if e["event"] == "rl_buffer_exhausted"]
     assert [e["rollout_id"] for e in exhausted] == [2] and "SampleBufferExhausted" in exhausted[0]["error"]
+
+
+def test_a_single_buffer_trainer_continues_after_the_groups_it_trained(tmp_path):
+    """S27 G-EQ3 (gap 21): a restarted trainer without a lane used to read the
+    buffer from the first group again. The cursor log the synced trainers already
+    have now serves it too, so it continues where it stopped."""
+    from yeto.rl.engine.merged_release import lane_cursor_log
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer
+
+    store = CheckpointStore(tmp_path)
+    buffer = open_trainer_buffer(store, batch_size=1, create_index=True, shards=["modal-0"])
+    assert lane_cursor_log(buffer) is None  # no lane, no learner id: as before
+    log = lane_cursor_log(buffer, 0)
+    assert log is not None and log.last_cursor() == 0
+    log.append(0, [0, 1, 2, 3], 4)
+    log.append(1, [4, 5, 6, 7], 8)
+    assert lane_cursor_log(buffer, 0).last_cursor() == 8  # a new process reads the same log
+    assert lane_cursor_log(buffer, 1).last_cursor() == 0  # another learner has its own
+    assert log.path.name == "solo0.jsonl"

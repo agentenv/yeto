@@ -307,11 +307,35 @@ LORA_RECV = (RECV_TARGET, RECV_ANCHOR, RECV_HOOK, "replace")
 SEQ_IDX = ((SEQ_IDX_TARGET, SEQ_IDX_HELPER_ANCHOR, SEQ_IDX_HELPER, "before"),
            (SEQ_IDX_TARGET, SEQ_IDX_PACKED_ANCHOR, SEQ_IDX_PACKED_HOOK, "replace"),
            (SEQ_IDX_TARGET, SEQ_IDX_ENGINE_ANCHOR, SEQ_IDX_ENGINE_HOOK, "replace"))
+# S27 G-EQ3: with no mamba kernels (Ascend NPU, CPU) transformers' NemotronH torch path
+# sums the inter-chunk SSM states over the wrong axis, which puts the response log-probs
+# 0.44 nats per token away from any kernel-based sampler (G-ES measured both sides; the
+# fix is yeto.rl.nemotron_h_torch_fix, verified on 910B3: 0.4413 -> 0.0178). The engine
+# builds the model in every worker process, so the fix is applied there, right before.
+NEMOTRON_FIX_TARGET = "verl/workers/engine/fsdp/transformer_impl.py"
+NEMOTRON_FIX_ANCHOR = (
+    "    def _build_module(self):\n"
+    "        from verl.utils.model import get_hf_auto_model_class\n"
+)
+NEMOTRON_FIX_HOOK = (
+    "    def _build_module(self):\n"
+    "        # yeto S27 G-EQ3: fix transformers' NemotronH torch path before the model is built\n"
+    "        try:\n"
+    "            from yeto.rl import nemotron_h_torch_fix as _yeto_nh_fix\n"
+    "\n"
+    "            _yeto_nh_result = _yeto_nh_fix.apply()\n"
+    "            print(f'[yeto] nemotron_h_torch_fix: {_yeto_nh_result}', flush=True)\n"
+    "        except Exception as _yeto_nh_error:  # a build without yeto, or another model family\n"
+    "            print(f'[yeto] nemotron_h_torch_fix not applied: {_yeto_nh_error!r}', flush=True)\n"
+    "        from verl.utils.model import get_hf_auto_model_class\n"
+)
+NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")
+
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, *RANK0_SOURCE),
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
             "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 

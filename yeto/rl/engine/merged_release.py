@@ -200,9 +200,12 @@ class LaneCursorLog:
     is where a restarted trainer continues. ``commit`` makes the line durable
     (the store's ``commit``; a Modal Volume commit)."""
 
-    def __init__(self, root: str | Path, lane: BufferLane,
+    def __init__(self, root: str | Path, lane: "BufferLane | str",
                  commit: Callable[[], None] = lambda: None) -> None:
-        self.path = Path(root) / LANES_DIR / lane.file_name()
+        """``lane``: the reader's lane, or a plain name for a reader without one
+        (S27 G-EQ3: a single buffer trainer keeps a cursor too)."""
+        name = lane if isinstance(lane, str) else lane.name()
+        self.path = Path(root) / LANES_DIR / f"{name}.jsonl"
         self.commit = commit
 
     def last_cursor(self) -> int:
@@ -237,9 +240,10 @@ class ObjectLaneCursorLog:
     lane, so the next sequence number is the count of the listed objects; the
     write is a plain put (no create-if-absent between hosts needed)."""
 
-    def __init__(self, objects: Any, prefix: str, lane: BufferLane) -> None:
+    def __init__(self, objects: Any, prefix: str, lane: "BufferLane | str") -> None:
         self.objects = objects
-        self.prefix = f"{prefix.rstrip('/')}/{LANES_DIR}/{lane.name()}/"
+        name = lane if isinstance(lane, str) else lane.name()
+        self.prefix = f"{prefix.rstrip('/')}/{LANES_DIR}/{name}/"
         self._keys: list[str] | None = None
 
     def _listed(self) -> list[str]:
@@ -263,13 +267,25 @@ class ObjectLaneCursorLog:
         keys.append(key)
 
 
-def lane_cursor_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
-    """The lane cursor log of a lane reader (``FileSampleBuffer`` with a lane; None
-    for a single reader): in the store's object API when it has one, else in the
-    store directory (committed after each line)."""
+SOLO_CURSOR = "solo{learner}"  # the cursor name of a buffer trainer without a lane
+
+
+def lane_cursor_log(buffer: Any, learner_id: int | None = None
+                    ) -> LaneCursorLog | ObjectLaneCursorLog | None:
+    """The cursor log of a buffer reader: in the store's object API when it has
+    one, else in the store directory (committed after each line).
+
+    A lane reader gets its lane's log. A reader **without** a lane gets
+    ``solo<learner_id>`` when ``learner_id`` is given (S27 G-EQ3: a single buffer
+    trainer that restarts then continues after the groups it already trained,
+    instead of reading the buffer from the first one again); None when it is not,
+    which is the behaviour every caller had before.
+    """
     lane = getattr(buffer, "lane", None)
     if lane is None:
-        return None
+        if learner_id is None:
+            return None
+        lane = SOLO_CURSOR.format(learner=int(learner_id))
     from .resume import CheckpointStore  # noqa: PLC0415
     from .sample_buffer import BUFFER_DIR  # noqa: PLC0415 - sample_buffer imports this module
 

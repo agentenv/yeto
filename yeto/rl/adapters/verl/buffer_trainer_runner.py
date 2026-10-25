@@ -160,7 +160,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
                                         wait_s=float(section.get("wait_s") or 3600.0),
                                         poll_s=float(section.get("poll_s") or 2.0),
-                                        cursor_log=lane_cursor_log(buffer),
+                                        # S27 G-EQ3: a trainer without a lane keeps its own cursor,
+                                        # so a restart continues after the groups it already trained
+                                        cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),
                                         delta_full_every=int(section.get("release_delta_full_every") or 0))

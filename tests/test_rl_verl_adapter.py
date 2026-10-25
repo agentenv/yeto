@@ -331,6 +331,8 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     meta = tmp_path / patch_verl.META_INIT[0]
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text("def build(self):\n" + patch_verl.META_INIT[1] + "        return module\n"
+                    # S27 G-EQ3: the tenth patch (the NemotronH torch-path fix), same file
+                    + patch_verl.NEMOTRON_FIX[1] + "        pass\n"
                     # S27 G-EZ2: the ninth patch's other anchors in the same file
                     "def shard(self):\n" + patch_verl.RANK0_STATE_ANCHOR
                     + "            if offload:\n" + patch_verl.PIN_ANCHOR)
@@ -342,6 +344,7 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     text = target.read_text()
     assert text.count("_yeto_after_add_lora(self, VLLM_LORA_INT_ID)") == 1
     assert meta.read_text().count('init_context, "__name__"') == 1  # replaced once, not twice
+    assert meta.read_text().count("nemotron_h_torch_fix: ") == 1  # the same for the NemotronH fix
     assert meta.read_text().count("YETO_VERL_RANK0_CHECKPOINT_DTYPE") == 2  # the hook and its error text
     assert load.read_text().count("t.is_meta") == 1
     target.write_text("nothing here\n")
