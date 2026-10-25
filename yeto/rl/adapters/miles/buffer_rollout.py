@@ -600,6 +600,12 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
         raise SampleBufferRolloutError(f"convertible rollout mode {mode!r}: expected "
                                        f"{SAMPLER} or {TRAINER}")
     previous, _MODE[CONVERTIBLE] = _MODE[CONVERTIBLE], mode
+    reader = _ACTIVE.get(TRAINER)
+    if mode == SAMPLER and reader is not None:
+        # the trainer stint is over: its read-ahead would poll the index (a Volume
+        # reload every poll) through the rollout and the next stint's start, whose
+        # store writes then fail on the remount (EPERM, GPU run s27-eg-b1)
+        reader._stop_prefetching()
     return previous
 
 

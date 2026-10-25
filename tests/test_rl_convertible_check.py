@@ -732,3 +732,58 @@ def test_a_trainer_parked_after_its_publication_holds_no_store_writer_guard():
     handle._target_rounds = 3
     sync.prepare_cut(driver, rollout_id=2, state=None)
     assert inner.prepared is not None and inner.prepared[0] == 2
+
+
+# ---------------------------------------------------------------- the next stint starts on a quiet Volume
+def test_leaving_trainer_mode_stops_the_buffer_read_ahead(tmp_path):
+    """GPU run s27-eg-b1: after its first stint the node's buffer reader kept
+    reading ahead for the next round, polling the index (a Volume reload per
+    poll) through the rollout; the node's second stint then failed creating the
+    store directory on the remounted Volume (PermissionError). Back to sampler
+    mode, the read-ahead stops."""
+    from buffer_rollout_procs import sample
+
+    from yeto.rl.adapters.miles import buffer_rollout as br
+
+    store = CheckpointStore(str(tmp_path / "store"))
+    writer = br.GroupWriter(FileSampleBuffer(store, batch_size=2), "s0")
+    for g in range(3):
+        writer.write([sample(2 * g, g, 0), sample(2 * g + 1, g, 0)], group_key=f"g{g}")
+    reader = br.BatchReader(FileSampleBuffer(store, batch_size=2), max_policy_age=2, wait_s=30.0,
+                            poll_s=0.01)
+    br.register_reader(reader)
+    try:
+        br.executor_set_mode(None, br.TRAINER)
+        taken, _ = reader.take(0, 2, current_version=0)
+        assert len(taken) == 2
+        assert reader._prefetcher is not None and reader._prefetcher.is_alive()  # waits for round 1
+        br.executor_set_mode(None, br.SAMPLER)
+        assert reader._prefetcher is None
+    finally:
+        br._ACTIVE.pop(br.TRAINER, None)
+        br.executor_set_mode(None, br.SAMPLER)
+
+
+def test_resume_controller_creates_the_store_root_under_the_writer_guard(tmp_path):
+    """The same failure from the store side: the store root is created under the
+    writer guard, so no reload of another process remounts the Volume meanwhile."""
+    from yeto.rl.engine.resume import ResumeController
+
+    events = []
+
+    class Store(CheckpointStore):
+        def hold_writer(self):
+            events.append(("hold", self.root.exists()))
+            root = self.root
+
+            class Guard:
+                def release(self):
+                    events.append(("release", root.exists()))
+
+            return Guard()
+
+        def reload(self):
+            events.append(("reload",))
+
+    ResumeController(state_dir=tmp_path / "state", store=Store(str(tmp_path / "store")))
+    assert events[:3] == [("hold", False), ("release", True), ("reload",)]
