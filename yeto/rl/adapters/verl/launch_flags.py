@@ -136,7 +136,7 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
 # Why each option above has no verl mapping yet (the launcher's refusal says it).
 NOT_MAPPED_REASONS = {
     "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
-                               "(VERL-PARITY #25)",
+                               "(VERL-PARITY #25; the island refuses it as well, train_options.verify_plan)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
     "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",

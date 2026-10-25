@@ -253,11 +253,14 @@ def _threshold_card(manifest: dict) -> str:
 
 
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
-                 slot: Any = None) -> tuple[str, str]:
+                 slot: Any = None, number_rows: bool = False) -> tuple[str, str]:
     """``data``'s train and test splits as verl parquet files. ``slot``
     (``data_split.DataSlot``, S27 task assignment): the train file keeps only the
     slot's rows, in data order, each with its row number in the unsplit data as
-    ``extra_info["yeto_data_row"]``; the validation rows stay whole."""
+    ``extra_info["yeto_data_row"]``; the validation rows stay whole.
+    ``number_rows`` (the task dispenser, S27 G-EU): every train row keeps its row
+    number, and ``root/train-dispense.jsonl`` (``task_dispense.write_rows_file``)
+    is written for the dispenser's row count and fingerprint."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
 
@@ -282,6 +285,14 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
+        elif number_rows:  # S27 G-EU: the dispenser hands out rows by number
+            if slot is not None and not slot.whole:
+                raise ValueError("a data slot and the task dispenser exclude each other")
+            from .task_dispense import ROWS_FILE, write_rows_file
+
+            write_rows_file(root / ROWS_FILE, (row for _, row in frame.iterrows()))
+            rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
+                    for number, row in enumerate(rows)]
         elif slot is not None and not slot.whole:
             rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
                     for number, row in slot.numbered(rows)]
@@ -409,10 +420,25 @@ def main(argv=None) -> int:
 
     from huggingface_hub import snapshot_download
 
+    from .task_dispense import DispenseIslandError, dispense_section, island_dispense
+    from .train_options import verify_plan
+
+    try:  # S27 G-EU (VERL-PARITY #31, #25, #26): refused paths stop before any model or data work
+        dispense = island_dispense(args, engine=engine, fully_async=bool(int(args.rl_max_policy_age or 0)),
+                                   buffer_trainer=buffer_section is not None)
+        verify = verify_plan(args, full=(args.parameter_mode == vconf.FULL_PARAMETER_MODE
+                                         or engine == megatron_engine.ENGINE_MEGATRON))
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     model_path = snapshot_download(args.model, revision=args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
-                                        slot=island_data_slot(args))
+                                        slot=island_data_slot(args), number_rows=dispense)
+    try:
+        dispense_plan = (dispense_section(args, work / "data" / "train-dispense.jsonl",
+                                          block=args.groups_per_round) if dispense else None)
+    except DispenseIslandError as error:
+        raise SystemExit(str(error)) from None
     spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
@@ -527,7 +553,10 @@ def main(argv=None) -> int:
         **({"separate": pools.to_dict()} if pools is not None else {}),  # S27 G-EK
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
-        "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
+        # S27 task assignment (rl_driver_start); "dispense": the rows come from the dispenser (G-EU)
+        "data_slot": "dispense" if dispense_plan else args.rl_data_slot,
+        **({"dispense": dispense_plan} if dispense_plan else {}),
+        **verify,  # S27 G-EU: verify_every / verify_every_round (absent when off)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),

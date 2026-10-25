@@ -253,15 +253,39 @@ class VerlIsland:
 
 # ----------------------------------------------------------------------------- ports
 class VerlRolloutPool:
-    def __init__(self, island: VerlIsland):
+    def __init__(self, island: VerlIsland, dispense=None):
         from .data_cursor import VerlDataCursor
 
         self.island = island
-        # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
-        self._cursor = VerlDataCursor(island.trainer)
+        # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        # (``task_dispense.VerlDispensedBatches``, installed on the trainer already)
+        self.dispense = dispense
+        if dispense is not None:
+            # the dispenser keeps the data position: nothing to seek (the driver's
+            # restart and rejoin paths skip a pool without a callable seek)
+            self.seek_data_cursor = None
+        else:
+            # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
+            self._cursor = VerlDataCursor(island.trainer)
 
     def data_cursor(self) -> dict[str, int]:
+        if self.dispense is not None:
+            return self.dispense.cursor()
         return self._cursor.cursor()
+
+    def commit_dispensed(self, rollout_id: int) -> dict | None:
+        """S27 G-EU (driver, after the round's sync boundary): report the round's
+        kept rows trained to the dispenser; None without one."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        return self.dispense.commit(int(rollout_id))
+
+    def close_dispensed(self) -> dict | None:
+        """S27 G-EU (driver, finished run): release every row not trained yet."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        self._dispense_closed = True
+        return self.dispense.close()
 
     def seek_data_cursor(self, cursor) -> dict[str, int]:
         landed = self._cursor.seek(cursor)
@@ -327,6 +351,9 @@ class VerlRolloutPool:
                 token_count=int(sum(lengths[i] for i in idx)),
             ))
         isl.pending = {"batch": batch, "metrics": metrics, "gen_seconds": gen_seconds}
+        # S27 G-EU: the dispensed rows of the groups the trainer gets wait for the commit
+        data_rows = (None if self.dispense is None else
+                     self.dispense.kept_round(rollout_id, {uid: len(idx) for uid, idx in groups.items()}))
         lens = sorted(lengths)
         summary = {"resp_len_mean": float(np.mean(lengths)) if lengths else None,
                    "resp_len_p95": float(lens[int(0.95 * (len(lens) - 1))]) if lens else None,
@@ -343,7 +370,7 @@ class VerlRolloutPool:
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
             batch_summary=summary, data_cursor=self.data_cursor(),
-            backend="verl",
+            backend="verl", round_data_rows=data_rows,
         )
 
     def abort(self) -> None:

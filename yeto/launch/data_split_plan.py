@@ -88,6 +88,21 @@ def _plan_data_split(args):
                            dispense_blockers=dispense_blockers(args))
 
 
+def island_backends(args) -> set[str]:
+    """The training backends of the launch: ``--rl-backend`` and every island's own
+    (rl-mixed-island-placement), when the launch has islands."""
+
+    backends = {getattr(args, "rl_backend", None) or "miles"}
+    try:
+        from .topology import rl_island_args
+
+        count = len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 0
+        backends |= {getattr(rl_island_args(args, k), "rl_backend", None) or "miles" for k in range(count)}
+    except Exception:  # noqa: BLE001 - the launch checks report a bad placement themselves
+        pass
+    return backends
+
+
 def dispense_blockers(args) -> list[str]:
     """Why this launch cannot use the task dispenser (S27 P2); empty: it can.
     ``--rl-data-split auto`` falls back to the row slots (stride) on any of
@@ -98,16 +113,14 @@ def dispense_blockers(args) -> list[str]:
     out = []
     if getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET:
         out.append(f"--rl-sync-preset {SAO_STREAMING_SYNC_PRESET} (no GPU check with the dispenser)")
-    backends = {getattr(args, "rl_backend", None) or "miles"}
-    try:  # per-island backends (rl-mixed-island-placement), when the launch has islands
-        from .topology import rl_island_args
-
-        count = len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 0
-        backends |= {getattr(rl_island_args(args, k), "rl_backend", None) or "miles" for k in range(count)}
-    except Exception:  # noqa: BLE001 - the launch checks report a bad placement themselves
-        pass
-    for backend in sorted(backends - {"miles"}):
-        out.append(f"--rl-backend {backend} (the dispenser is wired for Miles only)")
+    # S27 G-EU (VERL-PARITY #31): verl training islands of the synchronous trainer take
+    # their rows from the dispenser (adapters/verl/task_dispense.py), as Miles islands do
+    backends = island_backends(args)
+    if len(backends) > 1:
+        out.append(f"training islands of different backends ({', '.join(sorted(backends))}: their "
+                   "prompt files differ)")
+    if "verl" in backends and int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
+        out.append("verl fully_async (--rl-max-policy-age > 0: verl's rollouter draws the rows)")
     if getattr(args, "rl_single_island_no_sync", False):
         out.append("--rl-single-island-no-sync (no syncer)")
     if getattr(args, "rl_elastic", False):

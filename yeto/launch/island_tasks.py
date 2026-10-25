@@ -177,11 +177,18 @@ def _check_dispense(args, plan) -> None:
             raise ValueError(f"{DATA_SPLIT_FLAG} dispense and island round cuts "
                              f"({rl_option(name, CLI)}) exclude each other: the dispenser, not the "
                              "island cut, keeps the data position")
-    if plan.islands and (getattr(args, "rl_backend", None) or "miles") != "miles":
-        # sampler islands of either backend claim through the engine-neutral
-        # DispensedPrompts / the Miles data source; verl training islands: later
-        raise ValueError(f"{DATA_SPLIT_FLAG} dispense covers verl sampler islands, not verl "
-                         "training islands yet (Miles only)")
+    from .data_split_plan import island_backends
+
+    backends = island_backends(args)
+    if plan.islands and len(backends) > 1:
+        # S27 G-EU: a Miles island and a verl island write different prompt files, so the
+        # dispenser would refuse the second fingerprint (sampler islands claim through the
+        # engine-neutral DispensedPrompts / the Miles data source either way)
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense: the training islands run different backends "
+                         f"({', '.join(sorted(backends))}); their prompt files differ")
+    if plan.islands and "verl" in backends and int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover verl fully_async training islands "
+                         "(--rl-max-policy-age > 0: verl's rollouter draws the rows) yet")
 
 
 def dispensing_islands(args, plan) -> list[int]:
