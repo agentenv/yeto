@@ -16,8 +16,12 @@ What this module provides:
   Miles islands use, so one syncer profile covers both backends' fragments;
 * the worker-side operations a fragment needs
   (:func:`remote_manifest`, :func:`remote_export_fragment`,
-  :func:`remote_apply_fragment`), run on every actor worker through
-  ``VerlIsland.call_workers``.
+  :func:`remote_export_flat`, :func:`remote_apply_fragment`), run on every
+  actor worker through ``VerlIsland.call_workers``.  Since S27 G-EC a
+  fragment is read with :func:`remote_export_flat` (rank 0 builds the flat
+  payload, checks it finite on the device, hashes it) and every payload
+  crosses Ray as a numpy array, not a torch tensor (Ray pickles torch tensors
+  through ``torch.save``; numpy goes out of band).
 
 Two properties of the verl FSDP2 boundary, both different from Miles:
 
