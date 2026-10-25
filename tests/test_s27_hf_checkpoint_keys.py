@@ -358,7 +358,7 @@ def test_delta_releases_need_a_base_whose_files_are_readable(tmp_path):
     assert delta_chain_for(store, 0, emit=emit) is None  # the flag is off
     chain = delta_chain_for(store, 2, emit=emit)  # an empty store: the first release is full
     assert chain is not None and chain.base() is None
-    assert events[-1]["adopted"] is False and "no full release" in events[-1]["reason"]
+    assert events[-1]["adopted"] is False and "no release" in events[-1]["reason"]
 
 
 def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
@@ -378,7 +378,9 @@ def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
     group.release_memory = release_memory
     writer = VerlHfWriter(group, base, run=_run)
     writer(1, tmp_path / "out")
-    assert calls == [True]
+    # once per written file (the step after an export has to fit on the same card)
+    # plus once at the end, which is the one last_layout reports
+    assert len(calls) == 3, calls
     assert writer.last_layout["freed"] == {"reserved_before": 40, "reserved_after": 8, "workers": 2}
 
 
@@ -388,3 +390,57 @@ def test_an_export_without_a_release_memory_port_still_works(tmp_path):
     writer = VerlHfWriter(_Group(parameters, buffers), base, run=_run)
     writer(1, tmp_path / "out")
     assert writer.last_layout["freed"] is None
+
+
+def test_a_restarted_trainer_rebuilds_a_delta_release_as_its_base(tmp_path):
+    """S27 G-EQ3 (gap 20): the store's newest release is often a delta, whose
+    directory holds .ydelta files. Without a mirror the next release has to be a
+    whole checkpoint (63 GB over the cross-cloud link); with one the trainer
+    rebuilds it locally and keeps releasing deltas."""
+    from yeto.rl.engine.policy_release import PolicyReleaseStore
+    from yeto.rl.engine.release_delta import DeltaMirror
+    from yeto.rl.engine.resume import CheckpointStore
+
+    from yeto.rl.adapters.verl.buffer_ports import delta_chain_for
+    from yeto.rl.adapters.verl.merged_release import write_full_checkpoint
+
+    base = tmp_path / "base"
+    parameters, buffers = _base_checkpoint(base, files=2)
+    store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+
+    def write_v0(directory: Path) -> None:
+        for path in sorted(base.iterdir()):
+            if path.is_file():
+                (directory / path.name).write_bytes(path.read_bytes())
+
+    v0 = store.release(0, "base-hash", write_v0, buffer_selected=0)
+    chain = delta_chain_for(store, 2)
+    moved = parameters["model.embeddings.weight"].clone()
+    moved[:64] += 0.5
+    parameters["model.embeddings.weight"] = moved
+    staged = tmp_path / "staging" / "v1"
+    staged.parent.mkdir(parents=True)
+    write_full_checkpoint(VerlHfWriter(_Group(parameters, buffers), base, run=_run), staged)
+    v1 = store.release_staged(1, "v1-hash", staged, position=lambda: (4, None),
+                              delta_base=chain.base(), digest_full=True)
+    assert v1 is not None and v1.delta is not None  # the newest release is a delta
+
+    # a new process, no mirror: it cannot use that release as a base
+    events: list[dict] = []
+    plain = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+    assert delta_chain_for(plain, 2, emit=lambda n, **f: events.append(f)).base() is None
+    assert events[-1]["adopted"] is False and events[-1]["rebuilt"] is True
+
+    # the same process with a mirror: the release is rebuilt and adopted
+    events.clear()
+    mirrored = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                  mirror=DeltaMirror(tmp_path / "mirror"))
+    chain2 = delta_chain_for(mirrored, 2, emit=lambda n, **f: events.append(f))
+    assert events[-1] == {"adopted": True, "base_seq": v1.seq, "base_version": 1,
+                          "base_path": events[-1]["base_path"], "rebuilt": True}
+    adopted = chain2.base()
+    assert adopted is not None and adopted.release.path == v1.path
+    # the rebuilt directory holds the real weight files, byte for byte
+    for name in sorted(p.name for p in staged.iterdir() if p.name.endswith(".safetensors")):
+        assert _bytes(Path(adopted.directory) / name) == _bytes(staged / name), name
+    assert v0 is not None

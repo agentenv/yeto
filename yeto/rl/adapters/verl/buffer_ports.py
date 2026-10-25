@@ -119,29 +119,37 @@ def lora_release_weights(base_dir: str | Path, merge: Callable[..., dict[str, An
 def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Callable[..., None] | None = None):
     """A :class:`DeltaChain` for this trainer, started from the release the store
     already holds when that release's files are readable in the store (module
-    doc, delta releases); None when ``full_every`` is 0 (deltas off)."""
+    doc, delta releases); None when ``full_every`` is 0 (deltas off). A release
+    that is itself a delta is rebuilt first when the store has a mirror
+    (S27 G-EQ3, gap 20), so a restarted island's next release stays a delta."""
     from yeto.rl.engine.policy_release import DeltaChain
 
     if int(full_every) < 1:
         return None
     chain = DeltaChain(int(full_every))
     latest = releases.latest()
-    if latest is not None and latest.delta is None:
-        try:
-            directory = releases.resolve(latest)
-        except Exception as error:  # noqa: BLE001 -- no local base: the first release goes out whole
-            directory = None
-            if emit is not None:
-                emit("rl_policy_release_delta_base", adopted=False,
-                     reason=f"{type(error).__name__}: {error}"[:200])
-        if directory is not None and Path(directory).is_dir():
-            chain.adopt(latest, directory)
-            if emit is not None:
-                emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
-                     base_version=latest.version, base_path=str(directory))
-    elif emit is not None:
-        emit("rl_policy_release_delta_base", adopted=False,
-             reason="the store holds no full release" if latest is None else "the latest is a delta")
+    if latest is None:
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=False, rebuilt=False,
+                 reason="the store holds no release")
+        return chain
+    # A delta release is rebuilt first (S27 G-EQ3, gap 20): its own directory holds
+    # ``.ydelta`` files, which are no base, but ``PolicyReleaseStore.resolve`` with a
+    # mirror rebuilds it on local disk (Nemotron Nano: about 1 min) -- far cheaper than
+    # the whole-checkpoint upload the alternative costs (63 GB, about 2.3 h on this link).
+    rebuilt = latest.delta is not None
+    try:
+        directory = releases.resolve(latest)
+    except Exception as error:  # noqa: BLE001 -- no usable base: the next release goes out whole
+        directory = None
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=False, rebuilt=rebuilt,
+                 reason=f"{type(error).__name__}: {error}"[:200])
+    if directory is not None and Path(directory).is_dir():
+        chain.adopt(latest, directory)
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
+                 base_version=latest.version, base_path=str(directory), rebuilt=rebuilt)
     return chain
 
 
