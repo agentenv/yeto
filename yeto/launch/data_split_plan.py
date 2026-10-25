@@ -40,7 +40,35 @@ def _plan_data_split(args):
     islands, roles = _data_split_islands(args)
     return plan_data_split(getattr(args, "rl_data_split", None), islands=islands,
                            tasks=bool(getattr(args, "rl_island_tasks", None)), sample_roles=roles,
-                           external_learners=int(getattr(args, "external_learners", 0) or 0))
+                           external_learners=int(getattr(args, "external_learners", 0) or 0),
+                           dispense_blockers=dispense_blockers(args))
+
+
+def dispense_blockers(args) -> list[str]:
+    """Why this launch cannot use the task dispenser (S27 P2); empty: it can.
+    ``--rl-data-split auto`` falls back to the row slots (stride) on any of
+    these; an explicit ``dispense`` is refused on them (``island_tasks``)."""
+
+    out = []
+    backend = getattr(args, "rl_backend", None) or "miles"
+    if backend != "miles":
+        out.append(f"--rl-backend {backend} (the dispenser is wired for Miles only)")
+    if getattr(args, "rl_single_island_no_sync", False):
+        out.append("--rl-single-island-no-sync (no syncer)")
+    if getattr(args, "rl_elastic", False):
+        out.append("--rl-elastic")
+    shards = getattr(args, "syncer_shards", None)
+    if shards is not None and int(shards) > 1:
+        out.append(f"--syncer-shards {int(shards)}")
+    if (int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1
+            and not int(getattr(args, "rl_rollout_ahead", 0) or 0)):
+        out.append("Miles fully_async rollouts (--rl-max-policy-age without --rl-rollout-ahead)")
+    for flag, name in (("--rl-cut-every", "rl_cut_every"), ("--rl-cut-auto-mtbf-s", "rl_cut_auto_mtbf_s")):
+        if getattr(args, name, None) is not None:
+            out.append(f"{flag} (island round cuts keep their own data position)")
+    if getattr(args, "eval_only", False):
+        out.append("--eval-only")
+    return out
 
 
 def dispense_syncer_flags(args) -> str:

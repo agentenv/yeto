@@ -80,7 +80,8 @@ def test_dispense_options_need_dispense_and_island_flags_are_launcher_only(tmp_p
     from yeto import launcher
 
     with pytest.raises(ValueError, match="need --rl-data-split dispense"):
-        launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-passes", "1"))
+        launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "stride",
+                                        "--rl-data-passes", "1"))
     with pytest.raises(ValueError, match="set by the launcher"):
         launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-dispense"))
     with pytest.raises(ValueError, match="round cuts"):
@@ -93,9 +94,38 @@ def test_strict_and_stride_syncer_commands_carry_no_dispense_flag(tmp_path, monk
     from yeto import launcher
     from yeto.launch.syncer import syncer_command
 
-    args = _args(tmp_path, monkeypatch, TWO_ISLANDS)
+    args = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "stride")
     launcher._prepare_rl_args(args)
     assert "--dispense" not in syncer_command(args, 2)
+
+
+def test_auto_takes_the_dispenser_where_the_launch_can_use_it_else_the_row_slots(
+        tmp_path, monkeypatch, capsys):
+    """S27 G-DH: the default (auto) is the dispenser since its GPU checks; a launch
+    the dispenser does not cover falls back to the row slots and says why."""
+    from yeto import launcher
+    from yeto.launch.syncer import syncer_command
+
+    args = _args(tmp_path, monkeypatch, TWO_ISLANDS)
+    launcher._prepare_rl_args(args)
+    plan = launcher.dry_run_plan(args)
+    assert plan["data_split"]["mode"] == DISPENSE and plan["data_split"]["requested"] == "auto"
+    assert all("--rl-data-dispense" in i["learner_command"] for i in plan["island_requests"])
+    assert " --dispense " in syncer_command(args, 2)
+    assert "data split (dispense)" in capsys.readouterr().err
+    cut = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-cut-every", "2",
+                "--rl-checkpoint-store", str(tmp_path / "store"))
+    launcher._prepare_rl_args(cut)
+    plan = launcher.dry_run_plan(cut)
+    assert plan["data_split"]["mode"] == STRIDE
+    assert "no dispenser: --rl-cut-every" in plan["data_split"]["reason"]
+    assert [_flag(i["learner_command"], "--rl-data-slot") for i in plan["island_requests"]] == ["0/2", "1/2"]
+    assert "--dispense" not in syncer_command(cut, 2)
+    assert "no dispenser: --rl-cut-every" in capsys.readouterr().err
+    # one island: every row, no dispenser
+    single = _args(tmp_path, monkeypatch, "modal:1xh100")
+    launcher._prepare_rl_args(single)
+    assert launcher.dry_run_plan(single)["data_split"]["mode"] != DISPENSE
 
 
 # --------------------------------------------------------------- island side
