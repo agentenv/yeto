@@ -35,7 +35,7 @@ from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 from . import config as vconf
 from . import megatron_engine
 from . import run_config_rules
-from .pins import VERL_COMMIT, VERL_ROOT, expected_versions_for_engine
+from .pins import VERL_COMMIT, expected_versions_for_engine, verl_root
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -342,14 +342,25 @@ def _ray_resources(address: str) -> dict:
     return {}
 
 
-def island_gpus(ray_info: Mapping[str, Any]) -> int:
-    """GPUs of this single-node island: the island-local Ray's ``GPU`` resource
-    (the launcher starts it with every card of the container), else 1.
+def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None) -> int:
+    """Cards of this single-node island: the island-local Ray's accelerator
+    resource (the launcher starts it with every card of the container), else 1.
 
     S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
-    trained on one rank (e9-g3-a); every card now joins the FSDP2 group."""
+    trained on one rank (e9-g3-a); every card now joins the FSDP2 group.
+
+    S27 G-EQ2 (npu1): the resource is named ``GPU`` on CUDA and ``NPU`` on
+    Ascend (``catalog.ray_accelerator_resource``), so an 8-card Ascend island
+    used to read 1 here and train on one rank. Either key is read, so a node
+    whose Ray reports the other name still gives its cards."""
+    from yeto.hw.catalog import ray_accelerator_resource
+
     resources = ray_info.get("after") or ray_info.get("before") or {}
-    return max(1, int(resources.get("GPU", 0)))
+    resource = ray_accelerator_resource(device_family)
+    count = int(resources.get(resource, 0))
+    if not count:  # the other family's spelling, when this node's family was read wrong
+        count = max(int(resources.get(name, 0)) for name in ("GPU", "NPU"))
+    return max(1, count)
 
 
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
@@ -378,9 +389,14 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself (V2 b).
     # Inside a Modal container the launcher's island Ray is the only Ray on the node.
     info["stop_rc"] = subprocess.run(["ray", "stop", "--force"], timeout=180).returncode
-    gpus = int(before.get("GPU", 0))
+    # S27 G-EQ2: the cards come back under this node's own resource name; on an
+    # Ascend node that is --resources '{"NPU": n}', not --num-gpus (catalog).
+    from yeto.hw.catalog import ray_accelerator_resource, ray_start_accelerator_flag
+
+    resource = ray_accelerator_resource()
+    gpus = int(before.get(resource, 0)) or max(int(before.get(name, 0)) for name in ("GPU", "NPU"))
     cmd = (f'ray start --head --node-ip-address={host} --port={port} --num-cpus={min_cpus} '
-           f'--num-gpus={gpus} --include-dashboard=false --temp-dir={temp}')
+           f'{ray_start_accelerator_flag(gpus)} --include-dashboard=false --temp-dir={temp}')
     info["restart"] = cmd
     info["restart_rc"] = subprocess.run(cmd, shell=True).returncode
     info["after"] = _ray_resources(address)
@@ -627,7 +643,7 @@ def main(argv=None) -> int:
         start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
     try:
         with log.open("a") as handle:
-            proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
+            proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in proc.stdout:
                 sys.stdout.write(line)

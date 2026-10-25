@@ -6,6 +6,9 @@ from the fork's own ``uv.lock`` (``uv sync --frozen --all-packages --extra vllm
 --extra fsdp``), the same recipe as upstream ``docker/Dockerfile.uv.cu130``.
 """
 
+import os
+from pathlib import Path
+
 VERL_REPOSITORY = "https://github.com/michaellchung/verl"
 VERL_COMMIT = "acad9875a8bdfc81afbcb0a50d146b2630f44093"
 VERL_BASE_IMAGE = "nvidia/cuda:13.0.2-devel-ubuntu24.04"
@@ -77,6 +80,38 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # ``--rl-image`` value that selects the Modal-built verl image (no registry
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
+
+# S27 G-EQ2 (npu1): where the verl checkout lives inside the island's image.
+# The island has to start verl with this directory as the working directory,
+# because verl's fully_async config names its search path relative to it
+# (``fully_async_ppo_trainer.yaml``: ``hydra.searchpath:
+# - file://verl/trainer/config``). Our Modal-built image puts the checkout at
+# VERL_ROOT; a vendor image does not (the official Ascend verl image
+# quay.nju.edu.cn/ascend/verl:verl-8.5.2-910b-ubuntu22.04-py3.11-qwen3-5 has it
+# at /verl), and from the wrong directory hydra fails with "Could not load
+# 'ppo_trainer'". So the directory is resolved at run time, not assumed.
+VERL_ROOT_ENV = "YETO_VERL_ROOT"
+
+
+def verl_root() -> str | None:
+    """The directory to run verl from, or None when none can be found.
+
+    In order: ``$YETO_VERL_ROOT``, the built-in :data:`VERL_ROOT`, then the
+    parent of the importable ``verl`` package (a vendor image). Only a
+    directory that actually holds ``verl/trainer/config`` is returned, so a
+    wrong guess becomes None (verl's own default) instead of a broken cwd."""
+    candidates = [os.environ.get(VERL_ROOT_ENV), VERL_ROOT]
+    try:
+        import verl  # noqa: PLC0415 - absent outside the island image
+
+        if getattr(verl, "__file__", None):
+            candidates.append(str(Path(verl.__file__).resolve().parents[1]))
+    except Exception:  # noqa: BLE001 - import errors are a missing candidate, not a failure
+        pass
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "verl" / "trainer" / "config").is_dir():
+            return candidate
+    return None
 
 
 # --- Megatron engine image (S27 G-DC, V8) ------------------------------------

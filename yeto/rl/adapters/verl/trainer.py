@@ -13,34 +13,60 @@ import json
 import os
 import time
 
-from verl.trainer.ppo.v1.trainer_base import register_trainer
-from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
-
 from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 
+# S27 G-EQ2 (npu1): ``verl.trainer.ppo.v1`` is the user's fork only. A vendor
+# verl build -- the official Ascend image
+# quay.nju.edu.cn/ascend/verl:verl-8.5.2-910b-ubuntu22.04-py3.11-qwen3-5 ships
+# verl 0.8.0.dev -- has no v1 package, so importing it at module level took the
+# whole module down and with it ``run_fully_async_island``, which does not use
+# the sync trainer at all. The sync island still needs it, and says so when it
+# is missing (``require_sync_trainer``), instead of failing as an ImportError in
+# an unrelated module. Everything else the buffer trainer island needs
+# (fully_async_policy, separation.utils, core_algos, DataProto) is in both builds.
+try:
+    from verl.trainer.ppo.v1.trainer_base import register_trainer
+    from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 
-@register_trainer("yeto_sync")
-class YetoSyncTrainer(PPOTrainerSync):
-    yeto_criteria_sink = None
+    SYNC_TRAINER_IMPORT_ERROR: ImportError | None = None
+except ImportError as error:  # vendor verl build without the fork's v1 trainer
+    SYNC_TRAINER_IMPORT_ERROR = error
+    register_trainer = None
+    PPOTrainerSync = None
 
-    def on_init_end(self):  # the first publication is the driver's (policy version 0)
-        return None
 
-    def on_step_end(self):  # publication happens after the outer sync (driver)
-        return None
+def require_sync_trainer() -> None:
+    """Refuse a sync island on a verl build without the fork's v1 sync trainer."""
+    if SYNC_TRAINER_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "这个 verl 版本没有 verl.trainer.ppo.v1（分叉独有）："
+            f"{SYNC_TRAINER_IMPORT_ERROR}。同步岛需要它；"
+            "缓冲训练岛（--rl-sample-role trainer）和 fully_async 岛不需要")
 
-    def _compute_old_log_prob(self, batch, metrics):
-        batch = super()._compute_old_log_prob(batch, metrics)
-        sink = self.yeto_criteria_sink
-        if sink is not None:
-            from .ports_impl import criteria_from_trainer_batch
 
-            criteria_from_trainer_batch(sink, batch)
-            for key in ("abs_diff", "k3", "tis_clipfrac", "signed_mean"):
-                value = sink.last_criteria.get(key)
-                if isinstance(value, float):
-                    metrics[f"yeto_mismatch/{key}"] = value
-        return batch
+if SYNC_TRAINER_IMPORT_ERROR is None:
+    @register_trainer("yeto_sync")
+    class YetoSyncTrainer(PPOTrainerSync):
+        yeto_criteria_sink = None
+
+        def on_init_end(self):  # the first publication is the driver's (policy version 0)
+            return None
+
+        def on_step_end(self):  # publication happens after the outer sync (driver)
+            return None
+
+        def _compute_old_log_prob(self, batch, metrics):
+            batch = super()._compute_old_log_prob(batch, metrics)
+            sink = self.yeto_criteria_sink
+            if sink is not None:
+                from .ports_impl import criteria_from_trainer_batch
+
+                criteria_from_trainer_batch(sink, batch)
+                for key in ("abs_diff", "k3", "tis_clipfrac", "signed_mean"):
+                    value = sink.last_criteria.get(key)
+                    if isinstance(value, float):
+                        metrics[f"yeto_mismatch/{key}"] = value
+            return batch
 
 
 def _capabilities(fingerprint: str):
@@ -205,6 +231,7 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
 
 
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
+    require_sync_trainer()  # S27 G-EQ2: a vendor verl build has no v1 sync trainer
     from verl.utils.skip import SkipManager
     from verl.utils.tracking import Tracking
 
