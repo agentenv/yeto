@@ -75,6 +75,8 @@ def parse_args(argv):
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
+    # S27 G-EV (VERL-PARITY #10): the separate-mode island generates one batch ahead
+    p.add_argument("--rl-rollout-ahead", type=int, default=0)
     # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
     # the engine sampler island, yeto.rl.engine.engine_sampler). --rl-resume-store
     # names the buffer's store there, and the round-cut store otherwise (N7.6b)
@@ -102,6 +104,11 @@ def parse_args(argv):
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
     p.add_argument("--rl-sample-lanes", type=int, default=None)
+    # S27 G-EV: a relay trainer (spot samplers through the head's sample relay,
+    # .relay_trainer) and the layout board for the spot subscribers (island 0)
+    p.add_argument("--rl-sample-relay", action="store_true")
+    p.add_argument("--rl-sample-relay-prefetch", type=int, default=None)
+    p.add_argument("--rl-spot-subscribers", type=int, default=0)
     # N7.6b round cuts (same flags as the Miles island)
     p.add_argument("--rl-resume-state-dir", default=None)
     p.add_argument("--rl-cut-every", type=int, default=None)
@@ -253,11 +260,14 @@ def _threshold_card(manifest: dict) -> str:
 
 
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
-                 slot: Any = None) -> tuple[str, str]:
+                 slot: Any = None, number_rows: bool = False) -> tuple[str, str]:
     """``data``'s train and test splits as verl parquet files. ``slot``
     (``data_split.DataSlot``, S27 task assignment): the train file keeps only the
     slot's rows, in data order, each with its row number in the unsplit data as
-    ``extra_info["yeto_data_row"]``; the validation rows stay whole."""
+    ``extra_info["yeto_data_row"]``; the validation rows stay whole.
+    ``number_rows`` (the task dispenser, S27 G-EU): every train row keeps its row
+    number, and ``root/train-dispense.jsonl`` (``task_dispense.write_rows_file``)
+    is written for the dispenser's row count and fingerprint."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
 
@@ -282,6 +292,14 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
+        elif number_rows:  # S27 G-EU: the dispenser hands out rows by number
+            if slot is not None and not slot.whole:
+                raise ValueError("a data slot and the task dispenser exclude each other")
+            from .task_dispense import ROWS_FILE, write_rows_file
+
+            write_rows_file(root / ROWS_FILE, (row for _, row in frame.iterrows()))
+            rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
+                    for number, row in enumerate(rows)]
         elif slot is not None and not slot.whole:
             rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
                     for number, row in slot.numbered(rows)]
@@ -367,6 +385,7 @@ def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
     buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
+    spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
@@ -409,16 +428,31 @@ def main(argv=None) -> int:
 
     from huggingface_hub import snapshot_download
 
+    from .task_dispense import DispenseIslandError, dispense_section, island_dispense
+    from .train_options import debug_plan, refuse_unmapped_argv, verify_plan
+
+    try:  # S27 G-EU (VERL-PARITY #31, #25, #26): refused paths stop before any model or data work
+        dispense = island_dispense(args, engine=engine, buffer_trainer=buffer_section is not None)
+        full_mode = args.parameter_mode == vconf.FULL_PARAMETER_MODE or engine == megatron_engine.ENGINE_MEGATRON
+        refuse_unmapped_argv(ignored, full=full_mode)
+        verify = {**verify_plan(args, full=full_mode), **debug_plan(args)}
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     model_path = snapshot_download(args.model, revision=args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
-                                        slot=island_data_slot(args))
+                                        slot=island_data_slot(args), number_rows=dispense)
+    try:
+        dispense_plan = (dispense_section(args, work / "data" / "train-dispense.jsonl",
+                                          block=args.groups_per_round) if dispense else None)
+    except DispenseIslandError as error:
+        raise SystemExit(str(error)) from None
     spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
     chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
     max_prompt = 512
-    limit = int(args.rl_max_policy_age or 0)
+    ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None
     if engine == megatron_engine.ENGINE_MEGATRON:  # S27 G-DC: verl Megatron island
@@ -429,10 +463,15 @@ def main(argv=None) -> int:
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
-        if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
-            raise SystemExit("verl 全参数岛只接同步路径：不支持 --rl-max-policy-age > 0、"
-                             "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
+        if full and args.rl_rollout_quant_tier:
+            raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
         pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
+        if pools is not None and buffer_section is not None:  # S27 G-EW: no rollout on a buffer trainer
+            raise SystemExit("verl 全参数缓冲训练岛（--rl-sample-role trainer）不接 --rl-placement fixed-partition："
+                             "它没有 rollout 卡，采样岛生成")
+        if full and limit and buffer_section is None and pools is None:  # S27 G-EV (VERL-PARITY #11)
+            raise SystemExit("verl 全参数 fully_async 岛（--rl-max-policy-age > 0）需要 --rl-placement fixed-partition "
+                             "--rl-rollout-gpus N：rollouter 在自己的卡上生成")
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
@@ -468,7 +507,7 @@ def main(argv=None) -> int:
     if megatron is not None:
         asserted_keys = megatron_engine.ASSERTED_KEYS
         resume, store_note = megatron_resume(args, resume)
-    elif pools is not None:  # S27 G-EK: the FSDP2 island in verl's separate mode
+    elif pools is not None and not limit:  # S27 G-EK: the FSDP2 island in verl's separate mode
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
 
         asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
@@ -501,7 +540,11 @@ def main(argv=None) -> int:
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
-        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
+        before = asserted_keys
+        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync, pools=pools)
+        if full:  # S27 G-EV: a full-parameter island keeps its training options' asserted keys
+            asserted_keys = tuple(dict.fromkeys((*asserted_keys, *before)))
+        pools = None  # S27 G-EV: the fully_async path places its own pools; not verl's separate mode
         append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
@@ -527,10 +570,14 @@ def main(argv=None) -> int:
         **({"separate": pools.to_dict()} if pools is not None else {}),  # S27 G-EK
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
-        "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
+        # S27 task assignment (rl_driver_start); "dispense": the rows come from the dispenser (G-EU)
+        "data_slot": "dispense" if dispense_plan else args.rl_data_slot,
+        **({"dispense": dispense_plan} if dispense_plan else {}),
+        **verify,  # S27 G-EU: verify_every / verify_every_round / debug_dump (absent when off)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
-        "max_policy_age": limit, "fully_async": bool(limit),
+        "max_policy_age": int(args.rl_max_policy_age or 0), "fully_async": bool(limit),
+        **({"rollout_ahead": ahead} if ahead else {}),  # S27 G-EV: separate.wire_rollout_ahead
         "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
@@ -544,6 +591,7 @@ def main(argv=None) -> int:
     workdir = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = workdir + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["YETO_VERL_PLAN"] = str(plan_path)
+    env.update(spot_env)
     if args.rl_echo_events:  # tape lines also on stdout (head launcher / relaunch-proof copy)
         from yeto.rl.event_echo import ECHO_ENV
 
@@ -570,6 +618,38 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def rollout_ahead_of(args) -> tuple[int, int]:
+    """S27 G-EV (VERL-PARITY #10): ``(--rl-rollout-ahead, the fully_async limit)``.
+
+    Rollout ahead runs verl's separate mode with its synchronous trainer: the
+    rollout servers generate round r+1 with the published policy r while the
+    trainer trains round r (``separate``, ``VerlRolloutPool.start_generate``).
+    ``--rl-max-policy-age`` then bounds that one-version lag and does not select
+    the fully_async path (the limit returned is 0). The launcher refuses the same
+    combinations first (``policy_age.rollout_ahead_problems`` and the engine-neutral
+    ``rollout_ahead.launch_problems``); the island refuses them again here."""
+    from .policy_age import MAX_ROLLOUT_AHEAD
+
+    ahead = int(getattr(args, "rl_rollout_ahead", 0) or 0)
+    limit = int(args.rl_max_policy_age or 0)
+    if not ahead:
+        return 0, limit
+    problems = []
+    if not 0 < ahead <= MAX_ROLLOUT_AHEAD:
+        problems.append(f"--rl-rollout-ahead 0..{MAX_ROLLOUT_AHEAD}")
+    if args.parameter_mode != vconf.FULL_PARAMETER_MODE:
+        problems.append("--tuning full (a LoRA island's fixed partition is the fully_async path)")
+    if (args.rl_placement or "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition (the rollout servers on their own cards)")
+    if limit < ahead:
+        problems.append(f"--rl-max-policy-age >= {ahead} (every sample lags {ahead} version)")
+    if args.rl_sample_role:
+        problems.append("no --rl-sample-role")
+    if problems:
+        raise SystemExit("verl 岛的 --rl-rollout-ahead 需要：" + "; ".join(problems))
+    return ahead, 0
 
 
 def fsdp_separate_pools(args, ray_info: dict):
@@ -612,7 +692,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)
-    if pools is not None:
+    if pools is not None and not limit:  # limit > 0: the fully_async pools (fully_async_plan)
         from .separate import with_separate_pools
 
         overrides = with_separate_pools(overrides, pools)
@@ -656,8 +736,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         problems.append("--rl-single-island-no-sync (outer sync is not wired)")
     if (args.rl_placement or "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
-    if int(args.rl_max_policy_age or 0) != 0:
-        problems.append("--rl-max-policy-age 0 (the fully_async path is not wired)")
+    if int(args.rl_max_policy_age or 0) != 0 and not int(args.rl_rollout_ahead or 0):
+        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the fully_async path is not wired)")
     if args.rl_sample_role or args.rl_rollout_quant_tier:
         problems.append("no --rl-sample-role / --rl-rollout-quant-tier")
     if args.rl_data_slot:
@@ -764,7 +844,42 @@ def sample_buffer_section(args) -> dict | None:
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
-def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
+def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
+    """S27 G-EV (SPOT-ROLLOUT.md §12.9 item 1): the environment of the spot-rollout
+    channel on a verl island ({} when off; ``YETO_`` variables reach verl's Ray actors).
+
+    * ``--rl-spot-subscribers N``: island 0 publishes its fragment layout on the relay
+      board (the engine-neutral stream does it, ``layout_manifest.maybe_publish``);
+    * ``--rl-sample-relay`` on a full-parameter buffer trainer: the relay variables
+      (``trainer_relay_env``); the buffer trainer then reads the relay
+      (``relay_trainer``). Any other island refuses it (it would be ignored)."""
+    env: dict[str, str] = {}
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
+        from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
+
+        if args.parameter_mode != vconf.FULL_PARAMETER_MODE or args.rl_single_island_no_sync:
+            raise SystemExit("--rl-spot-subscribers 需要同步的 verl 全参数岛（订阅者收合并后的全参数分片）")
+        env[PUBLISH_ENV] = "1"
+    if getattr(args, "rl_sample_relay", False):
+        from yeto.rl.spot_rollout.relay_buffer import trainer_relay_env
+
+        from .full_parameter_stream import syncer_addresses
+        from .relay_trainer import RELAY_SECTION_KEY
+
+        if (buffer_section is None or args.parameter_mode != vconf.FULL_PARAMETER_MODE
+                or args.rl_single_island_no_sync or not args.syncer):
+            raise SystemExit("--rl-sample-relay 只接同步的 verl 全参数缓冲训练岛（--rl-sample-role trainer，"
+                             "全参数，有 syncer）")
+        addresses = syncer_addresses(args.syncer)
+        if len(addresses) != 1:
+            raise SystemExit("--rl-sample-relay 需要不分片的 syncer（--syncer-shards 1）")
+        buffer_section[RELAY_SECTION_KEY] = {"channel": int(args.learner_id)}
+        env.update(trainer_relay_env(addresses[0], int(args.learner_id), groups_per_round=int(args.groups_per_round),
+                                     prefetch=args.rl_sample_relay_prefetch))
+    return env
+
+
+def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *, pools=None):
     """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
     and a TIS correction) so a wrong spec fails before verl starts.
@@ -786,8 +901,11 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     profile = execution_profile_for(spec, limit, groups_per_round=args.groups_per_round,
                                     samples_per_group=args.samples_per_group, sync=sync)
     check_algorithm_contract(profile, spec)
+    # S27 G-EV (VERL-PARITY #11): a full-parameter island's pools from the launcher's
+    # fixed-partition flags (separate.pools_from_args); a LoRA island keeps 1 + 1
+    sizes = {} if pools is None else {"rollout_gpus": pools.rollout_gpus, "trainer_gpus": pools.trainer_gpus}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
-                                    rounds=args.global_rounds)
+                                    rounds=args.global_rounds, **sizes)
     out = apply_to_overrides(out, correction_mapping(spec))
     from yeto.hw.catalog import device_family
 

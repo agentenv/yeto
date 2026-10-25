@@ -696,8 +696,10 @@ def _prepare_node_inventory(args) -> None:
     args.rl_node_inventory_nodes = load_inventory(path)
 
 
-def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None:
-    """--rl-rollout-ahead (``yeto.rl.engine.rollout_ahead``), refused before any cloud work."""
+def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int,
+                         backend_problems=None) -> None:
+    """--rl-rollout-ahead (``yeto.rl.engine.rollout_ahead``), refused before any cloud work.
+    ``backend_problems(args)``: the backend's own rules on top (verl: separate mode only)."""
     from ..rl.engine.rollout_ahead import FLAG, launch_problems
 
     ahead = getattr(args, "rl_rollout_ahead", 0) or 0
@@ -720,6 +722,8 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None
                          and not bool(getattr(args, "rl_checkpoint_store_export_only", False)))),
         overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
     )
+    if ahead and callable(backend_problems):
+        problems += backend_problems(args)
     if problems:
         raise ValueError(f"{FLAG} {ahead} requires " + "; ".join(problems))
 
@@ -859,7 +863,8 @@ def _prepare_rl_args(
                    custom_generate=getattr(args, "custom_generate_function_path", None),
                    custom_agent=getattr(args, "custom_agent_function_path", None))
     _check_rollout_ahead(args, max_policy_age=max_policy_age,
-                         backend_max=getattr(policy_age_module, "MAX_ROLLOUT_AHEAD", 0))
+                         backend_max=getattr(policy_age_module, "MAX_ROLLOUT_AHEAD", 0),
+                         backend_problems=getattr(policy_age_module, "rollout_ahead_problems", None))
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
     elif args.over_sampling_batch_size < args.rollout_batch_size:

@@ -55,6 +55,11 @@ def add_island_flags(parser) -> None:
         ("--rl-activation-recompute", {"action": "store_true"}),
         ("--rl-observe-timeline", {"action": "store_true"}),
         ("--rl-resource-sample-interval", {"type": float, "default": None}),
+        # S27 G-EU (VERL-PARITY #25, #26): the publication checks (verify_plan)
+        ("--rl-verify-every-round", {"action": "store_true"}),
+        ("--rl-verify-every", {"type": int, "default": None}),
+        # S27 G-EU (VERL-PARITY #35): Miles' debug dump (debug_plan)
+        ("--rl-debug-dump", {"action": "store_true"}),
     ):
         if flag not in parser._option_string_actions:
             parser.add_argument(flag, **kwargs)
@@ -131,3 +136,99 @@ def wire_observation(driver: Any, plan: dict) -> None:
     for key in ("heartbeat_interval_s", "resource_sample_interval_s"):
         if plan.get(key):
             setattr(driver, key, float(plan[key]))
+
+
+# S27 G-EU (VERL-PARITY #25): why a full-parameter verl island refuses --rl-verify-every-round
+VERIFY_EVERY_ROUND_REFUSAL = (
+    "--rl-verify-every-round: a full-parameter verl publication does not read vLLM's weights back "
+    "(VERL-PARITY #25; verl's update_weights / NCCL checkpoint engine report no per-tensor checksum, "
+    "and the LoRA read-back hook vllm_readback reads a registered adapter only). Every round already "
+    "checks the training/rollout log-prob gap (the criteria); drop the option")
+
+
+def verify_plan(args: Any, *, full: bool) -> dict[str, Any]:
+    """The plan keys of the publication checks (absent when off), as Miles' island
+    reads them (``adapters/miles/island_entry.py``, S27 C5):
+
+    * ``--rl-verify-every-round``: a LoRA island verifies every publication anyway
+      (the driver hashes the adapter, ``VerlPublisher`` reads vLLM's copy back), so
+      the key only records it; a full-parameter island (FSDP2 or Megatron) refuses
+      it (:data:`VERIFY_EVERY_ROUND_REFUSAL`);
+    * ``--rl-verify-every N`` (a no-sync island, ``run_flags.check_verify_every``):
+      a full-parameter island hashes its policy on the first, every N-th, the last
+      and every cut round only (``driver.verify_every``, :func:`wire_verify`); a
+      LoRA island has nothing to skip (its adapter digest is small and every
+      publication is read back), so the option is recorded and a warning printed.
+    Raises ValueError on a refused combination."""
+
+    out: dict[str, Any] = {}
+    every_round = bool(getattr(args, "rl_verify_every_round", False))
+    every = getattr(args, "rl_verify_every", None)
+    if every is not None:
+        from yeto.rl.engine.run_flags import check_verify_every
+
+        check_verify_every(args)
+    if every_round:
+        if full:
+            raise ValueError(VERIFY_EVERY_ROUND_REFUSAL)
+        out["verify_every_round"] = True
+    if every is not None:
+        if full:
+            out["verify_every"] = int(every)
+        else:
+            note = (f"--rl-verify-every {int(every)}: a verl LoRA island verifies every publication "
+                    "(adapter digest + vLLM read-back); nothing is skipped")
+            import sys
+
+            print(f"[yeto-verl] WARNING: {note}", file=sys.stderr, flush=True)
+            out["verify_every_note"] = note
+    return out
+
+
+def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
+    """The driver side of :func:`verify_plan` (nothing when the plan has none)."""
+
+    if plan.get("verify_every_round"):
+        driver.verify_every_round = True
+    every = plan.get("verify_every")
+    if every is not None:
+        driver.verify_every = int(every)
+        allow = getattr(policy_state, "allow_unverified_rounds", None)
+        if not callable(allow):
+            raise ValueError("--rl-verify-every: this policy state cannot skip its digest")
+        allow()
+
+
+def debug_plan(args: Any) -> dict[str, Any]:
+    """S27 G-EU (VERL-PARITY #35): ``--rl-debug-dump`` as on a Miles island, the
+    round's rollout samples and train data next to the event tape: the island
+    already writes the log-prob tensors of every step (``verl-dump-<id>-stepNNN.pt``,
+    the mismatch criteria); with the option every round also writes
+    ``verl-debug-<id>-rNNNN.pt`` (uid, prompt and response tokens, reward, advantage
+    and the response mask, read from the transfer queue after the advantage step;
+    ``ports_impl.debug_dump``). Absent when off."""
+
+    return {"debug_dump": True} if getattr(args, "rl_debug_dump", False) else {}
+
+
+def wire_debug(island: Any, plan: dict) -> None:
+    """The trainer side of :func:`debug_plan` (``VerlTrainerGroup.train_step`` reads it)."""
+
+    island.debug_dump = bool(plan.get("debug_dump"))
+
+
+def refuse_unmapped_argv(ignored: Sequence[str], *, full: bool) -> None:
+    """S27 G-EU: a full-parameter island refuses the Miles options it has no mapping
+    for when they reach it anyway (the launcher checks them on a synced full-parameter
+    preset only; a no-sync island, e.g. the Megatron island, got them dropped by
+    ``parse_known_args``). Raises ValueError with each option's reason."""
+
+    if not full:
+        return
+    from .launch_flags import NOT_MAPPED_REASONS
+
+    seen = [option for option in NOT_MAPPED_REASONS
+            if any(token == option or token.startswith(option + "=") for token in ignored)]
+    if seen:
+        raise ValueError("verl full-parameter island: no mapping for " + "; ".join(
+            f"{option} ({NOT_MAPPED_REASONS[option]})" for option in seen))

@@ -117,13 +117,17 @@ def test_a_missing_layout_hash_names_the_verl_planner():
 def test_verl_problems_cover_the_island_refusals():
     from types import SimpleNamespace
 
-    args = SimpleNamespace(rl_placement="standby-only", rl_sample_role="trainer", rl_max_policy_age=2,
+    # S27 G-EW: synced buffer trainers (--rl-sample-role trainer) are accepted (VERL-PARITY #14,
+    # test_s27_verl_sample_role.py), so this island generates its own samples
+    args = SimpleNamespace(rl_placement="standby-only", rl_max_policy_age=2,
                            rl_rollout_quant_tier=1, expert_full_count=2, rl_peer_recovery=True,
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))
-    for needle in ("--rl-placement colocated", "--rl-sample-role trainer", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
-                   "--expert-full-count"):
+    # S27 G-EV: a limit > 0 runs on its own rollout cards (VERL-PARITY #10 / #11)
+    for needle in ("--rl-placement colocated", "--rl-placement fixed-partition with --rl-max-policy-age > 0",
+                   "--rl-rollout-quant-tier", "--expert-full-count"):
         assert needle in problems, needle
+    assert "--rl-sample-role" not in problems
     assert "--rl-peer-recovery" not in problems  # S27 G-ED: the verl stream recovers from a peer
 
 
@@ -150,7 +154,8 @@ def test_the_async_mode_island_argv_reaches_the_verl_stream(model_dir):
         parsed, ignored = island_entry.parse_args(argv)
         assert _flags(ignored) <= MILES_ONLY, _flags(ignored) - MILES_ONLY
         assert parsed.parameter_mode == "full" and parsed.syncer_profile_sha256 == profile
-        assert parsed.rl_data_slot == f"{learner_id}/2"
+        # S27 G-EU: the default split of verl training islands is the task dispenser
+        assert parsed.rl_data_dispense and parsed.rl_data_slot is None
         section = vfs.plan_section(parsed, _run_dict(), model_path=str(model_dir), sync="strict",
                                    algorithm_spec_sha256="a" * 64)["full_parameter"]
         assert section["async_rounds"] and section["local_init"] and section["final_cut"] == "ack"

@@ -1159,25 +1159,8 @@ class DispensedPrompts(DispensedRows):
         """Open the island's connection (``config``: ``address``, ``learner_id``,
         ``seed``, ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for
         the streams) and start taking rows."""
-        rows, digest = file_fingerprint(path)
-        mix, labels = config.get("mix"), config.get("labels")
-        by_label = bool(config.get("by_label")) or bool(labels)
-        table = None
-        accept = None
-        if mix or by_label:
-            table = StreamTable.from_prompts(path, mix=list(mix) if mix else None, by_label=by_label)
-            accept = table.accept(list(labels)) if labels else None
-            if table.single and accept is None:
-                table = None
-        connect = connect or tcp_connector(
-            str(config["address"]), learner_id=int(config["learner_id"]), rows=rows, fingerprint=digest,
-            key=key, streams=None if table is None else table.decl(), accept=accept)
-        tasks = TaskSource(connect=connect, block=int(groups_per_round),
-                           prefetch_blocks=int(config.get("prefetch_blocks", 2) or 2),
-                           incarnation=member_incarnations(environ))
-        seed = int(config.get("seed", 0) or 0)
-        positions = PositionMap(rows, seed=seed) if table is None else PositionMap(seed=seed, table=table)
-        tasks.start()
+        tasks, positions = open_task_source(path, config, block=int(groups_per_round), key=key,
+                                            connect=connect, incarnation=member_incarnations(environ))
         try:
             return cls(path, tasks, positions, input_key=input_key, label_key=label_key,
                        groups_per_round=groups_per_round, render=render)
@@ -1210,6 +1193,39 @@ class DispensedPrompts(DispensedRows):
                                         metadata={"row": index, DISPENSE_POSITION_KEY: int(position)}))
                 self.drawn += 1
         return items
+
+
+def open_task_source(path: str | os.PathLike[str], config: Mapping[str, Any], *, block: int,
+                     key: bytes | None = None, connect: Callable[[int], DispenseConnection] | None = None,
+                     incarnation: Callable[[], int] | None = None,
+                     emit: Callable[..., None] | None = None) -> tuple[TaskSource, PositionMap]:
+    """The started :class:`TaskSource` and the :class:`PositionMap` of one island
+    process whose rows are the lines of the prompt file ``path`` (row count and
+    fingerprint from the file). ``config``: ``address``, ``learner_id``, ``seed``,
+    ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for the streams
+    (S27 P3). Shared by the engine sampler (:class:`DispensedPrompts`, S27 P4) and
+    the verl training island (``adapters.verl.task_dispense``). ``incarnation``:
+    the holder's incarnation source (None: a new random one per process)."""
+    rows, digest = file_fingerprint(path)
+    mix, labels = config.get("mix"), config.get("labels")
+    by_label = bool(config.get("by_label")) or bool(labels)
+    table = None
+    accept = None
+    if mix or by_label:
+        table = StreamTable.from_prompts(path, mix=list(mix) if mix else None, by_label=by_label)
+        accept = table.accept(list(labels)) if labels else None
+        if table.single and accept is None:
+            table = None
+    connect = connect or tcp_connector(
+        str(config["address"]), learner_id=int(config["learner_id"]), rows=rows, fingerprint=digest,
+        key=key, streams=None if table is None else table.decl(), accept=accept)
+    tasks = TaskSource(connect=connect, block=int(block),
+                       prefetch_blocks=int(config.get("prefetch_blocks", 2) or 2),
+                       incarnation=incarnation, emit=emit)
+    seed = int(config.get("seed", 0) or 0)
+    positions = PositionMap(rows, seed=seed) if table is None else PositionMap(seed=seed, table=table)
+    tasks.start()
+    return tasks, positions
 
 
 def tcp_connector(address: str | tuple[str, int], *, learner_id: int, rows: int, fingerprint: bytes,

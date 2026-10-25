@@ -302,7 +302,7 @@ ASYNC_FULL = ("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-par
               "--rl-sync-full-parameter-rounds", "async")
 UNSUPPORTED = {
     # path the dispenser does not cover -> extra launch args (2 islands each)
-    "verl": ("--rl-backend", "verl"),
+    # S27 G-EU: verl training islands take the dispenser now (tests/test_s27_verl_dispense.py)
     "miles_fully_async": ("--rl-max-policy-age", "1", "--rl-algorithm-spec",
                           str(ROOT / "tools/eval/efficiency/algo-eff-miles.json")),
     "island_round_cuts": ("--rl-cut-every", "2", "--rl-checkpoint-store", "/tmp/gdh-store"),
@@ -344,7 +344,9 @@ def test_auto_on_a_path_the_dispenser_does_not_cover_is_byte_identical_to_stride
 def test_explicit_dispense_on_those_paths_is_still_refused(tmp_path, monkeypatch):
     from yeto import launcher
 
-    for path in ("verl", "miles_fully_async", "island_round_cuts", "sharded_head"):
+    # S27 G-EU: an explicit dispense covers verl training islands now
+    # (tests/test_s27_verl_dispense.py); auto on verl still plans stride (above)
+    for path in ("miles_fully_async", "island_round_cuts", "sharded_head"):
         args = _args(tmp_path, monkeypatch, "modal:2xh100,modal:2xh100",
                      *UNSUPPORTED[path], "--rl-data-split", "dispense")
         with pytest.raises(ValueError):
