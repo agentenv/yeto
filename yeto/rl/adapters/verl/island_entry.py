@@ -87,6 +87,9 @@ def parse_args(argv):
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
+    # S27 G-EQ3: staged bf16 delta releases on a full-parameter buffer trainer
+    # (sample_roles._check_release_delta; 0 turns them off)
+    p.add_argument("--rl-release-delta-full-every", type=int, default=0)
     # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
     # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
     p.add_argument("--rl-sampler-node", default=None)
