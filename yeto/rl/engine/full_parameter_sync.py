@@ -1268,6 +1268,11 @@ class FullParameterSync(RoundCutHooks):
     immutable trajectory evidence of the round the trainer just consumed.
     """
 
+    # S27 G-ED: the local round counter starts at 0 in every process (start()),
+    # so a ledger restored from an earlier process's island cut does not apply
+    # (yeto.rl.engine.ledger.island_cut_ledger).
+    local_rounds_restart = True
+
     def __init__(
         self,
         pairing: RolePairing,

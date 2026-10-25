@@ -264,7 +264,8 @@ def test_a_recorded_verl_data_cursor_is_where_a_new_process_seeks_to(tmp_path):
 
 def test_the_launcher_forwards_exports_and_data_positions_to_verl_islands(model_dir):
     store = "modal-volume://v/run"
-    args = _prepared(_verl_args("--rl-checkpoint-store", store, "--rl-export-hf-rounds", "2,final"))
+    args = _prepared(_verl_args("--rl-checkpoint-store", store, "--rl-export-hf-rounds", "2,final",
+                                "--no-rl-peer-recovery"))
     assert args.rl_peer_recovery is False and args.rl_island_state_source == "catch-up"
     for learner_id in range(2):
         argv = _island_argv(args, learner_id)
@@ -280,7 +281,7 @@ def test_the_launcher_forwards_exports_and_data_positions_to_verl_islands(model_
 def test_a_catch_up_store_alone_keeps_data_positions():
     """No export, no cuts, no peer recovery: the store holds the islands' data
     positions (asynchronous rounds; a relaunched island takes the catch-up)."""
-    args = _prepared(_verl_args("--rl-checkpoint-store", "modal-volume://v/run"))
+    args = _prepared(_verl_args("--rl-checkpoint-store", "modal-volume://v/run", "--no-rl-peer-recovery"))
     parsed, ignored = island_entry.parse_args(_island_argv(args, 1))
     assert _flags(ignored) <= MILES_ONLY and parsed.rl_data_position_store
     with pytest.raises(ValueError, match="--rl-checkpoint-store"):  # a strict sweep has no catch-up

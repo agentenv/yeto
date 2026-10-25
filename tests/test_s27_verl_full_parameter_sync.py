@@ -223,8 +223,7 @@ def test_the_inbound_sink_streams_out_of_order_chunks_and_keeps_replays():
         inbound.bind_fragment(inbound.begin_message(9, 64), MSG_BCAST_FRAGMENT, 1, 6, 4)
 
 
-@pytest.mark.parametrize("option, value", [("overlap", True), ("expert_token_weights", True),
-                                           ("peer_recovery", object())])
+@pytest.mark.parametrize("option, value", [("overlap", True), ("expert_token_weights", True)])
 def test_options_a_verl_island_does_not_offer_are_refused(option, value):
     config = _config()
     forced = SimpleNamespace(**{**{f: getattr(config, f) for f in config.__dataclass_fields__}, option: value})

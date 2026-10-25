@@ -58,9 +58,9 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
 # and fragment count come from ``python -m yeto.rl.adapters.verl.full_parameter_plan``
 # (the model's HF config on the meta device), not from the Miles layout probe.
 FULL_PARAMETER_PLACEMENT = "colocated"
-# The stream refuses peer recovery (full_parameter_stream.refuse_unsupported),
-# so the async mode must not turn it on by default (rl_args._peer_recovery_applies).
-FULL_PARAMETER_PEER_RECOVERY = False
+# S27 G-ED: the verl stream recovers from a peer (adapters/verl/peer_recovery.py),
+# so the async mode turns it on by default as on Miles (rl_args._peer_recovery_applies).
+FULL_PARAMETER_PEER_RECOVERY = True
 FULL_PARAMETER_PLAN_COMMAND = (
     "python -m yeto.rl.adapters.verl.full_parameter_plan --model <M> --model-revision <R> "
     "--fragments <P> --matrix-merge <avg|rda>")
@@ -88,8 +88,7 @@ def full_parameter_problems(args) -> list[str]:
     if int(getattr(args, "expert_full_count", 0) or 0):
         problems.append("no --expert-full-count (DeepSeek V4 expert-full is a Miles recipe)")
     for dest, option in (("rl_sync_overlap", "--rl-sync-overlap"),
-                         ("rl_sync_expert_token_weights", "--rl-sync-expert-token-weights"),
-                         ("rl_peer_recovery", "--rl-peer-recovery")):
+                         ("rl_sync_expert_token_weights", "--rl-sync-expert-token-weights")):
         if getattr(args, dest, False):
             problems.append(f"no {option} (not offered by the verl stream)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):

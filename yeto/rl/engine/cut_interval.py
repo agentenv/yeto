@@ -189,3 +189,35 @@ def cut_interval_for(*, every: int | None, auto_mtbf_s: float | None,
     return AutoCutInterval(mtbf_s=float(auto_mtbf_s),
                            max_interval_s=(DEFAULT_MAX_INTERVAL_S if max_interval_s is None
                                            else float(max_interval_s)))
+
+
+# ----------------------------------------------------------------------------- island cut store (S27 R-2)
+# Shared by the Miles and the verl island entries (S27 G-ED).
+def cut_auto_options(args) -> dict[str, float]:
+    """The timed cut interval flags of an island (empty: every N rounds)."""
+    mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)
+    if mtbf is None:
+        return {}
+    cap = getattr(args, "rl_cut_max_interval_s", None)
+    return {"auto_mtbf_s": float(mtbf), **({} if cap is None else {"max_interval_s": float(cap)})}
+
+
+def check_island_cut_store(args) -> None:
+    """``--rl-island-cut-store``: island round cuts belong to a synced island (a
+    syncer, no elastic store, no resume store); its cuts are written only, so
+    the resume switches do not apply."""
+    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-island-cut-store is a synced island's (no --rl-single-island-no-sync, "
+                         "no --rl-elastic)")
+    if getattr(args, "rl_resume_store", None):
+        raise ValueError("--rl-island-cut-store and --rl-resume-store exclude each other")
+    for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                       ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
+        if getattr(args, name, None):
+            raise ValueError(f"{flag}: a synced island does not resume from its round cuts "
+                             "(the syncer is authoritative)")
+
+
+def island_cut_store_for(island_store: str, learner_id: int) -> str:
+    """This island's own cut store below the launch's ``--rl-island-cut-store``."""
+    return f"{str(island_store).rstrip('/')}/island{int(learner_id)}"

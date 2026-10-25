@@ -301,7 +301,7 @@ def _synced_launch_uses_store(args) -> bool:
 
 def _catch_up_keeps_data_positions(args) -> bool:
     """S27 G-DS: asynchronous full-parameter rounds without peer recovery
-    (``--rl-island-state-source catch-up``; verl always) keep the islands'
+    (``--rl-island-state-source catch-up``) keep the islands'
     data positions in the store (:func:`data_positions_kept`), so a relaunched
     island that takes the syncer's catch-up continues at its next row."""
     from .syncer import rl_full_parameter_async
@@ -389,9 +389,10 @@ def _check_resume_launch_flags(args) -> bool:
                              "island round cuts), HF exports (--rl-export-hf-rounds) or --rl-peer-recovery")
         if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
             raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
-        if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
+        # S27 G-ED: the verl island writes island cuts too (adapters/verl/round_cuts.py)
+        if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") not in ("miles", "verl"):
             raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
-                             "launch) are wired for --rl-backend miles only")
+                             "launch) are wired for --rl-backend miles and verl only")
         rl_checkpoint_store_plan(args)  # validates the form
         return False
     if elastic:

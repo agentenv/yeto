@@ -1050,7 +1050,7 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
     elif not isinstance(sync, LocalOnlySync):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")
-    from yeto.rl.engine.ledger import BatchLedger
+    from yeto.rl.engine.ledger import BatchLedger, island_cut_ledger
     from yeto.rl.engine.resume import ResumeController, store_for
 
     if not config.get("runtime_fingerprint"):
@@ -1061,7 +1061,10 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
                                   keep=int(config.get("keep", 2)))
     interval = cut_interval_for(every=config.get("every"), auto_mtbf_s=config.get("auto_mtbf_s"),
                                 max_interval_s=config.get("max_interval_s"))
-    return ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir),
+    ledger = (island_cut_ledger(controller.state_dir, tag=controller.incarnation["id"],
+                                rounds_restart=bool(getattr(sync, "local_rounds_restart", False)))
+              if config.get("write_only") else BatchLedger(controller.state_dir))
+    return ResumeWiring(controller=controller, ledger=ledger,
                         every=interval.every, stop_after=config.get("stop_after"),
                         allow_config_change=bool(config.get("allow_config_change", False)),
                         interval=interval)
