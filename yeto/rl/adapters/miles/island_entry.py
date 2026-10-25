@@ -1039,10 +1039,14 @@ def peer_recovery_options(args, environ=None):
             raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
         return None
     ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
+    ttl_s = 3600.0 if ttl is None else float(ttl)
     return PeerRecoveryOptions(
         store=str(store),
         recover=recover,
-        ttl_s=3600.0 if ttl is None else float(ttl),
+        ttl_s=ttl_s,
+        # A recovery may wait as long as its snapshot lives (a 30B trainer's
+        # snapshot write, commit, read and the full resend take tens of minutes).
+        timeout_s=ttl_s,
         staging=getattr(args, "rl_peer_recovery_staging", None),
     )
 

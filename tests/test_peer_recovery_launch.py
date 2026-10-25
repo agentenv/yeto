@@ -134,6 +134,9 @@ def test_island_entry_reads_the_recover_env(tmp_path):
     assert peer_recovery_options(args, environ={}).recover is False
     options = peer_recovery_options(args, environ={PEER_RECOVER_ENV: "1"})
     assert options.recover and options.ttl_s == 3600.0 and options.store == str(tmp_path)
+    assert options.timeout_s == 3600.0
+    longer = SimpleNamespace(rl_peer_recovery_store=str(tmp_path), rl_peer_recovery_ttl_s=7200.0)
+    assert peer_recovery_options(longer, environ={}).timeout_s == 7200.0, "a recovery waits as long as the TTL"
     assert peer_recovery_options(SimpleNamespace(), environ={}) is None
     with pytest.raises(ValueError, match="need --rl-peer-recovery-store"):
         peer_recovery_options(SimpleNamespace(rl_peer_recover=True), environ={})
