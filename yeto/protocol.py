@@ -667,17 +667,20 @@ class _DownlinkWindow:
         self._lock = threading.Lock()
         self._started: float | None = None
         self._ended = False
+        self.pulls_in_window: list[int] = []  # steps of the PULLs read while it is on
 
     def see_pull(self, step: int) -> None:
-        """Start the window at the first PULL for a step >= FROM_STEP."""
-        if self._started is not None or step < self.from_step:
-            return
-        with self._lock:
-            if self._started is not None:
-                return
-            self._started = time.monotonic()
-        _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:.0f}s, "
-                     f"PULL step {step} (learner {self.learner_id})")
+        """Start the window at the first PULL for a step >= FROM_STEP; count
+        the PULLs read while it is on."""
+        if self._started is None and step >= self.from_step:
+            with self._lock:
+                if self._started is None:
+                    self._started = time.monotonic()
+                    _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:g}s, "
+                                 f"PULL step {step} (learner {self.learner_id})")
+        started = self._started
+        if started is not None and time.monotonic() - started < self.seconds:
+            self.pulls_in_window.append(step)
 
     def active(self) -> bool:
         started = self._started
@@ -689,7 +692,9 @@ class _DownlinkWindow:
             if self._ended:
                 return False
             self._ended = True
-        _connect_log(f"test downlink limit off after {self.seconds:.0f}s (learner {self.learner_id})")
+        steps = self.pulls_in_window
+        _connect_log(f"test downlink limit off after {self.seconds:g}s (learner {self.learner_id}); "
+                     f"PULLs read while on: {len(steps)}, steps {min(steps, default=-1)}..{max(steps, default=-1)}")
         return False
 
 
