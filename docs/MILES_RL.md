@@ -436,6 +436,47 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
   when the head job ends. Miles only, not with
   fully_async rollouts, island round cuts or a sharded head (refused at
   launch).
+- Data mix and task labels (S27 P3, with `--rl-data-split dispense` only):
+  `--data-mix 'a.jsonl=0.7,org/ds@rev=0.3'` (instead of `--data`) names
+  several prompt data sets and their weights. The launcher writes their rows,
+  source by source, into one prompt file in the run directory
+  (`data-mix.jsonl`, each row with `metadata.yeto_data_source`), which becomes
+  the run's `--data`; the islands get the weights (`--rl-dispense-mix`). The
+  dispenser keeps one stream per source and interleaves them by weight: while
+  every island takes every stream, any prefix of the rows given out is within
+  one row of the weights, so every island's rows are within one block of
+  them. `--rl-island-task-labels 'l0=web;l1=pwn,crypto'` gives island M only
+  the rows whose `task_label` (top level or metadata) is one of its labels
+  (`-`: rows without a label); an island not listed takes every row. The
+  streams are then one per (source, label). The launch fails when a row label
+  is taken by no island or a listed label is on no row (the launcher reads
+  `--data` for this), and warns that the tokens^2/steps merge weight favours
+  islands of long answers (compare `--rl-sync-learner-weight equal`). With
+  labels the mix of the rows trained follows the islands' speeds.
+  `--rl-data-passes N` counts per stream, so near the end of a mix the
+  streams that still have rows go on alone. `dispense_check` reports per
+  stream (rows given out, trained, dropped, released, reclaimed, the share of
+  each against its weight, `mix_error`) and per island the rows of each
+  stream it trained (`--prompts` for the tape check).
+- Sampler islands on the dispenser (S27 P4): in a synced group
+  (`--rl-sample-role trainer --rl-island-sample-role M:sampler`, a syncer)
+  `--rl-data-split dispense` makes the sampler islands claim their rows from
+  the group's actor syncer instead of their fixed slots (`--rl-data-dispense
+  --rl-dispense-addr $SYNCER_ADDR`). No row goes to two samplers; a fast
+  sampler claims more; a sampler reports a row once its group is in the
+  sample buffer, so a preempted sampler's unwritten rows go first to the next
+  claim (at once when the same sampler id is relaunched, else after
+  `--rl-dispense-lease-s`); a sampler launch of its own over the same store
+  joins with `--rl-sample-role sampler --rl-single-island-no-sync
+  --rl-data-split dispense --rl-dispense-addr HOST:PORT` (the group's actor
+  syncer; the same `YETO_ISLAND_HMAC_KEY`) and just claims. Its sampler id
+  (`--rl-sampler-node`) must be new to the buffer: it writes its own shard,
+  which the trainers merge like every shard they find (the data end still
+  waits only for the shards the group launched with). The buffer trainers keep reading the buffer; the groups they
+  pass over as too stale are logged with their dispenser positions
+  (`rl_buffer_stale_skipped.stale_positions`), not given out again.
+  Refused: a store-coupled pair or a convertible pool (no syncer), and
+  `--rl-data-passes` (the samplers keep their round counts).
 
 ### Clouds, controller and images
 

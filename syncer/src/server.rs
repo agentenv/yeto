@@ -1795,7 +1795,7 @@ async fn handle_connection(
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
-        MSG_TASK_HELLO => Ok(4096),
+        MSG_TASK_HELLO => Ok(crate::protocol::MAX_TASK_HELLO),
         other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {other}"),
     })
     .await

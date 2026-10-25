@@ -525,6 +525,10 @@ def handle_from_metadata(
         buffer_stale_groups=(
             int(payload["buffer_stale_groups"]) if "buffer_stale_groups" in payload else None
         ),
+        buffer_stale_positions=(
+            [[int(v) for v in run] for run in payload["buffer_stale_positions"]]
+            if payload.get("buffer_stale_positions") else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),

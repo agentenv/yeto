@@ -56,6 +56,7 @@ from .sampler_engine import (
 )
 from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
+from .task_dispense import DISPENSE_POSITION_KEY
 
 ROUND_EVENT = "rl_sampler_engine_round"
 START_EVENT = "rl_sampler_start"
@@ -145,12 +146,21 @@ class EngineRound:
         self.unchecked_in_flight = unchecked_in_flight
         self.dropped_groups = 0  # groups not written because the island is leaving
 
-    def _round_record(self, rollout_id: int, last: bool) -> dict[str, Any] | None:
+    def _round_record(self, rollout_id: int, last: bool,
+                      position: int | None = None) -> dict[str, Any] | None:
         if self.incarnation is None:
             return None
         cursor = None if self.data_cursor is None else self.data_cursor(rollout_id)
         return SamplerRound(self.writer.sampler_id, self.incarnation, rollout_id,
-                            data_cursor=cursor, last=last).record()
+                            data_cursor=cursor, last=last, dispense_position=position).record()
+
+    def _written(self, rollout_id: int, positions: list[int]) -> None:
+        """S27 P4: prompts from the task dispenser learn which groups are in the buffer."""
+        written = getattr(self.prompts, "written", None)
+        if callable(written):
+            result = dict(written(rollout_id, positions, unwritten="release") or {})
+            result.pop("rollout_id", None)
+            self.emit("rl_dispense_written", rollout_id=rollout_id, **result)
 
     def __call__(self, rollout_id: int) -> None:
         rollout_id = int(rollout_id)
@@ -171,6 +181,7 @@ class EngineRound:
             self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version, groups=0,
                       samples=0, response_tokens=0, finish={}, source=self.provenance.key(),
                       dropped_groups=len(items), dropped_reason="unchecked_weights_in_flight")
+            self._written(rollout_id, [])
             return
         record = self.provenance.to_record()
         finish: Counter[str] = Counter()
@@ -194,14 +205,21 @@ class EngineRound:
             scored.append((item, samples))
         prefix = "" if self.incarnation is None else f"{self.incarnation}-"
         written = 0
+        dispensed: list[int] = []
         for position, (item, samples) in enumerate(scored):
             if self.reclaimed():  # leaving: the replacement owns the shard from now on
                 self.dropped_groups += len(scored) - position
                 break
+            spot = item.metadata.get(DISPENSE_POSITION_KEY)
+            spot = spot if isinstance(spot, int) and not isinstance(spot, bool) else None
             self.writer.write(samples, group_key=f"{prefix}r{rollout_id}-{item.prompt_id}",
                               provenance=record,
-                              sampler_round=self._round_record(rollout_id, position == len(scored) - 1))
+                              sampler_round=self._round_record(rollout_id, position == len(scored) - 1,
+                                                               spot))
             written += 1
+            if spot is not None:
+                dispensed.append(spot)
+        self._written(rollout_id, dispensed)
         if written and self.guard is not None:
             self.guard.written(rollout_id)
         self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version,

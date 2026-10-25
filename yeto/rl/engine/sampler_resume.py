@@ -73,12 +73,16 @@ class SamplerRound:
     rollout_id: int
     data_cursor: Mapping[str, int] | None = None  # the data source after the round drew its prompts
     last: bool = False  # the round's last group
+    # S27 P4: the task-dispenser position of the group's row (a sampler with a dispenser)
+    dispense_position: int | None = None
 
     def record(self) -> dict[str, Any]:
         out = {"sampler": self.sampler, "incarnation": self.incarnation,
                "rollout_id": int(self.rollout_id), "last": bool(self.last)}
         if self.data_cursor is not None:
             out["data_cursor"] = {k: int(v) for k, v in self.data_cursor.items()}
+        if self.dispense_position is not None:
+            out["dispense_position"] = int(self.dispense_position)
         return out
 
 

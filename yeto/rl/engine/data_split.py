@@ -18,6 +18,9 @@ order the rows are read, before any split):
 * Sampler islands keep their own slots: sampler ``k`` of ``S`` samplers reads
   the slot ``k/S`` (``sample_roles.island_args``). Trainers that read the
   sample buffer read buffer lanes (``merged_release.BufferLane``), not data.
+  With ``--rl-data-split dispense`` (S27 P4) a synced group's sampler islands
+  claim their rows from the group's actor syncer instead, and so does a
+  sampler launch that joins the group (``--rl-dispense-addr``).
 * Passes: when an island has read every row of its slot, it starts pass 1,
   then pass 2, and so on, and continues. Pass 0 is the slot in data order. Pass
   ``p >= 1`` is the slot reshuffled with a seed made from the run seed and
@@ -117,16 +120,20 @@ class DataSlot:
         return out
 
 
-def pass_order(count: int, *, seed: int, data_pass: int) -> list[int]:
+def pass_order(count: int, *, seed: int, data_pass: int, stream: int = 0) -> list[int]:
     """The row order (indexes into the slot's rows) of pass ``data_pass``.
 
     Pass 0 is data order. Pass ``p >= 1`` is a shuffle seeded by ``seed`` and
     ``p``; the seed goes through SHA-256, so every host and Python version gets
-    the same order."""
+    the same order. ``stream`` (the task dispenser's streams, S27 P3): stream
+    ``s >= 1`` mixes ``s`` into the seed, so two streams of the same size do
+    not share one order; stream 0 is the order of P1/P2."""
     order = list(range(int(count)))
     if int(data_pass) <= 0:
         return order
-    digest = hashlib.sha256(f"yeto-data-pass:{int(seed)}:{int(data_pass)}".encode()).digest()
+    key = (f"yeto-data-pass:{int(seed)}:{int(data_pass)}" if not int(stream)
+           else f"yeto-data-pass:{int(seed)}:s{int(stream)}:{int(data_pass)}")
+    digest = hashlib.sha256(key.encode()).digest()
     random.Random(int.from_bytes(digest[:8], "big")).shuffle(order)
     return order
 
@@ -145,6 +152,10 @@ class DataSplitPlan:
     requested: str
     islands: tuple[int, ...] = ()
     reason: str = ""
+    # S27 P4: the sampler islands (island index in --gpu) that claim rows from the
+    # dispenser; a dispense plan with sample roles and no samplers serves sampler
+    # launches that join it
+    samplers: tuple[int, ...] = ()
 
     @property
     def several_islands(self) -> bool:
@@ -172,6 +183,13 @@ class DataSplitPlan:
         if self.mode == SHARED:
             return (f"{n} training islands read every row of --data in the same order "
                     f"({self.reason})")
+        if self.mode == DISPENSE and not n:
+            who = (f"sampler islands {', '.join(map(str, self.samplers))}" if self.samplers
+                   else "sampler islands of the launches that join this one")
+            return (f"{who} claim the rows of --data from the actor syncer's dispenser, one "
+                    "block per sampler round: no row goes to two samplers, a fast sampler claims "
+                    "more, the rows a preempted sampler did not write go to the others, an added "
+                    "sampler just claims; buffer trainers read the buffer")
         if self.mode == DISPENSE:
             return (f"{n} training island(s) claim the rows of --data from the syncer's "
                     "dispenser, one block per round: no row goes to two islands, a fast island "
@@ -200,6 +218,8 @@ class DataSplitPlan:
         """What the run manifest and the dry-run plan carry for the launch."""
         out: dict[str, Any] = {"mode": self.mode, "requested": self.requested,
                                "islands": list(self.islands), "rule": self.describe()}
+        if self.samplers:
+            out["samplers"] = list(self.samplers)
         if self.reason:
             out["reason"] = self.reason
         return out
@@ -211,22 +231,28 @@ class DataSplitPlan:
 
 
 def plan_data_split(requested: str | None, *, islands: Sequence[int], tasks: bool = False,
-                    sample_roles: bool = False, external_learners: int = 0) -> DataSplitPlan:
+                    sample_roles: bool = False, external_learners: int = 0,
+                    samplers: Sequence[int] = (), sampler_blocker: str | None = None) -> DataSplitPlan:
     """The data split of a launch (module doc). Raises ``ValueError`` on a request
     the launch shape cannot honour.
 
     ``islands``: learner ids of the same-card training islands the launch builds;
     ``tasks``: ``--rl-island-tasks`` is given; ``sample_roles``: the islands have
     sampler/trainer roles; ``external_learners``: islands of other launches that
-    join the same syncer (their data is not this launch's to split)."""
+    join the same syncer (their data is not this launch's to split);
+    ``samplers`` / ``sampler_blocker`` (S27 P4): the sampler islands that claim
+    rows with ``dispense``, or why the launch cannot dispense to samplers."""
     requested = AUTO if requested is None else str(requested)
     if requested not in DATA_SPLITS:
         raise ValueError(f"{DATA_SPLIT_FLAG} {requested!r}: expected one of {DATA_SPLITS}")
     islands = tuple(int(i) for i in islands)
     if requested == DISPENSE:
         if sample_roles:
-            raise ValueError(f"{DATA_SPLIT_FLAG} dispense covers training islands that generate and "
-                             "train; sampler islands keep their row slots (P4)")
+            if sampler_blocker:
+                raise ValueError(f"{DATA_SPLIT_FLAG} dispense with sample roles: {sampler_blocker}")
+            if tasks:
+                raise ValueError(f"{DATA_SPLIT_FLAG} dispense and --rl-island-tasks exclude each other")
+            return DataSplitPlan(DISPENSE, requested, (), samplers=tuple(int(m) for m in samplers))
         if tasks:
             raise ValueError(f"{DATA_SPLIT_FLAG} dispense and --rl-island-tasks exclude each other")
         if external_learners:

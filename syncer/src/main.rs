@@ -10,6 +10,7 @@ mod recovery;
 mod merge;
 mod dispense;
 mod dispense_service;
+mod members;
 mod downlink;
 mod eval_checkpoint;
 mod protocol;
