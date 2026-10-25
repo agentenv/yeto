@@ -196,7 +196,16 @@ def tape_rows(tapes: Iterable[Mapping[str, Any]]) -> tuple[dict[int, Counter[int
     Records are read in order; ``rl_driver_start`` starts a new process."""
     from yeto.rl.engine.data_split import rows_of_runs
 
-    records = [r for r in tapes if r.get("island_id") is not None]
+    # the Modal tape of a relaunched island starts with the records of the
+    # incarnations before it (s27-dh-a1: rl-island-1.inc1.jsonl): count each once
+    records, seen = [], set()
+    for r in tapes:
+        if r.get("island_id") is None:
+            continue
+        key = json.dumps(r, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            records.append(r)
     with_commits = {int(r["island_id"]) for r in records if r.get("event") == "rl_dispense_commit"}
     committed: dict[int, Counter[int]] = defaultdict(Counter)
     uncommitted: dict[int, Counter[int]] = defaultdict(Counter)
