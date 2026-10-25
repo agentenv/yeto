@@ -89,8 +89,16 @@ def syncer_facts(run_dir: Path) -> dict:
     log = ANSI.sub("", log_path.read_text(errors="replace")) if log_path.is_file() else ""
     steps = {int(r["step"]): r for r in tape}
     acks = [tuple(int(x) for x in m) for m in ALL_ACK.findall(log)]
+    # A late push of the async profile is carried into a later round of the same
+    # fragment (``carried``); it contributes there.  One queued and never carried
+    # missed the end of the run.
+    carried = {s: [int(c["id"]) for c in (r.get("carried") or [])] for s, r in steps.items()}
     return {
         "steps": sorted(steps), "responders": {s: list(r.get("responded") or []) for s, r in steps.items()},
+        "contributors": {s: sorted(set(r.get("responded") or []) | set(carried[s])) for s, r in steps.items()},
+        "carried_pushes": sum(len(v) for v in carried.values()),
+        "late_queued": log.count("late push queued"),
+        "stale_admitted": log.count("stale base-relative delta admitted"),
         "gnorm": [float(r["gnorm"]) if isinstance(r.get("gnorm"), (int, float)) else float("nan")
                   for _s, r in sorted(steps.items())],
         "rejected_lines": len(REJECTED.findall(log)), "all_ack": acks, "log_bytes": len(log),
@@ -112,6 +120,7 @@ def check(run_dir: Path, learners: int = 2, total_steps: int = 32) -> dict:
     row("cards", "PASS" if all(c and set(c) == {"NVIDIA H200"} for c in cards) else "FAIL", f"{cards}")
     expected = list(range(1, total_steps + 1))
     every = [s for s, ids in syncer["responders"].items() if set(ids) >= set(range(learners))]
+    every_merged = [s for s, ids in syncer["contributors"].items() if set(ids) >= set(range(learners))]
     empty = [s for s, ids in syncer["responders"].items() if not ids]
     gn_ok = _finite(syncer["gnorm"])
     down = [i.get("versions_went_down_at") for i in islands]
@@ -119,7 +128,9 @@ def check(run_dir: Path, learners: int = 2, total_steps: int = 32) -> dict:
                  and not any(down))
     row("merges", "PASS" if merges_ok else "FAIL",
         f"syncer steps {len(syncer['steps'])} (expected 1..{total_steps}: {syncer['steps'] == expected}), "
-        f"with every island {len(every)}, without responder {empty}, gnorm finite {gn_ok}; islands' last "
+        f"with every island in time {len(every)}, with every island incl. carried late pushes "
+        f"{len(every_merged)}; late pushes queued {syncer['late_queued']}, carried {syncer['carried_pushes']}, "
+        f"stale admitted {syncer['stale_admitted']}; without responder {empty}, gnorm finite {gn_ok}; islands' last "
         f"versions {[i.get('last_versions') for i in islands]}, versions went down at {down}")
     row("rejected", "PASS" if syncer["rejected_lines"] == 0 else "WARN",
         f"{syncer['rejected_lines']} 'push rejected' lines in the syncer log")
@@ -152,7 +163,7 @@ def check(run_dir: Path, learners: int = 2, total_steps: int = 32) -> dict:
         f"per island {[[round(v, 3) for v in i.get('reward', [])] for i in islands]}")
     counts = {s: sum(r["status"] == s for r in rows) for s in ("PASS", "WARN", "FAIL", "N/A")}
     return {"rows": rows, "counts": counts, "islands": islands,
-            "syncer": {k: v for k, v in syncer.items() if k != "responders"}}
+            "syncer": {k: v for k, v in syncer.items() if k not in ("responders", "contributors")}}
 
 
 def main(argv: list[str]) -> int:
