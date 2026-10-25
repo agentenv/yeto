@@ -457,14 +457,17 @@ def test_a_resumed_syncer_returns_to_the_checkpoint_cut(syncer_binary, tmp_path)
         learner = subprocess.Popen([sys.executable, str(runner)], stdout=subprocess.DEVNULL,
                                    stderr=open(tmp_path / "learner.err", "w"), env=_cargo_env())
         deadline = time.monotonic() + 60
-        while not (Path(str(ckpt) + ".dispense").exists() and any(
+        # the sidecar is written before the checkpoint: wait for both files
+        while not (Path(str(ckpt) + ".dispense").exists() and ckpt.is_file() and any(
                 r["kind"] == "dispense_checkpoint" for r in syncer.records())):
             assert time.monotonic() < deadline, (tmp_path / "learner.err").read_text()[-2000:]
             time.sleep(0.05)
-        cut = [r for r in syncer.records() if r["kind"] == "dispense_checkpoint"][-1]
-        syncer.stop()  # SIGKILL
+        # no more rounds, so no more checkpoint cuts; one the last round started lands
         learner.kill()
         learner.wait(timeout=10)
+        time.sleep(1.0)
+        cut = [r for r in syncer.records() if r["kind"] == "dispense_checkpoint"][-1]
+        syncer.stop()  # SIGKILL
         before = syncer.records()
         resumed = Syncer(syncer_binary, tmp_path, *common, "--resume", port=free_port(), key=None,
                          learners=1, lease_s=60, name="resumed")
