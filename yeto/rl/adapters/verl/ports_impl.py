@@ -265,6 +265,9 @@ class VerlPendingGeneration:
     expected_policy_version: str | None = None
     ahead: bool = False
     cancelled: bool = False
+    # the submission's error, raised at the join (as a spawned generation's would be):
+    # e.g. the task dispenser's end of the data, met while drawing the prompts
+    failure: BaseException | None = None
 
 
 def _check_expected_token(rollout_id: int, published: tuple[int, str], expected: str | None) -> None:
@@ -355,14 +358,20 @@ class VerlRolloutPool:
         t.global_steps = rollout_id + 1
         SkipManager.set_step(t.global_steps)
         started = time.monotonic()
+        failure: BaseException | None = None
         try:
             prep = t.prepare_step()
+        except Exception as error:  # noqa: BLE001 - raised by finish_generate (the driver's join)
+            # S27 G-EV: the round being trained must still train and pass its boundary;
+            # the driver then ends on a data end or fails the join (rollout_ahead module)
+            prep, failure = {}, error
         finally:
             t.global_steps = training_step
             SkipManager.set_step(training_step)
-        isl.emit("rl_verl_generate_started", rollout_id=rollout_id, policy_version=isl.published[0])
+        isl.emit("rl_verl_generate_started", rollout_id=rollout_id, policy_version=isl.published[0],
+                 **({"error": f"{type(failure).__name__}: {failure}"} if failure is not None else {}))
         return VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
-                                     expected_policy_version, ahead=True)
+                                     expected_policy_version, ahead=True, failure=failure)
 
     def finish_generate(self, pending: VerlPendingGeneration) -> RolloutBatchHandle:
         """Wait for a batch :meth:`start_generate` submitted (the driver calls it after the
@@ -371,6 +380,8 @@ class VerlRolloutPool:
 
         if pending.cancelled:
             raise RuntimeError(f"rollout {pending.rollout_id}: the batch generated ahead was cancelled")
+        if pending.failure is not None:
+            raise pending.failure
         t = self.island.trainer
         t.global_steps = pending.rollout_id + 1
         SkipManager.set_step(t.global_steps)

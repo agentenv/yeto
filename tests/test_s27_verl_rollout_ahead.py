@@ -129,15 +129,17 @@ class _SeparateTrainer:
         prompts = self._fetch_one_gen_batch()
         servers = self.standalone_checkpoint_manager
         keys = []
-        for p, _prompt in enumerate(prompts):
-            uid = f"l{self.learner_id}-s{self.global_steps}-{p}"
+        for p, prompt in enumerate(prompts):
+            # a dispensed prompt (task_dispense.VerlDispensedBatches) brings its own uid
+            uid = prompt["uid"] if isinstance(prompt, dict) else f"l{self.learner_id}-s{self.global_steps}-{p}"
             for k in range(GROUP):
                 key = f"{uid}_{k}"
                 self.queue.rows[key] = {"uid": uid, "prompt": [self.global_steps, p], "reward": 1.0}
                 keys.append(key)
         self._batches[self.global_steps] = keys
         self.submitted.append({"global_steps": self.global_steps, "served": servers.calls[-1],
-                               "weights": _weights_hash(servers.rollout_weights)})
+                               "weights": _weights_hash(servers.rollout_weights),
+                               "rows": [p["row"] for p in prompts if isinstance(p, dict)]})
         self.in_flight += 1
         return {"prep/submitted": float(len(prompts))}
 
@@ -282,12 +284,12 @@ def _trainer_port(island, learner_id: int, *, layout_hash: str | None = None):
     return Trainer()
 
 
-def _driver(island, tape_path: Path, plan: dict, sync, policy_state, learner_id: int = 0):
+def _driver(island, tape_path: Path, plan: dict, sync, policy_state, learner_id: int = 0, dispense=None):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.engine.driver import EventTape, IslandDriver
 
     options = separate.driver_options(plan, SPEC, verl_capabilities("sha256:" + "1" * 64))
-    driver = IslandDriver(learner_id=learner_id, rollout=VerlRolloutPool(island),
+    driver = IslandDriver(learner_id=learner_id, rollout=VerlRolloutPool(island, dispense=dispense),
                           trainer=_trainer_port(island, learner_id,
                                                 layout_hash=(plan.get(vfs.PLAN_KEY) or {}).get(
                                                     "parameter_layout_sha256")),
@@ -532,3 +534,66 @@ def test_the_island_refuses_rollout_ahead_off_the_separate_mode(change, message)
         setattr(args, key, value)
     with pytest.raises(SystemExit, match=message):
         island_entry.rollout_ahead_of(args)
+
+
+# ----------------------------------------------------------------------------- with the task dispenser
+from test_s27_dispense import Syncer  # noqa: E402
+from test_s27_dispense import syncer_binary as dispense_syncer_binary  # noqa: E402,F401
+from test_s27_verl_dispense import FakeDataset, _install, _rows_file, _section  # noqa: E402
+
+
+def _run_dispensed(tmp_path: Path, queue: _TransferQueue, syncer, rows: int, *, rounds: int):
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    island, _tape = _island(tmp_path, queue)
+    island.trainer.train_dataset = FakeDataset(rows)
+    hook = _install(island.trainer, _section(syncer, _rows_file(tmp_path, rows), 0, block=2))
+    island.full_group = vfs.VerlFullParameterGroup(island)
+    state = vfs.VerlFullParameterLocalState(island.full_group, component=COMPONENT,
+                                            max_fragment_bytes=MAX_FRAGMENT_BYTES)
+    island.layout_hash = state.layout_hash
+    driver = _driver(island, tmp_path / "tape.jsonl", _local_plan(1), LocalOnlySync(rounds), state, dispense=hook)
+    driver.run()
+    events = [json.loads(line) for line in (tmp_path / "tape.jsonl").read_text().splitlines()]
+    return island, driver, events
+
+
+def test_rollout_ahead_with_the_task_dispenser_trains_every_drawn_row_once(dispense_syncer_binary, tmp_path, tq):
+    from tools.eval.dispense_check import check
+
+    syncer = Syncer(dispense_syncer_binary, tmp_path, lease_s=30)
+    try:
+        island, driver, events = _run_dispensed(tmp_path, tq, syncer, 12, rounds=4)
+        submitted = island.trainer.submitted
+        # the batch of round r+1 drew its rows while round r trained; every round trained its own rows
+        drawn = [tuple(s["rows"]) for s in submitted]
+        assert len(drawn) == 4 and len({r for rows in drawn for r in rows}) == 8
+        assert [(s["global_steps"], s["served"]) for s in submitted] == [(1, 0), (2, 0), (3, 1), (4, 2)]
+        commits = [e for e in events if e["event"] == "rl_dispense_commit"]
+        assert [(c["rollout_id"], c["trained"], c["acked"]) for c in commits] == [(r, 2, True) for r in range(4)]
+        summary = check(syncer.records())
+        assert summary["ok"], summary["problems"]
+        assert summary["trained"] == 8
+    finally:
+        syncer.stop()
+
+
+def test_the_end_of_the_dispensed_data_ends_the_run_after_the_round_being_trained(dispense_syncer_binary,
+                                                                                   tmp_path, tq):
+    from tools.eval.dispense_check import check
+
+    syncer = Syncer(dispense_syncer_binary, tmp_path, "--dispense-passes", "1", lease_s=30)
+    try:
+        # 5 rows, 2 per round: rounds 0 and 1 train 4 rows; the batch of round 2 meets the end of
+        # the data while round 1 trains (its draw raises in start_generate, the join raises it)
+        island, driver, events = _run_dispensed(tmp_path, tq, syncer, 5, rounds=10)
+        assert driver.rounds_completed == 2
+        ahead = [e for e in events if e["event"] == "rl_rollout_ahead"]
+        assert [(e["rollout_id"], e.get("discarded"), "DispenseEnded" in e.get("error", "")) for e in ahead] == [
+            (1, None, False), (2, True, True)]
+        assert [e["rollout_id"] for e in events if e["event"] == "rl_round_trained"] == [0, 1]
+        summary = check(syncer.records())
+        assert summary["ok"], summary["problems"]
+        assert summary["trained"] == 4
+    finally:
+        syncer.stop()
