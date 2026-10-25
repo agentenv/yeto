@@ -203,8 +203,11 @@ class VerlValidate:
                                 "(prompts over data.max_prompt_length are dropped)")
         self.trainer = trainer
         self.section = section
-        self.mean_key = (f"val-core/{section['data_source']}/reward/"
-                         f"mean@{int(section['samples_per_prompt'])}")
+        # verl files the reward mean under val-core, or under val-aux when the reward
+        # function also reports "acc" (the reward loop adds it for a float score:
+        # experimental/reward_loop/reward_manager/naive.py); s27-en-s1 met the second.
+        tail = f"/{section['data_source']}/reward/mean@{int(section['samples_per_prompt'])}"
+        self.mean_keys = ("val-core" + tail, "val-aux" + tail)
 
     def __call__(self, rollout_id: int) -> dict[str, float]:
         del rollout_id  # the driver records it with the metrics
@@ -215,9 +218,10 @@ class VerlValidate:
         t.on_validate_end()
         out = {str(key): float(value) for key, value in dict(metrics).items()
                if isinstance(value, numbers.Real)}
-        if self.mean_key not in out:
-            raise RuntimeError(f"verl validation returned no {self.mean_key} (keys: {sorted(out)[:8]})")
-        out[self.section["dataset_name"]] = out[self.mean_key]
+        mean_key = next((key for key in self.mean_keys if key in out), None)
+        if mean_key is None:
+            raise RuntimeError(f"verl validation returned none of {self.mean_keys} (keys: {sorted(out)})")
+        out[self.section["dataset_name"]] = out[mean_key]
         out["verl_validate_seconds"] = time.monotonic() - started
         return out
 

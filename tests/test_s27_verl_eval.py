@@ -231,8 +231,17 @@ def test_verl_validate_runs_verls_validation_and_names_the_miles_metric():
 def test_verl_validate_refuses_a_smaller_eval_set_and_a_missing_mean():
     with pytest.raises(eval_port.EvalPortError, match="loaded 2 of the 3 eval rows"):
         eval_port.VerlValidate(_VerlTrainer(2), _plan()["eval"])
-    with pytest.raises(RuntimeError, match="no val-core/yeto-eval/"):
+    with pytest.raises(RuntimeError, match="none of .*val-aux/yeto-eval/"):
         eval_port.VerlValidate(_VerlTrainer(3, key="val-core/other/reward/mean@2"), _plan()["eval"])(0)
+
+
+def test_with_an_acc_core_metric_the_reward_mean_comes_from_val_aux():
+    """s27-en-s1 (GPU): a float reward makes verl's reward loop report "acc" too
+    (reward_manager/naive.py), and _val_metrics_update then files acc under
+    val-core and the reward mean under val-aux."""
+    aux = f"val-aux/yeto-eval/{DATASET}/reward/mean@2"
+    metrics = eval_port.VerlValidate(_VerlTrainer(3, key=aux), _plan()["eval"])(0)
+    assert metrics[DATASET] == metrics[aux] == pytest.approx(0.3)
 
 
 def test_the_driver_evaluates_each_due_policy_right_after_publishing_it(tmp_path):
