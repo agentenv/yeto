@@ -55,11 +55,15 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
 # S27 G-DN: the shape of ``--rl-sync-preset full-parameter`` on verl islands
 # (launch.rl_args._prepare_dense_full_sweep asks for it; the Miles backend
 # provides none and keeps its fixed-partition shape).  A verl full-parameter
-# island is one colocated node: verl's hybrid engine trains and rolls out on
-# the same cards, so there is no dedicated rollout partition.  The layout hash
+# island is colocated by default: verl's hybrid engine trains and rolls out on
+# the same cards.  S27 G-EK: ``--rl-placement fixed-partition`` with
+# ``--rl-rollout-gpus N`` runs verl's separate mode instead (``separate``): the
+# trainer keeps its own cards, standalone vLLM servers take the last N cards
+# and the weights go over verl's NCCL checkpoint engine.  The layout hash
 # and fragment count come from ``python -m yeto.rl.adapters.verl.full_parameter_plan``
 # (the model's HF config on the meta device), not from the Miles layout probe.
-FULL_PARAMETER_PLACEMENT = "colocated"
+FULL_PARAMETER_PLACEMENT = "colocated"  # the default
+FULL_PARAMETER_PLACEMENTS = ("colocated", "fixed-partition")
 # The stream refuses peer recovery (full_parameter_stream.refuse_unsupported),
 # so the async mode must not turn it on by default (rl_args._peer_recovery_applies).
 FULL_PARAMETER_PEER_RECOVERY = False
@@ -78,9 +82,12 @@ def full_parameter_problems(args) -> list[str]:
     from yeto.rl.engine.sample_roles import is_synced_trainer
 
     problems = []
-    if getattr(args, "rl_placement", "colocated") != FULL_PARAMETER_PLACEMENT:
-        problems.append("--rl-placement colocated (a verl island trains and rolls out on the same "
-                        "cards; no fixed-partition)")
+    placement = getattr(args, "rl_placement", "colocated")
+    if placement not in FULL_PARAMETER_PLACEMENTS:
+        problems.append("--rl-placement colocated or fixed-partition (a verl island trains and rolls out "
+                        "on the same cards, or in verl's separate mode on its own trainer and rollout cards)")
+    if placement == "fixed-partition" and int(getattr(args, "rl_standby_gpus", 0) or 0):
+        problems.append("no --rl-standby-gpus (verl's separate mode has no standby cards)")
     if is_synced_trainer(args):
         problems.append("no --rl-sample-role trainer (a verl full-parameter island generates its own samples)")
     if int(getattr(args, "rl_max_policy_age", 0) or 0):

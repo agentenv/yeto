@@ -28,8 +28,9 @@ sample flow into the next (S27 G-AL found the same in Miles, GAL-REPORT.md:
 train/rollout log-prob gap 0.0885 -> 0.0179 once ``seq_idx`` is set). The
 patch passes the pack length when context parallelism is off.
 
-Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4;
-``megatron`` (the image ``verl-megatron-build``) applies 1, 2 and 5 -- the
+Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4 and,
+since S27 G-EK, the sixth (zmq SUB, below: the FSDP2 separate mode and the LoRA
+fully_async path use the same NCCL checkpoint engine); ``megatron`` (the image ``verl-megatron-build``) applies 1, 2 and 5 -- the
 Megatron island trains full parameters, so the LoRA wire patches 3 and 4
 (which replace the checkpoint-engine sender) are left out.
 
@@ -154,7 +155,10 @@ SEQ_IDX = ((SEQ_IDX_TARGET, SEQ_IDX_HELPER_ANCHOR, SEQ_IDX_HELPER, "before"),
            (SEQ_IDX_TARGET, SEQ_IDX_PACKED_ANCHOR, SEQ_IDX_PACKED_HOOK, "replace"),
            (SEQ_IDX_TARGET, SEQ_IDX_ENGINE_ANCHOR, SEQ_IDX_ENGINE_HOOK, "replace"))
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
-PROFILES = {"fsdp": PATCHES, "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB)}
+# S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
+# same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
+# did already), so the fsdp profile takes the zmq SUB fix as well.
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB), "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:

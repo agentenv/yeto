@@ -319,6 +319,10 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     for other, anchor, *_ in patch_verl.PATCHES[1:]:
         (tmp_path / other).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / other).write_text("def g(self):\n" + anchor + "            return 1\n")
+    # S27 G-EK: the fsdp profile also takes the two zmq SUB patches (one file, both anchors)
+    zmq = tmp_path / patch_verl.ZMQ_TARGET
+    zmq.parent.mkdir(parents=True, exist_ok=True)
+    zmq.write_text("".join("def g(self):\n" + anchor + "        pass\n" for _t, anchor, *_r in patch_verl.ZMQ_SUB))
     patch_verl.apply(tmp_path)
     patch_verl.apply(tmp_path)  # idempotent
     text = target.read_text()

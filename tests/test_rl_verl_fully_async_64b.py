@@ -406,10 +406,13 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
     fork = Path("/home/michael/work/verl-fork-acad9875")
     if not (fork / patch_verl.CALLS_TARGET).is_file():
         pytest.skip("verl fork checkout not present")
-    for target, *_ in patch_verl.PATCHES:
+    for target, *_ in patch_verl.PROFILES["fsdp"]:
         (tmp_path / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(fork / target, tmp_path / target)
     patch_verl.apply(tmp_path)
+    zmq = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # S27 G-EK: zmq SUB fix in the fsdp profile
+    compile(zmq, "nccl_checkpoint_engine.py", "exec")
+    assert zmq.count("_yeto_sub_key") == 2 and zmq.count("time.sleep(1.0)  # yeto") == 1
     text = (tmp_path / patch_verl.CALLS_TARGET).read_text()
     compile(text, "llm_server.py", "exec")
     assert text.count("yeto_resume_calls") == 1

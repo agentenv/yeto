@@ -35,17 +35,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
-from yeto.rl.engine.ports import PlacementDescription, PublicationResult
+
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
 
-from .ports_impl import MEMBER, VerlIsland, VerlRolloutPool, VerlTrainerGroup, _inner_worker
+from .ports_impl import MEMBER, VerlIsland, VerlRolloutPool, VerlTrainerGroup, _inner_worker  # noqa: F401
+from .separate import READBACK_STATUS, SeparatePlacement, SeparatePublisher, execution_profile  # noqa: F401
 
 DIGEST_PREFIX = b"yeto-verl-megatron-policy-v1\0"
 PAYLOAD_PREFIX = b"yeto-verl-megatron-payload-v1\0"
 HASH_THREADS = 8
-READBACK_STATUS = "ENGINE_READBACK_NOT_IMPLEMENTED"
 
 
 class MegatronTensorExportError(RuntimeError):
@@ -288,46 +287,14 @@ class MegatronPolicyState:
         self._refuse(int(getattr(state, "policy_version", -1)))
 
 
-class MegatronPublisher:
-    def __init__(self, island: MegatronIsland):
-        self.island = island
-
-    def publish(self, state) -> PublicationResult:
-        isl, t = self.island, self.island.trainer
-        version = int(state.policy_version)
-        check = getattr(state, "check_holds", None)
-        if callable(check):
-            check()  # the trainer still holds the hashed weights
-        started = time.monotonic()
-        sync_metrics = dict(t.standalone_checkpoint_manager.update_weights(version) or {})
-        update_seconds = time.monotonic() - started
-        digest = state.policy_tensor_hash()
-        payload_hash, payload_bytes = state.payload_digest
-        record = {"policy_version": version, "status": READBACK_STATUS, "update_seconds": update_seconds,
-                  "policy_tensor_hash": digest, "payload_bytes": int(payload_bytes),
-                  "transport": "verl-nccl-checkpoint-engine",
-                  "sync_metrics": {k: v for k, v in sync_metrics.items() if isinstance(v, (int, float, str))}}
-        isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", record)
-        isl.emit("rl_publication_check", **record)
-        isl.published = (version, digest)
-        manifest = InferencePublicationManifest(
-            publication_mode="full", base_policy_version=None, target_policy_version=version,
-            target_policy_hash=digest,
-            target_manifest_hash=hashlib.sha256(f"{version}:{digest}".encode()).hexdigest(),
-            payload_hash=payload_hash, payload_bytes=int(payload_bytes), complete=True)
-        return PublicationResult(manifest, frozenset({MEMBER}))
+# S27 G-EK: the publisher and the placement are the engine-neutral ones of the
+# separate mode (.separate; the FSDP2 full-parameter island runs them too)
+class MegatronPublisher(SeparatePublisher):
+    pass
 
 
-class MegatronPlacement:
-    def __init__(self, shape: dict):
-        self.shape = dict(shape)
-
-    def describe(self) -> PlacementDescription:
-        trainer = tuple(f"trainer:{i}" for i in range(int(self.shape["trainer_gpus"])))
-        rollout = tuple(f"rollout:{i}" for i in range(int(self.shape["rollout_gpus"])))
-        return PlacementDescription("fixed-partition", trainer, rollout,
-                                    extra={"weight_transport": "verl-nccl-checkpoint-engine",
-                                           "shape": self.shape})
+class MegatronPlacement(SeparatePlacement):
+    pass
 
 
 class MegatronHfExports:
@@ -351,13 +318,7 @@ class MegatronHfExports:
 
 
 def _execution_profile(spec, plan: dict):
-    from yeto.rl.engine.execution_profile import ExecutionProfile
-
-    return ExecutionProfile(
-        name="verl-megatron-separate", execution_mode="partitioned-serial", outer_protocol="none",
-        algorithm_contract="on-policy", max_policy_age=0,
-        groups_per_batch=int(plan["groups_per_round"]), samples_per_group=int(plan["samples_per_group"]),
-        algorithm_spec_sha256=spec.sha256(), extra={"engine": "verl-megatron"})
+    return execution_profile(spec, plan, name="verl-megatron-separate", engine="verl-megatron")
 
 
 def hf_exports_for(plan: dict, island: MegatronIsland) -> MegatronHfExports | None:

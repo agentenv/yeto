@@ -404,6 +404,7 @@ def main(argv=None) -> int:
     max_prompt = 512
     limit = int(args.rl_max_policy_age or 0)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
+    pools = None
     if engine == megatron_engine.ENGINE_MEGATRON:  # S27 G-DC: verl Megatron island
         megatron = megatron_island_plan(
             args, model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
@@ -413,11 +414,12 @@ def main(argv=None) -> int:
     else:
         megatron = None
         if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
-            raise SystemExit("verl 全参数岛只接同步共置路径：不支持 --rl-max-policy-age > 0、"
+            raise SystemExit("verl 全参数岛只接同步路径：不支持 --rl-max-policy-age > 0、"
                              "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
+        pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
-                                         ray_info=ray_info, max_prompt=max_prompt, limit=limit)
+                                         ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
     if args.rl_single_island_no_sync:
         sync = "none"
     elif args.rl_island_pool:
@@ -452,6 +454,10 @@ def main(argv=None) -> int:
     if megatron is not None:
         asserted_keys = megatron_engine.ASSERTED_KEYS
         resume, store_note = megatron_resume(args, resume)
+    elif pools is not None:  # S27 G-EK: the FSDP2 island in verl's separate mode
+        from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
+
+        asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
@@ -479,6 +485,7 @@ def main(argv=None) -> int:
         "engine": engine,
         **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
             "store_note": store_note} if megatron is not None else {}),
+        **({"separate": pools.to_dict()} if pools is not None else {}),  # S27 G-EK
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
         "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
@@ -525,10 +532,24 @@ def main(argv=None) -> int:
     return code
 
 
+def fsdp_separate_pools(args, ray_info: dict):
+    """S27 G-EK (VERL-PARITY #13): the trainer and rollout pools of a full-parameter
+    FSDP2 island with ``--rl-placement fixed-partition`` (verl's separate mode,
+    :mod:`.separate`), None for a colocated island. A LoRA island's fixed partition
+    is the fully_async path (``fully_async_plan``), not this one."""
+    from .separate import FIXED_PARTITION, pools_from_args
+
+    if args.parameter_mode != vconf.FULL_PARAMETER_MODE or (args.rl_placement or "colocated") != FIXED_PARTITION:
+        return None
+    return pools_from_args(args, island_gpus(ray_info), what="verl FSDP2 分离岛")
+
+
 def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
-                    chat: dict, ray_info: dict, max_prompt: int, limit: int):
+                    chat: dict, ray_info: dict, max_prompt: int, limit: int, pools=None):
     """The FSDP2 island's ``VerlRunConfig`` and Hydra overrides (unchanged by S27 G-DC,
-    except that a spec clip range is refused: only the Megatron island maps it)."""
+    except that a spec clip range is refused: only the Megatron island maps it).
+    ``pools`` (:func:`fsdp_separate_pools`, S27 G-EK): the trainer trains on its own
+    cards and the rollout runs on standalone vLLM servers (``separate.with_separate_pools``)."""
     clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
     if clips:
         raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
@@ -543,12 +564,19 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         # limit > 0: the correction is mapped by offpolicy_correction in
         # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
         tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
-        gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
+        gpu_memory_utilization=(float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")) if pools is None
+                                else pools.gpu_memory_utilization),
         max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
-        n_gpus=island_gpus(ray_info), experiment_name=f"yeto-verl-{args.learner_id}")
-    overrides = vconf.build_overrides(run) + [
+        n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
+        experiment_name=f"yeto-verl-{args.learner_id}")
+    overrides = vconf.build_overrides(run)
+    if pools is not None:
+        from .separate import with_separate_pools
+
+        overrides = with_separate_pools(overrides, pools)
+    overrides += [
         "actor_rollout_ref.rollout.agent.num_workers=2",
         "reward.num_workers=2",
     ]
@@ -596,27 +624,20 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         problems.append("no --rl-data-slot (one island)")
     if problems:
         raise SystemExit("verl Megatron 岛需要：" + "; ".join(problems))
-    total = island_gpus(ray_info)
-    per_node = int(args.rl_island_gpus_per_node or args.actor_num_gpus_per_node or total)
-    rollout_gpus = int(args.rollout_num_gpus or 0)
-    trainer_gpus_per_node = int(args.actor_num_gpus_per_node or per_node)
-    trainer_gpus = int(args.actor_num_nodes) * trainer_gpus_per_node
-    if rollout_gpus <= 0 or rollout_gpus % min(per_node, rollout_gpus):
-        raise SystemExit(f"verl Megatron 岛：--rollout-num-gpus {rollout_gpus} 不能按每节点 {per_node} 卡排布")
-    if trainer_gpus + rollout_gpus != total:
-        raise SystemExit(f"verl Megatron 岛：训练 {trainer_gpus} + rollout {rollout_gpus} 卡 != 岛内 Ray 的 {total} 卡")
-    rollout_per_node = min(per_node, rollout_gpus)
+    from .separate import pools_from_args
+
+    pools = pools_from_args(args, island_gpus(ray_info), what="verl Megatron 岛")  # S27 G-EK: shared
+    trainer_gpus = pools.trainer_gpus
     with open(Path(model_path) / "config.json") as handle:
         num_experts = json.load(handle).get("n_routed_experts")
     shape = MegatronShape(
-        trainer_nodes=int(args.actor_num_nodes), trainer_gpus_per_node=trainer_gpus_per_node,
-        rollout_nodes=rollout_gpus // rollout_per_node, rollout_gpus_per_node=rollout_per_node,
-        rollout_tp=int(args.rollout_num_gpus_per_engine or 1), tp=int(args.tensor_parallel or 1),
+        trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
+        rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
+        rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
-        # the launcher's engine memory flag is spelled for SGLang; on this island it is vLLM's
-        gpu_memory_utilization=float(args.sglang_mem_fraction_static or 0.8),
+        gpu_memory_utilization=pools.gpu_memory_utilization,
         num_experts=int(num_experts) if num_experts else None)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(

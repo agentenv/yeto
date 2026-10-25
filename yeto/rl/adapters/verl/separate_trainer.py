@@ -27,7 +27,7 @@ from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
 from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
-from .megatron_engine import TRAINER_MODE
+from .separate import TRAINER_MODE
 from .ray_ports import spread_master_ports
 
 

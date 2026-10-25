@@ -39,7 +39,7 @@ class YetoTaskRunner:
         import yeto.rl.adapters.verl.trainer  # noqa: F401  (registers trainer_mode yeto_sync)
 
         megatron = plan.get("engine") == "megatron"
-        if megatron:  # S27 G-DC: registers trainer_mode yeto_separate (Megatron island)
+        if megatron or plan.get("separate"):  # S27 G-DC / G-EK: registers trainer_mode yeto_separate
             import yeto.rl.adapters.verl.separate_trainer  # noqa: F401
         configure_verl_logging()
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
@@ -114,7 +114,7 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
     # S27 G-DC: the Megatron island syncs weights over the same disaggregated NCCL
     # checkpoint engine as the fully_async path, so it gets the same NCCL host setting
-    disaggregated = fully_async or plan.get("engine") == "megatron"
+    disaggregated = fully_async or plan.get("engine") == "megatron" or bool(plan.get("separate"))  # S27 G-EK
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None

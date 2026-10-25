@@ -36,10 +36,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from . import config as vconf
+from . import separate
+from .separate import TRAINER_MODE  # noqa: F401 - re-exported (S27 G-EK: separate mode moved to .separate)
 
 ENGINE_FSDP2 = "fsdp2"
 ENGINE_MEGATRON = "megatron"
-TRAINER_MODE = "yeto_separate"
 ROLLOUT_ENGINES = ("vllm",)
 DISPATCHERS = ("alltoall",)
 ROUTER_REPLAY_MODES = ("disabled", "R3")
@@ -93,6 +94,13 @@ class MegatronShape:
     def data_parallel(self) -> int:
         return self.trainer_gpus // (self.tp * self.pp * self.cp)
 
+    def pools(self) -> separate.SeparatePools:
+        """The trainer and rollout pools (the engine-neutral part, :mod:`.separate`)."""
+        return separate.SeparatePools(
+            trainer_nodes=self.trainer_nodes, trainer_gpus_per_node=self.trainer_gpus_per_node,
+            rollout_nodes=self.rollout_nodes, rollout_gpus_per_node=self.rollout_gpus_per_node,
+            rollout_tp=self.rollout_tp, gpu_memory_utilization=self.gpu_memory_utilization)
+
     def to_dict(self) -> dict:
         out = asdict(self)
         out["recompute_modules"] = list(self.recompute_modules)
@@ -122,9 +130,7 @@ def validate(shape: MegatronShape) -> None:
         raise MegatronShapeError(f"EP*ETP={s.ep * s.etp} 不整除每个流水级的卡数 {s.trainer_gpus // s.pp}")
     if s.num_experts is not None and s.num_experts % s.ep:
         raise MegatronShapeError(f"EP={s.ep} 不整除专家数 {s.num_experts}")
-    if s.rollout_tp > s.rollout_gpus_per_node or s.rollout_gpus_per_node % s.rollout_tp:
-        raise MegatronShapeError(
-            f"rollout TP={s.rollout_tp} 必须整除每个 rollout 节点的卡数 {s.rollout_gpus_per_node}")
+    separate.validate_pools(s.pools(), MegatronShapeError)
     if s.rollout_engine not in ROLLOUT_ENGINES:
         raise MegatronShapeError(f"rollout 引擎只接 {ROLLOUT_ENGINES}（镜像只带 vLLM），得到 {s.rollout_engine!r}")
     if s.dispatcher not in DISPATCHERS:
@@ -135,8 +141,6 @@ def validate(shape: MegatronShape) -> None:
     unknown = sorted(set(s.recompute_modules) - set(RECOMPUTE_MODULES))
     if unknown:
         raise MegatronShapeError(f"未知的 selective 重算模块 {unknown}（可选 {RECOMPUTE_MODULES}）")
-    if not 0.0 < float(s.gpu_memory_utilization) < 1.0:
-        raise MegatronShapeError(f"gpu_memory_utilization 必须在 (0, 1)，得到 {s.gpu_memory_utilization}")
 
 
 def validate_run(cfg: vconf.VerlRunConfig) -> None:
@@ -150,16 +154,12 @@ def validate_run(cfg: vconf.VerlRunConfig) -> None:
 # everything else of ``config.build_overrides`` -- data, sampling, algorithm,
 # correction, reward, trainer bookkeeping -- is kept as is).
 _FSDP_ONLY_PREFIXES = (
-    "trainer.v1.trainer_mode=",
-    "trainer.n_gpus_per_node=",
-    "trainer.nnodes=",
+    *separate.POOL_PREFIXES,
     "actor_rollout_ref.model.use_remove_padding=",
     "actor_rollout_ref.model.enable_gradient_checkpointing=",
     "actor_rollout_ref.actor.strategy=",
     "actor_rollout_ref.actor.fsdp_config.",
     "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=",
-    "actor_rollout_ref.rollout.tensor_model_parallel_size=",
-    "actor_rollout_ref.rollout.gpu_memory_utilization=",
     "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=",
 )
 
@@ -177,19 +177,8 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     out = [
         "model_engine=megatron",
         *base,
-        f"trainer.v1.trainer_mode={TRAINER_MODE}",
-        "actor_rollout_ref.hybrid_engine=False",
-        "trainer.v1.separate_async.parameter_sync_step=1",
-        "trainer.v1.separate_async.num_warmup_batches=0",
-        "trainer.v1.separate_async.hybrid_rollout.enable_switch=False",
-        f"trainer.n_gpus_per_node={shape.trainer_gpus_per_node}",
-        f"trainer.nnodes={shape.trainer_nodes}",
-        # rollout: standalone vLLM servers on their own cards, NCCL weight sync
-        f"actor_rollout_ref.rollout.nnodes={shape.rollout_nodes}",
-        f"actor_rollout_ref.rollout.n_gpus_per_node={shape.rollout_gpus_per_node}",
-        f"actor_rollout_ref.rollout.tensor_model_parallel_size={shape.rollout_tp}",
-        f"actor_rollout_ref.rollout.gpu_memory_utilization={shape.gpu_memory_utilization}",
-        "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        # trainer mode, separate_async settings and both pools (engine-neutral, .separate)
+        *separate.separate_overrides(shape.pools()),
         # Mamba SSM state cache in fp32 (the checkpoint's mamba_ssm_cache_dtype; NeMo-RL's
         # Nemotron vLLM setting), written out so the rollout never falls back to bf16
         "++actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_ssm_cache_dtype=float32",
@@ -242,11 +231,7 @@ ASSERTED_KEYS = (
     "actor_rollout_ref.rollout.top_k",
     "actor_rollout_ref.rollout.calculate_log_probs",
     "algorithm.rollout_correction.bypass_mode",
-    "actor_rollout_ref.hybrid_engine",
-    "trainer.v1.trainer_mode",
-    "trainer.v1.separate_async.parameter_sync_step",
-    "trainer.v1.separate_async.num_warmup_batches",
-    "actor_rollout_ref.rollout.checkpoint_engine.backend",
+    *separate.ASSERTED_KEYS,
     "actor_rollout_ref.actor.megatron.expert_model_parallel_size",
     "actor_rollout_ref.actor.megatron.tensor_model_parallel_size",
     "actor_rollout_ref.actor.megatron.use_distributed_optimizer",
