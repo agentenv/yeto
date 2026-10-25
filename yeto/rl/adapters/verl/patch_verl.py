@@ -323,6 +323,16 @@ def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
     return text.replace(anchor, hook)
 
 
+def _applied(text: str, hook: str) -> bool:
+    """The hook is already in ``text``: verbatim, or -- for a hook that opens with its
+    own ``# yeto`` comment line -- that line is (a later patch may edit the rest of the
+    hook: the ninth patch extends the eighth's ``else`` branch, S27 G-EZ2)."""
+    if hook in text:
+        return True
+    first = hook.splitlines(keepends=True)[0] if hook else ""
+    return first.strip().startswith("# yeto") and first in text
+
+
 def apply(root: Path, profile: str = "fsdp") -> None:
     try:
         patches = PROFILES[profile]
@@ -331,7 +341,7 @@ def apply(root: Path, profile: str = "fsdp") -> None:
     for target, anchor, hook, mode in patches:
         path = root / target
         text = path.read_text()
-        if hook in text:
+        if _applied(text, hook):
             continue
         if text.count(anchor) != 1:
             raise SystemExit(f"patch_verl: anchor occurs {text.count(anchor)} times in {target}")
