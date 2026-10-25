@@ -370,7 +370,7 @@ def _start_syncer(binary: Path, tmp_path: Path, *, fragments: int, rounds: int, 
 
 
 def _plan(learner_id: int, port: int, profile: str, *, rounds: int, fragments: int, async_rounds: bool,
-          matrix_merge: str, pipeline: int) -> dict:
+          matrix_merge: str, pipeline: int, final_cut: str) -> dict:
     layout = _layout(minimum_fragments=fragments, matrix_merge=matrix_merge)
     assert layout.fragments.num_fragments == fragments
     return {"learner_id": learner_id, "syncer": f"127.0.0.1:{port}", "model_revision": "a" * 40,
@@ -381,7 +381,7 @@ def _plan(learner_id: int, port: int, profile: str, *, rounds: int, fragments: i
                 "model_config_sha256": "b" * 64, "training_contract_sha256": "2" * 64,
                 "algorithm_spec_sha256": "a1" * 32, "local_horizon": 1, "pipeline": pipeline,
                 "wait_timeout_s": 60.0, "wan_streams": 1, "push_dtype": "f32",
-                "max_fragment_bytes": MAX_FRAGMENT_BYTES, "final_cut": "download",
+                "max_fragment_bytes": MAX_FRAGMENT_BYTES, "final_cut": final_cut,
                 "local_init": async_rounds, "matrix_merge": matrix_merge, "island_pool": None}}
 
 
@@ -430,7 +430,7 @@ def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> 
 
 
 def _two_islands(binary, tmp_path, monkeypatch, *, rounds: int, fragments: int, async_rounds: bool,
-                 extra: tuple[str, ...], matrix_merge: str, pipeline: int):
+                 extra: tuple[str, ...], matrix_merge: str, pipeline: int, final_cut: str = "download"):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-full-parameter-test-key")
     monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
     process, port, profile = _start_syncer(binary, tmp_path, fragments=fragments, rounds=rounds, extra=extra)
@@ -438,7 +438,7 @@ def _two_islands(binary, tmp_path, monkeypatch, *, rounds: int, fragments: int, 
     try:
         threads = [threading.Thread(target=_run_island, args=(
             i, _plan(i, port, profile, rounds=rounds, fragments=fragments, async_rounds=async_rounds,
-                     matrix_merge=matrix_merge, pipeline=pipeline),
+                     matrix_merge=matrix_merge, pipeline=pipeline, final_cut=final_cut),
             rounds if not async_rounds else 20 * rounds, results)) for i in range(2)]
         for thread in threads:
             thread.start()
@@ -465,24 +465,35 @@ def _expected_average(rounds: int) -> dict[str, torch.Tensor]:
 
 
 @needs_cargo
-def test_two_verl_islands_run_strict_sweeps_through_the_real_syncer(syncer_binary, tmp_path, monkeypatch):
+@pytest.mark.parametrize("final_cut", ["download", "ack"])
+def test_two_verl_islands_run_strict_sweeps_through_the_real_syncer(syncer_binary, tmp_path, monkeypatch,
+                                                                     final_cut):
     rounds, fragments = 3, len(_layout().fragments.fragments)
     # An explicit sweep is the strict control profile (plain average, every island per round).
     results, _log = _two_islands(syncer_binary, tmp_path, monkeypatch, rounds=rounds, fragments=fragments,
-                                 async_rounds=False, extra=("--rl-sync-full-parameter-rounds", "sweep"),
-                                 matrix_merge="avg", pipeline=1)
+                                 async_rounds=False, matrix_merge="avg", pipeline=1, final_cut=final_cut,
+                                 extra=("--rl-sync-full-parameter-rounds", "sweep",
+                                        "--rl-sync-final-cut", final_cut))
     expected = _expected_average(rounds)
     for learner_id in range(2):
         result = results[learner_id]
-        for name, value in expected.items():
+        # "ack": the final sweep stays with the syncer, so the islands hold the
+        # merge of every round but the last plus their own last step.
+        merged = expected if final_cut == "download" else {
+            name: value - (_step(1 - learner_id, rounds - 1)[name] - _step(learner_id, rounds - 1)[name]) / 2
+            for name, value in expected.items()}
+        for name, value in merged.items():
             assert torch.allclose(result["values"][name], value, atol=1e-6), (learner_id, name)
         merges = [fields for event, fields in result["events"] if event == "rl_full_parameter_round"]
+        applied = rounds if final_cut == "download" else rounds - 1  # "ack": the last merge stays in the syncer
         assert [m["sync/fragment_versions"] for m in merges][-1] == list(
-            range((rounds - 1) * fragments + 1, rounds * fragments + 1))
+            range((applied - 1) * fragments + 1, applied * fragments + 1))
         assert len(merges) == rounds == result["rounds"]
         acks = [fields for event, fields in result["events"] if event == "rl_full_parameter_final_ack"]
-        assert acks == [{"acknowledged": True}]
-    assert results[0]["state"].policy_tensor_hash() == results[1]["state"].policy_tensor_hash()
+        assert acks == ([{"acknowledged": True}] if final_cut == "download"
+                        else [{"acknowledged": True, "sync/final_cut": "ack"}])
+    if final_cut == "download":
+        assert results[0]["state"].policy_tensor_hash() == results[1]["state"].policy_tensor_hash()
 
 
 @needs_cargo
