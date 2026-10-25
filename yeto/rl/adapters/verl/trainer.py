@@ -300,6 +300,11 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         from .driver_extras import wire_full_parameter_extras
 
         wire_full_parameter_extras(driver, island, plan)
+    if full and plan.get("separate"):  # S27 G-EW: engine outage (VERL-PARITY #16; nothing without the budget)
+        from .engine_recovery import arm_verl_engine_outage
+        from .full_parameter_stream import _LoopRunner
+
+        arm_verl_engine_outage(driver, trainer, plan, run=_LoopRunner().run)
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",
