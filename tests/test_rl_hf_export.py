@@ -451,3 +451,32 @@ def test_verl_lora_and_elastic_launches_are_refused():
     args.rl_backend, args.rl_elastic = "miles", True
     with pytest.raises(ValueError, match="--rl-elastic"):
         rl_ports._check_hf_export_launch_flags(args)
+
+
+# ------------------------------------------------- S27 G-EQ: delta-friendly shard layout
+def test_base_shard_layout_reuses_the_source_checkpoints_own_files(tmp_path):
+    """The export writes the files the source checkpoint has, so a later
+    release_delta against that checkpoint compares same-name, same-size files."""
+    from yeto.rl.adapters.verl.hf_export import base_shard_layout
+
+    names = ["a.weight", "b.weight", "c.weight"]
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(
+        {"metadata": {"total_size": 3}, "weight_map": {"a.weight": "model-00001-of-00002.safetensors",
+                                                       "c.weight": "model-00002-of-00002.safetensors",
+                                                       "b.weight": "model-00001-of-00002.safetensors"}}))
+    groups, files = base_shard_layout(tmp_path, names)
+    assert files == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    assert groups == [["a.weight", "b.weight"], ["c.weight"]]
+    # the layout is reusable only when the index names exactly the exported parameters
+    assert base_shard_layout(tmp_path, [*names, "d.weight"]) is None
+    assert base_shard_layout(tmp_path, names[:2]) is None
+
+
+def test_base_shard_layout_declines_without_a_usable_index(tmp_path):
+    from yeto.rl.adapters.verl.hf_export import base_shard_layout
+
+    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # single-file checkpoint: no index
+    (tmp_path / "model.safetensors.index.json").write_text("{")
+    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # torn index
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a.weight": "x.bin"}}))
+    assert base_shard_layout(tmp_path, ["a.weight"]) is None  # not a safetensors shard
