@@ -255,7 +255,13 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
             time.sleep(5)
-MODAL_STOP_VERIFY_ATTEMPTS = 5
+# After `modal app stop` an island container gets up to 30 s to answer the input
+# cancellation and up to 30 s more to shut its runner down (Modal system log: "failed to
+# respond to cancellation for too long: 30 seconds", "shutting down for too long (grace
+# period: 30 seconds)"); `modal app list` showed the last task up to ~6 s after it ended.
+# S27 runs took 17-60 s from the stop to "stopped" (EXTRA-CONTAINER.md); 5 checks (~25 s)
+# reported 8 of them as not stopped (exit 5). 25 checks wait about 2 min.
+MODAL_STOP_VERIFY_ATTEMPTS = 25
 MODAL_STOP_VERIFY_DELAY_S = 5.0
 
 
@@ -332,12 +338,21 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
+def finalized_island_containers(id_guards: dict, collectors: dict) -> set[str]:
+    """The container ids that islands printed (``ContainerIdGuard.first``, by island
+    name) for the islands whose event tape has ``rl_learner_finalized``."""
+    return {cid for name, guard in list(id_guards.items())
+            if getattr(collectors.get(name), "finalized", False)
+            for cid in dict(getattr(guard, "first", None) or {}).values()}
+
+
 def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True,
-                             attributed=None):
+                             attributed=None, finished=None):
     """The log-independent container guard (modal_runner.ContainerSetPoller), only when
     a new container is never expected: no launcher relaunch, no checkpoint-store resume
     and no droppable island. None otherwise. ``attributed()`` returns the container ids
-    the islands printed (container id -> (island, rank))."""
+    the islands printed (container id -> (island, rank)); ``finished()`` the ones of
+    islands that already finalized."""
     if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
         return None
     if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
@@ -348,7 +363,7 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
 
     expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
     poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change,
-                                attributed=attributed)
+                                attributed=attributed, finished=finished)
     return poller.start() if start else poller
 
 
