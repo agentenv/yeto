@@ -938,7 +938,7 @@ def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=No
     if cfg.harbor_relay_port is None or rank != 0:
         yield
         return
-    from yeto.rl.adapters.miles.harbor_agent import (
+    from yeto.rl.harness.gateway.relay_env import (
         RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_SECRET_FILE_ENV)
 
     if forward is None:

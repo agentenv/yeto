@@ -68,6 +68,8 @@ from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.suspend import TurnGate, after_suspension
 from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.gateway.gate_relay import GateRelay
+from yeto.rl.harness.gateway.relay_env import (  # noqa: F401 - re-exported names
+    RELAY_HOST_ENV, RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_PUBLIC_HOST_ENV, RELAY_SECRET_FILE_ENV)
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
 from yeto.rl.harness.harbor.codex_provider import use_yeto_codex
@@ -153,11 +155,6 @@ def append_sample_log(record: dict[str, Any], environ: Any = None) -> None:
 # --------------------------------------------------------------- suspension
 
 TEST_HOLD_EXTRA_ENV = "YETO_TEST_SUSPEND_HOLD_EXTRA_S"  # test only, see test_hold_extra_s
-RELAY_PORT_ENV = "YETO_HARBOR_GATE_RELAY_PORT"
-RELAY_HOST_ENV = "YETO_HARBOR_GATE_RELAY_HOST"
-RELAY_PUBLIC_HOST_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_HOST"
-RELAY_PUBLIC_BASE_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_BASE"
-RELAY_SECRET_FILE_ENV = "YETO_HARBOR_GATE_RELAY_SECRET_FILE"
 
 
 @dataclass(frozen=True)

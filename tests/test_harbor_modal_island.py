@@ -46,6 +46,14 @@ def _args(agent: str | None = harbor_agent.AGENT_FUNCTION) -> SimpleNamespace:
     return SimpleNamespace(custom_agent_function_path=agent, training_mode="rl")
 
 
+def test_launch_layer_names_the_harbor_agent_and_relay_envs_like_the_adapter():
+    from yeto.rl.harness.gateway import relay_env
+
+    assert harness_env.HARBOR_AGENT_FUNCTION == harbor_agent.AGENT_FUNCTION
+    assert (relay_env.RELAY_PORT_ENV, relay_env.RELAY_PUBLIC_BASE_ENV, relay_env.RELAY_SECRET_FILE_ENV) == (
+        harbor_agent.RELAY_PORT_ENV, harbor_agent.RELAY_PUBLIC_BASE_ENV, harbor_agent.RELAY_SECRET_FILE_ENV)
+
+
 def test_example_dirs_go_on_the_island_pythonpath_only_for_the_harbor_agent():
     assert harness_env.harbor_example_pythonpath(_args()) == (
         "$HOME/miles/examples/experimental/harbor:$HOME/miles/examples/swe-agent-harbor-docker:")
