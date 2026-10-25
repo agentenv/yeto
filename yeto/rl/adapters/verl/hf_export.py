@@ -183,6 +183,7 @@ class VerlHfWriter:
         self.last_layout = {"layout": "base" if plan is not None else "regrouped", "why": why,
                             "bytes": total, "freed": self._release_memory()}
         print(f"[yeto hf export] {self.last_layout['layout']} layout: {why}", flush=True)
+        print(f"[yeto hf export] freed: {self.last_layout['freed']}", flush=True)
         copy_model_files(self.model_path, directory)
         (directory / COMPLETE_MARKER).write_text("")
 
@@ -197,9 +198,15 @@ class VerlHfWriter:
         results = [dict(result) for result in (self.run(release()) or ())]
         if not results:
             return None
-        return {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
-                "reserved_after": max(int(r["after"]["reserved"]) for r in results),
-                "workers": len(results)}
+        freed = {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
+                 "reserved_after": max(int(r["after"]["reserved"]) for r in results),
+                 "workers": len(results)}
+        hosts = [r["host"] for r in results if r.get("host")]  # YETO_HOST_MEMORY=trim (S27 G-EZ3)
+        if hosts:
+            freed["host_rss_anon_mib_before"] = sum(int(h.get("rss_anon_mib_before") or 0) for h in hosts)
+            freed["host_rss_anon_mib_after"] = sum(int(h.get("rss_anon_mib_after") or 0) for h in hosts)
+            freed["host_trim_s_max"] = max(float(h.get("gc_s", 0)) + float(h.get("trim_s", 0)) for h in hosts)
+        return freed
 
     def _write_base_layout(self, plan: BaseExport, directory: Path) -> int:
         """The source checkpoint's own files (module doc, step 2). A stacked model

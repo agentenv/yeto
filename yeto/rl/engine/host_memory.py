@@ -78,3 +78,92 @@ def release_host_memory() -> dict[str, Any]:
         "trim_s": round(time.monotonic() - collected, 3),
         "malloc_trim": trim is not None,
     }
+
+
+# ---- where the host memory is (S27 G-EZ3) ----
+#
+# The 120B verl island on npu1 (G-EZ2) used about 150-175 GiB per node more
+# than its parameters, gradients and Adam state; the node's MemAvailable alone
+# cannot say which process or which kind of page holds it. These two readers
+# give the split a caller logs next to each training step.
+
+PROCESS_FIELDS = ("VmRSS", "VmHWM", "RssAnon", "RssFile", "RssShmem")
+NODE_FIELDS = ("MemTotal", "MemAvailable", "MemFree", "AnonPages", "Shmem", "Cached", "Buffers",
+               "Mapped", "SUnreclaim", "PageTables", "Unevictable", "Mlocked", "AnonHugePages")
+
+
+def _kib_fields(path: str, fields: tuple[str, ...]) -> dict[str, int]:
+    """``fields`` of a ``/proc`` file with ``Name:  N kB`` lines, in MiB (missing ones left out)."""
+    out: dict[str, int] = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                name, _, rest = line.partition(":")
+                if name in fields:
+                    parts = rest.split()
+                    if parts and parts[0].isdigit():
+                        out[name] = int(parts[0]) // 1024
+    except OSError:
+        pass
+    return out
+
+
+def process_memory(pid: int | str = "self") -> dict[str, int]:
+    """A process's resident memory by kind, in MiB: total (``VmRSS``), peak
+    (``VmHWM``), anonymous, file-backed and shared-memory pages."""
+    return _kib_fields(f"/proc/{pid}/status", PROCESS_FIELDS)
+
+
+def node_memory() -> dict[str, int]:
+    """This node's ``/proc/meminfo`` fields of :data:`NODE_FIELDS`, in MiB."""
+    return _kib_fields("/proc/meminfo", NODE_FIELDS)
+
+
+HOST_MEMORY_ENV = "YETO_HOST_MEMORY"
+HOST_MEMORY_MODES = ("report", "trim")
+
+
+def host_memory_mode(environ: Any = None) -> str | None:
+    """What a training island does about host memory around each step
+    (``YETO_HOST_MEMORY``): None (unset, empty or ``0``: nothing), ``report``
+    (log :func:`process_memory` / :func:`node_memory` before and after each
+    step), or ``trim`` (also :func:`release_host_memory` after each step and
+    after each export). Any other value is an error, not a silent no-op."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(HOST_MEMORY_ENV, "").strip().lower()
+    if value in ("", "0"):
+        return None
+    if value not in HOST_MEMORY_MODES:
+        raise ValueError(f"{HOST_MEMORY_ENV}={value!r}: expected one of {HOST_MEMORY_MODES} (or unset)")
+    return value
+
+
+def summarize_by_node(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """One line's worth of per-worker reports (each ``{"host", "pid", "rank",
+    "process", "node"[, "release"]}``): per host the node's MemAvailable and
+    Shmem (the lowest any worker saw) and the summed worker RSS by kind; per
+    worker its RSS. Trim results are summed per host when present."""
+    nodes: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        host = str(report.get("host"))
+        node = nodes.setdefault(host, {"workers": 0, "mem_available_mib": None, "shmem_mib": None,
+                                       **{f"workers_{k.lower()}_mib": 0 for k in PROCESS_FIELDS[:1] + PROCESS_FIELDS[2:]}})
+        node["workers"] += 1
+        meminfo = report.get("node") or {}
+        for key, field in (("mem_available_mib", "MemAvailable"), ("shmem_mib", "Shmem")):
+            if field in meminfo:
+                node[key] = meminfo[field] if node[key] is None else min(node[key], meminfo[field])
+        if "MemTotal" in meminfo:
+            node["mem_total_mib"] = meminfo["MemTotal"]
+        process = report.get("process") or {}
+        for field in PROCESS_FIELDS[:1] + PROCESS_FIELDS[2:]:
+            node[f"workers_{field.lower()}_mib"] += int(process.get(field, 0))
+        release = report.get("release")
+        if release and release.get("rss_anon_mib_before") is not None and release.get("rss_anon_mib_after") is not None:
+            node["trimmed_mib"] = node.get("trimmed_mib", 0) + (
+                int(release["rss_anon_mib_before"]) - int(release["rss_anon_mib_after"]))
+            node["trim_s_max"] = max(node.get("trim_s_max", 0.0), float(release.get("gc_s", 0)) + float(release.get("trim_s", 0)))
+    workers = [{"host": r.get("host"), "rank": r.get("rank"), "pid": r.get("pid"), **(r.get("process") or {})}
+               for r in sorted(reports, key=lambda r: (str(r.get("host")), r.get("rank") if r.get("rank") is not None else -1))]
+    return {"nodes": nodes, "workers": workers}
