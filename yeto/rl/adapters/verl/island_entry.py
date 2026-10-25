@@ -615,6 +615,46 @@ def island_model_path(model: str, revision: str | None) -> str:
     return snapshot_download(model, revision=revision)
 
 
+def model_supports_gradient_checkpointing(model_path: str, *, trust_remote_code: bool = False) -> bool | None:
+    """Whether this model's HF implementation can recompute activations, or None
+    when it cannot be determined (no transformers, an unmapped architecture).
+
+    Only the model class is looked at, never the weights: ``supports_gradient_
+    checkpointing`` is a class attribute of ``PreTrainedModel``."""
+    try:
+        from transformers import AutoConfig
+        from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING
+
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+        model_class = MODEL_FOR_CAUSAL_LM_MAPPING[type(config)]
+        return bool(getattr(model_class, "supports_gradient_checkpointing", True))
+    except Exception as error:  # noqa: BLE001 - a probe never stops the island
+        print(f"[yeto-verl] gradient checkpointing support unknown for {model_path}: "
+              f"{type(error).__name__}: {error}", flush=True)
+        return None
+
+
+def gradient_checkpointing_for(args, model_path: str) -> bool:
+    """Whether this island recomputes activations (S27 G-EQ2).
+
+    Default on, as before. Turned off only when this model's implementation says
+    it cannot: verl's FSDP2 engine calls ``gradient_checkpointing_enable()``
+    unconditionally, and a model that refuses takes the island down after the
+    whole model is built (npu1: HF NemotronH of transformers 5.3 sets
+    ``supports_gradient_checkpointing = False``). ``--rl-activation-recompute``
+    is an explicit request, so it is refused instead of silently dropped."""
+    supported = model_supports_gradient_checkpointing(
+        model_path, trust_remote_code=bool(getattr(args, "trust_remote_code", False)))
+    requested = bool(getattr(args, "rl_activation_recompute", False))
+    if supported is False:
+        if requested:
+            raise SystemExit(f"--rl-activation-recompute：{model_path} 的 transformers 实现不支持"
+                             "重算激活（supports_gradient_checkpointing = False）")
+        print(f"[yeto-verl] activation recompute off: {model_path} 的 transformers 实现不支持", flush=True)
+        return False
+    return True
+
+
 def fsdp_separate_pools(args, ray_info: dict):
     """S27 G-EK (VERL-PARITY #13): the trainer and rollout pools of a full-parameter
     FSDP2 island with ``--rl-placement fixed-partition`` (verl's separate mode,
@@ -653,6 +693,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
         trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
+        gradient_checkpointing=gradient_checkpointing_for(args, model_path),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)

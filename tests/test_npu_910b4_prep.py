@@ -453,3 +453,56 @@ def test_the_island_parses_trust_remote_code():
     assert island_entry.parse_args(base)[0].trust_remote_code is False
     args, ignored = island_entry.parse_args([*base, "--trust-remote-code"])
     assert args.trust_remote_code is True and "--trust-remote-code" not in ignored
+
+
+def test_activation_recompute_follows_the_model_implementation(monkeypatch):
+    """S27 G-EQ2: verl's FSDP2 engine enables gradient checkpointing itself, so a
+    model whose implementation refuses it has to be known before the island runs."""
+    import types
+
+    from yeto.rl.adapters.verl import island_entry
+
+    class _Config:
+        pass
+
+    def fake_transformers(supported):
+        auto = types.ModuleType("transformers")
+        auto.AutoConfig = SimpleNamespace(from_pretrained=lambda path, trust_remote_code=False: _Config())
+        modeling = types.ModuleType("transformers.models.auto.modeling_auto")
+        modeling.MODEL_FOR_CAUSAL_LM_MAPPING = {_Config: type(
+            "Model", (), {"supports_gradient_checkpointing": supported})}
+        return auto, modeling
+
+    for supported, want in ((True, True), (False, False)):
+        auto, modeling = fake_transformers(supported)
+        monkeypatch.setitem(sys.modules, "transformers", auto)
+        monkeypatch.setitem(sys.modules, "transformers.models", types.ModuleType("transformers.models"))
+        monkeypatch.setitem(sys.modules, "transformers.models.auto", types.ModuleType("transformers.models.auto"))
+        monkeypatch.setitem(sys.modules, "transformers.models.auto.modeling_auto", modeling)
+        assert island_entry.model_supports_gradient_checkpointing("/m") is supported
+        args = SimpleNamespace(trust_remote_code=False, rl_activation_recompute=False)
+        assert island_entry.gradient_checkpointing_for(args, "/m") is want
+        # an explicit --rl-activation-recompute is refused, not silently dropped
+        args = SimpleNamespace(trust_remote_code=False, rl_activation_recompute=True)
+        if supported:
+            assert island_entry.gradient_checkpointing_for(args, "/m") is True
+        else:
+            with pytest.raises(SystemExit, match="rl-activation-recompute"):
+                island_entry.gradient_checkpointing_for(args, "/m")
+    # no transformers at all: unknown, and the island keeps the default
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    assert island_entry.model_supports_gradient_checkpointing("/m") is None
+    assert island_entry.gradient_checkpointing_for(
+        SimpleNamespace(trust_remote_code=False, rl_activation_recompute=False), "/m") is True
+
+
+def test_gradient_checkpointing_reaches_the_overrides():
+    from yeto.rl.adapters.verl import config as vconf
+
+    def overrides(**kw):
+        return vconf.build_overrides(vconf.VerlRunConfig(
+            model_path="/m", train_file="/t", val_file="/v", out_dir="/o", **kw))
+
+    assert "actor_rollout_ref.model.enable_gradient_checkpointing=True" in overrides()
+    assert "actor_rollout_ref.model.enable_gradient_checkpointing=False" in overrides(
+        gradient_checkpointing=False)

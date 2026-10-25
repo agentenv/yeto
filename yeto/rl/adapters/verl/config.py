@@ -81,6 +81,11 @@ class VerlRunConfig:
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
+    # S27 G-EQ2: activation recomputation, when the model's implementation
+    # supports it (``island_entry.gradient_checkpointing_for``). The HF
+    # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
+    # FSDP2 engine dies on it right after building the model.
+    gradient_checkpointing: bool = True
     # S27 G-EQ2: load the model and tokenizer with the checkpoint's own code
     # (``--trust-remote-code``, the launcher's flag the Miles islands already
     # take). Needed for an architecture whose support lives in the repository
@@ -177,7 +182,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         f"actor_rollout_ref.model.trust_remote_code={cfg.trust_remote_code}",
         f"actor_rollout_ref.model.path={cfg.model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
-        "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        f"actor_rollout_ref.model.enable_gradient_checkpointing={cfg.gradient_checkpointing}",
         *(["actor_rollout_ref.model.lora_rank=0"] if full_parameter(cfg) else [
             f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
             f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
