@@ -439,6 +439,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
     "train_memory.dp_optimizer": _ok,  # _full_parameter_optimizer_attrs
+    "train_memory.grad_reduce_bf16": _ok,  # base argv: --grad-reduce-in-bf16
+    "train_memory.precision_aware_optimizer": _ok,  # train_memory_argv
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline",
@@ -907,7 +909,10 @@ def translate_run_config(
         # algorithm (D7): the only place AlgorithmSpec becomes Miles args
         "--advantage-estimator", algorithm.advantage_estimator,
         "--lr", str(config.algorithm.lr),
-        "--accumulate-allreduce-grads-in-fp32",
+        # bf16 gradient buffers (--rl-grad-reduce-bf16): Megatron asserts that
+        # --accumulate-allreduce-grads-in-fp32 is absent then
+        *(("--grad-reduce-in-bf16",) if getattr(config.train_memory, "grad_reduce_bf16", False)
+          else ("--accumulate-allreduce-grads-in-fp32",)),
         "--attention-softmax-in-fp32",
         "--attention-backend", recipe.training_attention_backend,
         *(() if config.train_memory.gradient_accumulation_fusion else ("--no-gradient-accumulation-fusion",)),
@@ -1208,6 +1213,11 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+# --rl-precision-aware-optimizer (no-sync islands only): bf16 Adam moments on the
+# device; Megatron keeps the FP32 masters as 16-bit remainders of the bf16 params
+# (store_param_remainders, its default). G-DF T1 measured it on 8 x H100 80 GB.
+PRECISION_AWARE_ARGV = ("--use-precision-aware-optimizer", "--exp-avg-dtype", "bf16",
+                        "--exp-avg-sq-dtype", "bf16")
 
 
 def megatron_moe_layer_freq(layer_freq: Any) -> str:
@@ -1288,6 +1298,8 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
     fraction = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0)
     if fraction > 0:
         values.extend((*OPTIMIZER_OFFLOAD_ARGV, "--optimizer-offload-fraction", repr(fraction)))
+    if getattr(memory, "precision_aware_optimizer", False):
+        values.extend(PRECISION_AWARE_ARGV)
     return tuple(values)
 
 
@@ -1345,6 +1357,11 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
 
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
+    if getattr(memory, "precision_aware_optimizer", False):
+        raise MilesConfigError(
+            "the full-parameter sync reads FP32 optimizer masters, which the precision-aware "
+            "optimizer keeps only as remainders inside TE FusedAdam: drop --rl-precision-aware-optimizer "
+            "(no-sync islands only)")
     offload = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0
     if data_parallel != 1 and builds_trainer:
         if (gap := full_parameter_dp_replica_gap()) is not None:

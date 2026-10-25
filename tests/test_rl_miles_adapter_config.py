@@ -950,3 +950,41 @@ def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
     argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     at = argv.index("--mamba-training-ssm-states-dtype")
     assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain
+
+
+def _memory_config(**memory):
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    return dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(**memory))
+
+
+def test_grad_reduce_bf16_replaces_the_fp32_gradient_accumulation():
+    # G-DF C4: bf16 gradient buffers for Nemotron-3 Nano on 80 GB cards; FP32 masters stay
+    base = list(mc.translate_run_config(_memory_config(), AlgorithmSpec(), full_parameter_sync=False).argv)
+    assert "--accumulate-allreduce-grads-in-fp32" in base and "--grad-reduce-in-bf16" not in base
+    argv = list(mc.translate_run_config(_memory_config(grad_reduce_bf16=True), AlgorithmSpec(),
+                                   full_parameter_sync=False).argv)
+    assert "--grad-reduce-in-bf16" in argv and "--accumulate-allreduce-grads-in-fp32" not in argv
+
+
+def test_precision_aware_optimizer_only_without_the_full_parameter_sync():
+    # G-DF C4: bf16 Adam moments; the sync's FP32-master reader would find only remainders
+    argv = list(mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec(),
+                                   full_parameter_sync=False).argv)
+    i = argv.index("--use-precision-aware-optimizer")
+    assert argv[i:i + 5] == list(mc.PRECISION_AWARE_ARGV)
+    assert "--optimizer-cpu-offload" not in argv
+    with pytest.raises(mc.MilesConfigError, match="drop --rl-precision-aware-optimizer"):
+        mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec())
+
+
+def test_train_memory_args_check_the_precision_aware_optimizer():
+    from types import SimpleNamespace as NS
+
+    ok = rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True, rl_single_island_no_sync=True,
+                             rl_grad_reduce_bf16=True))
+    assert ok.precision_aware_optimizer and ok.grad_reduce_bf16
+    with pytest.raises(ValueError, match="needs --rl-single-island-no-sync"):
+        rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True))
+    with pytest.raises(ValueError, match="exclusive"):
+        rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True, rl_single_island_no_sync=True,
+                            rl_optimizer_offload_fraction=0.5))

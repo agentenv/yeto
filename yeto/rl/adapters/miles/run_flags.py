@@ -195,6 +195,20 @@ _ROLLOUT_ENGINE = (
         "with the distributed optimizer). Default 0: all on the device",
     ),
     shared_flag(
+        "--rl-grad-reduce-bf16",
+        action="store_true",
+        help="ports: gradient buffers and the data-parallel gradient reduce in bf16 "
+        "(Megatron --grad-reduce-in-bf16) instead of fp32; FP32 masters and Adam moments "
+        "stay. Saves 2 bytes per local parameter (e.g. Nemotron-3 Nano EP8 on 80 GB cards)",
+    ),
+    shared_flag(
+        "--rl-precision-aware-optimizer",
+        action="store_true",
+        help="ports: Megatron precision-aware optimizer with bf16 Adam moments (FP32 masters "
+        "kept as 16-bit remainders). --rl-single-island-no-sync only: the full-parameter "
+        "sync reads FP32 masters",
+    ),
+    shared_flag(
         "--rl-dp-optimizer",
         choices=DP_OPTIMIZERS,
         default="auto",
