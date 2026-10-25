@@ -24,6 +24,17 @@ instead of from a fixed slot. Plain rules:
   reports the data as ended). Reports wait in a queue until the head answers.
 * The data ends only when the dispenser says so (``--rl-data-passes``);
   :meth:`TaskSource.take` then raises :class:`DispenseEnded`.
+* Streams (S27 P3, :class:`StreamTable`): with ``--data-mix`` (several source
+  data sets with weights) or task labels (a row's ``task_label``), the rows
+  are split into streams, one per (source, label). A position then carries
+  its stream in its high bits (``position >> STREAM_SHIFT``) and counts the
+  stream's own rows: position ``(s << 40) | k`` is row
+  ``rows_s[pass_order(len(rows_s), seed, k // len(rows_s), stream=s)[k % len(rows_s)]]``.
+  The dispenser interleaves fresh positions across the streams by their
+  weights (within one position of the mix when every island takes every
+  stream) and gives an island with task labels (``--rl-island-task-labels``)
+  only the positions of its labels. One stream without a label and a mix is
+  exactly P2 (the wire then speaks protocol version 1).
 
 Wire format: ``docs/PROTOCOL.md`` "Task dispenser"; the golden bytes are
 pinned on both sides (``syncer/src/dispense_service.rs`` and
@@ -42,7 +53,7 @@ import struct
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,7 +71,26 @@ MSG_TASK_REPORT = 54
 MSG_TASK_ACK = 55
 MSG_TASK_HEARTBEAT = 56
 TASK_PROTOCOL_VERSION = 1
+TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams (S27 P3)
 TASK_HELLO_MAC_DOMAIN = b"yeto-task-hello-mac-v1\0"
+
+# streams (S27 P3; syncer/src/dispense.rs)
+STREAM_SHIFT = 40
+STREAM_POSITIONS = 1 << STREAM_SHIFT
+MAX_STREAMS = 256
+MAX_STREAM_NAME = 64
+MAX_LABEL = 48  # bytes of one task label (the stream name adds the source)
+# a row's task label: top level or metadata (prepare_prompt_data copies the top level in)
+TASK_LABEL_KEY = "task_label"
+# --data-mix: the row's source (index into the mix), in the row's metadata
+DATA_SOURCE_KEY = "yeto_data_source"
+# an island label that matches the rows without a task label
+UNLABELED = "-"
+# the weight scale of a --data-mix stream (weights are integers on the wire)
+MIX_WEIGHT_SCALE = 1 << 50
+# sampler islands (S27 P4): holder ids from here up, apart from the training
+# islands' learner ids (:func:`sampler_holder_id`)
+SAMPLER_HOLDER_BASE = 1 << 31
 
 GRANT, WAIT, END = 0, 1, 2
 TRAINED, DROPPED, REQUEUE, RELEASE = 1, 2, 3, 4
@@ -103,6 +133,27 @@ def encode_task_hello(learner_id: int, incarnation: int, rows: int, fingerprint:
     return struct.pack("<HIQQ", TASK_PROTOCOL_VERSION, int(learner_id), int(incarnation), int(rows)) + fingerprint
 
 
+def encode_task_hello_streams(learner_id: int, incarnation: int, fingerprint: bytes,
+                              streams: Sequence[tuple[int, int, str]],
+                              accept: Sequence[int] | None) -> bytes:
+    """TASK_HELLO version 2 (S27 P3): ``streams`` are ``(rows, weight, name)``;
+    ``accept`` the stream ids this island takes (None: every stream)."""
+    if len(fingerprint) != 32:
+        raise ValueError("the data fingerprint must be 32 bytes")
+    if not 1 <= len(streams) <= MAX_STREAMS:
+        raise ValueError(f"{len(streams)} streams (1..{MAX_STREAMS} allowed)")
+    out = [struct.pack("<HIQ", TASK_PROTOCOL_VERSION_STREAMS, int(learner_id), int(incarnation)),
+           fingerprint, struct.pack("<H", len(streams))]
+    for rows, weight, name in streams:
+        raw = str(name).encode("utf-8")
+        if len(raw) > MAX_STREAM_NAME:
+            raise ValueError(f"stream name {name!r} is longer than {MAX_STREAM_NAME} bytes")
+        out.append(struct.pack("<QQH", int(rows), int(weight), len(raw)) + raw)
+    ids = [] if accept is None else [int(a) for a in accept]
+    out.append(struct.pack("<H", len(ids)) + b"".join(struct.pack("<H", a) for a in ids))
+    return b"".join(out)
+
+
 def seal_task_hello(body: bytes, key: bytes | None) -> bytes:
     """``body | HMAC-SHA256(key, TASK_HELLO_MAC_DOMAIN | body)``; no-op without a key."""
     if not key:
@@ -121,13 +172,14 @@ class Welcome:
     next: int
 
 
-def decode_welcome(payload: bytes) -> Welcome:
+def decode_welcome(payload: bytes, version: int = TASK_PROTOCOL_VERSION) -> Welcome:
+    """``version``: the TASK_HELLO version this island sent (the WELCOME answers in it)."""
     fmt = "<HQQIBBQQQ"
     if len(payload) != struct.calcsize(fmt):
         raise DispenseError(f"TASK_WELCOME has {len(payload)} bytes")
-    version, lease_ms, passes, max_block, reconnect, has_sup, sup, reclaimed, nxt = struct.unpack(fmt, payload)
-    if version != TASK_PROTOCOL_VERSION:
-        raise DispenseError(f"the syncer speaks task protocol {version}, this island {TASK_PROTOCOL_VERSION}")
+    got, lease_ms, passes, max_block, reconnect, has_sup, sup, reclaimed, nxt = struct.unpack(fmt, payload)
+    if got != int(version):
+        raise DispenseError(f"the syncer speaks task protocol {got}, this island {version}")
     return Welcome(lease_ms / 1000.0, passes or None, max_block, bool(reconnect),
                    sup if has_sup else None, reclaimed, nxt)
 
@@ -199,27 +251,263 @@ def ranges_of(positions: Iterable[int]) -> list[tuple[int, int]]:
 # ------------------------------------------------------------- positions -> rows
 
 
-class PositionMap:
-    """Position -> row of ``--data`` (module doc). Caches the two latest pass orders."""
+def sampler_holder_id(sampler_id: str) -> int:
+    """The dispenser island id of the sampler island ``sampler_id`` (its buffer
+    shard name, unique in the run): ``SAMPLER_HOLDER_BASE`` plus 31 bits of its
+    SHA-256. The same sampler id after a relaunch is the same island, so its new
+    process takes over the old one's rows at once."""
+    digest = hashlib.sha256(f"yeto-sampler:{sampler_id}".encode()).digest()
+    return SAMPLER_HOLDER_BASE | (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF)
 
-    def __init__(self, rows: int, *, seed: int) -> None:
-        if int(rows) < 1:
+
+def stream_of(position: int) -> int:
+    return int(position) >> STREAM_SHIFT
+
+
+def local_of(position: int) -> int:
+    return int(position) & (STREAM_POSITIONS - 1)
+
+
+def position_of(stream: int, local: int) -> int:
+    return (int(stream) << STREAM_SHIFT) | int(local)
+
+
+def row_label(row: Mapping[str, Any]) -> str:
+    """A row's task label (``task_label`` at the top level or in its metadata;
+    "" when it has none). Raises on a label that is not a short string."""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+    value = row.get(TASK_LABEL_KEY, metadata.get(TASK_LABEL_KEY))
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    if not isinstance(value, str):
+        raise ValueError(f"task_label {value!r}: a row has one task label (a string)")
+    check_label(value)
+    return value
+
+
+def check_label(label: str) -> str:
+    raw = str(label).encode("utf-8")
+    if (not raw or len(raw) > MAX_LABEL or label == UNLABELED or any(c in label for c in ",;=*")
+            or any(ord(c) < 32 for c in label)):
+        raise ValueError(f"task label {label!r}: 1..{MAX_LABEL} bytes, no control character, "
+                         f"no ',;=*', not {UNLABELED!r}")
+    return label
+
+
+def parse_island_labels(spec: str) -> dict[int, list[str] | None]:
+    """``--rl-island-task-labels 'l0=web;l1=pwn,crypto;2=-'`` -> {island: labels}
+    (``-``: rows without a task label; ``*``: every row, None). Raises ValueError."""
+    out: dict[int, list[str] | None] = {}
+    for item in str(spec).split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, value = item.partition("=")
+        key = key.strip()
+        island = key[1:] if key[:1] in ("l", "L") else key
+        if not sep or not island.isdigit():
+            raise ValueError(f"--rl-island-task-labels item {item!r}: expected lM=LABEL[,LABEL...]")
+        if int(island) in out:
+            raise ValueError(f"--rl-island-task-labels names island {int(island)} twice")
+        labels = [v.strip() for v in value.split(",") if v.strip()]
+        if not labels:
+            raise ValueError(f"--rl-island-task-labels item {item!r}: no label")
+        if "*" in labels:
+            if len(labels) > 1:
+                raise ValueError(f"--rl-island-task-labels item {item!r}: '*' stands alone")
+            out[int(island)] = None
+            continue
+        for label in labels:
+            if label != UNLABELED:
+                check_label(label)
+        out[int(island)] = sorted(set(labels))
+    if not out:
+        raise ValueError("--rl-island-task-labels is empty")
+    return out
+
+
+def unmatched_labels(data_labels: Iterable[str], islands: Iterable[int],
+                     labels: Mapping[int, list[str] | None]) -> list[str]:
+    """The row labels ("" = no label) that no island of ``islands`` takes
+    (an island not in ``labels``, or with None, takes every row)."""
+    taken: set[str] = set()
+    for island in islands:
+        accepted = labels.get(int(island))
+        if accepted is None:
+            return []
+        taken.update("" if label == UNLABELED else label for label in accepted)
+    return sorted(set(data_labels) - taken)
+
+
+@dataclass(frozen=True)
+class Stream:
+    """One stream (module doc): the rows of one source with one task label."""
+
+    source: int
+    label: str
+    rows: tuple[int, ...]  # row numbers of the prompt file, ascending
+    weight: int
+    name: str
+
+
+class StreamTable:
+    """The streams of the run's rows (module doc); every island builds the same
+    table from the same prompt file (the dispenser refuses another one)."""
+
+    def __init__(self, streams: Sequence[Stream], fingerprint: bytes) -> None:
+        if not streams or len(streams) > MAX_STREAMS:
+            raise ValueError(f"{len(streams)} streams (1..{MAX_STREAMS} allowed)")
+        self.streams = tuple(streams)
+        self.fingerprint = bytes(fingerprint)
+        self.total_rows = sum(len(s.rows) for s in self.streams)
+
+    @classmethod
+    def build(cls, keys: Sequence[tuple[int, str]], fingerprint: bytes, *,
+              mix: Sequence[Any] | None = None) -> "StreamTable":
+        """``keys[i]``: ``(source, label)`` of row ``i``. ``mix``: the weight of each
+        source (``--data-mix``; None: one source, the streams weighted by their row
+        counts). A stream's weight is its source's weight split over the source's
+        labels by row count (:data:`MIX_WEIGHT_SCALE` integers)."""
+        from fractions import Fraction
+
+        groups: dict[tuple[int, str], list[int]] = {}
+        for row, (source, label) in enumerate(keys):
+            groups.setdefault((int(source), str(label)), []).append(row)
+        if not groups:
             raise ValueError("the data has no rows")
-        self.rows, self.seed = int(rows), int(seed)
-        self._orders: dict[int, list[int]] = {}
+        ordered = sorted(groups)
+        sources = sorted({source for source, _ in ordered})
+        if mix is None:
+            if sources != [0]:
+                raise ValueError(f"rows of sources {sources} without --data-mix weights")
+            if ordered == [(0, "")]:
+                weights = [1]  # the plain P2 stream
+            else:
+                weights = [len(groups[key]) for key in ordered]
+        else:
+            mix = [Fraction(str(w)) for w in mix]
+            if any(w <= 0 for w in mix):
+                raise ValueError("--data-mix weights must be positive")
+            missing = sorted(set(range(len(mix))) - set(sources))
+            if missing or sources[-1] >= len(mix):
+                raise ValueError(f"--data-mix has {len(mix)} sources; the rows have sources "
+                                 f"{sources} (a source without rows: {missing})")
+            per_source = {src: sum(len(groups[k]) for k in ordered if k[0] == src) for src in sources}
+            shares = [mix[src] * len(groups[(src, label)]) / per_source[src] for src, label in ordered]
+            total = sum(shares)
+            weights = [max(1, round(share / total * MIX_WEIGHT_SCALE)) for share in shares]
+        streams = []
+        for (source, label), weight in zip(ordered, weights):
+            name = label if mix is None else f"s{source}" + (f"/{label}" if label else "")
+            streams.append(Stream(source, label, tuple(groups[(source, label)]), int(weight), name))
+        return cls(streams, fingerprint)
+
+    @classmethod
+    def from_prompts(cls, path: str | os.PathLike[str], *, mix: Sequence[Any] | None = None,
+                     by_label: bool = False) -> "StreamTable":
+        """The table of an island's prompt file (``prepare_prompt_data`` rows: the
+        source in ``metadata["yeto_data_source"]``, the label in ``task_label``);
+        ``by_label``: one stream per (source, label), else one per source."""
+        import json
+
+        digest, keys = hashlib.sha256(), []
+        with open(os.path.expanduser(str(path)), "rb") as handle:
+            for line in handle:
+                digest.update(line)
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                metadata = row.get("metadata") or {}
+                keys.append((int(metadata.get(DATA_SOURCE_KEY, 0) or 0) if mix is not None else 0,
+                             row_label(row) if by_label else ""))
+        return cls.build(keys, digest.digest(), mix=mix)
+
+    @property
+    def single(self) -> bool:
+        """The plain P2 data: one stream, no label, no mix (wire version 1)."""
+        only = self.streams[0]
+        return len(self.streams) == 1 and only.weight == 1 and not only.name
+
+    def decl(self) -> list[tuple[int, int, str]]:
+        return [(len(s.rows), s.weight, s.name) for s in self.streams]
+
+    def labels(self) -> set[str]:
+        return {s.label for s in self.streams}
+
+    def accept(self, labels: Iterable[str] | None) -> list[int] | None:
+        """The stream ids of rows with one of ``labels`` (``"-"``: rows without a
+        label); None: every stream. Raises when no stream matches."""
+        if labels is None:
+            return None
+        wanted = {"" if label == UNLABELED else str(label) for label in labels}
+        ids = [i for i, s in enumerate(self.streams) if s.label in wanted]
+        if not ids:
+            have = sorted(UNLABELED if s.label == "" else s.label for s in self.streams)
+            raise ValueError(f"no row of the data has task label(s) {sorted(labels)} (the data has {have})")
+        return None if len(ids) == len(self.streams) else ids
+
+    def record(self) -> list[dict[str, Any]]:
+        return [{"stream": i, "name": s.name, "source": s.source, "label": s.label,
+                 "rows": len(s.rows), "weight": s.weight} for i, s in enumerate(self.streams)]
+
+    def to_config(self) -> dict[str, Any]:
+        """A compact form for the rollout executor (rows as runs)."""
+        from .data_split import row_runs
+
+        return {"fingerprint": self.fingerprint.hex(),
+                "streams": [{"source": s.source, "label": s.label, "weight": s.weight, "name": s.name,
+                             "rows": row_runs(s.rows)} for s in self.streams]}
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "StreamTable":
+        from .data_split import rows_of_runs
+
+        return cls([Stream(int(s["source"]), str(s["label"]), tuple(rows_of_runs(s["rows"])),
+                           int(s["weight"]), str(s["name"])) for s in config["streams"]],
+                   bytes.fromhex(str(config["fingerprint"])))
+
+
+class PositionMap:
+    """Position -> row of the prompt file (module doc). Caches the two latest
+    pass orders of each stream. ``PositionMap(rows, seed=...)``: the P2 data
+    (one stream of ``rows`` rows); ``table``: a :class:`StreamTable`."""
+
+    def __init__(self, rows: int | None = None, *, seed: int, table: StreamTable | None = None) -> None:
+        if table is None:
+            if rows is None or int(rows) < 1:
+                raise ValueError("the data has no rows")
+            self._rows: list[Sequence[int] | None] = [None]  # None: row k is row k
+            self._counts = [int(rows)]
+        else:
+            self._rows = [s.rows for s in table.streams]
+            self._counts = [len(s.rows) for s in table.streams]
+        self.rows = sum(self._counts)
+        self.seed = int(seed)
+        self._orders: dict[tuple[int, int], list[int]] = {}
 
     def data_pass(self, position: int) -> int:
-        return int(position) // self.rows
+        return local_of(position) // self._counts[stream_of(position)]
+
+    def stream(self, position: int) -> int:
+        return stream_of(position)
 
     def row(self, position: int) -> int:
-        data_pass, index = divmod(int(position), self.rows)
-        order = self._orders.get(data_pass)
+        stream = stream_of(position)
+        if stream >= len(self._counts):
+            raise ValueError(f"position {position} is in stream {stream}; the data has {len(self._counts)}")
+        count = self._counts[stream]
+        data_pass, index = divmod(local_of(position), count)
+        order = self._orders.get((stream, data_pass))
         if order is None:
-            order = pass_order(self.rows, seed=self.seed, data_pass=data_pass)
-            self._orders[data_pass] = order
-            for old in [p for p in self._orders if p < data_pass - 1]:
+            order = pass_order(count, seed=self.seed, data_pass=data_pass, stream=stream)
+            self._orders[(stream, data_pass)] = order
+            for old in [k for k in self._orders if k[0] == stream and k[1] < data_pass - 1]:
                 del self._orders[old]
-        return order[index]
+        local_row = order[index]
+        rows = self._rows[stream]
+        return local_row if rows is None else int(rows[local_row])
 
 
 def file_fingerprint(path: str | os.PathLike[str]) -> tuple[int, bytes]:
@@ -247,13 +535,24 @@ class DispenseConnection:
     """One TCP connection to the dispenser; one answer per request, in order."""
 
     def __init__(self, address: tuple[str, int], *, learner_id: int, incarnation: int, rows: int,
-                 fingerprint: bytes, key: bytes | None, timeout_s: float = 30.0) -> None:
+                 fingerprint: bytes, key: bytes | None, timeout_s: float = 30.0,
+                 streams: Sequence[tuple[int, int, str]] | None = None,
+                 accept: Sequence[int] | None = None) -> None:
+        """``streams``/``accept`` (S27 P3): the data's streams and this island's
+        accepted stream ids; without them (or for the plain single stream that
+        every island takes) the TASK_HELLO is the P2 one (version 1)."""
+        plain = streams is None or (len(streams) == 1 and int(streams[0][1]) == 1 and not streams[0][2])
+        if plain and accept is None:
+            version, body = TASK_PROTOCOL_VERSION, encode_task_hello(learner_id, incarnation, rows, fingerprint)
+        else:
+            version = TASK_PROTOCOL_VERSION_STREAMS
+            body = encode_task_hello_streams(learner_id, incarnation, fingerprint,
+                                             streams or [(int(rows), 1, "")], accept)
         self.sock = socket.create_connection(address, timeout=timeout_s)
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self._send(MSG_TASK_HELLO, seal_task_hello(
-                encode_task_hello(learner_id, incarnation, rows, fingerprint), key))
-            self.welcome = decode_welcome(self._answer(MSG_TASK_WELCOME))
+            self._send(MSG_TASK_HELLO, seal_task_hello(body, key))
+            self.welcome = decode_welcome(self._answer(MSG_TASK_WELCOME), version)
         except BaseException:
             self.close()
             raise
@@ -614,14 +913,18 @@ class TaskSource:
 
 
 def tcp_connector(address: str | tuple[str, int], *, learner_id: int, rows: int, fingerprint: bytes,
-                  key: bytes | None, timeout_s: float = 30.0) -> Callable[[int], DispenseConnection]:
-    """``connect(incarnation)`` for :class:`TaskSource` over TCP (``host:port``)."""
+                  key: bytes | None, timeout_s: float = 30.0,
+                  streams: Sequence[tuple[int, int, str]] | None = None,
+                  accept: Sequence[int] | None = None) -> Callable[[int], DispenseConnection]:
+    """``connect(incarnation)`` for :class:`TaskSource` over TCP (``host:port``);
+    ``streams``/``accept`` as in :class:`DispenseConnection`."""
     if isinstance(address, str):
         host, _, port = address.rpartition(":")
         address = (host, int(port))
 
     def connect(incarnation: int) -> DispenseConnection:
         return DispenseConnection(address, learner_id=learner_id, incarnation=incarnation, rows=rows,
-                                  fingerprint=fingerprint, key=key, timeout_s=timeout_s)
+                                  fingerprint=fingerprint, key=key, timeout_s=timeout_s,
+                                  streams=streams, accept=accept)
 
     return connect

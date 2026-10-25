@@ -1392,8 +1392,15 @@ def _island_dispense(args) -> bool:
         raise ValueError("--rl-data-dispense and --rl-data-slot exclude each other")
     if getattr(args, "data_sha256", None):
         raise ValueError("--rl-data-dispense and per-island task data (--data-sha256) exclude each other")
-    if sample_roles.sample_role(args) != sample_roles.BOTH or getattr(args, "rl_sampler_data_slot", None):
-        raise ValueError("--rl-data-dispense belongs to a training island that generates and trains")
+    role = sample_roles.sample_role(args)
+    if getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-dispense and --rl-sampler-data-slot exclude each other")
+    if role == sample_roles.SAMPLER:  # S27 P4: a sampler island claims its rows too
+        if not getattr(args, "rl_dispense_addr", None):
+            raise ValueError("--rl-data-dispense on a sampler island needs --rl-dispense-addr")
+    elif role != sample_roles.BOTH:
+        raise ValueError("--rl-data-dispense belongs to an island that generates (a training "
+                         "island that generates and trains, or a sampler island)")
     if getattr(args, "eval_only", False):
         raise ValueError("--rl-data-dispense: an eval-only island evaluates every row")
     return True
@@ -1409,14 +1416,49 @@ def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
         raise ValueError("--rl-data-dispense does not cover Miles fully_async rollouts yet")
     from yeto.rl.engine.task_dispense import file_fingerprint
 
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.task_dispense import sampler_holder_id
+
     rows, digest = file_fingerprint(prompt_path)
-    host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:
+        # S27 P4: the sampler's dispenser (a synced group's actor syncer); its island
+        # id comes from its sampler id, apart from the training islands' learner ids
+        host, port = _syncer_addresses(args.rl_dispense_addr)[0]
+        sampler = getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
+        learner_id = sampler_holder_id(sampler)
+    else:
+        host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+        learner_id = int(args.learner_id)
     block = int(getattr(miles_args, "over_sampling_batch_size", None)
                 or getattr(miles_args, "rollout_batch_size"))
-    return {"address": f"{host}:{port}", "learner_id": int(args.learner_id), "rows": rows,
-            "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
-            "block": block,
-            "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
+    config = {"address": f"{host}:{port}", "learner_id": learner_id, "rows": rows,
+              "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
+              "block": block,
+              "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
+    config.update(_dispense_streams(args, prompt_path, rows, digest))
+    return config
+
+
+def _dispense_streams(args, prompt_path, rows: int, digest: bytes) -> dict[str, Any]:
+    """S27 P3: the streams of ``--rl-dispense-mix`` / ``--rl-dispense-by-label``
+    and this island's ``--rl-dispense-labels``; {} for the plain P2 data. An
+    island whose labels are on no row fails here, before any training."""
+
+    mix = getattr(args, "rl_dispense_mix", None)
+    by_label = bool(getattr(args, "rl_dispense_by_label", False))
+    labels = getattr(args, "rl_dispense_labels", None)
+    if not (mix or by_label or labels):
+        return {}
+    from yeto.rl.engine.task_dispense import StreamTable
+
+    table = StreamTable.from_prompts(prompt_path, mix=mix.split(",") if mix else None,
+                                     by_label=by_label or bool(labels))
+    if table.total_rows != rows or table.fingerprint != digest:
+        raise ValueError("the prompt file changed while its streams were read")
+    accept = table.accept(labels.split(",")) if labels else None
+    if table.single and accept is None:
+        return {}
+    return {"streams": table.to_config(), "accept": accept, "stream_record": table.record()}
 
 
 def _island_data_slot(args) -> Any:

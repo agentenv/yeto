@@ -108,12 +108,17 @@ def _check_data_split(args) -> None:
 
     from ..rl.engine.data_split import DATA_SPLIT_FLAG
 
-    for name in ("rl_data_slot", "rl_data_position_store", "rl_data_dispense"):
+    for name in ("rl_data_slot", "rl_data_position_store", "rl_data_dispense",
+                 "rl_dispense_by_label", "rl_dispense_labels"):
         if getattr(args, name, None):
             raise ValueError(f"{rl_option(name, CLI)} is set by the launcher, not a launch "
                              f"option; use {DATA_SPLIT_FLAG}")
+    if getattr(args, "rl_dispense_mix", None) and getattr(args, "data_mix_record", None) is None:
+        raise ValueError(f"{rl_option('rl_dispense_mix', CLI)} is set by the launcher from "
+                         "--data-mix, not a launch option")
     plan = args._data_split_plan = _plan_data_split(args)
     _check_dispense(args, plan)
+    _check_streams(args, plan)
     print(f"[launcher] data split ({plan.mode}): {plan.describe()}", file=sys.stderr, flush=True)
     warning = plan.warning()
     if warning:
@@ -141,6 +146,9 @@ def _check_dispense(args, plan) -> None:
     passes = getattr(args, "rl_data_passes", None)
     if passes is not None and int(passes) < 1:
         raise ValueError("--rl-data-passes must be >= 1")
+    if passes is not None and not plan.islands:
+        raise ValueError("--rl-data-passes: sampler islands do not end on the dispenser's data end "
+                         "yet (S27 P4); give the samplers their rounds instead")
     if passes is not None and _strict_roster(args):
         raise ValueError("--rl-data-passes needs islands that may end on their own when the data "
                          "ends (asynchronous rounds or an island pool); a strict roster trains "
@@ -151,12 +159,15 @@ def _check_dispense(args, plan) -> None:
         raise ValueError("--rl-dispense-lease-s must be positive")
     if int(getattr(args, "rl_dispense_prefetch_blocks", 2)) < 1:
         raise ValueError("--rl-dispense-prefetch-blocks must be >= 1")
-    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
+    joins = bool(getattr(args, "rl_dispense_addr", None))  # a sampler launch of its own (P4)
+    if ((getattr(args, "rl_single_island_no_sync", False) and not joins)
+            or getattr(args, "rl_elastic", False)):
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense needs a synced launch (the dispenser runs "
-                         "in the actor syncer); not --rl-single-island-no-sync / --rl-elastic")
+                         "in the actor syncer); not --rl-single-island-no-sync / --rl-elastic "
+                         "(a sampler launch of its own names its dispenser with --rl-dispense-addr)")
     if syncer_shard_count(args) > 1:
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense with --syncer-shards > 1 is not supported yet")
-    if (int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1
+    if (plan.islands and int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1
             and not int(getattr(args, "rl_rollout_ahead", 0) or 0)):
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover Miles fully_async rollouts "
                          "(--rl-max-policy-age without --rl-rollout-ahead) yet")
@@ -167,6 +178,143 @@ def _check_dispense(args, plan) -> None:
                              "island cut, keeps the data position")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense is wired for the Miles backend only (verl: later)")
+
+
+def dispensing_islands(args, plan) -> list[int]:
+    """The islands of the launch that claim rows from the dispenser (by island
+    index in ``--gpu``; the same-card training islands' learner ids)."""
+
+    return list(plan.islands) + list(getattr(plan, "samplers", ()) or ())
+
+
+def island_task_labels(args) -> dict[int, list[str] | None]:
+    """``--rl-island-task-labels`` per island ({} without it); checked by
+    :func:`_check_streams` (cached on ``args``)."""
+
+    cached = getattr(args, "_island_task_labels", None)
+    if cached is not None:
+        return cached
+    spec = getattr(args, "rl_island_task_labels", None)
+    if not spec:
+        return {}
+    from ..rl.engine.task_dispense import parse_island_labels
+
+    return parse_island_labels(spec)
+
+
+def _data_rows(args):
+    """The rows of the run's ``--data`` (the launcher reads them for the label
+    check; an HF id is loaded as the island loads it)."""
+
+    from ..data import load_rows
+    from ..rl.adapters.miles.island_entry import _prompt_split  # the split the island reads
+
+    revision = getattr(args, "data_revision", None)
+    split = _prompt_split(args.data, revision)
+    if split == "train":
+        return load_rows(args.data, revision=revision)
+    return load_rows(args.data, split=split, revision=revision)
+
+
+def _check_streams(args, plan) -> None:
+    """S27 P3: ``--data-mix`` and ``--rl-island-task-labels`` need the
+    dispenser; every row label must be taken by an island of the launch and
+    every listed label must be on a row (fail before any cloud spend)."""
+
+    from ..rl.engine.data_split import DATA_SPLIT_FLAG
+    from ..rl.engine.task_dispense import UNLABELED, row_label, unmatched_labels
+
+    mix = getattr(args, "rl_dispense_mix", None)
+    spec = getattr(args, "rl_island_task_labels", None)
+    if not (mix or spec):
+        return
+    if not plan.dispense:
+        named = "--data-mix" if mix else rl_option("rl_island_task_labels", CLI)
+        raise ValueError(f"{named} needs {DATA_SPLIT_FLAG} dispense (the dispenser mixes the "
+                         "sources and keeps the label streams)")
+    if mix:
+        record = getattr(args, "data_mix_record", None) or {}
+        sources = record.get("sources") or []
+        print(f"[launcher] data mix ({len(sources)} sources, weights {mix}): the dispenser "
+              "interleaves one stream per source (per source and task label with task "
+              "labels); a prefix of the rows given out is within one row of the weights when "
+              "every island takes every stream", file=sys.stderr, flush=True)
+    if not spec:
+        return
+    labels = island_task_labels(args)
+    islands = dispensing_islands(args, plan)
+    unknown = sorted(set(labels) - set(islands))
+    if unknown:
+        raise ValueError(f"{rl_option('rl_island_task_labels', CLI)} names island(s) {unknown}; "
+                         f"the islands that claim rows are {islands}")
+    counts: dict[str, int] = {}
+    for row in _data_rows(args):
+        label = row_label(row)
+        counts[label] = counts.get(label, 0) + 1
+    shown = {UNLABELED if k == "" else k: v for k, v in sorted(counts.items())}
+    listed = {("" if label == UNLABELED else label) for accepted in labels.values() if accepted
+              for label in accepted}
+    absent = sorted(UNLABELED if k == "" else k for k in listed - set(counts))
+    if absent:
+        raise ValueError(f"{rl_option('rl_island_task_labels', CLI)}: no row of --data has task "
+                         f"label(s) {absent} (the rows have {shown})")
+    orphan = unmatched_labels(counts, islands, labels)
+    if orphan:
+        raise ValueError(f"{rl_option('rl_island_task_labels', CLI)}: no island takes the rows "
+                         f"with task label(s) {[UNLABELED if k == '' else k for k in orphan]} "
+                         f"({sum(counts[k] for k in orphan)} rows); give one island these labels "
+                         "or leave an island unlisted (it takes every row)")
+    args._island_task_labels = labels
+    described = "; ".join(f"island {m}: {'every row' if labels.get(m) is None else ','.join(labels[m])}"
+                          for m in islands)
+    print(f"[launcher] task labels {shown}: {described}", file=sys.stderr, flush=True)
+    if len({tuple(v) if v else None for v in labels.values()}) > 1 or len(labels) < len(islands):
+        print("[launcher] WARNING islands with different task labels train different rows: the "
+              "merge weights an island by tokens^2/steps, so islands of long answers weigh "
+              "more; compare against --rl-sync-learner-weight equal", file=sys.stderr, flush=True)
+
+
+def sampler_dispense_island(args, plan) -> int | None:
+    """S27 P4: the island index of a sampler island that claims rows (``args``:
+    the island args), or None. A synced group's sampler carries it
+    (``sample_roles``: ``rl_sampler_dispense_island``); a sampler launch of its
+    own is its island 0."""
+
+    from ..rl.engine import sample_roles
+
+    if not plan.dispense or sample_roles.sample_role(args) != sample_roles.SAMPLER:
+        return None
+    island = getattr(args, "rl_sampler_dispense_island", None)
+    if island is not None:
+        return int(island)
+    return 0 if getattr(args, "rl_dispense_addr", None) else None
+
+
+def sampler_dispense_addr(args) -> str:
+    """The dispenser address a sampler island dials: the one its launch was
+    given (a sampler launch of its own) or the group's actor syncer, which the
+    island reads from ``$SYNCER_ADDR`` (set on every island of a synced launch)."""
+
+    import shlex
+
+    addr = getattr(args, "rl_dispense_addr", None)
+    return shlex.quote(str(addr)) if addr else "$SYNCER_ADDR"
+
+
+def stream_island_flags(args, island: int) -> str:
+    """The island flags of the dispenser's streams (S27 P3): the mix weights and
+    the label split for every claiming island, its own labels when it has some."""
+
+    flags = ""
+    mix = getattr(args, "rl_dispense_mix", None)
+    if mix:
+        flags += f" {rl_option('rl_dispense_mix')} {mix}"
+    if getattr(args, "rl_island_task_labels", None):
+        flags += f" {rl_option('rl_dispense_by_label')}"
+        accepted = island_task_labels(args).get(int(island))
+        if accepted is not None:
+            flags += f" {rl_option('rl_dispense_labels')} {','.join(accepted)}"
+    return flags
 
 
 def _strict_roster(args) -> bool:
@@ -227,11 +375,15 @@ def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
         both = sample_roles.sample_role(args) == sample_roles.BOTH
         slot = split.slot(learner_id) if both else None
         flags = f" {rl_option('rl_data_slot')} {slot.env()}" if slot is not None else ""
-        if both and split.dispense:
+        island = learner_id if both else sampler_dispense_island(args, split)
+        if split.dispense and (both or island is not None):
             flags += f" {rl_option('rl_data_dispense')}"
+            if not both:  # S27 P4: a sampler names its dispenser (it has no --syncer)
+                flags += f" {rl_option('rl_dispense_addr')} {sampler_dispense_addr(args)}"
             prefetch = int(getattr(args, "rl_dispense_prefetch_blocks", 2))
             if prefetch != 2:
                 flags += f" {rl_option('rl_dispense_prefetch_blocks')} {prefetch}"
+            flags += stream_island_flags(args, island)
         return learner_data_arg(args.data), flags, learner_file_mounts(args.data)
     if learner_id not in plan:
         raise ValueError(f"{rl_option('rl_island_tasks', CLI)} has no task list for learner "

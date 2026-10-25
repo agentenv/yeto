@@ -22,12 +22,13 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn};
 
 use crate::dispense::{
-    Claim, DispenseConfig, DispenseError, Dispenser, Holder, OpenOutcome, ReportEntry, ReportKind, ReportTotals,
-    WAIT_RETRY,
+    Claim, DataDecl, DispenseConfig, DispenseError, Dispenser, Holder, OpenOutcome, ReportEntry, ReportKind, ReportTotals,
+    StreamDecl, MAX_STREAMS, MAX_STREAM_NAME, WAIT_RETRY,
 };
 use crate::protocol::{
     read_frame_limited, Reader, MAGIC, MAX_TASK_REPORT, MSG_ERROR, MSG_TASK_ACK, MSG_TASK_CLAIM, MSG_TASK_GRANT,
     MSG_TASK_HEARTBEAT, MSG_TASK_REPORT, MSG_TASK_WELCOME, TASK_HELLO_MAC_DOMAIN, TASK_PROTOCOL_VERSION,
+    TASK_PROTOCOL_VERSION_STREAMS,
 };
 
 pub const GRANT_STATUS_GRANT: u8 = 0;
@@ -40,32 +41,89 @@ pub const RECORD_SUFFIX: &str = ".dispense";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskHello {
     pub holder: Holder,
-    pub rows: u64,
-    pub fingerprint: [u8; 32],
+    pub data: DataDecl,
+    /// The streams the island takes positions of (None: every stream).
+    pub accept: Option<Vec<u16>>,
+    /// The protocol version the island spoke (the WELCOME answers in it).
+    pub version: u16,
 }
 
-/// The TASK_HELLO body (without the HMAC).
+/// The TASK_HELLO body (without the HMAC). Version 1 (P2) when the data is
+/// one plain stream and the island accepts it; version 2 otherwise:
+/// `u16 version | u32 learner_id | u64 incarnation | [32] fingerprint |
+/// u16 n | n x (u64 rows, u64 weight, u16 name_len, name) | u16 m |
+/// m x u16 stream` (`m = 0`: every stream).
 #[cfg_attr(not(test), allow(dead_code))] // the island side encodes (yeto/rl/engine/task_dispense.py)
 pub fn encode_task_hello(hello: &TaskHello) -> Vec<u8> {
     let mut out = Vec::with_capacity(54);
-    out.extend_from_slice(&TASK_PROTOCOL_VERSION.to_le_bytes());
+    if hello.version == TASK_PROTOCOL_VERSION {
+        out.extend_from_slice(&TASK_PROTOCOL_VERSION.to_le_bytes());
+        out.extend_from_slice(&hello.holder.learner_id.to_le_bytes());
+        out.extend_from_slice(&hello.holder.incarnation.to_le_bytes());
+        out.extend_from_slice(&hello.data.total_rows().to_le_bytes());
+        out.extend_from_slice(&hello.data.fingerprint);
+        return out;
+    }
+    out.extend_from_slice(&TASK_PROTOCOL_VERSION_STREAMS.to_le_bytes());
     out.extend_from_slice(&hello.holder.learner_id.to_le_bytes());
     out.extend_from_slice(&hello.holder.incarnation.to_le_bytes());
-    out.extend_from_slice(&hello.rows.to_le_bytes());
-    out.extend_from_slice(&hello.fingerprint);
+    out.extend_from_slice(&hello.data.fingerprint);
+    out.extend_from_slice(&(hello.data.streams.len() as u16).to_le_bytes());
+    for stream in &hello.data.streams {
+        out.extend_from_slice(&stream.rows.to_le_bytes());
+        out.extend_from_slice(&stream.weight.to_le_bytes());
+        out.extend_from_slice(&(stream.name.len() as u16).to_le_bytes());
+        out.extend_from_slice(stream.name.as_bytes());
+    }
+    let accept = hello.accept.as_deref().unwrap_or(&[]);
+    out.extend_from_slice(&(accept.len() as u16).to_le_bytes());
+    for id in accept {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
     out
 }
 
 pub fn decode_task_hello(body: &[u8]) -> Result<TaskHello> {
     let mut r = Reader(body);
     let version = r.u16()?;
-    ensure!(version == TASK_PROTOCOL_VERSION, "TASK_HELLO version {version}, this syncer speaks {TASK_PROTOCOL_VERSION}");
     let learner_id = r.u32()?;
     let incarnation = r.u64()?;
-    let rows = r.u64()?;
+    let holder = Holder { learner_id, incarnation };
+    if version == TASK_PROTOCOL_VERSION {
+        let rows = r.u64()?;
+        let fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+        ensure!(r.remaining() == 0, "trailing bytes in TASK_HELLO");
+        return Ok(TaskHello { holder, data: DataDecl::single(rows, fingerprint), accept: None, version });
+    }
+    ensure!(
+        version == TASK_PROTOCOL_VERSION_STREAMS,
+        "TASK_HELLO version {version}, this syncer speaks {TASK_PROTOCOL_VERSION} and {TASK_PROTOCOL_VERSION_STREAMS}"
+    );
     let fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+    let n = usize::from(r.u16()?);
+    ensure!((1..=MAX_STREAMS).contains(&n), "TASK_HELLO declares {n} streams (1..={MAX_STREAMS})");
+    let mut streams = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rows = r.u64()?;
+        let weight = r.u64()?;
+        let len = usize::from(r.u16()?);
+        ensure!(len <= MAX_STREAM_NAME, "TASK_HELLO stream name of {len} bytes");
+        let name = String::from_utf8(r.take(len)?.to_vec()).context("TASK_HELLO stream name")?;
+        streams.push(StreamDecl { rows, weight, name });
+    }
+    let m = usize::from(r.u16()?);
+    ensure!(m <= n, "TASK_HELLO accepts {m} of {n} streams");
+    let mut accept = Vec::with_capacity(m);
+    for _ in 0..m {
+        accept.push(r.u16()?);
+    }
     ensure!(r.remaining() == 0, "trailing bytes in TASK_HELLO");
-    Ok(TaskHello { holder: Holder { learner_id, incarnation }, rows, fingerprint })
+    Ok(TaskHello {
+        holder,
+        data: DataDecl { streams, fingerprint },
+        accept: (!accept.is_empty()).then_some(accept),
+        version,
+    })
 }
 
 /// Check the TASK_HELLO HMAC (no key: the payload is the body).
@@ -96,9 +154,10 @@ pub struct Welcome {
     pub next: u64,
 }
 
-pub fn encode_welcome(w: &Welcome) -> Vec<u8> {
+/// The WELCOME in the island's protocol `version` (the layout is the same).
+pub fn encode_welcome(w: &Welcome, version: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
-    out.extend_from_slice(&TASK_PROTOCOL_VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&w.lease_ms.to_le_bytes());
     out.extend_from_slice(&w.passes.to_le_bytes());
     out.extend_from_slice(&w.max_block.to_le_bytes());
@@ -317,7 +376,7 @@ pub async fn serve(mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf, first: &[u8], 
     };
     let holder = hello.holder;
     let opened = service.with(|d, now| {
-        d.open(holder, hello.rows, hello.fingerprint, now).map(|outcome| {
+        d.open_with(holder, &hello.data, hello.accept.as_deref(), now).map(|outcome| {
             let cfg = d.config();
             let (reconnect, superseded, reclaimed) = match outcome {
                 OpenOutcome::Reconnected => (true, None, 0),
@@ -335,7 +394,7 @@ pub async fn serve(mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf, first: &[u8], 
         })
     });
     match opened {
-        Ok(welcome) => send(&mut wr, MSG_TASK_WELCOME, &encode_welcome(&welcome)).await?,
+        Ok(welcome) => send(&mut wr, MSG_TASK_WELCOME, &encode_welcome(&welcome, hello.version)).await?,
         Err(error) => return refuse(&mut wr, error).await,
     }
     loop {
@@ -395,8 +454,9 @@ mod tests {
     fn wire_golden_vectors() {
         let hello = TaskHello {
             holder: Holder { learner_id: 3, incarnation: 0x0102_0304_0506_0708 },
-            rows: 480,
-            fingerprint: [0xab; 32],
+            data: DataDecl::single(480, [0xab; 32]),
+            accept: None,
+            version: TASK_PROTOCOL_VERSION,
         };
         let body = encode_task_hello(&hello);
         assert_eq!(
@@ -416,7 +476,7 @@ mod tests {
         assert!(open_task_hello(Some(b"other"), &sealed).is_err());
         let welcome = Welcome { lease_ms: 300_000, passes: 0, max_block: 65536, reconnect: false, superseded: Some(9), reclaimed: 6, next: 40 };
         assert_eq!(
-            hex(&encode_welcome(&welcome)),
+            hex(&encode_welcome(&welcome, TASK_PROTOCOL_VERSION)),
             "0100e0930400000000000000000000000000000001000001090000000000000006000000000000002800000000000000"
         );
         assert_eq!(
@@ -443,5 +503,52 @@ mod tests {
             hex(&encode_ack(&ReportTotals { settled: 2, requeued: 1, exhausted: 0 })),
             "020000000000000001000000000000000000000000000000"
         );
+    }
+
+    /// TASK_HELLO version 2 (streams, S27 P3); shared with `tests/test_s27_dispense_p34.py`.
+    #[test]
+    fn wire_golden_vectors_with_streams() {
+        let hello = TaskHello {
+            holder: Holder { learner_id: 3, incarnation: 0x0102_0304_0506_0708 },
+            data: DataDecl {
+                streams: vec![
+                    StreamDecl { rows: 10, weight: 7, name: "a/web".into() },
+                    StreamDecl { rows: 5, weight: 3, name: String::new() },
+                ],
+                fingerprint: [0xab; 32],
+            },
+            accept: Some(vec![1]),
+            version: TASK_PROTOCOL_VERSION_STREAMS,
+        };
+        let body = encode_task_hello(&hello);
+        assert_eq!(
+            hex(&body),
+            format!(
+                "0200030000000807060504030201{}02000a0000000000000007000000000000000500612f77656205000000000000000300000000000000000001000100",
+                "ab".repeat(32)
+            )
+        );
+        assert_eq!(decode_task_hello(&body).unwrap(), hello);
+        let mac = crate::hmac::hmac_sha256(b"k", &[TASK_HELLO_MAC_DOMAIN, &body].concat());
+        assert_eq!(hex(&mac), "ae4b9a4a78ae1aa7fbc05b27d614d78767b3464bc01b72ba7e2a30d6a83a9e97");
+        // every stream accepted: m = 0
+        let all = TaskHello { accept: None, ..hello.clone() };
+        assert_eq!(decode_task_hello(&encode_task_hello(&all)).unwrap(), all);
+        // the WELCOME answers in the island's version
+        let welcome = Welcome { lease_ms: 1, passes: 0, max_block: 1, reconnect: false, superseded: None, reclaimed: 0, next: 0 };
+        assert_eq!(&encode_welcome(&welcome, TASK_PROTOCOL_VERSION_STREAMS)[..2], &[2, 0]);
+        // malformed: too many accepted streams, a long name, an unknown version
+        let mut bad = body.clone();
+        let m_at = bad.len() - 4;
+        bad[m_at] = 3;
+        assert!(decode_task_hello(&bad).is_err());
+        let long = TaskHello {
+            data: DataDecl { streams: vec![StreamDecl { rows: 1, weight: 1, name: "x".repeat(65) }], fingerprint: [0; 32] },
+            ..hello.clone()
+        };
+        assert!(decode_task_hello(&encode_task_hello(&long)).is_err());
+        let mut v3 = body.clone();
+        v3[0] = 3;
+        assert!(decode_task_hello(&v3).is_err());
     }
 }

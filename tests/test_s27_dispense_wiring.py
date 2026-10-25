@@ -44,9 +44,13 @@ def test_dispense_is_opt_in_and_refused_where_it_does_not_apply():
     assert plan.mode == DISPENSE and plan.dispense and plan.slot(0) is None and plan.warning() is None
     assert "dispenser" in plan.describe()
     assert plan_data_split("dispense", islands=[0]).dispense, "one island may dispense (others join later)"
-    for kwargs in ({"tasks": True}, {"sample_roles": True}, {"external_learners": 1}):
+    # S27 P4: sample roles dispense to the samplers unless the launch shape cannot
+    for kwargs in ({"tasks": True}, {"sample_roles": True, "sampler_blocker": "a pair has no syncer"},
+                   {"external_learners": 1}):
         with pytest.raises(ValueError, match="dispense"):
             plan_data_split("dispense", islands=[0, 1], **kwargs)
+    roles = plan_data_split("dispense", islands=[], sample_roles=True, samplers=[1, 2])
+    assert roles.dispense and roles.samplers == (1, 2) and roles.islands == ()
 
 
 def test_dry_run_gives_the_islands_the_dispenser_instead_of_slots(tmp_path, monkeypatch, capsys):

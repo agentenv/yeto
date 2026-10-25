@@ -489,8 +489,30 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         acknowledge_reclaim(env)  # a host hook (Nebius) lets the VM stop once the LEAVE is stored
 
     watcher = ReclaimWatcher(reclaimed, leave_reclaimed).start()
+    dispense = {"installed": False}
+
+    def close_dispense() -> None:
+        """S27 P4: give the rows this sampler holds back to the dispenser now
+        (a reclaimed sampler, a finished one), not at the end of its lease."""
+        if not dispense["installed"]:
+            return
+        dispense["installed"] = False
+        try:
+            emit("rl_dispense_close", **(_in_executor(executor, runner.run, "close_source") or {}))
+        except Exception as close_error:  # noqa: BLE001 - the lease returns them anyway
+            emit("rl_dispense_close", error=f"{type(close_error).__name__}: {close_error}")
+
     try:
         controller, executor = runner.run(init())
+        if getattr(miles_args, "yeto_rl_data_dispense", None):
+            # S27 P4: before the first round, the data source claims its rows
+            from yeto.protocol import island_hmac_key_from_env
+
+            installed = _in_executor(executor, runner.run, "install",
+                                     dict(miles_args.yeto_rl_data_dispense), island_hmac_key_from_env())
+            dispense["installed"] = True
+            emit("rl_dispense_install", sampler=sampler_id,
+                 dispense_island_id=int(miles_args.yeto_rl_data_dispense["learner_id"]), **dict(installed))
         lora = lora_mode(miles_args)
         loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora,
                                      fused_stage=bool(config.fused_stage))
@@ -523,6 +545,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             rounds = 0
         else:
             rounds = loop.run(start=resume.next_rollout_id)
+        close_dispense()
         if reclaimed():
             leave_reclaimed()  # the LEAVE is a no-op when the watcher already left
             _hold_until_stopped(sleep, LEAVE_HOLD_S)
@@ -533,6 +556,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         return rounds
     except BaseException as exc:
         error = exc
+        close_dispense()
         try:
             leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.INFRA_FAILED,
                   error=f"{type(exc).__name__}: {exc}"[:300])
@@ -546,6 +570,23 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                                           None if error is None else error.__traceback__))
         finally:
             runner.close()
+
+
+def _in_executor(executor: Any, run: Callable[[Any], Any], name: str, *fn_args: Any) -> Any:
+    """Run ``adapters.miles.task_dispense.<name>(executor, ...)`` inside the rollout
+    executor's process (``__ray_call__``), as ``MilesRolloutPool`` does for a
+    training island (S27 P4)."""
+    from . import task_dispense
+    from .rollout import _awaited, _executor_target
+
+    fn = getattr(task_dispense, name)
+    kind, target = _executor_target(executor)
+    if kind == "ray":
+        return run(_awaited(target.__ray_call__.remote(fn, *fn_args)))
+    if kind == "local":
+        return fn(executor, *fn_args)
+    raise SampleBufferRolloutError(f"task dispenser: cannot reach the rollout executor "
+                                   f"{type(executor).__name__}")
 
 
 def _hold_until_stopped(sleep: Callable[[float], None], hold_s: float) -> None:

@@ -44,6 +44,13 @@ own cursor (``yeto.rl.engine.task_dispense`` module doc):
   position not trained yet goes back to the dispenser (release).
 * Miles' own cursor (``sample_offset``, ``epoch_id``) does not move; the
   dispenser keeps the data position, so a relaunched island needs none.
+* Sampler islands (S27 P4, ``sampler_island.run_sampler_island``): the same
+  wrapped data source; a position is reported trained when the buffer writer
+  has written its group into the sample buffer (:func:`written`), so a
+  sampler that dies before the write leaves its rows unreported and the
+  dispenser gives them to the next claim (``superseded`` when the same
+  sampler id comes back, else at the end of the lease). Every other row the
+  round took is dropped unless Miles put its group back into its buffer.
 
 Runs inside the rollout executor actor (``__ray_call__``), installed once
 before the first draw by ``MilesRolloutPool``. Import-light.
@@ -63,6 +70,7 @@ from yeto.rl.engine.task_dispense import (
     DISPENSE_POSITION_KEY,
     DispenseEnded,
     PositionMap,
+    StreamTable,
     TaskSource,
     tcp_connector,
 )
@@ -253,6 +261,23 @@ class DispensedSource:
                 # fenced while they waited: the dispenser gave them out again
                 "lost": len(positions) - len(trained)}
 
+    def written(self, rollout_id: int, positions: Iterable[int], *,
+                timeout_s: float = COMMIT_ACK_TIMEOUT_S) -> dict[str, Any]:
+        """Sampler island (S27 P4): the groups of ``positions`` are in the sample
+        buffer, so their rows are done: report them trained (the sampler's
+        "trained" is "written for the trainers") and wait (``timeout_s``) for
+        the dispenser's answer. Every other position of the round that is still
+        taken becomes a drop candidate (dropped at the next draw unless Miles put
+        its group back into its buffer, as for a training island)."""
+        with self._lock:
+            done = {int(p) for p in positions} & self.tasks.taken()
+            self._pending = {r: kept - done for r, kept in self._pending.items()
+                             if r > int(rollout_id) and kept - done}
+            self.tasks.report(trained=sorted(done))
+            self._candidates = self.tasks.taken() - done - self.pending_positions()
+        acked = self.tasks.flush(timeout_s) if done else True
+        return {"rollout_id": int(rollout_id), "trained": len(done), "acked": bool(acked)}
+
     def close(self) -> dict[str, Any]:
         """Release every position not trained yet and stop (module doc)."""
         with self._lock:
@@ -282,15 +307,21 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
     if getattr(getattr(source, "args", None), "fully_async", False):
         raise DispenseInstallError("the dispenser does not cover fully_async rollouts yet")
     rows = int(config["rows"])
+    # S27 P3: the streams of --data-mix / task labels (None: the one P2 stream)
+    table = StreamTable.from_config(config["streams"]) if config.get("streams") else None
+    accept = config.get("accept")
     connect = tcp_connector(str(config["address"]), learner_id=int(config["learner_id"]), rows=rows,
-                            fingerprint=bytes.fromhex(str(config["fingerprint"])), key=key)
+                            fingerprint=bytes.fromhex(str(config["fingerprint"])), key=key,
+                            streams=None if table is None else table.decl(),
+                            accept=None if accept is None else [int(a) for a in accept])
     tasks = TaskSource(connect=connect, block=int(config["block"]),
                        prefetch_blocks=int(config.get("prefetch_blocks", 2)),
                        emit=lambda kind, **fields: logger.info("%s %s", kind, fields))
     tasks.start()
     try:
-        wrapped = DispensedSource(source, tasks, PositionMap(rows, seed=int(config.get("seed", 0))),
-                                  executor=executor)
+        positions = (PositionMap(rows, seed=int(config.get("seed", 0))) if table is None
+                     else PositionMap(seed=int(config.get("seed", 0)), table=table))
+        wrapped = DispensedSource(source, tasks, positions, executor=executor)
     except BaseException:
         tasks.close(release=True)
         raise
@@ -298,8 +329,10 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
     _CURRENT = wrapped
     atexit.register(tasks.close)
     logger.info("task dispenser: island %s takes its rows from %s (incarnation %016x, %d rows, "
-                "%d filtered at load)", config["learner_id"], config["address"], tasks.incarnation,
-                rows, wrapped.filtered_rows)
+                "%d filtered at load, %s)", config["learner_id"], config["address"], tasks.incarnation,
+                rows, wrapped.filtered_rows,
+                "one stream" if table is None else
+                f"{len(table.streams)} streams, accepts {'all' if accept is None else accept}")
     return {"installed": True, "incarnation": f"{tasks.incarnation:016x}",
             "filtered_rows": wrapped.filtered_rows}
 
@@ -324,6 +357,20 @@ def commit_round(executor: Any, rollout_id: int) -> dict[str, Any] | None:
         return source.commit(int(rollout_id))
     except Exception as error:  # noqa: BLE001 - bookkeeping must not fail the round
         logger.warning("task dispenser: commit of round %s failed: %r", rollout_id, error)
+        return {"acked": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def written(rollout_id: int, positions: Sequence[int]) -> dict[str, Any] | None:
+    """The sampler's buffer writer (``BufferWriterRolloutFn._write``, in the rollout
+    executor): the groups of ``positions`` are in the buffer (S27 P4). None without
+    a dispenser; never raises (the buffer write already happened)."""
+    source = _CURRENT
+    if source is None:
+        return None
+    try:
+        return source.written(int(rollout_id), positions)
+    except Exception as error:  # noqa: BLE001 - bookkeeping must not fail the round
+        logger.warning("task dispenser: report of round %s's written groups failed: %r", rollout_id, error)
         return {"acked": False, "error": f"{type(error).__name__}: {error}"}
 
 
