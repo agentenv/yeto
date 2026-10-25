@@ -348,11 +348,16 @@ def test_two_separate_verl_islands_publish_every_round_through_the_real_syncer(s
         start = next(json.loads(line) for line in (result["out"] / "tape.jsonl").read_text().splitlines()
                      if json.loads(line)["event"] == "rl_driver_start")
         assert (start["placement"], start["execution_mode"]) == ("fixed-partition", "partitioned-serial")
+        acks = [json.loads(line) for line in (result["out"] / "tape.jsonl").read_text().splitlines()
+                if json.loads(line)["event"] == "rl_full_parameter_final_ack"]
+        assert [a.get("acknowledged") for a in acks] == [True], acks
         assert result["rounds"] == rounds or (async_rounds and result["rounds"] >= rounds)
     if not async_rounds:  # strict sweeps: both islands served the same merged policy each round
         assert results[0]["served"] == results[1]["served"]
-    # the final cut is downloaded: both islands end on the same merged policy
-    assert results[0]["state"].policy_tensor_hash() == results[1]["state"].policy_tensor_hash()
+        assert results[0]["state"].policy_tensor_hash() == results[1]["state"].policy_tensor_hash()
+    # the final cut is downloaded: both islands end on the same merged weights (async: the
+    # islands ran different numbers of local rounds, so their last state handles differ in
+    # version and hash; the weights are compared, as in the G-DB async test)
     for name in SHAPES:
         assert torch.equal(results[0]["island"].model.values()[name], results[1]["island"].model.values()[name])
 
