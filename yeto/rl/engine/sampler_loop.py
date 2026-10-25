@@ -14,8 +14,9 @@ the first release is loaded) step 2 also waits until a release is loaded.
 
 A load hook may refuse a release without stopping the island
 (:class:`~.policy_release.ReleaseNotLoaded`: a scheme the engine does not serve,
-a failed post-load check). The loop writes ``rl_sampler_release_not_loaded`` and
-goes on; with ``ready`` (the engine sampler: False while the engine holds
+a failed post-load check, a delta release whose rebuilt files fail their digest
+check). The loop writes ``rl_sampler_release_not_loaded`` and goes on; with
+``ready`` (the engine sampler: False while the engine holds
 weights that failed a check) it waits instead of generating, so no sample of
 unchecked weights reaches the buffer.
 
@@ -41,11 +42,15 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
 
 After the last round it marks the data end, so the trainer stops after reading
-the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
+the rest. ``num_rollouts`` None: no last round; the loop generates until
+``should_stop`` (a full-parameter synced group's sampler stops when its trainers
+ended, ``sample_roles`` module doc) and marks no data end. The loop is
+engine-neutral: ``generate(rollout_id)`` runs one round.
 """
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -59,7 +64,7 @@ DEFAULT_POLL_S = 5.0
 
 class SamplerLoop:
     def __init__(self, *, follower: PolicyFollower, buffer: Any,
-                 generate: Callable[[int], None], num_rollouts: int,
+                 generate: Callable[[int], None], num_rollouts: int | None,
                  max_backlog_groups: int, emit: Callable[..., None],
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
                  should_stop: Callable[[], bool] = lambda: False,
@@ -74,7 +79,7 @@ class SamplerLoop:
         self.follower = follower
         self.buffer = buffer
         self.generate = generate
-        self.num_rollouts = int(num_rollouts)
+        self.num_rollouts = None if num_rollouts is None else int(num_rollouts)
         self.max_backlog_groups = int(max_backlog_groups)
         self.emit = emit
         self.poll_s = float(poll_s)
@@ -85,7 +90,7 @@ class SamplerLoop:
         self.require_release = bool(require_release)
         self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
         self.ready = ready  # False: the engine may not generate (failed post-load check)
-        self._not_loaded: tuple[int, str] | None = None  # (seq, reason) last reported
+        self._not_loaded: tuple[Any, ...] | None = None  # (seq, reason, fields) last reported
         self.live_poll_s = self.poll_s if live_poll_s is None else float(live_poll_s)
         self.unchecked_in_flight = False  # this round generated on weights that failed a check
 
@@ -110,11 +115,12 @@ class SamplerLoop:
             loaded = self.follower.refresh()
         except ReleaseNotLoaded as error:
             seen = self.follower.last_seen
-            mark = (None if seen is None else seen.seq, error.reason)
-            if mark != self._not_loaded:  # one event per release and cause, not per poll
+            mark = (None if seen is None else seen.seq, error.reason, tuple(sorted(error.fields.items())))
+            if mark != self._not_loaded:  # one event per release, cause and fields, not per poll
                 self._not_loaded = mark
                 self.emit("rl_sampler_release_not_loaded", seq=mark[0], reason=error.reason,
-                          detail=str(error)[:300], policy_version=self.follower.version)
+                          detail=str(error)[:300], policy_version=self.follower.version,
+                          **error.fields)
             return
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
@@ -199,9 +205,12 @@ class SamplerLoop:
             self.sleep(rest)
 
     def run(self, start: int = 0) -> int:
-        """Generate rounds ``start .. num_rollouts - 1``; returns the rounds generated."""
+        """Generate rounds ``start .. num_rollouts - 1`` (no end for None: until
+        ``should_stop``); returns the rounds generated."""
         done = 0
-        for rollout_id in range(int(start), self.num_rollouts):
+        rollout_ids = (itertools.count(int(start)) if self.num_rollouts is None
+                       else range(int(start), self.num_rollouts))
+        for rollout_id in rollout_ids:
             if self.should_stop() or not self._admit(rollout_id):
                 self.emit("rl_sampler_stopped", rollout_id=rollout_id, rounds=done)
                 return done
@@ -217,7 +226,7 @@ class SamplerLoop:
                       groups=len(self.buffer) - before, buffer_end=len(self.buffer),
                       generate_s=round(generate_s, 3))
             done += 1
-            self._throttle(started, last=rollout_id == self.num_rollouts - 1)
+            self._throttle(started, last=rollout_id == (self.num_rollouts or 0) - 1)
         self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done

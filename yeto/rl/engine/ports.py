@@ -207,6 +207,11 @@ class RolloutPool(Protocol):
     #   -> Mapping[str, int]: move the data source to ``cursor`` (the ledger's
     #   restart point) and return the cursor it now reports; a pool whose
     #   batches carry ``data_cursor`` MUST implement it (driver fails closed).
+    # Optional (rollout ahead, ``rollout_ahead`` module):
+    #   def start_generate(self, rollout_id, *, expected_policy_version=None) -> Any
+    #     start the batch with the published policy and return while it generates;
+    #   def finish_generate(self, pending) -> RolloutBatchHandle: wait for it (the
+    #     engines are idle afterwards); def cancel_generate(self, pending) -> None.
     # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
 
 

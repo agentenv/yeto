@@ -45,6 +45,9 @@ JOIN_EVENT = "rl_sampler_join"
 LEAVE_EVENT = "rl_sampler_leave"
 DROPPED_EVENT = "rl_sampler_groups_dropped"  # groups not written after the leave
 MEMBERS_DIR = "sample-buffer/members"  # one record per sampler incarnation, under the store root
+# one record per trainer whose run ended (sample_roles module doc: samplers that run until then)
+TRAINERS_ENDED_DIR = "sample-buffer/trainers-ended"
+TRAINERS_ENDED_EVENT = "rl_sampler_trainers_ended"
 RECLAIM_MARKER_ENV = "YETO_SPOT_RECLAIM_MARKER"  # written by the Modal runner on the reclaim signal
 DEFAULT_RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"
 # Set where a host hook waits for the sampler's answer before the VM stops
@@ -240,24 +243,57 @@ def member_key(member: Member) -> str:
     return f"{MEMBERS_DIR}/{member.sampler}/{member.incarnation}.json"
 
 
-def write_member(store: Any, member: Member) -> Path:
-    """Write (or rewrite) the incarnation's member record and commit the store.
-    One file per incarnation: an old and a new incarnation never write the same
-    file (a Modal Volume keeps the last commit of a file). A store with an object
-    API (s3, OSS) gets the record by object: its staged mirror does not carry
-    ``sample-buffer/``, so a file would stay on the island's disk."""
-    data = (json.dumps(asdict(member), sort_keys=True) + "\n").encode()
+def _put_record(store: Any, key: str, record: dict[str, Any]) -> Path:
+    """Write the JSON ``record`` at ``key`` under the store root and commit the
+    store. A store with an object API (s3, OSS) gets it by object: its staged
+    mirror does not carry ``sample-buffer/``, so a file would stay on the
+    island's disk."""
+    data = (json.dumps(record, sort_keys=True) + "\n").encode()
     objects = getattr(store, "objects", None)
     if objects is not None:
-        objects.write(member_key(member), data)
-        return Path(member_key(member))
-    path = Path(store.root) / member_key(member)
+        objects.write(key, data)
+        return Path(key)
+    path = Path(store.root) / key
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_bytes(data)
     tmp.replace(path)
     store.commit()
     return path
+
+
+def write_member(store: Any, member: Member) -> Path:
+    """Write (or rewrite) the incarnation's member record and commit the store.
+    One file per incarnation: an old and a new incarnation never write the same
+    file (a Modal Volume keeps the last commit of a file)."""
+    return _put_record(store, member_key(member), asdict(member))
+
+
+def write_trainer_end(store: Any, trainer: str, **fields: Any) -> Path:
+    """The trainer ``trainer`` (its learner id) ended its run: one record per
+    trainer, read by the samplers that run until their trainers end."""
+    return _put_record(store, f"{TRAINERS_ENDED_DIR}/{trainer}.json",
+                       {"trainer": str(trainer), "ended_at": time.time(), **fields})
+
+
+def trainers_ended(store: Any) -> int:
+    """How many trainers wrote their end record. Reads the store as it is: the
+    caller's sample buffer refresh reloads it (once per round and per backlog
+    poll of the sampler loop)."""
+    objects = getattr(store, "objects", None)
+    if objects is not None:
+        names = objects.list(f"{TRAINERS_ENDED_DIR}/")
+    else:
+        names = store.list(TRAINERS_ENDED_DIR)
+    return sum(1 for name in names if name.endswith(".json"))
+
+
+def stop_when_trainers_ended(store: Any, trainers: int) -> Callable[[], bool]:
+    """``should_stop`` of a sampler that runs until ``trainers`` trainers that read
+    ``store`` ended (``sample_roles`` module doc); never for 0."""
+    if int(trainers) < 1:
+        return lambda: False
+    return lambda: trainers_ended(store) >= int(trainers)
 
 
 class SamplerMembership:

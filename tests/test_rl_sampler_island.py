@@ -342,6 +342,37 @@ class _Sampler:
         return [e for e, _ in self.events]
 
 
+def test_a_sampler_without_fixed_rounds_runs_until_its_trainer_ended(tmp_path):
+    # S27 G-CA: a full-parameter synced group's sampler (num_rollouts None) covers
+    # every round its trainer trains, then stops when the trainer's end record
+    # appears; it marks no data end (the trainer ended on the syncer's final)
+    from yeto.rl.engine.sampler_resume import stop_when_trainers_ended, write_trainer_end
+
+    store = CheckpointStore(tmp_path)
+    releases = PolicyReleaseStore(store)
+    sampler = _Sampler(tmp_path, releases, max_backlog_groups=4, rounds=None)
+    ended = stop_when_trainers_ended(store, 1)
+    sampler.loop.should_stop = lambda: ended() or sampler.sleeps > 200
+    trained = []  # rounds the trainer trained (2 groups each)
+
+    def trainer_runs():  # at each backlog wait the trainer trains 2 rounds, 9 rounds in all
+        if ended():
+            return
+        for _ in range(2):
+            if len(trained) < 9:
+                trained.append(len(trained))
+        releases.release(len(trained), f"h{len(trained)}", _write_weights, buffer_selected=2 * len(trained))
+        if len(trained) == 9:
+            write_trainer_end(store, "0")
+
+    sampler.on_sleep = trainer_runs
+    rounds = sampler.loop.run()
+    buffer = FileSampleBuffer(CheckpointStore(tmp_path), batch_size=2)
+    assert len(trained) == 9 and rounds >= 9 and len(buffer._entries) >= 2 * 9
+    assert not buffer.data_ended and "rl_sampler_data_end" not in sampler.names()
+    assert sampler.names()[-1] == "rl_sampler_stopped"
+
+
 def test_sampler_loads_releases_and_waits_at_the_backlog_cap(tmp_path):
     releases = PolicyReleaseStore(CheckpointStore(tmp_path))
     sampler = _Sampler(tmp_path, releases, max_backlog_groups=4, rounds=5)

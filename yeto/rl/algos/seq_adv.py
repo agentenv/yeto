@@ -426,8 +426,9 @@ def _current_round_id() -> int | None:
     """Training rollout id of the round being post-processed, or None.
 
     ``Sample.rollout_id`` is a per-trajectory key (multi-segment merging), not
-    the training round; the round is read from the policy token the driver
-    publishes before each rollout (``yeto:<rollout_id>:<hash>``, INFRA sink).
+    the training round; the round is the one the driver set for the rollout,
+    else the version of the policy token it publishes before each rollout
+    (``yeto:<rollout_id>:<hash>``, INFRA sink).
     No reachable sink (backend port, decoupling 4.11): None.
     """
 
@@ -435,6 +436,9 @@ def _current_round_id() -> int | None:
 
     if not rollout_meta.sink_available():
         return None
+    explicit = rollout_meta.current_rollout_round()  # rollout ahead: above the token's version
+    if explicit is not None:
+        return explicit
     token = rollout_meta.current_policy_token()
     if not token:
         return None

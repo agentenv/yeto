@@ -17,6 +17,7 @@ from ..rl.engine.run_flags import (
 from ..rl.engine.selection import (
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
+    ASYNC_TERMINAL_GRACE_MS,
     FULL_PARAMETER_SYNC_PRESET,
     SAO_STREAMING_SYNC_PRESET,
     is_sync_mode_default,
@@ -32,8 +33,8 @@ from .topology import (
     rl_island_count, rl_island_placement_args, rl_island_spec, rl_min_nodes, rl_trainer_shape,
 )
 from .syncer import (
-    ROLE_SYNCERS, island_pool, rl_full_parameter_async, rl_needs_critic,
-    rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
+    ROLE_SYNCERS, island_pool, rl_dense_sweep, rl_full_parameter_async, rl_full_parameter_final_cut,
+    rl_needs_critic, rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
 from .peer_recovery import check_peer_recovery
@@ -186,6 +187,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_final_cut", "auto", "--rl-sync-final-cut"),
+    ("rl_sync_verify_ahead", "auto", "--rl-sync-verify-ahead"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
@@ -230,10 +232,22 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     the syncer runs ordinary fragment rounds (H local RL rounds per fragment,
     at most two rounds in flight, the decoupled preset's outer Nesterov), and
     the outer-merge options (quorum K, grace, weights, base lag, RDA) apply.
-    The fragment count P comes from the Miles layout probe."""
+    The fragment count P comes from the Miles layout probe.
+
+    Placement: islands with engines on the island need dedicated engine GPUs
+    (``--rl-placement fixed-partition``). Synced trainers that read their samples
+    from the store (``--rl-sample-role trainer``) start no engine, so they take
+    no placement (their sampler islands are their own engine partitions)."""
+    from ..rl.engine.sample_roles import is_synced_trainer
+
     async_rounds = rl_full_parameter_async(args)
     problems = []
-    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+    fixed_partition = getattr(args, "rl_placement", "colocated") == "fixed-partition"
+    if is_synced_trainer(args):
+        if fixed_partition:
+            problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (the "
+                            "trainers start no engine; the sampler islands generate)")
+    elif not fixed_partition:
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
         problems.append("--rl-parameter-layout-sha256 <64 lowercase hex>")
@@ -356,6 +370,7 @@ _ASYNC_MODE_VALUES = {
 _ASYNC_MODE_FULL_PARAMETER_VALUES = {
     "rl_sync_full_parameter_rounds": "async",
     "rl_sync_push_dtype": "int4",
+    "rl_sync_terminal_grace_ms": ASYNC_TERMINAL_GRACE_MS,
 }
 # Marked defaults; the strict mode keeps their (strict) value.
 _SYNC_MODE_MARKED = (
@@ -368,11 +383,22 @@ def rl_sync_mode_applies(args) -> bool:
     """The async mode fills unset options only for a run with two or more
     islands on strict-avg, decoupled or full-parameter, without a critic or
     --experimental-rl-sync; every other run keeps the strict values."""
-    return (getattr(args, "rl_sync_preset", "strict-avg") in (
-                "strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET)
-            and rl_island_count(args) >= 2
-            and not getattr(args, "experimental_rl_sync", False)
-            and not rl_needs_critic(args))
+    return not rl_sync_mode_off_reasons(args)
+
+
+def rl_sync_mode_off_reasons(args) -> list[str]:
+    """Why the async mode does not apply to this run (empty: it applies)."""
+    reasons = []
+    preset = getattr(args, "rl_sync_preset", "strict-avg")
+    if preset not in ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET):
+        reasons.append(f"preset {preset}")
+    if (islands := rl_island_count(args)) < 2:
+        reasons.append(f"{islands} island")
+    if getattr(args, "experimental_rl_sync", False):
+        reasons.append("--experimental-rl-sync")
+    if rl_needs_critic(args):
+        reasons.append("a critic")
+    return reasons
 
 
 def _apply_rl_sync_mode(args) -> None:
@@ -419,12 +445,37 @@ def _apply_rl_sync_mode(args) -> None:
         if hasattr(args, dest):
             setattr(args, dest, plain(getattr(args, dest)))
     args.rl_sync_mode_effective = mode
+    if getattr(args, "rl_sync_mode", "strict") == "async" and mode == "strict" and not explicit_sweep:
+        _warn_async_mode_off(args)
+
+
+def _warn_async_mode_off(args) -> None:
+    """S27 G-CD: ``--rl-sync-mode async`` (the default) that does not apply to a
+    synced run: name the mode in effect and the final cut, which a one-island
+    full-parameter run otherwise only sees as an f32 download of the whole model
+    (120B: about 494 GB per island, GBC-120B-STAGEB §3)."""
+    import sys
+
+    if getattr(args, "rl_single_island_no_sync", False):
+        return  # no syncer: neither mode has anything to fill
+    final = ""
+    if rl_dense_sweep(args):
+        cut = rl_full_parameter_final_cut(args)
+        final = (f"; final cut: {cut}" + (
+            " (every island downloads the f32 model, about 4 bytes per parameter; "
+            "--rl-sync-final-cut ack keeps it in the syncer)" if cut == "download" else ""))
+    print(f"[launcher] WARNING: --rl-sync-mode async does not apply "
+          f"({', '.join(rl_sync_mode_off_reasons(args))}): the run uses the strict sync values "
+          f"(rl_sync_mode_effective strict){final}", file=sys.stderr)
 
 
 # S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
 _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_quorum", "--rl-sync-quorum", None),
     ("rl_sync_grace_ms", "--rl-sync-grace-ms", None),
+    ("rl_sync_grace_min_ms", "--rl-sync-grace-min-ms", None),
+    ("rl_sync_grace_arrival_quantile", "--rl-sync-grace-arrival-quantile", None),
+    ("rl_sync_terminal_grace_ms", "--rl-sync-terminal-grace-ms", None),
     ("rl_sync_learner_weight", "--rl-sync-learner-weight", "equal"),
     ("rl_sync_max_base_lag", "--rl-sync-max-base-lag", 0),
     ("rl_sync_outer_lr", "--rl-sync-outer-lr", None),
@@ -504,6 +555,21 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
         if grace_ms < 0:
             raise ValueError("--rl-sync-grace-ms must be >= 0")
         args.grace_ms = grace_ms
+    grace_min_ms = getattr(args, "rl_sync_grace_min_ms", None)
+    if grace_min_ms is not None:
+        if grace_min_ms < 0:
+            raise ValueError("--rl-sync-grace-min-ms must be >= 0")
+        args.grace_min_ms = grace_min_ms
+    quantile = getattr(args, "rl_sync_grace_arrival_quantile", None)
+    if quantile is not None:
+        if not 0.0 < quantile <= 1.0:
+            raise ValueError("--rl-sync-grace-arrival-quantile must be in (0, 1]")
+        args.grace_arrival_quantile = quantile
+    terminal_grace_ms = getattr(args, "rl_sync_terminal_grace_ms", None)
+    if terminal_grace_ms is not None:
+        if terminal_grace_ms < 0:
+            raise ValueError("--rl-sync-terminal-grace-ms must be >= 0")
+        args.terminal_grace_ms = terminal_grace_ms
     if args.rl_sync_max_base_lag < 0:
         raise ValueError("--rl-sync-max-base-lag must be >= 0")
     outer_lr = args.rl_sync_outer_lr
@@ -577,6 +643,34 @@ def _prepare_node_inventory(args) -> None:
     from .node_inventory import load_inventory
 
     args.rl_node_inventory_nodes = load_inventory(path)
+
+
+def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None:
+    """--rl-rollout-ahead (``yeto.rl.engine.rollout_ahead``), refused before any cloud work."""
+    from ..rl.engine.rollout_ahead import FLAG, launch_problems
+
+    ahead = getattr(args, "rl_rollout_ahead", 0) or 0
+    problems = launch_problems(
+        ahead,
+        backend_max=int(backend_max),
+        max_policy_age=max_policy_age,
+        placements=[getattr(i, "rl_placement", "colocated") for i in rl_island_placement_args(args)],
+        sync_supported=(rl_full_parameter_async(args)
+                        or bool(getattr(args, "rl_single_island_no_sync", False))),
+        sample_roles=(getattr(args, "rl_sample_role", None) or "both") != "both"
+        or bool(getattr(args, "rl_island_sample_role", None)),
+        elastic=bool(getattr(args, "rl_elastic", False)),
+        # a single-island store is the resume store (ledger and cuts) unless it holds
+        # only the HF exports (--rl-checkpoint-store-export-only, S27 G-CO)
+        island_cuts=(any(getattr(args, name, None) is not None
+                         for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"))
+                     or (bool(getattr(args, "rl_single_island_no_sync", False))
+                         and bool(getattr(args, "rl_checkpoint_store", None))
+                         and not bool(getattr(args, "rl_checkpoint_store_export_only", False)))),
+        overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
+    )
+    if problems:
+        raise ValueError(f"{FLAG} {ahead} requires " + "; ".join(problems))
 
 
 def _prepare_rl_args(
@@ -713,6 +807,8 @@ def _prepare_rl_args(
         task_check(max_policy_age,
                    custom_generate=getattr(args, "custom_generate_function_path", None),
                    custom_agent=getattr(args, "custom_agent_function_path", None))
+    _check_rollout_ahead(args, max_policy_age=max_policy_age,
+                         backend_max=getattr(policy_age_module, "MAX_ROLLOUT_AHEAD", 0))
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
     elif args.over_sampling_batch_size < args.rollout_batch_size:

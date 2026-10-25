@@ -41,6 +41,7 @@ from .traits import MILES_TRAITS
 from . import LoopRunner
 from .config import MilesConfigError, check_harness_reward_scope
 from .pins import miles_fork_lineage_from
+from .remote_code_prewarm import prewarm_remote_code
 
 ENGINE_NAME = "miles-upstream"
 
@@ -861,6 +862,8 @@ def compose_island(
     )
     # E1: publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
+    # S27: the engines generate the next round's batch while the trainer trains
+    driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 
@@ -2107,6 +2110,9 @@ def run_ports_island(
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
     startup.step("ray_connected")
+    # S27 G-CK: fill the remote-code module cache on every island node before any
+    # engine or trainer actor imports from it (concurrent first imports raced).
+    prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
@@ -2252,7 +2258,11 @@ def run_ports_island(
 
         if trainer_remote.commanded():  # rl-trainer-start-stop L5.3c: the head starts/stops us
             return run_commanded_trainer(driver)
-        return driver.run()
+        state = driver.run()
+        from .sampler_island import mark_trainer_end
+
+        mark_trainer_end(miles_args, learner_id=learner_id)  # its samplers may stop now
+        return state
     except BaseException as exc:
         error = exc
         raise

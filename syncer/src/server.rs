@@ -62,6 +62,20 @@ pub struct Config {
     pub grace_gamma: f64,
     /// Compute-overlap budget τ, in learner inner steps.
     pub grace_tau: f64,
+    /// Lower bound on the grace window of a round that reached quorum, in ms
+    /// (still capped by `grace_ms`). 0 = off: the adaptive window alone.
+    pub grace_min_ms: u64,
+    /// Arrival-gap floor on the grace window: at least this quantile of the
+    /// recent gaps between a round's first push and each later push of the
+    /// same round, late pushes included (`ArrivalGaps`). Still capped by
+    /// `grace_ms`. 0 = off.
+    pub grace_arrival_quantile: f64,
+    /// Terminal grace, in ms: the last round of each fragment waits up to
+    /// this long for every expected member (not capped by `grace_ms`). No
+    /// later round of that fragment exists to carry a late push, so without
+    /// it a late delta of a last round never reaches the final parameters.
+    /// 0 = off.
+    pub terminal_grace_ms: u64,
     /// Fragment rounds in flight at once (two by default, matching the
     /// default overlap budget τ=2). While one round sits in its quorum/grace window,
     /// the next fragment's pull is already out — sync latency overlaps
@@ -182,6 +196,8 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
+const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
+const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -227,6 +243,17 @@ impl Config {
         // Appended only when on, so every existing hash stays unchanged.
         if self.final_cut_manifest_only {
             encoded.extend_from_slice(FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN);
+        }
+        // Appended only when a floor is on, so every existing hash stays unchanged.
+        if self.grace_min_ms > 0 || self.grace_arrival_quantile > 0.0 {
+            encoded.extend_from_slice(GRACE_FLOOR_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&self.grace_min_ms.to_le_bytes());
+            encoded.extend_from_slice(&self.grace_arrival_quantile.to_bits().to_le_bytes());
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.terminal_grace_ms > 0 {
+            encoded.extend_from_slice(TERMINAL_GRACE_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&self.terminal_grace_ms.to_le_bytes());
         }
         Sha256::digest(encoded).into()
     }
@@ -771,6 +798,109 @@ fn adaptive_grace(
     let Some(step) = step_secs else { return cap };
     let slack = tau * step - quorum_secs - sync_secs;
     Duration::from_secs_f64((gamma * slack).max(0.0)).min(cap)
+}
+
+/// Grace window of a round that just reached quorum and the floor in it:
+/// the larger of the adaptive window and the floor, capped by `grace_ms`.
+/// A `terminal` round (the last round of its fragment) waits at least
+/// `terminal_grace_ms`, which the cap does not bound.
+fn round_grace(
+    cfg: &Config,
+    terminal: bool,
+    step_secs: Option<f64>,
+    quorum_secs: f64,
+    sync_secs: f64,
+    gaps: &ArrivalGaps,
+) -> (Duration, Duration) {
+    let cap = Duration::from_millis(cfg.grace_ms);
+    let adaptive =
+        adaptive_grace(cfg.grace_tau, cfg.grace_gamma, step_secs, quorum_secs, sync_secs, cap);
+    let mut floor = grace_floor(cfg.grace_min_ms, cfg.grace_arrival_quantile, gaps);
+    let mut grace = adaptive.max(floor).min(cap);
+    if terminal {
+        let terminal_grace = Duration::from_millis(cfg.terminal_grace_ms);
+        floor = floor.max(terminal_grace);
+        grace = grace.max(terminal_grace);
+    }
+    (grace, floor)
+}
+
+/// Whether step `t` is the last round of its fragment within `total_steps`.
+fn is_terminal_round(schedule: &crate::shard::ShardSchedule, t: u64, total_steps: u64) -> bool {
+    schedule.next_merge_of_fragment(t) > total_steps
+}
+
+/// Floor of the grace window (`--grace-min-ms`, `--grace-arrival-quantile`).
+/// The adaptive window sizes the wait from the learners' step time minus the
+/// time the round took to reach quorum; with a deep pipeline a round opens
+/// long before any push, so that slack is near zero even when the islands
+/// deliver the same fragment seconds apart. The floor waits for that gap.
+fn grace_floor(min_ms: u64, quantile: f64, gaps: &ArrivalGaps) -> Duration {
+    let measured = (quantile > 0.0)
+        .then(|| gaps.quantile(quantile))
+        .flatten()
+        .map_or(Duration::ZERO, Duration::from_secs_f64);
+    Duration::from_millis(min_ms).max(measured)
+}
+
+/// Gaps kept for the arrival quantile (about P/H rounds of history at P=64).
+const ARRIVAL_GAP_WINDOW: usize = 64;
+/// First arrivals remembered for late pushes, oldest dropped first.
+const ARRIVAL_FIRSTS_KEPT: usize = 512;
+
+/// Recent gaps between the first accepted push of a round `(step, fragment)`
+/// and each later push of that round, whether it joined the round or came
+/// after the round closed (a late push). Only the grace floor reads them.
+#[derive(Default)]
+struct ArrivalGaps {
+    gaps: std::collections::VecDeque<f64>,
+    firsts: BTreeMap<(u64, usize), Instant>,
+}
+
+impl ArrivalGaps {
+    /// An accepted push of an open round: the first one starts the clock,
+    /// each later one is a gap.
+    fn note_accepted(&mut self, step: u64, fragment: usize, now: Instant) {
+        match self.firsts.get(&(step, fragment)) {
+            Some(first) => self.note(now.saturating_duration_since(*first)),
+            None => {
+                self.firsts.insert((step, fragment), now);
+                while self.firsts.len() > ARRIVAL_FIRSTS_KEPT {
+                    self.firsts.pop_first();
+                }
+            }
+        }
+    }
+
+    /// A push for a round that is no longer open.
+    fn note_late(&mut self, step: u64, fragment: usize, now: Instant) {
+        if let Some(first) = self.firsts.get(&(step, fragment)) {
+            self.note(now.saturating_duration_since(*first));
+        }
+    }
+
+    /// A relaunched attempt starts its own clock.
+    fn forget(&mut self, step: u64, fragment: usize) {
+        self.firsts.remove(&(step, fragment));
+    }
+
+    fn note(&mut self, gap: Duration) {
+        if self.gaps.len() == ARRIVAL_GAP_WINDOW {
+            self.gaps.pop_front();
+        }
+        self.gaps.push_back(gap.as_secs_f64());
+    }
+
+    /// Nearest-rank quantile of the kept gaps; None before the first gap.
+    fn quantile(&self, q: f64) -> Option<f64> {
+        if self.gaps.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<f64> = self.gaps.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        let rank = (q.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
+        Some(sorted[rank.clamp(1, sorted.len()) - 1])
+    }
 }
 
 /// Round-launch floor: the manual ms floor, raised to H·ξ_step/P once a
@@ -2703,6 +2833,7 @@ async fn scheduler(
     let num_fragments = schedule.owned().len() as u64;
     let last_step = schedule.last_step(cfg.total_steps);
     let mut step_rates = StepRates::default();
+    let mut arrival_gaps = ArrivalGaps::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
     // Once a marked run is actually going to make more progress, the old
@@ -2950,14 +3081,9 @@ async fn scheduler(
             if r.grace_deadline.is_none() && r.quorum_reached() {
                 let step_secs = step_rates.max_step_secs_for(&r.expected_members);
                 let quorum_secs = r.started.elapsed().as_secs_f64();
-                let grace = adaptive_grace(
-                    cfg.grace_tau,
-                    cfg.grace_gamma,
-                    step_secs,
-                    quorum_secs,
-                    last_sync_secs,
-                    Duration::from_millis(cfg.grace_ms),
-                );
+                let terminal = is_terminal_round(&schedule, r.t, cfg.total_steps);
+                let (grace, floor) =
+                    round_grace(&cfg, terminal, step_secs, quorum_secs, last_sync_secs, &arrival_gaps);
                 if r.pushes.len() < r.expected_members.len() {
                     info!(
                         step = r.t,
@@ -2966,6 +3092,8 @@ async fn scheduler(
                         quorum_secs,
                         sync_secs = last_sync_secs,
                         grace_ms = grace.as_millis() as u64,
+                        grace_floor_ms = floor.as_millis() as u64,
+                        terminal,
                         "grace window armed"
                     );
                 }
@@ -3072,6 +3200,7 @@ async fn scheduler(
                         }
                     }
                     r.pushes.clear();
+                    arrival_gaps.forget(r.t, r.p);
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
                     r.soft_deadline = cfg.membership.soft_deadline.map(|soft| r.started + soft);
@@ -3350,6 +3479,12 @@ async fn scheduler(
                     // peer whose pushes keep missing their round is exactly
                     // the one the grace window must be sized for.
                     step_rates.note(member, local_step, Instant::now());
+                    if !inflight
+                        .iter()
+                        .any(|round| round.t == global_step && round.p == fragment_id as usize)
+                    {
+                        arrival_gaps.note_late(global_step, fragment_id as usize, Instant::now());
+                    }
                     let base_version = push.base_version;
                     if let Some(carry) = late_carry.as_mut() {
                         if carry.reuses_anchor(member, &push) {
@@ -3407,6 +3542,7 @@ async fn scheduler(
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
                         PushDisposition::Accepted => {
+                            arrival_gaps.note_accepted(global_step, fragment_id as usize, Instant::now());
                             if let Some(carry) = late_carry.as_mut() {
                                 carry.note_gathered(member, fragment_id as usize, base_version);
                             }
@@ -3762,6 +3898,16 @@ async fn scheduler(
             st.global_step,
             busy_fragments
         );
+    }
+    // A late push queued for a fragment whose last round already merged has
+    // no round left to join (`--terminal-grace-ms` keeps last rounds open).
+    if let Some(carry) = late_carry.as_ref() {
+        let dropped: usize = carry.queued.values().map(Vec::len).sum();
+        if dropped > 0 {
+            let mut fragments: Vec<usize> = carry.queued.keys().copied().collect();
+            fragments.sort_unstable();
+            warn!(dropped, fragments = ?fragments, "late pushes left out of the final cut: no later round");
+        }
     }
     // Explicitly drain and health-check every SVD worker before a checkpoint
     // or marker can publish the terminal cut.
@@ -6678,6 +6824,9 @@ mod tests {
             grace_ms: 0,
             grace_gamma: 0.5,
             grace_tau: 0.0,
+            grace_min_ms: 0,
+            grace_arrival_quantile: 0.0,
+            terminal_grace_ms: 0,
             pipeline: 1,
             min_round_interval_ms: 0,
             sync_interval_steps: 0.0,
@@ -6716,6 +6865,8 @@ mod tests {
     }
 
     const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
+    const GRACE_FLOOR_VECTOR: &str = "6f9104e302f894575fe2203cfe91a93ff37d16e37b4e75c4367b060d13748d12";
+    const TERMINAL_GRACE_VECTOR: &str = "6f40c5c1c02e6c63b99bf5aa77fab924fed928a42a9e0d88811583a19fc1aa39";
 
     #[test]
     fn semantic_profile_hash_matches_the_python_canonical_vector() {
@@ -6769,6 +6920,26 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
+        // A grace floor appends its own block; off keeps the hash. Python
+        // vector in tests/test_s27_grace_floor.py.
+        config.final_cut_manifest_only = false;
+        config.grace_arrival_quantile = 0.0;
+        config.grace_min_ms = 0;
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.grace_min_ms = 15_000;
+        config.grace_arrival_quantile = 0.9;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, GRACE_FLOOR_VECTOR);
+        config.grace_min_ms = 0;
+        assert_ne!(config.semantic_profile_hash(), original);
+        // So does a terminal grace (same Python test file).
+        config.grace_arrival_quantile = 0.0;
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.terminal_grace_ms = 120_000;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, TERMINAL_GRACE_VECTOR);
     }
 
     #[test]
@@ -8359,6 +8530,114 @@ mod tests {
         );
         // Huge slack → capped.
         assert_eq!(adaptive_grace(2.0, 0.8, Some(60.0), 0.0, 0.0, CAP), CAP);
+    }
+
+    #[test]
+    fn arrival_gaps_measure_joined_and_late_pushes() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        assert_eq!(gaps.quantile(0.9), None);
+        gaps.note_accepted(9, 8, start); // first push starts the clock
+        gaps.note_accepted(9, 8, start + Duration::from_secs(4)); // joined the round
+        gaps.note_late(9, 8, start + Duration::from_secs(16)); // after the round closed
+        gaps.note_late(10, 9, start + Duration::from_secs(30)); // round never seen: no gap
+        assert_eq!(gaps.quantile(0.5), Some(4.0));
+        assert_eq!(gaps.quantile(0.9), Some(16.0));
+        assert_eq!(gaps.quantile(1.0), Some(16.0));
+        // A relaunched attempt restarts its clock.
+        gaps.forget(9, 8);
+        gaps.note_accepted(9, 8, start + Duration::from_secs(40));
+        gaps.note_accepted(9, 8, start + Duration::from_secs(41));
+        assert_eq!(gaps.quantile(0.0), Some(1.0));
+    }
+
+    #[test]
+    fn arrival_gaps_keep_a_bounded_window() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        for step in 0..(ARRIVAL_GAP_WINDOW as u64 + 10) {
+            gaps.note_accepted(step, 0, start);
+            gaps.note_accepted(step, 0, start + Duration::from_secs(step));
+        }
+        assert_eq!(gaps.gaps.len(), ARRIVAL_GAP_WINDOW);
+        assert_eq!(gaps.quantile(0.0), Some(10.0)); // the 10 oldest gaps were dropped
+        for step in 0..(ARRIVAL_FIRSTS_KEPT as u64 + 5) {
+            gaps.note_accepted(1_000 + step, 1, start);
+        }
+        assert_eq!(gaps.firsts.len(), ARRIVAL_FIRSTS_KEPT);
+        assert!(!gaps.firsts.contains_key(&(1_000, 1))); // oldest first arrival forgotten
+    }
+
+    #[test]
+    fn terminal_rounds_are_the_last_round_of_each_fragment() {
+        let unsharded = crate::shard::ShardPlan::default().schedule(4).unwrap();
+        let terminal: Vec<u64> =
+            (1..=12).filter(|&t| is_terminal_round(&unsharded, t, 12)).collect();
+        assert_eq!(terminal, vec![9, 10, 11, 12]);
+        // A total that is not a multiple of P: fragment 3 last merges at step 8.
+        let terminal: Vec<u64> =
+            (1..=10).filter(|&t| is_terminal_round(&unsharded, t, 10)).collect();
+        assert_eq!(terminal, vec![7, 8, 9, 10]);
+        // Shard 1 of 2 owns fragments 2..4 and runs steps 3, 4, 7, 8, 11, 12.
+        let shard = crate::shard::ShardPlan::new(1, 2).unwrap().schedule(4).unwrap();
+        let terminal: Vec<u64> = (1..=12)
+            .filter(|&t| shard.owns_step(t) && is_terminal_round(&shard, t, 12))
+            .collect();
+        assert_eq!(terminal, vec![11, 12]);
+    }
+
+    #[test]
+    fn terminal_grace_holds_a_last_round_past_the_cap_and_is_off_by_default() {
+        let gaps = ArrivalGaps::default();
+        let mut config = round_test_config(8);
+        config.grace_ms = 30_000;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        // No slack: the adaptive window is 0 s for a terminal round too when off.
+        assert_eq!(round_grace(&config, true, Some(1.0), 5.0, 1.0, &gaps).0, Duration::ZERO);
+        config.terminal_grace_ms = 120_000;
+        assert_eq!(
+            round_grace(&config, true, Some(1.0), 5.0, 1.0, &gaps),
+            (Duration::from_secs(120), Duration::from_secs(120))
+        );
+        // Not a terminal round: unchanged.
+        assert_eq!(round_grace(&config, false, Some(1.0), 5.0, 1.0, &gaps).0, Duration::ZERO);
+    }
+
+    #[test]
+    fn grace_floor_takes_the_larger_bound_and_stays_off_by_default() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        assert_eq!(grace_floor(0, 0.9, &gaps), Duration::ZERO); // no gap measured yet
+        assert_eq!(grace_floor(15_000, 0.9, &gaps), Duration::from_secs(15));
+        for (step, secs) in [(1u64, 2u64), (2, 25), (3, 30)] {
+            gaps.note_accepted(step, 0, start);
+            gaps.note_late(step, 0, start + Duration::from_secs(secs));
+        }
+        assert_eq!(grace_floor(0, 0.0, &gaps), Duration::ZERO); // off
+        assert_eq!(grace_floor(0, 0.5, &gaps), Duration::from_secs(25));
+        assert_eq!(grace_floor(40_000, 0.5, &gaps), Duration::from_secs(40));
+        // The arming site caps the larger of the adaptive window and the floor.
+        // E1-like inputs: τ·ξ_step − ξ_quorum − ξ_sync = 54 − 33.7 − 8.2 s,
+        // so the adaptive window alone is under 10 s.
+        let mut config = round_test_config(8);
+        config.grace_ms = 300_000;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        let (grace, floor) = round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps);
+        assert!(grace < Duration::from_secs(10));
+        assert_eq!(floor, Duration::ZERO);
+        config.grace_arrival_quantile = 0.9;
+        assert_eq!(round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps).0, Duration::from_secs(30));
+        config.grace_ms = 20_000; // the cap still bounds the floor
+        assert_eq!(round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps).0, Duration::from_secs(20));
+        config.grace_ms = 300_000;
+        config.grace_arrival_quantile = 0.0;
+        config.grace_min_ms = 45_000;
+        assert_eq!(
+            round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps),
+            (Duration::from_secs(45), Duration::from_secs(45))
+        );
     }
 
     #[test]

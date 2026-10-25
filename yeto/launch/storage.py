@@ -45,10 +45,12 @@ MODAL_CHECKPOINT_STORE_MOUNT = "/root/yeto-checkpoint-store"
 
 def resumes_in_new_container(args) -> bool:
     """A Modal re-run of the island (preemption) is a resume, not a failure, when the run
-    has a non-elastic modal-volume:// store (rl-resume-from-checkpoint 2.5)."""
+    has a non-elastic modal-volume:// store (rl-resume-from-checkpoint 2.5). A store of
+    ``--rl-checkpoint-store-export-only`` holds no resume state: a re-run is a failure."""
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
     return (store.startswith("modal-volume://") and not getattr(args, "rl_elastic", False)
-            and bool(getattr(args, "rl_single_island_no_sync", False)))
+            and bool(getattr(args, "rl_single_island_no_sync", False))
+            and not getattr(args, "rl_checkpoint_store_export_only", False))
 
 
 def droppable_rejoins_in_new_container(args, modal_cfg) -> bool:

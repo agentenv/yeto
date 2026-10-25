@@ -1,0 +1,416 @@
+"""Fill transformers' remote-code module cache on every island node before any engine starts.
+
+S27 G-CK. For a ``trust_remote_code`` model, transformers copies the model directory's
+``*.py`` files into a node-local module cache (``HF_MODULES_CACHE``, default
+``~/.cache/huggingface/modules``) and imports them from there. The copy is not atomic
+(``shutil.copyfile`` truncates and rewrites the target) and transformers' own lock only
+covers threads of one process. Several SGLang engines (and the TP ranks of each) start
+on one node at the same time, so one process can import a file that another process is
+rewriting, and the class is missing from the module: s27-ch-d1 ``configuration_nemotron_h``,
+s27-bc-a ``processing_nemotron_h_omni``, s27-bc-b ``image_processing_nemotron_h_omni``.
+
+transformers copies a module file only when the cached copy is missing or differs from
+the source. Once the cache holds a complete copy of every file, the engines only compare
+and read it. So one child interpreter per node runs, under an exclusive file lock in the
+cache directory, before Miles creates any engine:
+
+1. every top-level ``*.py`` of the model directory goes through
+   ``get_cached_module_file`` (the cache path and copy that an ``auto_map`` entry naming
+   that file gets, relative imports included);
+2. the loaders that the model directory maps to remote code run once with remote code
+   trusted: ``AutoConfig``, ``AutoTokenizer``, ``AutoProcessor``, ``AutoImageProcessor``
+   (the processor pair also when a processor config file exists).
+
+Trust. The step runs only when the island trusts remote code (``--trust-remote-code``,
+``miles_args.yeto_rl_trust_remote_code``; the launcher requires it for the pinned Miles,
+whose engines load the model with remote code trusted). The child gets the decision as
+its own ``--trust-remote-code`` flag and does nothing without it.
+
+The child is the Ray worker's ``sys.executable``: the interpreter Miles launches
+``sglang.launch_server`` with, so its transformers lays out the cache as the engines do.
+
+Severity. A failed loader, or a failed cache step for a module file that an engine-side
+``auto_map`` entry (config, tokenizer, processor, image/video processor, feature
+extractor) names, is a WARNING. A file that no such entry names (a modeling file, a
+reasoning parser that needs vllm, a helper script) is not imported by the engines; its
+failure is an info line ("skipped"). Nothing here ever blocks the start: the engines then
+load remote code as they did without this step.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator, Sequence
+from typing import Any
+
+MODULE = "yeto.rl.adapters.miles.remote_code_prewarm"
+RESULT_PREFIX = "YETO_REMOTE_CODE_PREWARM "
+LOCK_NAME = ".yeto-remote-code-prewarm.lock"
+# One node: interpreter start, transformers import, the loaders. A child that takes
+# longer is killed and the node is reported; the driver waits this plus a grace.
+NODE_TIMEOUT_S = 300.0
+DRIVER_GRACE_S = 60.0
+EVENT = "remote_code_prewarm"
+
+_AUTO_MAP_FILES = (
+    "config.json",
+    "tokenizer_config.json",
+    "processor_config.json",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
+)
+_PROCESSOR_FILES = ("processor_config.json", "preprocessor_config.json", "video_preprocessor_config.json")
+_IMAGE_PROCESSOR_FILES = ("preprocessor_config.json",)
+_PROCESSOR_CLASSES = frozenset({"AutoProcessor", "AutoImageProcessor", "AutoVideoProcessor",
+                                "AutoFeatureExtractor"})
+# auto_map keys whose classes the engine processes import (SGLang: config, tokenizer, processor)
+ENGINE_AUTO_CLASSES = frozenset({"AutoConfig", "AutoTokenizer", *_PROCESSOR_CLASSES})
+
+
+def auto_map(model_path: str | os.PathLike) -> dict[str, frozenset[str]]:
+    """The ``auto_map`` of a local model directory's JSON configs: auto class -> module files.
+
+    Empty: transformers loads no remote code from this directory. A reference into another
+    repository (``repo--module.Class``) names no local file. A tokenizer config's legacy
+    list form maps ``AutoTokenizer``.
+    """
+    found: dict[str, set[str]] = {}
+    for name in _AUTO_MAP_FILES:
+        try:
+            data = json.loads((Path(model_path) / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        mapping = data.get("auto_map") if isinstance(data, dict) else None
+        if isinstance(mapping, (list, tuple)) and name == "tokenizer_config.json":
+            mapping = {"AutoTokenizer": mapping}
+        if not isinstance(mapping, dict):
+            continue
+        for key, refs in mapping.items():
+            files = found.setdefault(str(key), set())
+            for ref in refs if isinstance(refs, (list, tuple)) else (refs,):
+                if isinstance(ref, str) and "--" not in ref and "." in ref:
+                    files.add(ref.rsplit(".", 1)[0] + ".py")
+    return {key: frozenset(files) for key, files in found.items()}
+
+
+def auto_map_classes(model_path: str | os.PathLike) -> frozenset[str]:
+    """The ``auto_map`` keys that the JSON configs of a local model directory declare."""
+    return frozenset(auto_map(model_path))
+
+
+def engine_module_files(model_path: str | os.PathLike) -> frozenset[str]:
+    """Module files named by the ``auto_map`` entries that the engine processes load."""
+    mapping = auto_map(model_path)
+    return frozenset(name for key in ENGINE_AUTO_CLASSES for name in mapping.get(key, ()))
+
+
+def loader_plan(model_path: str | os.PathLike) -> tuple[str, ...]:
+    """transformers ``Auto*`` loaders to run once for ``model_path`` (empty: no remote code)."""
+    classes = auto_map_classes(model_path)
+    if not classes:
+        return ()
+    root = Path(model_path)
+    has_processor = bool(classes & _PROCESSOR_CLASSES) or any(
+        (root / name).is_file() for name in _PROCESSOR_FILES)
+    has_image_processor = "AutoImageProcessor" in classes or any(
+        (root / name).is_file() for name in _IMAGE_PROCESSOR_FILES)
+    plan = []
+    if "AutoConfig" in classes:
+        plan.append("AutoConfig")
+    if "AutoTokenizer" in classes:
+        plan.append("AutoTokenizer")
+    if has_processor:
+        plan.append("AutoProcessor")
+    if has_image_processor:
+        plan.append("AutoImageProcessor")
+    return tuple(plan)
+
+
+def engine_model_paths(miles_args: Any) -> list[str]:
+    """Model directories with remote code that this island's processes load.
+
+    The engines load ``--rollout-hf-checkpoint`` when set, else ``--hf-checkpoint``
+    (Miles ``rollout_hf_checkpoint``); the trainer loads ``--hf-checkpoint``. The cache
+    path is the directory's base name plus a hash of the module source, so a second
+    directory with the same files adds no work.
+    """
+    paths: list[str] = []
+    for value in (getattr(miles_args, "rollout_hf_checkpoint", None),
+                  getattr(miles_args, "hf_checkpoint", None)):
+        if value and str(value) not in paths and auto_map_classes(value):
+            paths.append(str(value))
+    return paths
+
+
+def _short(exc: BaseException, limit: int = 300) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def warm_model_dir(model_path: str, *, trust_remote_code: bool, transformers_module: Any = None,
+                   dynamic_module_utils: Any = None) -> dict[str, Any]:
+    """Child side for one directory: cache every top-level ``*.py``, then run the loaders.
+
+    Each step is independent; a failed step is recorded and the next one still runs.
+    ``errors`` holds the failed loaders and the failed engine module files (WARNING);
+    ``skipped`` holds the other files that could not be cached (info).
+    """
+    if transformers_module is None:
+        import transformers as transformers_module
+    if dynamic_module_utils is None:
+        from transformers import dynamic_module_utils
+    engine_files = engine_module_files(model_path)
+    plan = loader_plan(model_path)
+    cached: list[str] = []
+    loaded: list[str] = []
+    skipped: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for source in sorted(Path(model_path).glob("*.py")):
+        try:
+            dynamic_module_utils.get_cached_module_file(model_path, source.name)
+            cached.append(source.name)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            row = {"step": f"cache {source.name}", "error": _short(exc)}
+            (errors if source.name in engine_files else skipped).append(row)
+    for loader in plan:
+        try:
+            getattr(transformers_module, loader).from_pretrained(
+                model_path, trust_remote_code=trust_remote_code)
+            loaded.append(loader)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            errors.append({"step": loader, "error": _short(exc)})
+    return {"path": model_path, "loaders": list(plan), "cached": cached, "loaded": loaded,
+            "skipped": skipped, "errors": errors}
+
+
+@contextlib.contextmanager
+def exclusive_lock(directory: str | os.PathLike) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on ``<directory>/LOCK_NAME`` (released when the process ends)."""
+    import fcntl
+
+    os.makedirs(directory, exist_ok=True)
+    with open(Path(directory) / LOCK_NAME, "a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Child entry: warm every ``--model-path`` under the lock; print one JSON report line."""
+    parser = argparse.ArgumentParser(prog=MODULE)
+    parser.add_argument("--model-path", action="append", required=True)
+    parser.add_argument("--trust-remote-code", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.trust_remote_code:
+        print(f"{MODULE}: remote code is not trusted (no --trust-remote-code); nothing done",
+              file=sys.stderr, flush=True)
+        return 2
+    started = time.monotonic()
+    from transformers.utils import HF_MODULES_CACHE
+
+    with exclusive_lock(HF_MODULES_CACHE):
+        locked = time.monotonic()
+        models = [warm_model_dir(path, trust_remote_code=args.trust_remote_code)
+                  for path in args.model_path]
+    report = {
+        "cache": str(HF_MODULES_CACHE),
+        "import_and_lock_s": round(locked - started, 3),
+        "elapsed_s": round(time.monotonic() - started, 3),
+        "models": models,
+    }
+    print(RESULT_PREFIX + json.dumps(report, sort_keys=True), flush=True)
+    return 1 if any(model["errors"] for model in models) else 0
+
+
+def _parse_report(stdout: str) -> dict[str, Any] | None:
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(RESULT_PREFIX):
+            try:
+                return json.loads(line[len(RESULT_PREFIX):])
+            except ValueError:
+                return None
+    return None
+
+
+def _tail(text: str, lines: int = 5) -> str:
+    return "\n".join(text.strip().splitlines()[-lines:])
+
+
+def run_on_this_node(model_paths: Sequence[str], timeout_s: float = NODE_TIMEOUT_S, *,
+                     run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """Node side (a Ray task pinned to the node): run :func:`main` in a child interpreter.
+
+    The child gets no GPU (``CUDA_VISIBLE_DEVICES`` empty) and this checkout first on
+    ``PYTHONPATH``. Returns ``{"host", "ok", ...}``; never raises.
+    """
+    host = socket.gethostname()
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    root = str(Path(__file__).resolve().parents[4])
+    env["PYTHONPATH"] = os.pathsep.join([root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else root
+    cmd = [sys.executable, "-m", MODULE, "--trust-remote-code"]  # callers gate on the island's flag
+    for path in model_paths:
+        cmd += ["--model-path", str(path)]
+    started = time.monotonic()
+    try:
+        proc = run(cmd, env=env, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return {"host": host, "ok": False, "error": f"timed out after {timeout_s:.0f} s"}
+    except OSError as exc:
+        return {"host": host, "ok": False, "error": _short(exc)}
+    report = _parse_report(proc.stdout or "")
+    result: dict[str, Any] = {"host": host, "rc": proc.returncode, "report": report,
+                              "wall_s": round(time.monotonic() - started, 3)}
+    result["ok"] = proc.returncode == 0 and report is not None
+    if report is None:
+        result["error"] = f"no report (rc {proc.returncode}): {_tail(proc.stderr or '')}"
+    return result
+
+
+def node_task(model_paths: Sequence[str], timeout_s: float) -> dict[str, Any]:
+    """The Ray task body: plain positional parameters only (Ray serializes the call)."""
+    return run_on_this_node(model_paths, timeout_s)
+
+
+def _island_nodes(ray_module: Any) -> list[dict[str, Any]]:
+    """Alive Ray nodes with GPUs, one per machine (address), in a stable order."""
+    nodes = [n for n in ray_module.nodes()
+             if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+    by_address: dict[str, dict[str, Any]] = {}
+    for node in sorted(nodes, key=lambda n: (str(n.get("NodeManagerAddress")), str(n.get("NodeID")))):
+        by_address.setdefault(str(node.get("NodeManagerAddress")), node)
+    return list(by_address.values())
+
+
+def _run_on_island_nodes(ray_module: Any, model_paths: Sequence[str], *, affinity: Any,
+                         timeout_s: float, clock: Callable[[], float]) -> list[dict[str, Any]]:
+    nodes = _island_nodes(ray_module)
+    if not nodes:
+        raise RuntimeError("no alive Ray node with GPUs")
+    task = ray_module.remote(num_cpus=0, num_gpus=0)(node_task)
+    refs = []
+    for node in nodes:
+        strategy = affinity(node_id=node["NodeID"], soft=False)
+        refs.append((str(node.get("NodeManagerAddress")),
+                     task.options(scheduling_strategy=strategy).remote(list(model_paths), timeout_s)))
+    deadline = clock() + timeout_s + DRIVER_GRACE_S
+    results = []
+    for address, ref in refs:
+        try:
+            result = dict(ray_module.get(ref, timeout=max(1.0, deadline - clock())))
+        except Exception as exc:  # noqa: BLE001 - a node that cannot run the task is reported
+            with contextlib.suppress(Exception):
+                ray_module.cancel(ref, force=True)
+            result = {"ok": False, "error": _short(exc)}
+        result["node"] = address
+        results.append(result)
+    return results
+
+
+def _names(values: Sequence[str]) -> str:
+    return ",".join(values) or "none"
+
+
+def _loaders(models: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """(loaders that ran, loaders that failed) over every model directory of one node."""
+    ok = sorted({name for m in models for name in (m.get("loaded") or ())})
+    failed = sorted({name for m in models for name in (m.get("loaders") or ())
+                     if name not in (m.get("loaded") or ())})
+    return ok, failed
+
+
+def _node_lines(result: dict[str, Any]) -> tuple[str, str | None]:
+    """(info line, WARNING line or None) for one node's result."""
+    where = f"{result.get('node')} ({result.get('host', '?')})"
+    report = result.get("report")
+    if report is None:
+        return "", (f"[rl] WARNING: remote-code prewarm on {where} did not complete: "
+                    f"{result.get('error', 'no report')}; engines on that node may race on the "
+                    "remote-code module cache")
+    models = report.get("models") or []
+    ok, failed = _loaders(models)
+    cached = sum(len(m.get("cached") or ()) for m in models)
+    info = (f"[rl] remote-code prewarm on {where}: loaders ok {_names(ok)}; "
+            f"failed {_names(failed)}; {cached} module file(s) cached")
+    skipped = [s for m in models for s in (m.get("skipped") or ())]
+    if skipped:
+        info += "; skipped (no engine loader names them): " + "; ".join(
+            f"{s['step'].removeprefix('cache ')} ({s['error'][:160]})" for s in skipped)
+    errors = [e for m in models for e in (m.get("errors") or ())]
+    if not errors and result.get("ok"):
+        return info, None
+    detail = "; ".join(f"{e['step']}: {e['error']}" for e in errors) or str(result.get("error", "?"))
+    return info, (f"[rl] WARNING: remote-code prewarm on {where}: loaders ok {_names(ok)}, "
+                  f"failed {_names(failed)}; {detail}; engines on that node may race on the "
+                  "remote-code module cache for the failed entries")
+
+
+def prewarm_remote_code(miles_args: Any, *, ray_module: Any = None, affinity: Any = None,
+                        run_local: Callable[[Sequence[str]], dict[str, Any]] | None = None,
+                        emit: Callable[[dict[str, Any]], None] | None = None,
+                        timeout_s: float = NODE_TIMEOUT_S, clock: Callable[[], float] = time.monotonic,
+                        out: Any = None) -> list[dict[str, Any]] | None:
+    """Driver side: warm the module cache once on every island machine; call it after the
+    island's Ray is connected and before Miles creates any engine or trainer actor.
+
+    With Ray connected, one task per machine (alive node with GPUs, deduplicated by
+    address) is pinned there with ``NodeAffinitySchedulingStrategy``; without a
+    connected Ray (Miles starts a local one later), it runs on this machine. Returns the
+    per-node results, or ``None`` when the island does not trust remote code, the model
+    has no remote code, or the step could not run. Never raises: each problem is one
+    ``[rl] WARNING`` line.
+    """
+    out = sys.stderr if out is None else out
+    started = clock()
+    if not getattr(miles_args, "yeto_rl_trust_remote_code", False):
+        return None
+    try:
+        paths = engine_model_paths(miles_args)
+        if not paths:
+            return None
+        if ray_module is None:
+            try:
+                import ray as ray_module
+            except ImportError:
+                ray_module = None
+        if ray_module is not None and ray_module.is_initialized():
+            if affinity is None:
+                from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy as affinity
+            results = _run_on_island_nodes(ray_module, paths, affinity=affinity,
+                                           timeout_s=timeout_s, clock=clock)
+        else:
+            local = run_local or (lambda p: run_on_this_node(p, timeout_s))
+            results = [{**local(paths), "node": "local"}]
+    except Exception as exc:  # noqa: BLE001 - this step must never block the start
+        print(f"[rl] WARNING: remote-code prewarm did not run ({_short(exc)}); engines load "
+              "remote code without it and may race on the module cache", file=out, flush=True)
+        return None
+    nodes = []
+    for result in results:
+        info, warning = _node_lines(result)
+        if info:
+            print(info, flush=True)
+        if warning:
+            print(warning, file=out, flush=True)
+        ok, failed = _loaders((result.get("report") or {}).get("models") or [])
+        nodes.append({"node": result.get("node"), "host": result.get("host"),
+                      "ok": warning is None, "loaders_ok": ok, "loaders_failed": failed})
+    if emit is not None:
+        with contextlib.suppress(Exception):
+            emit({"event": EVENT, "paths": paths, "seconds": round(clock() - started, 3),
+                  "nodes": nodes})
+    return results
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

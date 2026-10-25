@@ -47,8 +47,10 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     StoredAuthoritativeFragment,
     defer_capture_supported,
     lazy_capture_supported,
+    StoredFragmentVerifier,
     optimizer_proof_without_model_check_supported,
     timed_group,
+    verified_apply_supported,
 )
 from yeto.rl.host_info import print_host_report, report_rank_hosts
 from yeto.rl.engine.policy_digest import (
@@ -242,6 +244,13 @@ class RoleStreamConfig:
     # final parameters stay with the syncer (syncer --final-cut-payload
     # manifest). Must match the syncer, whose profile hash binds it.
     final_cut: str = "download"
+    # S27 G-CG verify-ahead: check each stored broadcast's chunks on a
+    # background thread when it arrives, so the apply at the next boundary
+    # names it and the trainer's prepare reads none of its chunks (Miles
+    # ``verified_apply``; the same check, off the training path). False keeps
+    # the check in the trainer's prepare. Not part of the session contract:
+    # the applied values are the same either way.
+    verify_ahead: bool = True
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -513,6 +522,11 @@ class MilesFullParameterRoleStream:
         # S27 G-AG: summed push time split (_note_push_timing), read by the
         # session's round event.
         self.push_timing_totals: dict[str, float] = {}
+        # Verify-ahead (S27 G-CG): replaced fragments an apply named as checked
+        # off the trainer ("applied") or whose check was still running, so the
+        # trainer checked them itself ("pending").
+        self.verify_ahead_counters: dict[str, int] = {"applied": 0, "pending": 0}
+        self._verifier: StoredFragmentVerifier | None = None
         self.heartbeat: LeaseHeartbeat | None = None
         self.sink = None
         self.current: ReferencedPolicyCut | None = None
@@ -692,6 +706,9 @@ class MilesFullParameterRoleStream:
             if self.config.island_lease_s is not None else None
         )
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
+        if self.config.verify_ahead and verified_apply_supported(group):
+            self._verifier = StoredFragmentVerifier(ray_module=self.ray_module)
+            sink.verifier = self._verifier
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
         if self._recovering:
             await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
@@ -1433,12 +1450,14 @@ class MilesFullParameterRoleStream:
             target_policy_version=target_version,
             authoritative_fragments=tuple(selected.values()),
         )
+        verified = self._verified_ahead(selected)
         before = (tuple(await self.group.full_parameter_optimizer_states(**self._proof_kwargs()))
                   if optimizer_proof else None)
         await self.adapter.apply(
             self.group,
             target,
             commit_token=self._apply_token(target_version, selected),
+            **({"verified_fragments": verified} if verified else {}),
         )
         await report_rank_stats(self.group, "apply", self.config.role)
         if before is not None:
@@ -1474,6 +1493,28 @@ class MilesFullParameterRoleStream:
             self._clear_first_push_phase(fragment_id)
             self._tokens_at_anchor[fragment_id] = tokens
             self._routed_at_anchor[fragment_id] = routed
+
+    def _verified_ahead(self, selected: Mapping[int, StoredAuthoritativeFragment]) -> dict[int, str]:
+        """``{fragment: payload hash}`` of the fragments in ``selected`` whose
+        stored chunks the verifier already checked; a fragment whose check is
+        still running is checked by the trainer as before.  A failed check
+        fails this apply before the trainer changes, as its prepare would."""
+
+        verified: dict[int, str] = {}
+        for fragment_id, stored in selected.items():
+            try:
+                payload_hash = stored.verified_payload_hash()
+            except Exception as error:
+                raise RuntimeError(
+                    f"{self.config.role} broadcast of fragment {fragment_id} v{stored.version} "
+                    "failed its off-trainer chunk check"
+                ) from error
+            if payload_hash is not None:
+                verified[fragment_id] = payload_hash
+            elif stored.verification is not None:
+                self.verify_ahead_counters["pending"] += 1
+        self.verify_ahead_counters["applied"] += len(verified)
+        return verified
 
     def _apply_token(
         self,
@@ -2010,6 +2051,8 @@ class MilesFullParameterRoleStream:
             self.heartbeat.stop()
         if self.client is not None:
             self.client.close()
+        if self._verifier is not None:
+            self._verifier.close()
         if self.sink is not None:
             self.sink.release_all()
         retained_cuts = tuple(value for value, _count in self._pinned_cuts.values())

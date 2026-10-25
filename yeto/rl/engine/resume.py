@@ -167,6 +167,13 @@ class CheckpointStore:
         skips reloads while any guard is held; locally it does nothing."""
         return StoreWriterGuard()
 
+    def hold_reader(self) -> "StoreWriterGuard":
+        """Mark an open read of a store file until the returned guard is released.
+        A backend whose ``reload`` fails while a file is open (a Modal Volume:
+        "there are open files preventing the operation") skips reloads while any
+        guard is held, in any process of the container; locally it does nothing."""
+        return StoreWriterGuard()
+
     def describe(self) -> dict[str, Any]:
         return {"kind": self.kind, "root": str(self.root)}
 
@@ -533,6 +540,16 @@ def stage_state_dir(state_dir: Path, staged: Path) -> Path:
 
 def directory_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
+
+
+def commit_budget(store: Any, pending_bytes: int | None) -> Any:
+    """A context in which the commits of ``store`` on this thread may take as long as
+    ``pending_bytes`` uncommitted bytes need (a store whose commit has a timeout, the
+    Modal Volume, offers ``commit_budget``); a no-op for other stores."""
+    from contextlib import nullcontext
+
+    budget = getattr(store, "commit_budget", None)
+    return budget(pending_bytes) if callable(budget) else nullcontext()
 
 
 # ---------------------------------------------------------------------------

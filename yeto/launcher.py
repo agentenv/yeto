@@ -197,7 +197,8 @@ def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
     (S26 E9.1). Modal signals only the container's main process (the runner), so
     the runner writes the marker and the driver's watcher thread -- in a Ray actor
     on verl -- writes the store's preemption notice."""
-    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
+    if (cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False)
+            or getattr(iargs, "rl_checkpoint_store_export_only", False)):  # no resume store
         return {}
     from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
 
@@ -1044,6 +1045,10 @@ def dry_run_plan(args) -> dict:
                 # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
+            if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
+                entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
+            if learner_id in (stops := sample_roles.sampler_stop_trainers(args, len(specs))):
+                entry["sampler_until_trainers_end"] = stops[learner_id]  # no fixed round count
             if learner_id == trainer_loop.held_island(args):
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:

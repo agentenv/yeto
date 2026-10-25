@@ -42,6 +42,7 @@ from yeto.rl.engine.selection import (
     SYNC_PRESETS,
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
+    ASYNC_TERMINAL_GRACE_MS,
     canonical_sync_preset,
     sync_mode_default,
 )
@@ -577,6 +578,13 @@ _RESUME = (
              "there after every commit point and restores from it when its state dir "
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
+    # S27 G-CO: a single-island store that holds only the HF exports
+    cli_flag("--rl-checkpoint-store-export-only", action="store_true", default=False,
+             help="with --rl-single-island-no-sync, --rl-checkpoint-store and "
+             "--rl-export-hf-rounds: the store holds only the HF exports. The launcher "
+             "forwards no --rl-resume-store (no resume ledger, no round cuts), so the run "
+             "does not resume across launches; --rl-rollout-ahead accepts this store. "
+             "Refused with the cut and resume flags"),
     # rl-identity-tiering L9.4-L9.6
     cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch", "release"], default="auto",
              help="git-patch: pack the local git tree (commit + dirty patch with untracked "
@@ -661,6 +669,12 @@ _RESUME = (
                 "store before the next training step (the behavior before S27 G-AT); default: "
                 "stage it on local disk (every rank writes a share) and upload it while the "
                 "next step trains"),
+    shared_flag("--rl-release-delta-full-every", type=int, default=0, metavar="N",
+                help="--rl-sample-role trainer with staged full-weight releases: upload "
+                "each release as the bf16 words that changed since the previous release; every "
+                "N-th release (and a delta above half the full size) goes in full. The samplers "
+                "rebuild the weights on local disk and check every file's sha256. 0 (default): "
+                "every release in full"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),
@@ -699,6 +713,15 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
+    # S27 rollout ahead (yeto.rl.engine.rollout_ahead): whole batches, weight writes
+    # between them; the age limit must cover the lag.
+    shared_flag("--rl-rollout-ahead", type=int, choices=(0, 1), default=0, metavar="N",
+                help="fixed-partition island: the engines generate the next round's batch "
+                "with the published policy while the trainer trains this round and runs "
+                "its sync boundary; the weight update runs between two batches, so every "
+                "sample lags exactly N versions (round 0: none). Needs "
+                "--rl-max-policy-age >= N and a TIS correction; replaces the backend's own "
+                "in-batch overlap (fully_async). 0 (default): serial rounds"),
     # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
     # realised policy age (the backend maps K to its own buffer setting).
     shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",
@@ -1197,6 +1220,33 @@ _SYNC = (
         % ASYNC_GRACE_CAP_MS,
     ),
     cli_flag(
+        "--rl-sync-grace-min-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="strict-avg / decoupled / full-parameter async: lower bound on the post-quorum grace "
+        "window (still capped by --rl-sync-grace-ms); default off",
+    ),
+    cli_flag(
+        "--rl-sync-grace-arrival-quantile",
+        type=float,
+        default=None,
+        metavar="Q",
+        help="strict-avg / decoupled / full-parameter async: the grace window is at least this "
+        "quantile (0..1] of the measured gaps between the islands' pushes of one round, late "
+        "pushes included (still capped by --rl-sync-grace-ms); default off",
+    ),
+    cli_flag(
+        "--rl-sync-terminal-grace-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="full-parameter async (and other presets with carried late pushes): the last round "
+        "of each fragment waits up to this long for every island, so a late delta still reaches "
+        "the final parameters (not capped by --rl-sync-grace-ms); default %d in --rl-sync-mode "
+        "async with the full-parameter preset, 0 = off" % ASYNC_TERMINAL_GRACE_MS,
+    ),
+    cli_flag(
         "--rl-sync-learner-weight",
         choices=("equal", "tokens2-over-steps"),
         default=sync_mode_default("equal"),
@@ -1214,6 +1264,15 @@ _SYNC = (
         "f32 fragment, applied to the trainer before the ACK (island-side eval or a bitwise "
         "check). auto (default) = ack for --rl-sync-full-parameter-rounds async in "
         "--rl-sync-mode async without --rl-eval-interval, else download",
+    ),
+    cli_flag(
+        "--rl-sync-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter preset: auto (default) = each island checks a received broadcast's "
+        "chunks (finite values, chunk hashes, fragment digest) on a background thread and the "
+        "trainer's apply skips that check, when the trainer backend supports it; "
+        "off = the trainer checks every chunk in its apply (the applied values are the same)",
     ),
     cli_flag(
         "--rl-sync-expert-token-weights",

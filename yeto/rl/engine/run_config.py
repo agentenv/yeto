@@ -254,6 +254,9 @@ class BatchConfig:
     rollout_max_response_len: int
 
 
+DP_OPTIMIZERS = ("auto", "distributed", "replicated")
+
+
 @dataclass(frozen=True)
 class TrainMemoryConfig:
     """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
@@ -270,6 +273,10 @@ class TrainMemoryConfig:
     # Megatron gradient-accumulation fusion (fused wgrad into main_grad; needs
     # APEX/TE fused kernels). Off keeps the historical argv.
     gradient_accumulation_fusion: bool = False
+    # Optimizer of a full-parameter trainer at DP>1 (--rl-dp-optimizer):
+    # "distributed" (sharded FP32 masters), "replicated" (whole masters on
+    # every DP rank) or "auto" (distributed when the Miles pin supports it).
+    dp_optimizer: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -1190,11 +1197,15 @@ def _train_memory(args) -> TrainMemoryConfig:
     offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
     if not 0.0 <= offload <= 1.0:
         raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
+    dp_optimizer = getattr(args, "rl_dp_optimizer", None) or "auto"
+    if dp_optimizer not in DP_OPTIMIZERS:
+        raise ValueError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
         optimizer_offload_fraction=offload,
         gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
+        dp_optimizer=dp_optimizer,
     )
 
 

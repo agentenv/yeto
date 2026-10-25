@@ -255,6 +255,7 @@ _NON_RL_LITERALS = frozenset({
     "--checkpoint-every", "--checkpoint-path", "--config-json",
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
+    "--grace-arrival-quantile", "--grace-min-ms", "--terminal-grace-ms",
     "--format", "--get", "--global", "--gpus", "--head",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",
     "--json", "--learner-weight", "--learners", "--level",

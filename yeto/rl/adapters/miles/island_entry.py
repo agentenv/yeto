@@ -157,7 +157,8 @@ def build_ports_launch(args, run_config, extra_argv=()):
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
                                 async_buffer_rounds=getattr(args, "rl_async_buffer_rounds", None),
-                                full_parameter_sync=not _no_sync_island(args))
+                                full_parameter_sync=not _no_sync_island(args),
+                                rollout_ahead=int(getattr(args, "rl_rollout_ahead", 0) or 0))
 
 
 _ELASTIC_COMPANIONS = rl_option_pairs(
@@ -380,6 +381,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
             check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    if getattr(args, "rl_rollout_ahead", 0):  # read by entry (driver) and carry_over
+        miles_args.yeto_rl_rollout_ahead = int(args.rl_rollout_ahead)
     apply_sample_role(args, miles_args, environ)
     exports = hf_export_config(args)
     if exports is not None:  # read by entry.hf_exports_for
@@ -963,6 +966,7 @@ def _dense_full_sync_config(
         push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
         expert_token_weights=bool(getattr(args, "sweep_expert_token_weights", False)),
         final_cut=getattr(args, "sweep_final_cut", "download"),
+        verify_ahead=getattr(args, "sweep_verify_ahead", "auto") != "off",
         bcast_delta=bool(getattr(args, "bcast_delta", False)),
         # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
         # overlap's outer-step lag is bound into the session contract.
@@ -1844,6 +1848,8 @@ def run_miles(
     algorithm_spec_sha256 = ports_algorithm.sha256()
     algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
     code_pack_digest = _island_code_pack_digest(args)
+    # every island (also --rl-single-island-no-sync): the remote-code prewarm reads it
+    miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -1863,7 +1869,6 @@ def run_miles(
 
             layout_hash = canonical_layout_hash(specs)
             lora_config_hash = _lora_config_hash(args, canonical_targets)
-        miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
         miles_args.yeto_rl_base_model_revision = args.model_revision

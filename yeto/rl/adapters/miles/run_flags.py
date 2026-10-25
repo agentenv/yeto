@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
+from yeto.rl.engine.run_config import DP_OPTIMIZERS
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
@@ -192,6 +193,16 @@ _ROLLOUT_ENGINE = (
         help="ports: share (0, 1] of the Adam state (FP32 masters and moments) "
         "that Megatron keeps and updates on the host (--optimizer-cpu-offload, "
         "with the distributed optimizer). Default 0: all on the device",
+    ),
+    shared_flag(
+        "--rl-dp-optimizer",
+        choices=DP_OPTIMIZERS,
+        default="auto",
+        help="ports: optimizer of a full-parameter trainer at DP>1. distributed: Megatron's "
+        "distributed optimizer (each DP rank keeps 1/DP of the FP32 masters and Adam moments; "
+        "needs a Miles pin with sharded masters); replicated: the non-distributed optimizer "
+        "(whole FP32 masters on every DP rank). auto (default): distributed when the pinned "
+        "Miles supports it, else replicated. Same synced values either way",
     ),
     shared_flag(
         "--rl-distributed-timeout-minutes",
@@ -408,6 +419,14 @@ _ISLAND = (
         "final parameters)",
     ),
     island_flag(
+        "--sweep-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter: auto = check each received broadcast's chunks on a background "
+        "thread and let the trainer's apply skip that check (when the trainer's Miles has the "
+        "verified apply); off = the trainer checks every chunk in its apply",
+    ),
+    island_flag(
         "--sweep-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE: count the tokens each router sends to each "
@@ -501,6 +520,9 @@ _ISLAND = (
     # number of synced trainers (its buffer lane is learner id of that count)
     island_flag("--rl-sample-store", default=None, metavar="PATH"),
     island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
+    # S27 G-CA: a sampler of a full-parameter synced group runs until its trainers
+    # ended (sample_roles module doc); 0: the island's own rounds
+    island_flag("--rl-sampler-until-trainers-end", type=int, default=0, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
     island_flag(
         "--lora-targets",

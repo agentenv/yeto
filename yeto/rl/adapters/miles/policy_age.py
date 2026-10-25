@@ -39,6 +39,9 @@ from yeto.rl.engine.policy_age import STAGE_NAMES, PolicyAgeError, PolicyAgeSupp
 # 4 bounds the rollout compute a dropped group can waste. Sub-agent decision,
 # 2026-10-14; limits above 1 are not yet run on GPU (L6.10).
 SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4)
+# --rl-rollout-ahead: whole batches the island generates ahead of its trainer
+# (MilesRolloutPool.start_generate; yeto.rl.engine.rollout_ahead).
+MAX_ROLLOUT_AHEAD = 1
 
 PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"

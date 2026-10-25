@@ -98,7 +98,8 @@ def test_follower_loads_newest_only_and_counts_superseded(tmp_path):
     assert follower.refresh().version == 3 and follower.refresh() is None
     assert loads.loaded == [(1, 1), (3, 3)]
     assert follower.counters.to_dict() == {"loaded": 2, "superseded": 1, "stale_reads": 0,
-                                           "lineage_resets": 0, "deferred_in_flight": 0}
+                                           "lineage_resets": 0, "deferred_in_flight": 0,
+                                           "rebuild_failures": 0}
 
 
 def test_follower_never_goes_back_on_a_stale_store_read(tmp_path):

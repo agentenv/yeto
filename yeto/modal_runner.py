@@ -1408,6 +1408,12 @@ class ContainerIdGuard:
                     self.on_change(msg)
 
 
+# S27 s27-ch-d0a: two extra containers of the island function appeared beside the two
+# claimed ones, which kept training; they printed no island line. How long such extra
+# containers may stay listed while every claimed container is still listed.
+EXTRA_CONTAINER_GRACE_S = 600.0
+
+
 class ContainerSetPoller:
     """Second container guard, independent of the log stream (S19 run
     s19-agentic5-b-20261010b: after ``modal container stop`` Modal rescheduled the
@@ -1423,25 +1429,44 @@ class ContainerSetPoller:
     number of (island, rank) slots. A slot is taken once a container printed its line
     for it. A listed container that no island claimed yet may be the late first
     container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
-    that is not a change. The guard trips (``on_change(message)`` once) when the
-    listed unclaimed containers outnumber the free slots, so at least one of them
-    must be a second container of a taken slot. An unclaimed container that left the
-    list never ran island code (as far as the logs show) and is not counted. A failed
-    list is skipped (never trips)."""
+    that is not a change. When the listed unclaimed containers outnumber the free
+    slots, at least one of them is an extra container:
+
+    * a claimed container is no longer listed: a replacement of a taken slot (the
+      S19 case, s27-gr-h). The guard trips (``on_change(message)`` once) at once;
+    * every claimed container is still listed (s27-ch-d0a: two extra containers
+      that never ran island code beside two training ones): a warning names the
+      extra containers, and the guard trips only when extra containers stay
+      listed for more than ``grace_s``. A replacement that does run island code
+      prints a second container id for its slot, which trips
+      :class:`ContainerIdGuard` at once.
+
+    An unclaimed container that left the list never ran island code (as far as the
+    logs show) and is not counted. A failed list is skipped (never trips)."""
 
     def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
-                 attributed=None) -> None:
+                 attributed=None, grace_s: float = EXTRA_CONTAINER_GRACE_S,
+                 clock=time.monotonic) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
         self.attributed = attributed if attributed is not None else dict
+        self.grace_s = float(grace_s)
+        self.clock = clock
         self.seen: set[str] = set()
         self.changes: list[str] = []
+        self.extra_since: float | None = None  # clock() when the present extra containers appeared
+        self.warned: set[str] = set()  # extra container ids already named in a warning
         self.expected = False  # launcher.container_changed(): a change here is never expected
         self._stop = threading.Event()
 
     @property
     def tripped(self) -> bool:
         return bool(self.changes)
+
+    def _trip(self, msg: str) -> None:
+        self.changes.append(msg)
+        if self.on_change is not None:
+            self.on_change(msg)
 
     def poll_once(self) -> None:
         try:
@@ -1461,15 +1486,30 @@ class ContainerSetPoller:
         taken = set(claimed.values())
         free = max(0, self.expected_count - len(taken))
         unclaimed = sorted(ids - set(claimed))
-        if len(unclaimed) > free and not self.changes:
-            owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
-                               for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
-            msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
-                   f"claimed, with {free} of {self.expected_count} island slot(s) still free "
-                   f"(claimed: {owners}) (an island was rescheduled)")
-            self.changes.append(msg)
-            if self.on_change is not None:
-                self.on_change(msg)
+        if len(unclaimed) <= free or self.changes:
+            self.extra_since = None
+            return
+        owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
+                           for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
+        msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
+               f"claimed, with {free} of {self.expected_count} island slot(s) still free "
+               f"(claimed: {owners})")
+        lost = sorted(cid for cid in claimed if cid not in ids)
+        if lost:
+            self._trip(f"{msg}; claimed container(s) {', '.join(lost)} no longer listed "
+                       "(an island was rescheduled)")
+            return
+        now = self.clock()
+        if self.extra_since is None:
+            self.extra_since = now
+        if set(unclaimed) - self.warned:
+            self.warned |= set(unclaimed)
+            print(f"[launcher] WARNING: {msg}; every claimed container is still listed, so the run "
+                  f"continues while the extra container(s) stay at most {self.grace_s:.0f} s",
+                  flush=True)
+        if now - self.extra_since > self.grace_s:
+            self._trip(f"{msg}; extra container(s) listed for {now - self.extra_since:.0f} s "
+                       f"(limit {self.grace_s:.0f} s; an island was rescheduled)")
 
     def run(self) -> None:
         while not self._stop.wait(self.interval_s):

@@ -36,8 +36,13 @@ keeps the R0 behaviour byte-for-byte (execution mode label
 * ``partitioned-overlap`` runs only the age-0 overlap implemented in
   ``overlap.py`` (task 2.3): evaluation of the published policy on the rollout
   GPUs overlaps train/outer_sync of the same round and is joined before the
-  next publication. Every other overlap (in particular generation ahead of
-  publication) is refused.
+  next publication. Every other overlap of the execution profile is refused.
+
+Rollout ahead (``rollout_ahead`` module) is opt-in (``rollout_ahead = 1``,
+bounded staleness only): the engines generate the next round's batch with the
+published policy while the trainer trains and runs the sync boundary; the
+driver waits for that batch before the next publication, so a weight update
+never runs while the engines generate. Off, the loop and its tape are unchanged.
 
 Reconfiguration (rl-infra-spec 3.1-3.7) is opt-in (``controller=``): the
 loop offers the :class:`~yeto.rl.engine.controller.IslandController` one safe
@@ -101,6 +106,9 @@ from .ports import (
     TrainerGroup,
 )
 from .policy_versions import PolicyVersionConflict, PublishedPolicies
+from .rollout_ahead import EVENT as ROLLOUT_AHEAD_EVENT
+from .rollout_ahead import PendingBatch
+from .rollout_ahead import driver_problems as rollout_ahead_problems
 from .trainable_state import TrainableState, require_supported_layout
 
 EXECUTION_MODE = "colocated-serial"
@@ -378,6 +386,12 @@ def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
         "dynamic_filter_dropped_groups": int(filtered),
         "dynamic_filter_replacement_attempts": int(filtered),
     }
+
+
+def _batch_token(batch: RolloutBatchHandle) -> str:
+    """The token of the publication that generated ``batch`` (serial: the one
+    published for its round; rollout ahead: the one before)."""
+    return policy_token(batch.policy_version, batch.policy_hash)
 
 
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
@@ -779,6 +793,11 @@ class IslandDriver:
 
     # -- per-round steps -------------------------------------------------
     def publish(self, state: TrainableState, *, rollout_id: int) -> None:
+        pending = self._ahead
+        if pending is not None and not pending.joined:
+            # rollout ahead: a weight write into engines that generate is refused
+            raise PublicationError(f"publication of policy v{rollout_id} while the engines "
+                                   f"generate rollout {pending.rollout_id}")
         if state.policy_version != rollout_id:
             raise PublicationError(
                 f"publication of policy version {state.policy_version} "
@@ -1002,22 +1021,7 @@ class IslandDriver:
         self._trainer_offloaded = True
 
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
-        if self.published_version != rollout_id or self.expected_token is None:
-            raise PublicationError(
-                f"rollout {rollout_id} has no complete publication manifest"
-            )
-        if self.controller is not None and not self.controller.admission_open:
-            # 3.3 admission fence: no new batch while a reconfiguration holds it.
-            raise DriverError(f"generation of rollout {rollout_id} refused: admission fenced")
-        if self.colocated and not self._trainer_offloaded:
-            self._offload_trainer(rollout_id)
-        if self.eval_overlap is not None:
-            self.eval_overlap.before_generate(rollout_id)
-        if self._gated:
-            require(
-                generate_blockers(self.profile, self._snapshot(rollout_id)),
-                f"generation of rollout {rollout_id}",
-            )
+        self._before_generate(rollout_id, policy_version=rollout_id)
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
         offload_rollout = getattr(self.rollout, "offload_after_generate", None)
         split_offload = callable(offload_rollout) and bool(getattr(self.rollout, "offloads_after_generate", False))
@@ -1033,7 +1037,35 @@ class IslandDriver:
         if split_offload:
             self.phase("rollout_offload", rollout_id=rollout_id)
             offload_rollout()
-        if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
+        return self._accept_batch(rollout_id, batch)
+
+    def _before_generate(self, rollout_id: int, *, policy_version: int) -> None:
+        """Refuse to start the batch of ``rollout_id`` unless the engines serve the
+        complete publication of ``policy_version`` (serial: the same id; rollout
+        ahead: one version behind) and admission is open."""
+        if self.published_version != policy_version or self.expected_token is None:
+            raise PublicationError(
+                f"rollout {rollout_id} has no complete publication manifest"
+            )
+        if self.controller is not None and not self.controller.admission_open:
+            # 3.3 admission fence: no new batch while a reconfiguration holds it.
+            raise DriverError(f"generation of rollout {rollout_id} refused: admission fenced")
+        if self.colocated and not self._trainer_offloaded:
+            self._offload_trainer(rollout_id)
+        if self.eval_overlap is not None:
+            self.eval_overlap.before_generate(rollout_id)
+        if self._gated:
+            require(
+                generate_blockers(self.profile, self._snapshot(rollout_id)),
+                f"generation of rollout {rollout_id}",
+            )
+
+    def _accept_batch(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """Check a generated batch of ``rollout_id`` against the publication the
+        engines served while they generated it (``published_version`` and
+        ``expected_token``; the next publication waits for this check)."""
+        version = self.published_version
+        if batch.rollout_id != rollout_id or batch.policy_version != version:
             raise PolicyIdentityError(
                 f"rollout pool returned rollout {batch.rollout_id} "
                 f"(policy v{batch.policy_version}) for rollout {rollout_id}"
@@ -1057,7 +1089,7 @@ class IslandDriver:
         mismatched = batch.mismatched_groups(self.expected_token)
         segmented = tuple(g for g in batch.groups
                           if getattr(g, "policy_versions", None)
-                          and set(g.policy_versions) != {rollout_id})
+                          and set(g.policy_versions) != {version})
         limit = self._max_policy_age()
         if limit == 0 and segmented:
             # Limit 0: a token generated by an older version is never trained.
@@ -1071,14 +1103,14 @@ class IslandDriver:
             from .policy_age import check_batch_ages
 
             problems = check_batch_ages(
-                tuple(dict.fromkeys(mismatched + segmented)), rollout_id, limit,
-                {**self.published_policies.hashes(), rollout_id: batch.policy_hash})
+                tuple(dict.fromkeys(mismatched + segmented)), version, limit,
+                {**self.published_policies.hashes(), version: batch.policy_hash})
             if problems:
                 raise PolicyIdentityError(
                     f"rollout {rollout_id}: groups outside the policy-age window "
                     f"(max_policy_age={limit}): " + "; ".join(problems))
             mismatched = ()
-        if mismatched or policy_token(rollout_id, batch.policy_hash) != self.expected_token:
+        if mismatched or policy_token(version, batch.policy_hash) != self.expected_token:
             detail = ", ".join(f"{g.group_id}={g.policy_token}" for g in mismatched)
             raise PolicyIdentityError(
                 f"groups not sampled from {self.expected_token}: "
@@ -1508,6 +1540,11 @@ class IslandDriver:
     # rl-trainer-cold-start-cost L0: the island's StartPhases; the first
     # optimizer step records ``first_step_done`` (None: not recorded).
     start_phases: Any = None
+    # S27 rollout ahead (``rollout_ahead`` module, --rl-rollout-ahead): 1 = the
+    # engines generate the next round's batch while the trainer trains this
+    # round and runs its sync boundary; 0 = serial rounds. Set by the adapter entry.
+    rollout_ahead: int = 0
+    _ahead: PendingBatch | None = None  # the batch the engines generate ahead
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1575,13 +1612,15 @@ class IslandDriver:
         self._probe_nodes(rollout_id)
         started = time.monotonic()
         self._inject_round_delay(rollout_id)
-        batch = self._generate(rollout_id)
+        batch = self._take_batch(rollout_id)
         rollout_seconds = time.monotonic() - started
         if self.ledger is not None:
-            self.ledger.prepare(batch, policy_token=self.expected_token)
+            self.ledger.prepare(batch, policy_token=_batch_token(batch))
         try:
+            self._start_ahead(rollout_id + 1)
             boundary = self._train_round(rollout_id, batch, rollout_seconds)
         except BaseException as error:
+            self._abandon_ahead()
             if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
                 self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
             self._classify_failure(rollout_id, error)
@@ -1591,6 +1630,101 @@ class IslandDriver:
         self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
                   round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
         return boundary
+
+    # -- rollout ahead (``rollout_ahead`` module) ----------------------------------
+    def _refuse_unsupported_rollout_ahead(self) -> None:
+        problems = rollout_ahead_problems(self)
+        if problems:
+            raise DriverError(f"rollout_ahead {self.rollout_ahead} needs " + "; ".join(problems))
+
+    def _take_batch(self, rollout_id: int) -> RolloutBatchHandle:
+        """The batch that trains in ``rollout_id``: the one the engines generated
+        ahead during the previous round, else one generated now (serial)."""
+        pending, self._ahead = self._ahead, None
+        if pending is None:
+            return self._generate(rollout_id)
+        if pending.rollout_id != rollout_id or not pending.joined:
+            raise DriverError(f"rollout {rollout_id}: the batch generated ahead is rollout "
+                              f"{pending.rollout_id} (joined: {pending.joined})")
+        return pending.batch
+
+    def _start_ahead(self, rollout_id: int) -> None:
+        """Start the batch of ``rollout_id`` on the engines with the policy published
+        now (one version behind the policy that will train it), before the trainer
+        trains ``rollout_id - 1``. Nothing starts after a known final round."""
+        if not self.rollout_ahead or self._is_final_round(rollout_id - 1):
+            return
+        self._before_generate(rollout_id, policy_version=rollout_id - 1)
+        read = getattr(self.rollout, "data_cursor", None)
+        cursor = read() if self.data_positions is not None and callable(read) else None
+        pending = PendingBatch(rollout_id=rollout_id, policy_version=rollout_id - 1, handle=None,
+                               data_cursor=cursor, started_at=time.monotonic(),
+                               started_clock=self.clock())
+        pending.sampler.enter_context(self._load_sampler(rollout_id))
+        try:
+            pending.handle = self.rollout.start_generate(
+                rollout_id, expected_policy_version=self.expected_token)
+        except BaseException:
+            pending.sampler.close()
+            raise
+        self._ahead = pending
+
+    def _join_ahead(self, *, stop: bool) -> None:
+        """Wait for the batch the engines generate ahead, so the publication that
+        follows may write their weights, and check it against the publication that
+        generated it. ``stop``: the run ends; the batch is discarded untrained."""
+        pending = self._ahead
+        if pending is None:
+            return
+        self._ahead = None  # a failed join leaves nothing in flight
+        self.phase("generate_wait", rollout_id=pending.rollout_id,
+                   policy_version=pending.policy_version)
+        waited = time.monotonic()
+        failure: Exception | None = None
+        try:
+            with pending.sampler:
+                batch = self.rollout.finish_generate(pending.handle)
+            if not stop:
+                pending.batch = self._accept_batch(pending.rollout_id, batch)
+        except Exception as error:
+            if not stop:
+                raise
+            failure = error  # nothing trains a discarded batch; only idle engines matter
+        self._emit_ahead(pending, wait_seconds=time.monotonic() - waited, discarded=stop,
+                         failure=failure)
+        if not stop:
+            self._ahead = pending
+
+    def _emit_ahead(self, pending: PendingBatch, *, wait_seconds: float, discarded: bool,
+                    failure: Exception | None) -> None:
+        """One event per batch generated ahead. ``generate_seconds`` runs from its
+        start to the end of the join: the generation time when ``wait_seconds`` > 0,
+        an upper bound otherwise."""
+        self.emit(ROLLOUT_AHEAD_EVENT, rollout_id=pending.rollout_id,
+                  policy_version=pending.policy_version,
+                  generate_seconds=time.monotonic() - pending.started_at,
+                  wait_seconds=wait_seconds,
+                  **({"discarded": True} if discarded else {}),
+                  **({"error": f"{type(failure).__name__}: {failure}"} if failure else {}))
+        if self.observe:
+            self.emit("rl_timeline_span", task="generate", role="rollout", kind="compute",
+                      start=pending.started_clock, end=self.clock(), rollout_id=pending.rollout_id,
+                      profile_hash=self.profile_hash, epoch=self.config_epoch,
+                      weight_transport=self.weight_transport)
+
+    def _abandon_ahead(self) -> None:
+        """A round failed (or the run ends) with a batch still generating ahead: stop
+        its observation and ask the pool to drop it; the original error comes first."""
+        pending, self._ahead = self._ahead, None
+        if pending is None or pending.joined:
+            return
+        pending.sampler.close()
+        cancel = getattr(self.rollout, "cancel_generate", None)
+        if callable(cancel):
+            try:
+                cancel(pending.handle)
+            except Exception:  # noqa: BLE001 - must not mask the round's own error
+                pass
 
     def _inject_round_delay(self, rollout_id: int) -> None:
         """Test-only slow island: sleep before the rollout, inside the round wall time."""
@@ -1606,7 +1740,7 @@ class IslandDriver:
         if self.progress is not None:
             self.progress.after_generate(
                 rollout_id=rollout_id,
-                policy_token=self.expected_token,
+                policy_token=_batch_token(batch),
                 metrics={**_round_metrics(batch), "rollout_seconds": rollout_seconds},
             )
         if self.colocated:
@@ -1719,6 +1853,7 @@ class IslandDriver:
         self._record_data_position(rollout_id)
         self._export_hf_round(rollout_id, boundary)
         self._join_eval()
+        self._join_ahead(stop=boundary.stop)
         if self.colocated and self.publish_offloaded:
             # E1: a round cut due at the next safe point writes the trainer state now,
             # while it is resident, instead of waking the offloaded trainer for it
@@ -2036,12 +2171,16 @@ class IslandDriver:
                   data_cursor=dict(landed))
 
     def _record_data_position(self, rollout_id: int) -> None:
-        """S27 task assignment: the data cursor after this round's sync boundary."""
+        """S27 task assignment: the data cursor after this round's sync boundary.
+        Rollout ahead: the cursor read before the next batch drew its prompts, so a
+        relaunch draws that untrained batch's rows again."""
         log = self.data_positions
         read = getattr(self.rollout, "data_cursor", None)
         if log is None or not callable(read):
             return
-        self._write_data_position(log.record, rollout_id, read())
+        pending = self._ahead
+        cursor = pending.data_cursor if pending is not None else read()
+        self._write_data_position(log.record, rollout_id, cursor)
 
     def _export_hf_round(self, rollout_id: int, boundary: SyncBoundary) -> None:
         """--rl-export-hf-rounds: this round's model as an HF directory in the store
@@ -2099,6 +2238,7 @@ class IslandDriver:
     def _run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
+        self._refuse_unsupported_rollout_ahead()
         failure: BaseException | None = None
         try:
             try:
@@ -2165,6 +2305,7 @@ class IslandDriver:
             failure = error
             raise
         finally:
+            self._abandon_ahead()
             self._join_terminal_probe()  # its rl_load_sample lands before the tape closes
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths

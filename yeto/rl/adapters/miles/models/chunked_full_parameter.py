@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from yeto.rl.contracts import LocalStepReceipt
@@ -74,6 +74,21 @@ class StoredAuthoritativeFragment:
     descriptor: Any
     refs: list[object | None]
     wire_payload_hash: str
+    # S27 G-CG verify-ahead: the off-trainer check of these chunks (a future
+    # of Miles' verify_stored_fragment_chunks), None when none was started.
+    verification: Any = field(default=None, compare=False, repr=False)
+
+    def verified_payload_hash(self) -> str | None:
+        """The payload hash an apply may name in ``verified_fragments``: the
+        off-trainer check ended without error.  None while it runs or when
+        there is none (the trainer then checks the chunks itself); a failed
+        check raises its error."""
+
+        future = self.verification
+        if future is None or not future.done():
+            return None
+        future.result()
+        return self.descriptor.payload_hash
 
     def release(self) -> int:
         released = 0
@@ -82,6 +97,31 @@ class StoredAuthoritativeFragment:
                 self.refs[index] = None
                 released += 1
         return released
+
+
+class StoredFragmentVerifier:
+    """Verify-ahead (S27 G-CG): run the trainer prepare's check of a stored
+    broadcast (Miles ``verify_stored_fragment_chunks``: finite FP32 chunks,
+    chunk hashes, fragment digest) on one background thread as soon as the
+    fragment is stored, so the apply at the next boundary can name it in
+    ``verified_fragments`` and the trainer reads none of its chunks."""
+
+    def __init__(self, ray_module=None) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.ray_module = ray_module
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-fp-verify")
+
+    def submit(self, stored: StoredAuthoritativeFragment):
+        from miles.backends.megatron_utils.full_parameter_state import verify_stored_fragment_chunks
+
+        # The tuple keeps the objects alive even if the fragment is released meanwhile.
+        return self._pool.submit(verify_stored_fragment_chunks, stored.descriptor, tuple(stored.refs),
+                                 parameter_layout_hash=stored.parameter_layout_hash,
+                                 plan_hash=stored.plan_hash, ray_module=self.ray_module)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
 
 class AuthoritativeFragmentSink:
@@ -95,6 +135,16 @@ class AuthoritativeFragmentSink:
         self.reference = _metadata_only_reference(reference)
         self.ray_module = ray_module
         self._stored: dict[tuple[int, int], StoredAuthoritativeFragment] = {}
+        # Set by the role stream when verify-ahead is on; every newly stored
+        # fragment then starts its off-trainer check.
+        self.verifier: StoredFragmentVerifier | None = None
+
+    def with_verification(self, stored: StoredAuthoritativeFragment) -> StoredAuthoritativeFragment:
+        """``stored`` with its off-trainer check started (unchanged without a verifier)."""
+
+        if self.verifier is None:
+            return stored
+        return replace(stored, verification=self.verifier.submit(stored))
 
     def __call__(
         self,
@@ -136,6 +186,7 @@ class AuthoritativeFragmentSink:
             refs=refs,
             wire_payload_hash=payload_hash,
         )
+        stored = self.with_verification(stored)
         self._stored[key] = stored
         return stored
 
@@ -1057,7 +1108,12 @@ class MilesChunkedFullParameterAdapter:
         target: ReferencedPolicyCut,
         *,
         commit_token: str | None = None,
+        verified_fragments: Mapping[int, str] | None = None,
     ) -> int:
+        """``verified_fragments``: ``{fragment: payload hash}`` of replaced
+        fragments whose stored chunks were already checked off the trainer
+        (``StoredAuthoritativeFragment.verified_payload_hash``); the trainer
+        does not read them in its prepare.  Ignored by a Miles without it."""
         if target.layout_hash != self.layout.layout_hash:
             raise ValueError("Miles target layout changed")
         # The role stream builds every target from its current cut, which is
@@ -1065,6 +1121,8 @@ class MilesChunkedFullParameterAdapter:
         # skip resident fragments then reads and copies only the fragments
         # this apply replaces; the applied values are the same.
         extra = {"skip_resident_fragments": True} if skip_resident_supported(group) else {}
+        if verified_fragments and verified_apply_supported(group):
+            extra["verified_fragments"] = dict(verified_fragments)
         applied = await group.apply_full_parameter_chunked_cut(
             target.transport_cut,
             commit_token=commit_token,
@@ -1184,6 +1242,28 @@ def lazy_capture_supported(group: Any) -> bool:
         and transport_supports(group, "record_full_parameter_local_step", "check_model", "lazy_export")
     )
     return _report_feature("lazy capture", enabled, "group and local Miles transport")
+
+
+VERIFY_AHEAD_ENV = "YETO_FULL_PARAMETER_VERIFY_AHEAD"
+
+
+def verified_apply_supported(group: Any) -> bool:
+    """Verify-ahead (S27 G-CG): a broadcast's stored chunks are checked off
+    the trainer as soon as they arrive, and the apply names them so the
+    trainer's prepare reads none of them.  Needs the Miles ``verified_apply``
+    transport (``verify_stored_fragment_chunks``).
+    ``YETO_FULL_PARAMETER_VERIFY_AHEAD=0`` keeps the check on the trainer."""
+
+    import os
+
+    if os.environ.get(VERIFY_AHEAD_ENV, "1") == "0":
+        return _report_feature("verify-ahead", False, f"{VERIFY_AHEAD_ENV}=0")
+    try:
+        from miles.backends.megatron_utils.full_parameter_state import verify_stored_fragment_chunks  # noqa: F401
+    except ImportError:
+        return _report_feature("verify-ahead", False, "local Miles has no verify_stored_fragment_chunks")
+    enabled = transport_supports(group, "apply_full_parameter_chunked_cut", "verified_fragments", "verified_apply")
+    return _report_feature("verify-ahead", enabled, "group and local Miles transport")
 
 
 def optimizer_proof_without_model_check_supported(group: Any) -> bool:
