@@ -15,7 +15,8 @@ nothing is pending, the island's broadcasts are sent inline again.
 
 The syncer lease (60 s) is longer than the test's slow phase: under the old
 behavior a short lease ends the stall by removing the slow island (G-EL's
-test_bulk_resend covers leases; run s27-fa-r1 had none), and the 64 MiB INIT
+test_bulk_resend covers leases; the s27-fa-r1 syncer log shows no lease
+expiry), and the 64 MiB INIT
 at startup must not lapse one either. Here the stall itself is measured.
 
 The slow downlink is a test-only read limit on island 1's data sockets
