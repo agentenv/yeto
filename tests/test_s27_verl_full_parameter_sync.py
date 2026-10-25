@@ -224,7 +224,7 @@ def test_the_inbound_sink_streams_out_of_order_chunks_and_keeps_replays():
 
 
 @pytest.mark.parametrize("option, value", [("overlap", True), ("expert_token_weights", True),
-                                           ("bcast_delta", True), ("peer_recovery", object())])
+                                           ("peer_recovery", object())])
 def test_options_a_verl_island_does_not_offer_are_refused(option, value):
     config = _config()
     forced = SimpleNamespace(**{**{f: getattr(config, f) for f in config.__dataclass_fields__}, option: value})

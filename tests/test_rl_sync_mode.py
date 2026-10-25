@@ -254,13 +254,19 @@ def test_peer_recovery_defaults_on_where_it_applies():
     assert args.rl_peer_recovery is True
     args, _ = _plan(FULL)  # no snapshot store: off
     assert args.rl_peer_recovery is False
-    # Off: the store alone is then refused, which shows recovery stayed off.
-    for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up"),
-                  ("--rl-sync-mode", "strict")):
-        args = _launcher_args("ports", FULL + store + extra, gpu=TWO_ISLANDS)
-        with pytest.raises(ValueError, match="or --rl-peer-recovery"):
-            _prepare_rl_args(args)
-        assert args.rl_peer_recovery is False
+    # Off with asynchronous rounds (S27 G-DS): the store then keeps only the
+    # islands' data positions for the catch-up, and no island gets a snapshot store.
+    for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up")):
+        args, plan = _plan(FULL + store + extra)
+        assert args.rl_peer_recovery is False and args.rl_island_state_source == "catch-up"
+        for island in plan["island_requests"]:
+            assert "--rl-data-position-store" in island["learner_command"]
+            assert "--rl-peer-recovery-store" not in island["learner_command"]
+    # The strict mode has no catch-up: the store alone is refused.
+    args = _launcher_args("ports", FULL + store + ("--rl-sync-mode", "strict"), gpu=TWO_ISLANDS)
+    with pytest.raises(ValueError, match="or --rl-peer-recovery"):
+        _prepare_rl_args(args)
+    assert args.rl_peer_recovery is False
 
 
 def test_peer_recovery_defaults_on_in_an_island_pool():
