@@ -672,6 +672,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += f" --rl-async-buffer-rounds {int(args.rl_async_buffer_rounds)}"
     if getattr(args, "rl_rollout_ahead", 0):  # 0 (default) adds nothing
         flags += f" --rl-rollout-ahead {int(args.rl_rollout_ahead)}"
+    if getattr(args, "rl_rollout_ahead_start", None) is not None:  # None (default) adds nothing
+        flags += f" --rl-rollout-ahead-start {int(args.rl_rollout_ahead_start)}"
     from ..rl.engine.sample_roles import island_flags as sample_role_flags
     from ..rl.engine.sample_roles import is_synced_trainer as sample_role_is_synced_trainer
     from ..rl.engine.sample_roles import substore_uri

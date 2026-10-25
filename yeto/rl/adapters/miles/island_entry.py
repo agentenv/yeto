@@ -383,6 +383,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     if getattr(args, "rl_rollout_ahead", 0):  # read by entry (driver) and carry_over
         miles_args.yeto_rl_rollout_ahead = int(args.rl_rollout_ahead)
+    if getattr(args, "rl_rollout_ahead_start", None) is not None:  # read by entry (driver)
+        miles_args.yeto_rl_rollout_ahead_start = int(args.rl_rollout_ahead_start)
     apply_sample_role(args, miles_args, environ)
     exports = hf_export_config(args)
     if exports is not None:  # read by entry.hf_exports_for

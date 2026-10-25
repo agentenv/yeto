@@ -33,6 +33,14 @@ What ``--rl-rollout-ahead 1`` changes in the driver's round (``IslandDriver``)::
   publication needs idle engines) and discarded; nothing trains it.
 * A new process (Modal retry, relaunch, peer recovery) starts with nothing in
   flight: its first round generates serially from its start state.
+* Serial warm-up (``--rl-rollout-ahead-start R``, opt-in): the first batch
+  generated ahead is batch R (default 1, the behaviour above). Batches 0..R-1
+  are generated serially by their own round's policy (age 0); batch R is
+  generated during round R-1. Why (S27 AHEAD-LOSS.md): in the first rounds
+  each update moves the policy most, so the one-version lag is largest there,
+  and the larger gradients of those rounds stay in Adam's second moment for
+  the rest of a short run. Unset, nothing changes (the island command and the
+  driver's round order are the same as before the flag existed).
 
 Refused (fail closed, before launch and again when the driver starts):
 colocated islands, sample-buffer roles, elastic reconfiguration, island round
@@ -49,6 +57,8 @@ from typing import Any
 
 MAX_ROLLOUT_AHEAD = 1
 FLAG = "--rl-rollout-ahead"
+START_FLAG = "--rl-rollout-ahead-start"
+DEFAULT_START = 1  # batch 1 is the first batch generated ahead (round 0 is always serial)
 EVENT = "rl_rollout_ahead"
 
 
@@ -86,12 +96,18 @@ def launch_problems(
     elastic: bool = False,
     island_cuts: bool = False,
     overlap_eval: bool = False,
+    start: int | None = None,
 ) -> list[str]:
-    """What ``--rl-rollout-ahead ahead`` needs and the launch does not have (empty: ok)."""
+    """What ``--rl-rollout-ahead ahead`` needs and the launch does not have (empty: ok).
+
+    ``start``: ``--rl-rollout-ahead-start`` (None: not given)."""
     if type(ahead) is not int or not 0 <= ahead <= MAX_ROLLOUT_AHEAD:
         return [f"{FLAG} 0..{MAX_ROLLOUT_AHEAD}"]
+    start_problems = _start_problems(start)
     if ahead == 0:
-        return []
+        return [f"{FLAG} 1 (it sets the first batch generated ahead)"] if start is not None else []
+    if start_problems:
+        return start_problems
     checks = (
         (ahead > backend_max, f"a backend that generates {ahead} batch ahead "
                               f"(this backend: at most {backend_max})"),
@@ -110,6 +126,14 @@ def launch_problems(
     return [text for failed, text in checks if failed]
 
 
+def _start_problems(start: Any) -> list[str]:
+    if start is None:
+        return []
+    if type(start) is not int or start < DEFAULT_START:
+        return [f"{START_FLAG} >= {DEFAULT_START} (round 0 always generates serially)"]
+    return []
+
+
 def driver_problems(driver: Any) -> list[str]:
     """What the running island lacks for its ``rollout_ahead`` (empty: ok).
 
@@ -120,6 +144,9 @@ def driver_problems(driver: Any) -> list[str]:
         return []
     if ahead > MAX_ROLLOUT_AHEAD:
         return [f"rollout_ahead {ahead} > {MAX_ROLLOUT_AHEAD}"]
+    start = getattr(driver, "rollout_ahead_start", DEFAULT_START)
+    if type(start) is not int or start < DEFAULT_START:
+        return [f"rollout_ahead_start >= {DEFAULT_START} (got {start!r})"]
     rollout = driver.rollout
     checks = (
         (not all(callable(getattr(rollout, verb, None)) for verb in ("start_generate", "finish_generate")),

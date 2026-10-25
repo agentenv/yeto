@@ -1544,6 +1544,9 @@ class IslandDriver:
     # engines generate the next round's batch while the trainer trains this
     # round and runs its sync boundary; 0 = serial rounds. Set by the adapter entry.
     rollout_ahead: int = 0
+    # --rl-rollout-ahead-start: the first batch generated ahead (default 1: batch 1,
+    # during round 0). Batches before it are generated serially by their own policy.
+    rollout_ahead_start: int = 1
     _ahead: PendingBatch | None = None  # the batch the engines generate ahead
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
@@ -1651,8 +1654,11 @@ class IslandDriver:
     def _start_ahead(self, rollout_id: int) -> None:
         """Start the batch of ``rollout_id`` on the engines with the policy published
         now (one version behind the policy that will train it), before the trainer
-        trains ``rollout_id - 1``. Nothing starts after a known final round."""
-        if not self.rollout_ahead or self._is_final_round(rollout_id - 1):
+        trains ``rollout_id - 1``. Nothing starts after a known final round, nor
+        before ``rollout_ahead_start`` (serial warm-up: that round generates its own
+        batch with its own policy)."""
+        if (not self.rollout_ahead or rollout_id < self.rollout_ahead_start
+                or self._is_final_round(rollout_id - 1)):
             return
         self._before_generate(rollout_id, policy_version=rollout_id - 1)
         read = getattr(self.rollout, "data_cursor", None)

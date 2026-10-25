@@ -714,6 +714,11 @@ _SCHEDULING = (
                 "sample lags exactly N versions (round 0: none). Needs "
                 "--rl-max-policy-age >= N and a TIS correction; replaces the backend's own "
                 "in-batch overlap (fully_async). 0 (default): serial rounds"),
+    shared_flag("--rl-rollout-ahead-start", type=int, default=None, metavar="R",
+                help="with --rl-rollout-ahead 1: the first batch the engines generate "
+                "ahead (R >= 1). Batches 0..R-1 are generated serially by their own "
+                "round's policy (no lag), batch R during round R-1. Unset (default): "
+                "batch 1, the plain --rl-rollout-ahead behaviour"),
     # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
     # realised policy age (the backend maps K to its own buffer setting).
     shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",

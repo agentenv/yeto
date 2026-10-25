@@ -254,6 +254,17 @@ def declared_by_dimension(miles_commit: str | None = None) -> dict[str, set[str]
     return out
 
 
+def wire_rollout_ahead(driver: Any, miles_args: Any) -> None:
+    """S27 rollout ahead (``yeto.rl.engine.rollout_ahead``) from the island switches:
+    ``yeto_rl_rollout_ahead`` (0 when unset) and ``yeto_rl_rollout_ahead_start``
+    (unset: the driver default, batch 1)."""
+
+    driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
+    start = getattr(miles_args, "yeto_rl_rollout_ahead_start", None)
+    if start is not None:
+        driver.rollout_ahead_start = int(start)
+
+
 def miles_capabilities(
     fingerprint: str, *, unverified_mechanisms=()
 ) -> EngineCapabilities:
@@ -863,7 +874,7 @@ def compose_island(
     # E1: publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     # S27: the engines generate the next round's batch while the trainer trains
-    driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
+    wire_rollout_ahead(driver, miles_args)
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 

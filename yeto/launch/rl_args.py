@@ -644,6 +644,7 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None
                      or (bool(getattr(args, "rl_single_island_no_sync", False))
                          and bool(getattr(args, "rl_checkpoint_store", None)))),
         overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
+        start=getattr(args, "rl_rollout_ahead_start", None),
     )
     if problems:
         raise ValueError(f"{FLAG} {ahead} requires " + "; ".join(problems))
