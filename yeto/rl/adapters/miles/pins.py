@@ -87,8 +87,24 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # boundary (lazy export, partial commit; S27 G-AY) (yeto/s27-closing, S27 G-AZ2);
 # 7402a53d5 = 59aea07f9 + acb798c7b sharded FP32 masters (distributed optimizer
 # at DP>1; S27 G-BE) merged with 76a84963c set MoE runtime flags copied onto the
-# bridge provider (S27 G-BH2) (yeto/s27-eff, S27 G-CA).
-MILES_NEXT_COMMIT = "7402a53d58dfcccd57ad6b59c0408127158f5704"
+# bridge provider (S27 G-BH2) (yeto/s27-eff, S27 G-CA);
+# 697fb2000 = 7402a53d5 + training step without host syncs in R3 replay, loss
+# logging, THD packing and Megatron's DeepEP multihot (runtime patch; same
+# values bit for bit, MILES_HOST_SYNC_FREE=0 restores the old paths)
+# (yeto/s27-sync-free, S27 G-CI);
+# b6662508e = 7402a53d5 + 102672760 stored broadcast fragments verified ahead of
+# the apply (transport feature verified_apply; S27 G-CG) merged with 697fb2000
+# (yeto/s27-e3, S27 G-CN);
+# 8d03f386a = 7402a53d5 + shape-free layout support: partition reports,
+# installed owner maps, free-order owner plans (transport feature
+# shape_free_layout; yeto/s27-shape-free-layout, S27 G-DD); 3f6760f2b = + a
+# gated linear_fc1 reports its gate and up blocks (S27 G-DD);
+# 8faa7fccc = b6662508e merged with 3f6760f2b (yeto/s27-next, S27 G-DV);
+# ddd416167 = b6662508e + the commit reads its chunks ahead of the copy and
+# casts the model on the master's device (same bits), e9410717a = + the
+# read-ahead runs on Miles' hashing pool (yeto/s27-sync-commit, S27 G-DZ);
+# 970807006 = 8faa7fccc merged with e9410717a (yeto/s27-next, S27 G-DV).
+MILES_NEXT_COMMIT = "970807006ed0b9a958a2167039e046cae52ffdd0"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -209,6 +225,41 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "acb798c7b74f32004ad7ba4c5c07a4e69a82911a",
     # 7402a53d5 = merge of acb798c7b and 76a84963c (yeto/s27-eff, S27 G-CA).
     "7402a53d58dfcccd57ad6b59c0408127158f5704",
+    # 102672760 = 7402a53d5 + verify_stored_fragment_chunks; prepare skips the
+    # fragments the caller already verified (transport feature verified_apply)
+    # (S27 G-CG); same applied bytes, no loss path. A side branch without the
+    # host-sync-free commits, listed before them; merged at b6662508e.
+    "102672760a31c86697972a06b060c05d4efaeb60",
+    # daeb98903 = 7402a53d5 merged with 102672760 (same tree as 102672760;
+    # yeto/s27-e3, S27 G-CN).
+    "daeb98903779df2a470249d4142d97b610ad96c1",
+    # 17841205b = + no host syncs in R3 replay copies, loss_function logging
+    # tensors, THD cu_seqlens/max_seqlen and Mamba seq_idx (S27 G-CI); loss
+    # values unchanged bit for bit.
+    "17841205b19fde01279fd9585711cb610bad67a8",
+    # 697fb2000 = + host-sync-free DeepEP _indices_to_multihot, a runtime patch
+    # of Megatron a84b10547 (S27 G-CI); no loss path.
+    "697fb2000182955cbaa265345cd507924a1178a7",
+    # b6662508e = merge of daeb98903 and 697fb2000 (yeto/s27-e3, S27 G-CN).
+    "b6662508e77e2e351cac668f392d1c747921a1c2",
+    # 8d03f386a = 7402a53d5 + shape-free layout support (S27 G-DD);
+    # canonical-order plans keep their hashes and bytes. A side branch without
+    # the E3 commits above, listed after them; merged at 8faa7fccc.
+    "8d03f386a72c82a07af60dab9dd13d44c0a0fc5b",
+    # 3f6760f2b = + a gated linear_fc1 reports two TP blocks (S27 G-DD).
+    "3f6760f2bd7885a71b1bdd30a70956da88f775c0",
+    # 8faa7fccc = merge of b6662508e and 3f6760f2b (yeto/s27-next, S27 G-DV).
+    "8faa7fccc31625bfc4cc62ff3f34aed741ca62fe",
+    # ddd416167 = b6662508e + commit chunk read-ahead (page mapping off the
+    # copying thread) and the device-side model cast of sharded masters, a
+    # sample of every write checked bit for bit against the host cast (S27
+    # G-DZ); same committed bits, no loss path. A side branch without the
+    # shape-free commits, listed after them; merged at 970807006.
+    "ddd416167698741085b2544faf28004481be3991",
+    # e9410717a = + the read-ahead reuses the two-thread hashing pool (S27 G-DZ).
+    "e9410717aa7a44bf830872c4403497c1e4daf522",
+    # 970807006 = merge of 8faa7fccc and e9410717a (yeto/s27-next, S27 G-DV).
+    "970807006ed0b9a958a2167039e046cae52ffdd0",
 )
 
 # First Miles commit whose full-parameter sync reads distributed-optimizer
@@ -274,7 +325,7 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 7402a53-2fa8801; (S27 G-CA: Miles 7402a53d5 = 59aea07f9 + sharded FP32 masters at DP>1 acb798c7b (G-BE) + bridge MoE runtime flags 76a84963c (G-BH2); previous 59aea07-2fa8801 @sha256:d54dd445... (acb798c-2fa8801 @sha256:2bc602db... built but voided before the merge); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-7402a53-2fa8801/). Earlier: tag 59aea07-2fa8801; (S27 G-AZ2: Miles 59aea07f9 = ebc6519af + per-fragment full-parameter round boundary 63cb372b3 (lazy export, partial commit; G-AY); previous ebc6519-2fa8801 @sha256:1151c59a...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-59aea07-2fa8801/). Earlier: tag ebc6519-2fa8801; (S27 G-AZ: Miles ebc6519af = 8edea35a7 + DP replicas 921cde8c7 + pinned HybridDeviceOptimizer masters d78bf39e4 + Nemotron-H VL language-only bridge b7868074c; previous 8edea35-2fa8801 @sha256:6cc7b51d... (and b786807-2fa8801 @sha256:618e6c5b... for the 120B probe); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-ebc6519-2fa8801/). Earlier: tag b786807-2fa8801; (S27 G-AS: Miles b7868074c = d1616ba12 + language-model-only bridge for the Nemotron-H VL checkpoint (G-AQ); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-b786807-2fa8801/). Earlier: tag 8edea35-2fa8801; (S27 G-AP: Miles 8edea35a7 = d1616ba12 + zero-copy full-parameter chunks in Ray; previous d1616ba-2fa8801 @sha256:0b251d82...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-8edea35-2fa8801/). Earlier: tag d1616ba-2fa8801; (S27 IMG6: Miles d1616ba12 = aa6b887d8 + per-sample seq_idx for THD packs, Mamba state restarts per sample (G-AL); previous aa6b887-2fa8801 @sha256:2c4bd1db...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-d1616ba-2fa8801/). Earlier: tag aa6b887-2fa8801; (S27 IMG5: Miles aa6b887d8 = b13c170ce + deferred full-parameter export, on-demand materialize, faster checks, hybrid R3 layers (G-AA); previous b13c170-2fa8801 @sha256:814a7e27...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-aa6b887-2fa8801/). Earlier: tag b13c170-2fa8801; (S27 IMG4: Miles b13c170ce = 0b64b40c1 + per-fragment full-parameter apply (G-X); previous 0b64b40-2fa8801 @sha256:2b8c36f6...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-b13c170-2fa8801/). Earlier: tag 0b64b40-2fa8801; (S27 IMG3: Miles 0b64b40c1 = cc693c693 + flat-range fragment split + scheduler anchor rebase; previous cc693c6-2fa8801 @sha256:2011cbf9... (a477bcb-2fa8801 built but voided); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-0b64b40-2fa8801/). Earlier: tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
+# Tag 9708070-2fa8801; (S27 G-DV: Miles 970807006 = 8faa7fccc merged with e9410717a (commit read-ahead and device-side cast, G-DZ); previous 8faa7fc-2fa8801 @sha256:a7b9ab22... and, on s27-sync-commit, e941071-2fa8801 @sha256:dbf4a617... (build records 2026-10-25-e941071-2fa8801/, 2026-10-25-ddd4161-2fa8801/); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-9708070-2fa8801/). Earlier: tag 8faa7fc-2fa8801; (S27 G-DV: Miles 8faa7fccc = b6662508e (E3) merged with 3f6760f2b (shape-free layout, G-DD); previous b666250-2fa8801 @sha256:92b5055b... and, on s27-shape-free-layout, 3f6760f-2fa8801 @sha256:87dc8b02... (build records 2026-10-25-3f6760f-2fa8801/, 2026-10-25-8d03f38-2fa8801/); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-8faa7fc-2fa8801/). Earlier: tag b666250-2fa8801; (S27 G-CN: Miles b6662508e = 7402a53d5 + verify-ahead apply 102672760 (G-CG) + training step without host syncs 697fb2000 (G-CI); previous 697fb20-2fa8801 @sha256:498cac04...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-b666250-2fa8801/). Earlier: tag 697fb20-2fa8801; (S27 G-CI: Miles 697fb2000 = 7402a53d5 + training step without host syncs (R3 replay, loss logging, THD packing, DeepEP multihot runtime patch); previous 7402a53-2fa8801 @sha256:f0087fb1...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-697fb20-2fa8801/). Earlier: tag 7402a53-2fa8801; (S27 G-CA: Miles 7402a53d5 = 59aea07f9 + sharded FP32 masters at DP>1 acb798c7b (G-BE) + bridge MoE runtime flags 76a84963c (G-BH2); previous 59aea07-2fa8801 @sha256:d54dd445... (acb798c-2fa8801 @sha256:2bc602db... built but voided before the merge); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-7402a53-2fa8801/). Earlier: tag 59aea07-2fa8801; (S27 G-AZ2: Miles 59aea07f9 = ebc6519af + per-fragment full-parameter round boundary 63cb372b3 (lazy export, partial commit; G-AY); previous ebc6519-2fa8801 @sha256:1151c59a...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-59aea07-2fa8801/). Earlier: tag ebc6519-2fa8801; (S27 G-AZ: Miles ebc6519af = 8edea35a7 + DP replicas 921cde8c7 + pinned HybridDeviceOptimizer masters d78bf39e4 + Nemotron-H VL language-only bridge b7868074c; previous 8edea35-2fa8801 @sha256:6cc7b51d... (and b786807-2fa8801 @sha256:618e6c5b... for the 120B probe); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-ebc6519-2fa8801/). Earlier: tag b786807-2fa8801; (S27 G-AS: Miles b7868074c = d1616ba12 + language-model-only bridge for the Nemotron-H VL checkpoint (G-AQ); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-b786807-2fa8801/). Earlier: tag 8edea35-2fa8801; (S27 G-AP: Miles 8edea35a7 = d1616ba12 + zero-copy full-parameter chunks in Ray; previous d1616ba-2fa8801 @sha256:0b251d82...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-8edea35-2fa8801/). Earlier: tag d1616ba-2fa8801; (S27 IMG6: Miles d1616ba12 = aa6b887d8 + per-sample seq_idx for THD packs, Mamba state restarts per sample (G-AL); previous aa6b887-2fa8801 @sha256:2c4bd1db...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-d1616ba-2fa8801/). Earlier: tag aa6b887-2fa8801; (S27 IMG5: Miles aa6b887d8 = b13c170ce + deferred full-parameter export, on-demand materialize, faster checks, hybrid R3 layers (G-AA); previous b13c170-2fa8801 @sha256:814a7e27...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-aa6b887-2fa8801/). Earlier: tag b13c170-2fa8801; (S27 IMG4: Miles b13c170ce = 0b64b40c1 + per-fragment full-parameter apply (G-X); previous 0b64b40-2fa8801 @sha256:2b8c36f6...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-b13c170-2fa8801/). Earlier: tag 0b64b40-2fa8801; (S27 IMG3: Miles 0b64b40c1 = cc693c693 + flat-range fragment split + scheduler anchor rebase; previous cc693c6-2fa8801 @sha256:2011cbf9... (a477bcb-2fa8801 built but voided); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-0b64b40-2fa8801/). Earlier: tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
 # Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
 # build record openspec/changes/rl-infra-spec/evidence/ports-image/
 # 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
@@ -283,7 +334,7 @@ MILES_NEXT_BASE_IMAGE = (
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "f0087fb1178a62b377c4b216146daa29d83100eb34131859176b7310432683e2"
+    "d639e258709b9d4ae4a980c63818562daf62137c9e364f779010bc0b753e867a"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's

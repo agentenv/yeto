@@ -38,6 +38,37 @@ pub const MSG_INIT_DIGEST: u8 = 28;
 /// the island adopts its local weights as version 0 and no initial BCAST
 /// follows. Payload: `[32]` SHA-256 over the concatenated fragment digests.
 pub const MSG_INIT_CONFIRM: u8 = 29;
+/// Task dispenser (S27 P2, `dispense.rs`): the first frame of a dispense
+/// connection, its own connection like BW_PROBE (never part of a learner
+/// session). Payload: `u16 version (=1) | u32 learner_id | u64 incarnation |
+/// u64 rows | [32] data fingerprint`, sealed with `TASK_HELLO_MAC_DOMAIN`
+/// when the syncer has an island HMAC key.
+pub const MSG_TASK_HELLO: u8 = 50;
+/// Syncer -> island answer to TASK_HELLO: `u16 version | u64 lease_ms |
+/// u64 passes (0 = unlimited) | u32 max_block | u8 reconnect |
+/// u8 superseded | u64 superseded_incarnation | u64 reclaimed | u64 next`.
+pub const MSG_TASK_WELCOME: u8 = 51;
+/// Island -> syncer: `u64 seq | u32 count` positions wanted. `seq` numbers
+/// the island's CLAIM / REPORT requests (strictly increasing); a request
+/// resent after a lost answer repeats its `seq` and gets the same answer.
+pub const MSG_TASK_CLAIM: u8 = 52;
+/// Syncer -> island: `u8 status (0 grant, 1 wait, 2 end) | u64 block |
+/// u32 retry_ms | u32 n | n x (u64 start, u64 end)`.
+pub const MSG_TASK_GRANT: u8 = 53;
+/// Island -> syncer: `u64 seq | u32 n | n x (u64 block | u8 kind | u32 m |
+/// m x (u64 start, u64 end))`; kind 1 trained, 2 dropped, 3 requeue, 4 release.
+pub const MSG_TASK_REPORT: u8 = 54;
+/// Syncer -> island answer to REPORT and HEARTBEAT: `u64 settled |
+/// u64 requeued | u64 exhausted`.
+pub const MSG_TASK_ACK: u8 = 55;
+/// Island -> syncer: empty; renews the lease.
+pub const MSG_TASK_HEARTBEAT: u8 = 56;
+pub const TASK_PROTOCOL_VERSION: u16 = 1;
+/// HMAC domain of TASK_HELLO (distinct from HELLO's).
+pub const TASK_HELLO_MAC_DOMAIN: &[u8] = b"yeto-task-hello-mac-v1\0";
+/// Largest TASK_REPORT payload (65536 ranges).
+pub const MAX_TASK_REPORT: u64 = (1 << 20) + 12;
+
 /// Largest INIT_DIGEST payload for a layout of `fragments` fragments.
 pub fn init_digest_payload_len(fragments: usize) -> u64 {
     4 + 32 + 4 + 4 + 32 * fragments as u64

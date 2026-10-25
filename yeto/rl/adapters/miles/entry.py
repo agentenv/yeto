@@ -862,6 +862,13 @@ def compose_island(
     )
     # E1: publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
+    # S27 C5: --rl-verify-every N (no-sync island): hash the policy only every N-th version
+    verify_every = getattr(miles_args, "yeto_rl_verify_every", None)
+    if verify_every is not None:
+        driver.verify_every = int(verify_every)
+        allow = getattr(driver.policy_state, "allow_unverified_rounds", None)
+        if callable(allow):
+            allow()
     # S27: the engines generate the next round's batch while the trainer trains
     driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
     if elastic is not None:
@@ -1920,6 +1927,36 @@ def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
     return [list(r) for r in rows]
 
 
+def attach_engine_outage(driver: Any, topology: Any, *, environ: Mapping[str, str] | None = None) -> Any:
+    """S27 G-DI design v2: with ``YETO_ISLAND_ENGINE_RECOVERY_S`` (the launcher sets it
+    for a two-cluster island) the driver survives the loss of its engine nodes
+    (:mod:`yeto.rl.engine.engine_outage`, :mod:`.engine_recovery`). Unset: nothing."""
+    from yeto.rl.engine.engine_outage import EngineOutage, outage_budget_s
+
+    budget = outage_budget_s(os.environ if environ is None else environ)
+    if budget is None or topology is None or int(topology.nodes) <= 1:
+        return None
+    from .engine_recovery import MilesEngineRecovery
+
+    driver.engine_outage = EngineOutage(MilesEngineRecovery(driver.rollout, nodes=int(topology.nodes)),
+                                        wait_s=budget, emit=driver.emit)
+    driver.emit("rl_engine_outage", phase="armed", budget_s=budget, nodes=int(topology.nodes))
+    return driver.engine_outage
+
+
+def wait_island_nodes(nodes: int) -> dict[str, Any] | None:
+    """S27 G-DI: :func:`yeto.rl.engine.multinode.wait_for_island_nodes` on this Ray."""
+    from yeto.rl.engine.multinode import ISLAND_NODE_WAIT_ENV, wait_for_island_nodes
+
+    if not os.environ.get(ISLAND_NODE_WAIT_ENV):
+        return None
+    import ray
+
+    return wait_for_island_nodes(int(nodes), environ=os.environ, ray_nodes=ray.nodes,
+                                 clock=time.monotonic, sleep=time.sleep,
+                                 log=lambda line: print(line, flush=True))
+
+
 def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
     """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
     built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
@@ -2103,6 +2140,11 @@ def run_ports_island(
     connect_island_ray(miles_args=miles_args)
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
+        # S27 G-DI two-cluster island: every node in the Ray before anything below
+        # (None without YETO_ISLAND_NODE_WAIT_S: no wait, no event)
+        nodes_ready = wait_island_nodes(topology.nodes)
+        if nodes_ready is not None:
+            append_tape_event(miles_args, {"event": "rl_island_nodes_ready", **nodes_ready})
         # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
         # must fail closed here; a placement group asking for the dead node's GPUs
         # would stay PENDING forever
@@ -2228,11 +2270,13 @@ def run_ports_island(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
             eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
-            driver.data_slot = getattr(miles_args, "yeto_rl_data_slot", None)
+            driver.data_slot = ("dispense" if getattr(miles_args, "yeto_rl_data_dispense", None)
+                                else getattr(miles_args, "yeto_rl_data_slot", None))
             driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
             driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
+            attach_engine_outage(driver, topology)  # S27 G-DI v2 (no-op without the env)
             driver.start_phases = start_phases  # L0: first_step_done
             return driver
 

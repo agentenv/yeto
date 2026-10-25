@@ -75,10 +75,11 @@ of twice; the follower then skips its own check.
 
 Staged releases (S27 G-AT): the trainer exports a full checkpoint into a
 directory on its local disk, and :meth:`PolicyReleaseStore.release_staged`
-publishes that directory: the weight files in one store upload
-(``CheckpointStore.put_directory``; a Modal Volume takes it in one
-``batch_upload``, without the trainer's mount), then the record and LATEST in
-one more (``put_files``). A reader still sees a release only once LATEST names
+publishes that directory: the weight files in one store put
+(``CheckpointStore.put_directory``: through the trainer's mount and one commit;
+a Modal Volume store that is not mounted, or that is asked to, takes it in one
+``batch_upload`` instead, ``ModalVolumeStore.put_path``), then the record and
+LATEST in one more (``put_files``). A reader still sees a release only once LATEST names
 it and its files are complete. The upload runs
 on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
 while the samplers' release is written; releases stay in version order (the next

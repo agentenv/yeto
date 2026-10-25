@@ -315,7 +315,7 @@ class _WireRole:
         del self.pending[f]
         self.terminal_submitted |= candidate.permit.global_step == FRAGMENTS * OUTER_ROUNDS
         self.record("push", self.learner, (candidate.permit.global_step, candidate.c_steps,
-                                           candidate.local_step))
+                                           candidate.local_step, f))
         return SimpleNamespace(role="actor", fragment_id=f, global_step=candidate.permit.global_step,
                                round_attempt=candidate.permit.round_attempt,
                                base_version=candidate.base_version, c_steps=candidate.c_steps,
@@ -457,7 +457,43 @@ def _max_lead(log, fast=0, slow=1) -> int:
 
 def _pushes(log, learner):
     return {step: (c_steps, local) for _, kind, who, value in log if kind == "push" and who == learner
-            for step, c_steps, local in [value]}
+            for step, c_steps, local, _ in [value]}
+
+
+def _replayed_finals(log) -> dict[int, np.ndarray]:
+    """The final fragments recomputed in float64 from the pushes in ``log``.
+
+    A push of fragment f at local round r with c_steps c carries the island's
+    progress since its anchor: the sum of ``_step(learner, k, f)`` for
+    k = r - c + 1 .. r (the anchor is the fragment at the push's base
+    version).  Each merge adds the tokens^2/steps-weighted mean of the
+    pushes to that base (outer lr 1, momentum 0)."""
+    merges: dict[int, dict[int, tuple[int, int, int]]] = {}
+    for _, kind, who, value in log:
+        if kind == "push":
+            step, c_steps, local, fid = value
+            merges.setdefault(step, {})[who] = (c_steps, local, fid)
+    params = {fid: _initial(fid).astype(np.float64) for fid in range(FRAGMENTS)}
+    for step in sorted(merges):
+        pushes = merges[step]
+        (fid,) = {fid for _, _, fid in pushes.values()}
+        assert fid == (step - 1) % FRAGMENTS, (step, fid)
+        weights = {who: (c_steps * TOKENS) ** 2 / c_steps for who, (c_steps, _, _) in pushes.items()}
+        total = sum(weights.values())
+        merged = np.zeros(NUMEL, dtype=np.float64)
+        for who, (c_steps, local, _) in sorted(pushes.items()):
+            progress = sum(_step(who, k, fid).astype(np.float64) for k in range(local - c_steps + 1, local + 1))
+            merged += weights[who] / total * progress
+        params[fid] = params[fid] + merged
+    return params
+
+
+# The float32 path (island parameters, wire deltas, Rust merge and outer
+# step) differs from the float64 replay by float32 rounding only: at most
+# 2.7e-7 relative in 12 local runs of both tests (S27 G-DQ).  A push merged
+# with a wrong round, weight or fragment moves the result by 1e-3 relative or
+# more (one local round adds 0.001 per element).
+REPLAY_RTOL = 1e-5
 
 
 def _check_merges(run):
@@ -469,6 +505,12 @@ def _check_merges(run):
     for fid in range(FRAGMENTS):
         assert np.array_equal(finals[0][fid], finals[1][fid])
         assert np.all(np.isfinite(finals[0][fid]))
+    # The syncer's result is the weighted merge of exactly the pushes the
+    # islands made: no push lost, double-counted or merged with a wrong weight.
+    replayed = _replayed_finals(run.log)
+    for fid in range(FRAGMENTS):
+        np.testing.assert_allclose(finals[0][fid], replayed[fid], rtol=REPLAY_RTOL, atol=0,
+                                   err_msg=f"fragment {fid}")
     return finals[0]
 
 
@@ -477,7 +519,7 @@ def _check_merges(run):
 def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_every_merge(
         syncer_binary, tmp_path, monkeypatch):  # noqa: F811 - the imported fixture
     capped = _run_two_islands(syncer_binary, tmp_path / "capped", monkeypatch, cap=1)
-    finals = _check_merges(capped)
+    _check_merges(capped)
     assert _max_lead(capped.log) <= 1
     fast = _pushes(capped.log, 0)
     slow = _pushes(capped.log, 1)
@@ -491,12 +533,19 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
              if who == 0 and name == "rl_full_parameter_round"]
     assert waits[-1]["sync/max_local_rounds_ahead"] == 1
     assert waits[-1]["sync/lead_waits"] >= 1 and waits[-1]["sync/lead_wait_escapes"] == 0
-    # Same inputs, same outcome: the capped run is reproducible bit for bit.
-    again = _run_two_islands(syncer_binary, tmp_path / "again", monkeypatch, cap=1)
-    finals_again = _check_merges(again)
-    for fid in range(FRAGMENTS):
-        assert finals[fid].view(np.int32).tolist() == finals_again[fid].view(np.int32).tolist()
-    assert _pushes(again.log, 0) == fast and _pushes(again.log, 1) == slow
+    # Not checked: that a second run with the same inputs gives the same bits.
+    # Which local round a push carries depends on wall-clock order.  One slow
+    # boundary closes two rounds a few ms apart (the syncer writes a checkpoint
+    # before each broadcast).  The fast island's lead wait polls every
+    # LEAD_WAIT_POLL_S and pushes before it applies broadcasts, and a pair
+    # holds a pipeline slot until its broadcast is applied.  If one poll sees
+    # both broadcasts, the wait ends and the next push carries one more local
+    # round (c_steps 2).  If a poll falls between them, the freed slot takes
+    # the next PULL from the current cut (c_steps 1) and the island waits a
+    # slow round longer.  Both schedules keep the cap.  The syncer orders a
+    # round's pushes by learner id (server.rs), so arrival order inside a
+    # round does not change the merge.  _check_merges instead checks that the
+    # result equals, up to float32 rounding, the merge of this run's pushes.
 
 
 @needs_cargo

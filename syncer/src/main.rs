@@ -8,7 +8,10 @@ mod iso_worker;
 mod membership;
 mod recovery;
 mod merge;
+mod dispense;
+mod dispense_service;
 mod downlink;
+mod eval_checkpoint;
 mod protocol;
 mod server;
 mod state;
@@ -40,6 +43,22 @@ struct Args {
     /// Compute-overlap budget for the grace window, in learner inner steps (τ).
     #[arg(long, default_value_t = 2.0)]
     grace_tau: f64,
+    /// Lower bound on the grace window, in milliseconds (still capped by
+    /// --grace-ms). 0 = off.
+    #[arg(long, default_value_t = 0)]
+    grace_min_ms: u64,
+    /// Grace floor from measured arrival gaps: the window is at least this
+    /// quantile (0..1] of the recent gaps between a round's first push and
+    /// each later push of it, late pushes included. Still capped by
+    /// --grace-ms. 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    grace_arrival_quantile: f64,
+    /// Terminal grace, in milliseconds: the last round of each fragment
+    /// waits up to this long for every expected island (not capped by
+    /// --grace-ms), so a late delta of a last round still reaches the final
+    /// parameters. 0 = off.
+    #[arg(long, default_value_t = 0)]
+    terminal_grace_ms: u64,
     /// Fragment rounds in flight at once (two by default, matching the
     /// default --grace-tau 2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
@@ -112,6 +131,12 @@ struct Args {
     /// Write the snapshot every N outer steps (0 disables).
     #[arg(long, default_value_t = 8)]
     checkpoint_every: u64,
+    /// Also write the cut at these global steps (the `step=` of the "outer
+    /// step" log; comma-separated, strictly increasing, below --total-steps)
+    /// to `<checkpoint-path>.step-<t>`, on a background thread while rounds
+    /// keep merging. --resume never reads these files.
+    #[arg(long, value_delimiter = ',')]
+    checkpoint_at_steps: Vec<u64>,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -229,6 +254,28 @@ struct Args {
     /// parameters, which stay in --checkpoint-path / --final-state).
     #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
     final_cut_payload: String,
+    /// S27 P2 task dispenser: islands claim the rows of --data they train
+    /// from this syncer (TASK_* connections, docs/PROTOCOL.md "Task
+    /// dispenser"). Off by default.
+    #[arg(long)]
+    dispense: bool,
+    /// Dispenser lease: an island process silent this long loses its
+    /// unreported rows to the other islands.
+    #[arg(long, default_value_t = 300.0)]
+    dispense_lease_s: f64,
+    /// Passes over the rows before the data ends; unset = unlimited (every
+    /// pass after the first is reshuffled on the islands).
+    #[arg(long)]
+    dispense_passes: Option<u64>,
+    /// How often one row may be requeued after its group was too stale to train.
+    #[arg(long, default_value_t = 1)]
+    dispense_max_redo: u32,
+    /// Largest block one claim may ask for.
+    #[arg(long, default_value_t = 65536)]
+    dispense_max_block: u32,
+    /// JSONL log of every dispenser event.
+    #[arg(long)]
+    dispense_log: Option<std::path::PathBuf>,
     /// Fragment-sharded head (S27 P4b): this process owns the fragment
     /// range of shard --shard-index out of --shard-count and runs only the
     /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
@@ -291,6 +338,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let dispense = dispense_config(&args)?;
     let shard = args.shard_plan()?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
@@ -346,6 +394,9 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    if !(0.0..=1.0).contains(&args.grace_arrival_quantile) {
+        anyhow::bail!("--grace-arrival-quantile must be in [0, 1] (0 = off)");
+    }
     let expected_island_contract = args
         .expected_island_contract
         .as_deref()
@@ -358,6 +409,9 @@ fn main() -> anyhow::Result<()> {
         grace_ms: args.grace_ms,
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
+        grace_min_ms: args.grace_min_ms,
+        grace_arrival_quantile: args.grace_arrival_quantile,
+        terminal_grace_ms: args.terminal_grace_ms,
         pipeline: args.pipeline,
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
@@ -374,6 +428,7 @@ fn main() -> anyhow::Result<()> {
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
+        checkpoint_at_steps: args.checkpoint_at_steps,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
@@ -393,11 +448,34 @@ fn main() -> anyhow::Result<()> {
         shard,
         expert_token_weights: args.expert_token_weights,
         final_cut_manifest_only: args.final_cut_payload == "manifest",
+        dispense,
+        dispense_log: args.dispense_log.clone(),
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn dispense_config(args: &Args) -> anyhow::Result<Option<dispense::DispenseConfig>> {
+    let named = args.dispense_passes.is_some() || args.dispense_log.is_some();
+    if !args.dispense {
+        if named {
+            anyhow::bail!("--dispense-passes / --dispense-log need --dispense");
+        }
+        return Ok(None);
+    }
+    if !(args.dispense_lease_s.is_finite() && args.dispense_lease_s > 0.0) {
+        anyhow::bail!("--dispense-lease-s must be positive");
+    }
+    let cfg = dispense::DispenseConfig {
+        lease: std::time::Duration::from_secs_f64(args.dispense_lease_s),
+        passes: args.dispense_passes,
+        max_redo: args.dispense_max_redo,
+        max_block: args.dispense_max_block,
+    };
+    cfg.validate()?;
+    Ok(Some(cfg))
 }
 
 fn parse_hex32(text: &str) -> anyhow::Result<[u8; 32]> {
@@ -464,6 +542,18 @@ mod tests {
         .unwrap();
         assert_eq!(sweep.policy_sweep_fragments, Some(4));
         assert_eq!(sweep.total_steps, 8);
+    }
+
+    #[test]
+    fn checkpoint_at_steps_is_a_comma_separated_step_list() {
+        let base = ["yeto-syncer", "--learners", "1", "--total-steps", "200"];
+        assert!(Args::try_parse_from(base).unwrap().checkpoint_at_steps.is_empty());
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,149,190"]);
+        assert_eq!(Args::try_parse_from(argv).unwrap().checkpoint_at_steps, vec![75, 149, 190]);
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,x"]);
+        assert!(Args::try_parse_from(argv).is_err());
     }
 
     #[test]

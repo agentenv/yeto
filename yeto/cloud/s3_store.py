@@ -318,6 +318,10 @@ class S3Store(BucketMountStore):
                                       pointers=POINTER_FILES, records=RECORD_FILES)
         return self._mirror
 
+    @property
+    def put_renames(self) -> bool:  # type: ignore[override]
+        return self.staged  # a stage directory is local disk; the bucket mount is not
+
     def commit(self) -> float:
         return self._tree().push() if self.staged else super().commit()
 

@@ -191,6 +191,11 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
+    # S27 P2: the dispenser learns which of its rows entered this training batch
+    from .task_dispense import on_trained as dispense_on_trained
+
+    dispense_on_trained(data)
+    marks.append(("dispense", time.monotonic()))
     # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
     # final loss masks, for the role streams to read at the round boundary.
     from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence

@@ -532,6 +532,26 @@ coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the
 periodic interval still leaves an atomic final checkpoint.
 
+`--checkpoint-at-steps T1,T2,...` (launcher: `--rl-sync-checkpoint-at-steps`,
+asynchronous full-parameter rounds) also writes the cut at each listed global
+step `t` (one fragment merge, the `step=` of the `outer step` log, the unit of
+`--total-steps`) to `<checkpoint-path>.step-<t>`. The scheduler takes a shared
+copy-on-write snapshot right after step `t` commits and a background thread
+writes it through `<checkpoint-path>.step-<t>.tmp`, fsync and rename, while
+later rounds keep merging and broadcasting; the file holds the same bytes as a
+checkpoint written synchronously at `t`. A commit during the write copies a
+fragment only if the writer has not written it yet. One write runs at a time:
+a step that comes due earlier waits for it, and so does the final checkpoint.
+The syncer logs `eval checkpoint started step=<t> path=<p>`, then
+`eval checkpoint written step=<t> path=<p> seconds=<s> bytes=<n>
+copied_fragments=<k>` once the file is durable, or
+`eval checkpoint failed step=<t> path=<p> error=<e>` (training continues; the
+temporary is removed). The steps must be strictly increasing and below
+`--total-steps`; policy sweeps, `--checkpoint-every 1` and sharded heads are
+refused. `--resume` reads only `--checkpoint-path`; a resumed run skips the
+listed steps its cut has passed and rewrites the later ones. The list is part
+of the semantic profile hash only when set.
+
 When `--mark-final-checkpoint` is explicitly enabled, the syncer creates
 `<checkpoint-path>.final` only after that terminal checkpoint write. The
 marker contains `YETO_FINAL_V1` and the checkpoint `global_step`; periodic,
@@ -557,6 +577,7 @@ always take the strict values.
 | `--rl-sync-full-parameter-rounds` (full-parameter) | `async`, at most 2 fragment rounds in flight | `sweep` |
 | `--rl-sync-quorum` | 1 | every island |
 | `--rl-sync-grace-ms` | 300000: cap of the adaptive grace window | 0 (no grace) |
+| `--rl-sync-terminal-grace-ms` (full-parameter) | 120000: the last round of each fragment waits up to this long for every island | off |
 | `--rl-sync-max-base-lag` | 1 round | 0 |
 | `--rl-sync-learner-weight` | `tokens2-over-steps` | `equal` |
 | `--rl-sync-matrix-merge` (decoupled, full-parameter) | `rda` (embedding fragments stay averaged) | `avg` |
@@ -566,7 +587,20 @@ always take the strict values.
 
 The grace window adapts to the islands' measured step time through the
 syncer's `--grace-gamma` and `--grace-tau`, which keep their defaults; no
-value of gamma is prescribed, the cap only bounds a slow round. The
+value of gamma is prescribed, the cap only bounds a slow round.
+With a deep fragment pipeline a round opens long before its first push, so
+the adaptive window can shrink to a few seconds while the islands deliver
+the same fragment tens of seconds apart. Two optional floors (off by
+default, still capped by `--rl-sync-grace-ms`) wait for that gap:
+`--rl-sync-grace-min-ms` (syncer `--grace-min-ms`) and
+`--rl-sync-grace-arrival-quantile Q` (syncer `--grace-arrival-quantile`),
+the Q-quantile of the last 64 measured gaps between a round's first push
+and each later push of it, late pushes included. A late push is carried
+into the next round of its fragment; the last round of a fragment has no
+next round, so `--rl-sync-terminal-grace-ms` (syncer `--terminal-grace-ms`,
+not capped by `--rl-sync-grace-ms`) holds each last round open for every
+island, and the syncer logs any late push still left out at the final cut.
+Each of these options enters the semantic profile only when it is on. The
 broadcast overwrites the islands' fragments (merge alpha 0) in both modes.
 A quorum of 1 needs a base lag of at least 1 round: otherwise the push of an
 island that missed the quorum is a strict failure of a fixed roster.
@@ -709,3 +743,64 @@ To add an island to a running pool there is no CLI: start another island
 process against the same syncer address with the same `--rl-syncer-epoch`,
 the same HMAC key and a compatible backend identity and compat group (and an
 id below `--max-learners`). It is caught up to the current base.
+
+## Task dispenser (S27 P2, `--dispense`)
+
+The actor syncer can hand out the rows of `--data` that the training islands
+train (`syncer/src/dispense.rs`, launcher `--rl-data-split dispense`). An
+island process opens its own connection for it, like BW_PROBE, never part of
+a learner session; shard 0 of a sharded head only.
+
+Positions: the dispenser gives out positions of one global sequence; position
+`p` is row `pass_order(rows, seed, p // rows)[p % rows]` (island side,
+`yeto.rl.engine.task_dispense.PositionMap`). The first island fixes `rows`
+and the data fingerprint; a later island with other values is refused.
+
+| type | name | direction | payload |
+|---:|---|---|---|
+| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
+| 51 | TASK_WELCOME | syncer → island | version:u16, lease_ms:u64, passes:u64 (0 = unlimited), max_block:u32, reconnect:u8, superseded:u8, superseded_incarnation:u64, reclaimed:u64, next:u64 |
+| 52 | TASK_CLAIM | island → syncer | seq:u64, count:u32 |
+| 53 | TASK_GRANT | syncer → island | status:u8 (0 grant, 1 wait, 2 end), block:u64, retry_ms:u32, n:u32, n × (start:u64, end:u64) |
+| 54 | TASK_REPORT | island → syncer | seq:u64, n:u32, n × (block:u64, kind:u8 (1 trained, 2 dropped, 3 requeue, 4 release), m:u32, m × (start:u64, end:u64)) |
+| 55 | TASK_ACK | syncer → island | settled:u64, requeued:u64, exhausted:u64 |
+| 56 | TASK_HEARTBEAT | island → syncer | empty (answered with TASK_ACK) |
+
+Every request gets exactly one answer, in order. `seq` numbers an island
+process's CLAIM and REPORT requests (strictly increasing); a request resent
+after a lost answer repeats its `seq` and gets the stored answer, so it is
+never applied twice. A refusal is MSG_ERROR and closes the connection:
+`fenced: dispense ...` (the process is retired: the client drops its blocks
+and opens a new incarnation), `dispense mismatch: ...` (other data: fatal),
+`dispense refused: ...` (a malformed or impossible request: fatal).
+
+Semantics:
+
+- A holder is one island process (`learner_id`, random `incarnation`). A new
+  incarnation of an island supersedes the old one at once. A holder silent
+  for `--dispense-lease-s` (default 300) expires. In both cases the holder is
+  retired and every position it did not report goes to the front of the
+  queue; the next claim of any island takes them first. Expiry is checked at
+  every request, so no timer is needed.
+- A claim gets queued positions first, then fresh ones. With
+  `--dispense-passes N` a claim that finds nothing gets WAIT while some island
+  still holds positions, END once everything is reported. Without it the
+  passes never end and a claim never waits.
+- A report settles positions: trained, dropped (consumed, not trained),
+  requeue (given out again, at most `--dispense-max-redo` times, then settled
+  as exhausted), release (given out again, not a redo). A range must lie in
+  the block's unreported positions; a bad entry refuses the whole report. A
+  block whose positions are all reported is retired, so the state grows with
+  the blocks in flight, not with the rows.
+- A position is generated at least once and reported trained at most once.
+- Checkpoint: the dispenser record is written to `<checkpoint>.dispense`
+  at every checkpoint cut, before the checkpoint itself. `--resume` restores
+  the record of that cut: every holder of the record is retired and its
+  unreported positions are queued first; positions settled after the cut are
+  given out again (the model returned to the cut too).
+- Log: `--dispense-log` gets one JSON line per event (`dispense_open`,
+  `_grant` with the first and last pass, `_pass_start`, `_wait`, `_end`,
+  `_report`, `_block_done`, `_reclaim` with the reason `lease_expired` or
+  `superseded`, `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
+  every holder of the record inside `_restore`).
+  `python -m tools.eval.dispense_check` replays it.

@@ -198,6 +198,20 @@ def _syncer_checkpoint_every(args) -> int:
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
 
 
+def _syncer_checkpoint_at_steps(args) -> tuple[int, ...]:
+    """``--rl-sync-checkpoint-at-steps`` (asynchronous full-parameter rounds,
+    checked by rl_args): global steps whose cut the syncer also writes to
+    ``<checkpoint>.step-<t>`` off its scheduler; () for every other syncer."""
+    if not rl_full_parameter_async(args):
+        return ()
+    return tuple(getattr(args, "rl_sync_checkpoint_at_steps", None) or ())
+
+
+def _syncer_eval_checkpoints(args) -> str:
+    steps = _syncer_checkpoint_at_steps(args)
+    return f" --checkpoint-at-steps {','.join(map(str, steps))}" if steps else ""
+
+
 def outer_delayed_nesterov_period(args) -> int | None:
     """The syncer's Delayed Nesterov period; None (unset or 1) is plain Nesterov."""
     period = getattr(args, "outer_delayed_nesterov_period", None)
@@ -320,6 +334,11 @@ def rl_syncer_profile(args, num_learners: int):
         **({"outer_delayed_nesterov_period": period} if period else {}),
         **({"expert_token_weights": True} if _rl_expert_token_weights(args) else {}),
         **({"final_cut_manifest_only": True} if rl_full_parameter_final_cut(args) == "ack" else {}),
+        **({"grace_min_ms": _grace_floor(args)[0]} if _grace_floor(args)[0] else {}),
+        **({"grace_arrival_quantile": _grace_floor(args)[1]} if _grace_floor(args)[1] else {}),
+        **({"terminal_grace_ms": _terminal_grace_ms(args)} if _terminal_grace_ms(args) else {}),
+        **({"checkpoint_at_steps": list(_syncer_checkpoint_at_steps(args))}
+           if _syncer_checkpoint_at_steps(args) else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -604,6 +623,27 @@ def _syncer_profile_record(args) -> str:
     return " --require-profile-record" if async_mode else ""
 
 
+def _grace_floor(args) -> tuple[int, float]:
+    """(--rl-sync-grace-min-ms, --rl-sync-grace-arrival-quantile); (0, 0.0) is off."""
+    return (int(getattr(args, "grace_min_ms", 0) or 0),
+            float(getattr(args, "grace_arrival_quantile", 0.0) or 0.0))
+
+
+def _terminal_grace_ms(args) -> int:
+    """--rl-sync-terminal-grace-ms (0 = off)."""
+    return int(getattr(args, "terminal_grace_ms", 0) or 0)
+
+
+def _syncer_grace_floor(args) -> str:
+    """Syncer grace-floor and terminal-grace flags; none when off, so the
+    command is unchanged."""
+    min_ms, quantile = _grace_floor(args)
+    terminal = _terminal_grace_ms(args)
+    return ((f" --grace-min-ms {min_ms}" if min_ms else "")
+            + (f" --grace-arrival-quantile {quantile!r}" if quantile else "")
+            + (f" --terminal-grace-ms {terminal}" if terminal else ""))
+
+
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
                             syncer: RoleSyncer,
                             shard_plan: tuple[int, int] | None = None) -> str:
@@ -620,6 +660,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --grace-ms {args.grace_ms}"
         f" --grace-gamma {args.grace_gamma}"
         f" --grace-tau {args.grace_tau}"
+        f"{_syncer_grace_floor(args)}"
         f" --pipeline {args.pipeline}"
         f" --sync-interval-steps {args.sync_interval_steps}"
         f" --delta-correction {args.delta_correction}"
@@ -637,12 +678,23 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{' --final-cut-payload manifest' if rl_full_parameter_final_cut(args) == 'ack' else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
+        f"{_syncer_eval_checkpoints(args)}"
         f"{_syncer_profile_record(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
         f"{_syncer_weighted_fold(args)}"
+        f"{_syncer_dispense(args, syncer, shard_plan)}"
         f"{shard_flags}"
     )
+
+
+def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | None) -> str:
+    """S27 P2: the task dispenser runs in the actor syncer (shard 0) only."""
+    if syncer.role != "actor" or (shard_plan is not None and shard_plan[0] != 0):
+        return ""
+    from .data_split_plan import dispense_syncer_flags
+
+    return dispense_syncer_flags(args)
 
 
 def syncer_shard_count(args) -> int:

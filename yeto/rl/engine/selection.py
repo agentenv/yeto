@@ -45,6 +45,10 @@ RL_SYNC_MODES = ("async", "strict")
 # computed from the islands' measured step time (--grace-gamma, --grace-tau);
 # the cap only bounds a slow round, it does not fix the wait.
 ASYNC_GRACE_CAP_MS = 300_000
+# The async full-parameter mode's terminal grace: the last round of each
+# fragment waits this long at most for every island, since no later round of
+# that fragment can carry a late delta into the final parameters (S27 G-CG).
+ASYNC_TERMINAL_GRACE_MS = 120_000
 # The async mode's outer step needs enough local progress per merge: with
 # fewer than this many local RL rounds per sync (H), the default outer step is
 # plain averaging (lr 1.0, momentum 0); from H on it is Nesterov (lr 0.7,

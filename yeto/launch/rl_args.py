@@ -17,6 +17,7 @@ from ..rl.engine.run_flags import (
 from ..rl.engine.selection import (
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
+    ASYNC_TERMINAL_GRACE_MS,
     FULL_PARAMETER_SYNC_PRESET,
     SAO_STREAMING_SYNC_PRESET,
     is_sync_mode_default,
@@ -176,6 +177,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
     ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
+    ("rl_sync_checkpoint_at_steps", None, "--rl-sync-checkpoint-at-steps"),
     ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
     ("rl_sync_fragment_max_bytes", 2 << 30, "--rl-sync-fragment-max-bytes"),
     ("rl_sync_push_int4_block", 128, "--rl-sync-push-int4-block"),
@@ -186,6 +188,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_final_cut", "auto", "--rl-sync-final-cut"),
+    ("rl_sync_verify_ahead", "auto", "--rl-sync-verify-ahead"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
@@ -219,6 +222,32 @@ def _check_bcast_delta(args) -> None:
 # S27 P2: asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
 # fragment rounds in flight by default and at most
 # FULL_PARAMETER_ASYNC_MAX_PIPELINE (60); both live in rl.engine.run_flags.
+
+
+def _eval_checkpoint_problems(args, *, async_rounds: bool, checkpoint_every: int) -> list[str]:
+    """``--rl-sync-checkpoint-at-steps``: global steps (fragment merges, the
+    syncer's ``step=``) whose cut the syncer also writes to
+    ``<checkpoint>.step-<t>`` off its scheduler (syncer ``--checkpoint-at-steps``,
+    which refuses the same combinations)."""
+    steps = tuple(getattr(args, "rl_sync_checkpoint_at_steps", None) or ())
+    if not steps:
+        return []
+    if not async_rounds:
+        # A sweep checkpoint is the commit record of its broadcast.
+        return ["--rl-sync-checkpoint-at-steps only with --rl-sync-full-parameter-rounds async"]
+    problems = []
+    total = args.total_steps * args.fragments  # the syncer's --total-steps
+    if steps[0] < 1 or any(a >= b for a, b in zip(steps, steps[1:])) or steps[-1] >= total:
+        problems.append(f"--rl-sync-checkpoint-at-steps strictly increasing within 1..{total - 1} "
+                        f"(global steps: --total-steps x --fragments = {total}; the final checkpoint "
+                        "holds the last one)")
+    if checkpoint_every == 1:
+        problems.append("--rl-sync-checkpoint-every above 1 with --rl-sync-checkpoint-at-steps "
+                        "(1 writes every step before its broadcast)")
+    if int(getattr(args, "syncer_shards", None) or 1) > 1:
+        problems.append("no --syncer-shards above 1 with --rl-sync-checkpoint-at-steps (no shard "
+                        "holds the whole model at one step)")
+    return problems
 
 
 def _full_parameter_backend(args):
@@ -314,6 +343,8 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
             problems.append("no --rl-sync-overlap (sweep only)")
     elif checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
         problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
+    problems += _eval_checkpoint_problems(args, async_rounds=async_rounds,
+                                          checkpoint_every=checkpoint_every)
     fragment_max_bytes = getattr(args, "rl_sync_fragment_max_bytes", 2 << 30)
     if type(fragment_max_bytes) is not int or not 4 <= fragment_max_bytes <= 2 << 30 or fragment_max_bytes % 4:
         problems.append("--rl-sync-fragment-max-bytes a multiple of 4 between 4 and 2147483648")
@@ -387,6 +418,7 @@ _ASYNC_MODE_VALUES = {
 _ASYNC_MODE_FULL_PARAMETER_VALUES = {
     "rl_sync_full_parameter_rounds": "async",
     "rl_sync_push_dtype": "int4",
+    "rl_sync_terminal_grace_ms": ASYNC_TERMINAL_GRACE_MS,
 }
 # Marked defaults; the strict mode keeps their (strict) value.
 _SYNC_MODE_MARKED = (
@@ -489,6 +521,9 @@ def _warn_async_mode_off(args) -> None:
 _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_quorum", "--rl-sync-quorum", None),
     ("rl_sync_grace_ms", "--rl-sync-grace-ms", None),
+    ("rl_sync_grace_min_ms", "--rl-sync-grace-min-ms", None),
+    ("rl_sync_grace_arrival_quantile", "--rl-sync-grace-arrival-quantile", None),
+    ("rl_sync_terminal_grace_ms", "--rl-sync-terminal-grace-ms", None),
     ("rl_sync_learner_weight", "--rl-sync-learner-weight", "equal"),
     ("rl_sync_max_base_lag", "--rl-sync-max-base-lag", 0),
     ("rl_sync_outer_lr", "--rl-sync-outer-lr", None),
@@ -571,6 +606,21 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
         if grace_ms < 0:
             raise ValueError("--rl-sync-grace-ms must be >= 0")
         args.grace_ms = grace_ms
+    grace_min_ms = getattr(args, "rl_sync_grace_min_ms", None)
+    if grace_min_ms is not None:
+        if grace_min_ms < 0:
+            raise ValueError("--rl-sync-grace-min-ms must be >= 0")
+        args.grace_min_ms = grace_min_ms
+    quantile = getattr(args, "rl_sync_grace_arrival_quantile", None)
+    if quantile is not None:
+        if not 0.0 < quantile <= 1.0:
+            raise ValueError("--rl-sync-grace-arrival-quantile must be in (0, 1]")
+        args.grace_arrival_quantile = quantile
+    terminal_grace_ms = getattr(args, "rl_sync_terminal_grace_ms", None)
+    if terminal_grace_ms is not None:
+        if terminal_grace_ms < 0:
+            raise ValueError("--rl-sync-terminal-grace-ms must be >= 0")
+        args.terminal_grace_ms = terminal_grace_ms
     if args.rl_sync_max_base_lag < 0:
         raise ValueError("--rl-sync-max-base-lag must be >= 0")
     outer_lr = args.rl_sync_outer_lr
@@ -661,10 +711,13 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None
         sample_roles=(getattr(args, "rl_sample_role", None) or "both") != "both"
         or bool(getattr(args, "rl_island_sample_role", None)),
         elastic=bool(getattr(args, "rl_elastic", False)),
+        # a single-island store is the resume store (ledger and cuts) unless it holds
+        # only the HF exports (--rl-checkpoint-store-export-only, S27 G-CO)
         island_cuts=(any(getattr(args, name, None) is not None
                          for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"))
                      or (bool(getattr(args, "rl_single_island_no_sync", False))
-                         and bool(getattr(args, "rl_checkpoint_store", None)))),
+                         and bool(getattr(args, "rl_checkpoint_store", None))
+                         and not bool(getattr(args, "rl_checkpoint_store_export_only", False)))),
         overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
     )
     if problems:
@@ -936,17 +989,22 @@ def _prepare_rl_args(
     specs = [rl_island_spec(iargs, spec) for iargs, spec in zip(per_island, parse_gpu_spec(args.gpu))]
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
-    if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
-        raise ValueError("RL tensor and pipeline parallelism must be positive")
     if int(getattr(args, "context_parallel", 1) or 1) <= 0:
         raise ValueError("RL context parallelism must be positive")
-    model_parallel = args.tensor_parallel * args.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
-    if args.expert_parallel is not None:
-        if args.expert_parallel <= 0:
-            raise ValueError("RL expert parallelism must be positive")
-        if any(spec.total_gpus % args.expert_parallel for spec in specs):
-            raise ValueError("RL expert parallelism must divide every island")
+    # Each island's own parallel shape (--rl-island-placement with
+    # --rl-sync-layout shape-free), else the run-wide flags.
     for iargs, spec in zip(per_island, specs):
+        if iargs.tensor_parallel <= 0 or iargs.pipeline_parallel <= 0:
+            raise ValueError("RL tensor and pipeline parallelism must be positive")
+        if iargs.expert_parallel is not None:
+            if iargs.expert_parallel <= 0:
+                raise ValueError("RL expert parallelism must be positive")
+            if spec.total_gpus % iargs.expert_parallel:
+                raise ValueError("RL expert parallelism must divide every island")
+    for iargs, spec in zip(per_island, specs):
+        model_parallel = (
+            iargs.tensor_parallel * iargs.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
+        )
         if getattr(iargs, "rl_placement", "colocated") == "fixed-partition":
             # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
@@ -961,7 +1019,7 @@ def _prepare_rl_args(
 
             require_min_nodes(spec, rl_min_nodes(iargs, spec))
             actor_nodes, actor = rl_trainer_shape(iargs, spec)
-            node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
+            node_parallel = iargs.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
             cross_tp, cross_engine = rl_cross_node_switches(args)
             if spec.num_nodes > 1 and not cross_tp and (node_parallel > spec.gpus_per_node
                                                         or spec.gpus_per_node % node_parallel):

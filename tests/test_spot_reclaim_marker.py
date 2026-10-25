@@ -97,13 +97,22 @@ def test_modal_runner_writes_the_marker_and_signals_nobody(tmp_path):
     assert json.loads(marker.read_text()) == {"signal": int(_signal.SIGINT), "time": 12.5}
 
 
-def _poller(lists, expected, claims=None):
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _poller(lists, expected, claims=None, clock=None):
     from yeto.modal_runner import ContainerSetPoller
 
     it = iter(lists)
     changes = []
     claims = {} if claims is None else claims
-    g = ContainerSetPoller(lambda: next(it), expected, changes.append, attributed=lambda: claims)
+    g = ContainerSetPoller(lambda: next(it), expected, changes.append, attributed=lambda: claims,
+                           grace_s=600.0, clock=clock or _Clock())
     return g, changes, claims
 
 
@@ -153,15 +162,42 @@ def test_container_set_poller_late_first_container_is_not_a_reschedule():
     assert not g.tripped and changes == []
 
 
-def test_container_set_poller_two_unclaimed_containers_for_one_free_slot_trip():
-    g, changes, claims = _poller([{"ta-0", "ta-a", "ta-b"}], 2, {"ta-0": ("0", "0")})
+def test_container_set_poller_two_unclaimed_containers_for_one_free_slot_trip_after_the_grace(capsys):
+    clock = _Clock()
+    g, changes, claims = _poller([{"ta-0", "ta-a", "ta-b"}] * 3, 2, {"ta-0": ("0", "0")}, clock)
+    g.poll_once()
+    assert not g.tripped and "WARNING" in capsys.readouterr().out
+    clock.t = 600.0
+    g.poll_once()
+    assert not g.tripped and capsys.readouterr().out == ""  # warned once per container
+    clock.t = 601.0
     g.poll_once()
     assert g.tripped and "ta-a, ta-b" in changes[0] and "1 of 2" in changes[0]
+    assert "listed for 601 s" in changes[0] and "an island was rescheduled" in changes[0]
+
+
+def test_container_set_poller_extra_containers_beside_claimed_ones_do_not_trip():
+    # S27 s27-ch-d0a: both containers of island 0 claimed and training; two extra
+    # containers of the function appear (no island line) and later leave
+    clock = _Clock()
+    both = {"ta-r0", "ta-r1"}
+    lists = [both, both | {"ta-x", "ta-y"}, both | {"ta-x", "ta-y"}, both, both | {"ta-z"}, both | {"ta-z"}]
+    g, changes, _ = _poller(lists, 2, {"ta-r0": ("0", "0"), "ta-r1": ("0", "1")}, clock)
+    for t in (0.0, 30.0, 500.0, 530.0):
+        clock.t = t
+        g.poll_once()
+    assert not g.tripped and g.extra_since is None  # they left: the grace starts again
+    clock.t = 560.0
+    g.poll_once()
+    clock.t = 1100.0
+    g.poll_once()
+    assert not g.tripped  # ta-z: 540 s so far
 
 
 def test_container_set_poller_multi_island_reschedule_after_all_claimed():
-    # S27 s27-gr-h: both islands printed their lines; a third container appears.
-    lists = [{"ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1", "ta-new"}]
+    # S27 s27-gr-h: both islands printed their lines; Modal ended island 0's container
+    # and a third container appears.
+    lists = [{"ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1"}, {"ta-1", "ta-new"}]
     g, changes, claims = _poller(lists, 2)
     g.poll_once()
     claims["ta-1"] = ("1", "0")
@@ -171,18 +207,34 @@ def test_container_set_poller_multi_island_reschedule_after_all_claimed():
     assert not g.tripped
     g.poll_once()
     assert g.tripped and "ta-new" in changes[0] and "0 of 2" in changes[0]
+    assert "ta-0 no longer listed" in changes[0]
+
+
+def test_container_set_poller_a_third_container_beside_both_claimed_trips_after_the_grace():
+    clock = _Clock()
+    lists = [{"ta-0", "ta-1"}, {"ta-0", "ta-1", "ta-new"}, {"ta-0", "ta-1", "ta-new"}]
+    g, changes, _ = _poller(lists, 2, {"ta-0": ("0", "0"), "ta-1": ("1", "0")}, clock)
+    g.poll_once()
+    g.poll_once()
+    assert not g.tripped
+    clock.t = 601.0
+    g.poll_once()
+    assert g.tripped and "ta-new" in changes[0] and "0 of 2" in changes[0]
 
 
 def test_container_set_poller_multi_node_islands_count_every_rank():
     # island 0 has 2 ranks, island 1 has 1: three slots, rank 1 of island 0 is late
-    lists = [{"ta-00", "ta-1"}, {"ta-00", "ta-1", "ta-01"}, {"ta-00", "ta-1", "ta-01", "ta-x"}]
+    lists = [{"ta-00", "ta-1"}, {"ta-00", "ta-1", "ta-01"}, {"ta-00", "ta-1", "ta-01", "ta-x"},
+             {"ta-1", "ta-01", "ta-x"}]
     claims = {"ta-00": ("0", "0"), "ta-1": ("1", "0")}
     g, changes, _ = _poller(lists, 3, claims)
     g.poll_once()
     g.poll_once()
     assert not g.tripped  # ta-01 is the late first container of island 0 rank 1
     g.poll_once()
-    assert g.tripped and "ta-01, ta-x" in changes[0]
+    assert not g.tripped  # an extra container, every claimed one still listed
+    g.poll_once()
+    assert g.tripped and "ta-01, ta-x" in changes[0] and "ta-00 no longer listed" in changes[0]
 
 
 def test_container_set_poller_replacement_of_a_claimed_slot_trips_even_if_old_gone():
@@ -202,10 +254,14 @@ def test_container_set_poller_attribution_error_keeps_slots_free():
     def bad():
         raise RuntimeError("guards")
 
-    lists = iter([{"a", "b"}, {"a", "b", "c"}])
-    g = ContainerSetPoller(lambda: next(lists), 2, attributed=bad)
+    clock = _Clock()
+    lists = iter([{"a", "b"}, {"a", "b", "c"}, {"a", "b", "c"}])
+    g = ContainerSetPoller(lambda: next(lists), 2, attributed=bad, clock=clock)
     g.poll_once()
     assert not g.tripped
+    g.poll_once()
+    assert not g.tripped  # nothing claimed, so nothing claimed is lost: the grace applies
+    clock.t = 601.0
     g.poll_once()
     assert g.tripped
 
@@ -216,7 +272,7 @@ def test_launcher_attribution_reads_container_id_guard_lines():
     guards = [ContainerIdGuard(), ContainerIdGuard()]
     guards[0].feed("[modal-island 0] rank 0 container ta-0\n")
     claims = lambda: {cid: k for g in guards for k, cid in g.first.items()}  # noqa: E731
-    lists = iter([{"ta-0", "ta-q"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1", "ta-2"}])
+    lists = iter([{"ta-0", "ta-q"}, {"ta-0", "ta-1"}, {"ta-1", "ta-2"}])
     p = ContainerSetPoller(lambda: next(lists), 2, attributed=claims)
     p.poll_once()
     guards[1].feed("[modal-island 1] rank 0 container ta-1")

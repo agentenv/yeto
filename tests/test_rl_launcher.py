@@ -919,6 +919,64 @@ def test_island_ray_object_store_and_spill_dir_reach_ray_start():
     assert "--object-store-memory" not in run and "--system-config" not in run
 
 
+def _island_run(extra):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--gpu", "aws:2x4xa100@us-east-1", *extra))
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    start = run.index('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n') + len('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n')
+    head = run[start:].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    return run, head, worker
+
+
+def test_island_ray_head_store_and_preallocation_reach_only_the_head():
+    """S27 RAY-SEGV R1: head-only store size and RAY_* prefix on the head's ray start."""
+    run, head, worker = _island_run(("--rl-island-ray-object-store-gib", "1000",
+                                     "--rl-island-ray-head-object-store-gib", "700",
+                                     "--rl-island-ray-head-preallocate",
+                                     "--rl-island-ray-head-start-wait-s", "1800"))
+    assert head.startswith("  RAY_preallocate_plasma_memory=1 RAY_raylet_start_wait_time_s=1800 "
+                           "RAY_raylet_client_num_connect_attempts=1800 ray start --head ")
+    assert f"--object-store-memory={700 << 30}" in head and f"--object-store-memory={1000 << 30}" not in head
+    assert f"--object-store-memory={1000 << 30}" in worker
+    assert "RAY_preallocate" not in worker and "RAY_raylet_" not in worker
+    assert run.count("RAY_preallocate_plasma_memory") == 1
+
+    # preallocation without a wait gets Ray's 120 s for both waits
+    _, head, _ = _island_run(("--rl-island-ray-head-object-store-gib", "64", "--rl-island-ray-head-preallocate"))
+    assert head.startswith("  RAY_preallocate_plasma_memory=1 RAY_raylet_start_wait_time_s=120 "
+                           "RAY_raylet_client_num_connect_attempts=120 ray start --head ")
+    # a head store size alone: no RAY_ prefix; workers keep Ray's default size
+    _, head, worker = _island_run(("--rl-island-ray-head-object-store-gib", "64"))
+    assert head.startswith("  ray start --head ") and f"--object-store-memory={64 << 30}" in head
+    assert "--object-store-memory" not in worker
+    # a wait alone (no preallocation)
+    _, head, _ = _island_run(("--rl-island-ray-head-start-wait-s", "300"))
+    assert head.startswith("  RAY_raylet_start_wait_time_s=300 RAY_raylet_client_num_connect_attempts=300 "
+                           "ray start --head ")
+
+
+def test_island_ray_head_flags_unset_leave_the_head_command_alone():
+    run, head, _ = _island_run(())
+    assert head.startswith("  ray start --head --node-ip-address=")
+    assert "RAY_preallocate" not in run and "RAY_raylet_" not in run
+
+
+@pytest.mark.parametrize("extra, message", [
+    (("--rl-island-ray-head-preallocate",), "needs --rl-island-ray-head-object-store-gib"),
+    (("--rl-island-ray-head-object-store-gib", "0"), "head-object-store-gib must be >= 1"),
+    (("--rl-island-ray-object-store-gib", "64", "--rl-island-ray-head-preallocate",
+      "--rl-island-ray-head-start-wait-s", "0"), "head-start-wait-s must be >= 1"),
+])
+def test_island_ray_head_flags_are_checked(extra, message):
+    with pytest.raises(ValueError, match=message):
+        _island_run(extra)
+
+
 def _assert_island_ray_is_private(run: str) -> None:
     """The island's Ray must coexist with SkyPilot's runtime Ray on the node.
 
@@ -1741,3 +1799,52 @@ def test_removed_codex_agent_flags_are_refused(flag, value):
     args = _args((flag, value, "--use-session-server", "--tito-model", "qwen35"))
     with pytest.raises(ValueError, match="signed Codex agent"):
         _prepare_rl_args(args)
+
+
+def test_nebius_island_caps_the_ray_object_store_at_dev_shm(tmp_path):
+    # G-DF yeto-df-6: sky's docker runtime on Nebius gives the container a 200 GB /dev/shm and Ray refused
+    # a 644 GB object store at `ray start`. The size is now min(requested, 90% of /dev/shm) on the node.
+    import subprocess
+
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--gpu", "nebius:2x4xh100@eu-north1", "--rl-island-ray-object-store-gib", "600"))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    head = run[run.index("ray start --head"):].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    flag = f'--object-store-memory="$(r={600 << 30};'
+    assert flag in head and flag in worker
+    # evaluate the flag with a fake df: /dev/shm of 200e9 bytes -> 90% of it; a large /dev/shm keeps 600 GiB
+    word = head[head.index('--object-store-memory="'):]
+    word = word[:word.index('fi)"') + len('fi)"')]
+    fake = tmp_path / "df"
+    for shm, want in ((200_000_000_000, 180_000_000_000), (2_000_000_000_000, 600 << 30)):
+        fake.write_text(f"#!/bin/sh\necho '     1B-blocks'\necho ' {shm}'\n")
+        fake.chmod(0o755)
+        out = subprocess.run(["bash", "-c", f"echo {word}"], capture_output=True, text=True,
+                             env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, check=True)
+        assert out.stdout.strip() == f"--object-store-memory={want}"
+    # s27-next: a head-only size (S27 RAY-SEGV) on a Nebius island is capped the same way on node 0;
+    # the workers keep the island size, also capped
+    both = _args(("--gpu", "nebius:2x4xh100@eu-north1", "--rl-island-ray-object-store-gib", "600",
+                  "--rl-island-ray-head-object-store-gib", "300"))
+    both.model_revision, both.data_revision = "a" * 40, "b" * 40
+    both.source_sha256, both.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(both)
+    run = make_miles_island_task(both, parse_gpu_spec(both.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    head = run[run.index("ray start --head"):].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    assert f'--object-store-memory="$(r={300 << 30};' in head and f"r={600 << 30};" not in head
+    assert f'--object-store-memory="$(r={600 << 30};' in worker
+    # other clouds keep the literal size
+    aws = _args(("--gpu", "aws:2x4xa100@us-east-1", "--rl-island-ray-object-store-gib", "600"))
+    aws.model_revision, aws.data_revision = "a" * 40, "b" * 40
+    aws.source_sha256, aws.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(aws)
+    run = make_miles_island_task(aws, parse_gpu_spec(aws.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    assert f"--object-store-memory={600 << 30}" in run and "/dev/shm" not in run

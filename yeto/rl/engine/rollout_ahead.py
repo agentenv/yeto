@@ -37,7 +37,12 @@ What ``--rl-rollout-ahead 1`` changes in the driver's round (``IslandDriver``)::
 Refused (fail closed, before launch and again when the driver starts):
 colocated islands, sample-buffer roles, elastic reconfiguration, island round
 cuts and the resume ledger, the overlapped evaluation, and rollout pools
-without split generation (``start_generate`` / ``finish_generate``).
+without split generation (``start_generate`` / ``finish_generate``). The cuts
+and the ledger assume nothing in flight at their safe point. A single-island
+``--rl-checkpoint-store`` is the resume store (ledger and cuts), so it is
+refused too, unless ``--rl-checkpoint-store-export-only`` keeps only the HF
+exports there (the exports run after the round's training, while the next batch
+generates).
 """
 
 from __future__ import annotations
@@ -104,7 +109,8 @@ def launch_problems(
                        "has its own policy-age rules)"),
         (elastic, "no --rl-elastic (reconfiguration expects nothing in flight at its safe point)"),
         (island_cuts, "no island round cuts or resume ledger (--rl-cut-every, "
-                      "--rl-cut-auto-mtbf-s; --rl-checkpoint-store with --rl-single-island-no-sync)"),
+                      "--rl-cut-auto-mtbf-s; --rl-checkpoint-store with --rl-single-island-no-sync "
+                      "unless --rl-checkpoint-store-export-only)"),
         (overlap_eval, "no --rl-overlap-eval (the engines generate the next batch instead)"),
     )
     return [text for failed, text in checks if failed]

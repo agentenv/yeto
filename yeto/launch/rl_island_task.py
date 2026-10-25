@@ -9,7 +9,7 @@ import sys
 import time
 
 from ..gpu_spec import ClusterSpec
-from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
+from ..hw.catalog import COMPAT_GROUP_ENV, compat_group, launch_compat_group
 from .code_pack import code_pack_island_flag, code_workdir
 from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
@@ -19,7 +19,8 @@ from .remote_setup import (
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
-    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_spill_dir_prelude,
+    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_head_env,
+    rl_island_ray_spill_dir_prelude,
     rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
 )
 from .syncer import (
@@ -85,6 +86,25 @@ def _rl_matrix_merge_flag(args) -> str:
     return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
 
 
+def _rl_layout_flags(args) -> str:
+    """The shape-free layout flags; "" with the default shape-bound layout (argv unchanged)."""
+
+    if getattr(args, "rl_sync_layout", "shape-bound") != "shape-free":
+        return ""
+    flags = " --rl-sync-layout shape-free"
+    for flag, dest, default in (
+        ("--rl-sync-shape-free-tp-units", "rl_sync_shape_free_tp_units", 1),
+        ("--rl-sync-shape-free-expert-classes", "rl_sync_shape_free_expert_classes", 8),
+        ("--rl-sync-shape-free-dense-groups", "rl_sync_shape_free_dense_groups", 8),
+    ):
+        value = int(getattr(args, dest, default))
+        if value != default:
+            flags += f" {flag} {value}"
+    if getattr(args, "rl_sync_shape_free_split_layers", False):
+        flags += " --rl-sync-shape-free-split-layers"
+    return flags
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -112,6 +132,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --sweep-expert-token-weights"
     if rl_full_parameter_final_cut(args) == "ack":
         sweep += " --sweep-final-cut ack"
+    if getattr(args, "rl_sync_verify_ahead", "auto") == "off":
+        sweep += " --sweep-verify-ahead off"
     if getattr(args, "rl_sync_init_mode", "auto") != "auto":
         sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
@@ -216,6 +238,7 @@ def make_miles_island_task(
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
         + _rl_matrix_merge_flag(args)
+        + _rl_layout_flags(args)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
@@ -227,6 +250,9 @@ def make_miles_island_task(
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + (f" --rl-dp-optimizer {args.rl_dp_optimizer}"
            if (getattr(args, "rl_dp_optimizer", None) or "auto") != "auto" else "")
+        + (" --rl-grad-reduce-bf16" if getattr(args, "rl_grad_reduce_bf16", False) else "")
+        + (" --rl-precision-aware-optimizer"
+           if getattr(args, "rl_precision_aware_optimizer", False) else "")
         + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
         + _wan_transport_flags(args)
@@ -392,8 +418,9 @@ def make_miles_island_task(
         # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
         SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
-        # card raises here, before any cloud spend (no default).
-        COMPAT_GROUP_ENV: compat_group(spec.gpu),
+        # card raises here, before any cloud spend (no default). An explicit
+        # --rl-compat-group replaces it on every island (mixed cards, operator decision).
+        COMPAT_GROUP_ENV: _island_compat_group(args, spec, learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.
@@ -527,7 +554,8 @@ def make_miles_island_task(
             "}\n"
             "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
-            "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
+            # S27 RAY-SEGV R1: head-only RAY_* (plasma preallocation, start wait); "" when unset.
+            f"  {rl_island_ray_head_env(args)}ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
             # On a multi-node island the dashboard must listen on the node
@@ -537,7 +565,7 @@ def make_miles_island_task(
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
-            + rl_island_ray_storage(args, head=True)
+            + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -566,7 +594,7 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
@@ -601,20 +629,7 @@ def make_miles_island_task(
         workdir=code_workdir(args),
         file_mounts=file_mounts or None,
     )
-    resources = {
-        "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
-        "accelerators": spec.accelerators,
-        "cpus": rl_island_cpus(args, spec.cloud),
-        "instance_type": args.learner_instance_type,
-        "use_spot": args.spot,
-        "disk_size": args.disk_size,
-    }
-    if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
-        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
-    if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
-        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
-        if tier:
-            resources["network_tier"] = tier
+    resources = island_sky_resources(args, spec, in_vm_docker=in_vm_docker)
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
     storage_mounts = {}
@@ -649,10 +664,47 @@ def make_miles_island_task(
     return task
 
 
+def island_sky_resources(args, spec, *, in_vm_docker: bool) -> dict:
+    """``sky.Resources`` fields of an island cluster of shape ``spec``. A two-cluster
+    island (yeto.launch.engine_cluster) builds one set per cluster with this rule."""
+    resources = {
+        "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
+        "accelerators": spec.accelerators,
+        "cpus": rl_island_cpus(args, spec.cloud),
+        "instance_type": args.learner_instance_type,
+        "use_spot": args.spot,
+        "disk_size": args.disk_size,
+    }
+    if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
+        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
+    if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources["network_tier"] = tier
+    return resources
+
+
 STORE_CLIENT_SETUP = (
     'python -c "import boto3" 2>/dev/null || pip install -q boto3 '
     "|| { echo '[yeto-setup] boto3 install failed: the s3 store object API is unavailable' >&2; exit 1; }"
 )
+
+
+def _island_compat_group(args, spec, learner_id: int) -> str:
+    """The compat group this island declares (``$YETO_RL_COMPAT_GROUP``).
+
+    The card group from the catalog, or ``--rl-compat-group`` when the operator
+    declares one group for every island (e.g. an H200 island and an H100 island
+    in one session). The replacement is printed, so the launch log says which
+    island merges across card types without a calibrated tolerance."""
+    explicit = getattr(args, "rl_compat_group", None)
+    group = launch_compat_group(spec.gpu, explicit)
+    derived = compat_group(spec.gpu)
+    if group != derived:
+        print(f"[launcher] island {learner_id}: --rl-compat-group {group} replaces the card group "
+              f"{derived} (one declared group for mixed cards; numeric tolerance not calibrated)",
+              file=sys.stderr)
+    return group
 
 
 def _worker_node_ip_flag(cloud: str) -> str:

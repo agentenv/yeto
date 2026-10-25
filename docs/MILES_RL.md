@@ -405,6 +405,37 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
   continues at the next row of its slot (`rl_data_position_restored`). Without
   a store a relaunched island reads its rows from the first row again (the
   launch warns for an island pool).
+- `--rl-data-split dispense` (S27 P2, opt-in until its GPU check): the actor
+  syncer hands out the rows (`--dispense`, docs/PROTOCOL.md "Task
+  dispenser"). Every island writes every row into its prompt file, then claims
+  a block of positions per round from the syncer and trains those rows only.
+  No row goes to two islands; a fast island claims more often, so it trains
+  more rows and never waits for a slow one; the rows a relaunched, preempted
+  or silent island did not finish go first to the next claim of any island;
+  an island added later just claims. A row counts as trained only after its
+  round trained and passed the sync boundary (the driver commits the round,
+  `rl_dispense_commit`); an island process that dies earlier leaves the
+  round's rows to the next claim (a row is trained twice only when the
+  process dies between the boundary and the syncer's answer to the commit).
+  Position `p` is row
+  `pass_order(rows, --seed, p // rows)[p % rows]`: pass 0 in data order, every
+  later pass reshuffled. A row whose group is too stale to train can be given
+  out again (`--rl-dispense-max-redo`, default 1); `--rl-data-passes N` ends
+  the data after N passes (default: unlimited): an island that cannot fill
+  a batch any more gives its rows back and ends FINISHED (`rl_data_ended`;
+  a full-parameter island of asynchronous rounds leaves without the final
+  cut). Only for islands that may end on their own (asynchronous rounds or
+  an island pool; a strict roster is refused at launch). The rows of the last
+  incomplete batches are not trained. The syncer logs every grant
+  and report in `~/yeto-output/task-dispense.jsonl`;
+  `python -m tools.eval.dispense_check` replays it (no row granted twice,
+  none trained twice, every row accounted for). The launcher next to the
+  syncer copies the log and its check into the run directory
+  (`task-dispense.jsonl`, `dispense-check.json`, one `[launcher] task
+  dispenser:` line); `yeto launch --controller head` pulls both from the head
+  when the head job ends. Miles only, not with
+  fully_async rollouts, island round cuts or a sharded head (refused at
+  launch).
 
 ### Clouds, controller and images
 
@@ -724,6 +755,22 @@ and relies on the existing launcher/provider task recovery. The feature does
 not add roster shrinking or a new fleet restart controller. Syncer restart can
 resume when its checkpoint disk survives; losing that VM and disk remains a
 deployment-level durability gap.
+
+### Verify-ahead of received broadcasts
+
+A trainer apply re-checks every replaced fragment's stored chunks (finite
+FP32 values, chunk hashes, fragment digest) in its prepare. With
+`--rl-sync-verify-ahead auto` (default) each island runs that same check
+(Miles `verify_stored_fragment_chunks`) on a background thread as soon as a
+broadcast is stored, and the apply at the next boundary names the checked
+fragments (`verified_fragments`), so the trainer reads none of their chunks;
+a fragment whose check is still running is checked by the trainer as before,
+and a failed check fails the apply before the trainer changes. The applied
+values are the same either way. It needs a trainer Miles with the
+`verified_apply` transport; `--rl-sync-verify-ahead off` (island
+`--sweep-verify-ahead off`) or `YETO_FULL_PARAMETER_VERIFY_AHEAD=0` keeps the
+check on the trainer. Each `rl_full_parameter_round` event reports
+`sync/apply_verified_ahead` and `sync/apply_verify_pending`.
 
 ## Finalization and Export
 

@@ -41,11 +41,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--matrix-merge", default="avg", choices=("avg", "rda"), help="the run's --rl-sync-matrix-merge")
     parser.add_argument("--fragment-max-bytes", type=int, default=2 << 30)
     parser.add_argument("--minimum-fragments", type=int, default=1)
+    parser.add_argument("--shape-free", action="store_true",
+                        help="the shape-free layout (--rl-sync-layout shape-free) of TP/EP on TP x DP ranks")
+    parser.add_argument("--tp-units", type=int, default=1, help="shape-free: --rl-sync-shape-free-tp-units")
+    parser.add_argument("--expert-classes", type=int, default=8, help="shape-free: --rl-sync-shape-free-expert-classes")
+    parser.add_argument("--dense-groups", type=int, default=8, help="shape-free: --rl-sync-shape-free-dense-groups")
     args = parser.parse_args(argv)
 
     raw = args.config.read_bytes()
     geometry = L.NemotronHGeometry.from_hf_config(json.loads(raw))
     ep = args.ep or (args.dp if args.dp > 1 else args.tp)
+    if args.shape_free:
+        return _shape_free(args, raw, geometry, ep)
     manifests = L.rank_manifests(geometry, tp=args.tp, ep=ep, pp=args.pp, dp=args.dp)
     layout = L.offline_layout(
         manifests,
@@ -76,6 +83,51 @@ def main(argv: list[str] | None = None) -> int:
              "scalar_count": manifest.numel, "source_layout_sha256": L.miles_source_layout_sha256(manifest)}
             for manifest in manifests
         ],
+    }, indent=1))
+    return 0
+
+
+def _shape_free(args, raw: bytes, geometry, ep: int) -> int:
+    from yeto.rl.adapters.miles.models import nemotron_h_layout as L
+    from yeto.rl.engine.shape_free_layout import Granularity, plan_shape_free_layout
+    from yeto.rl.local_learner import ComponentIdentity
+
+    if args.pp != 1:
+        raise SystemExit("--shape-free models PP 1 only")
+    world = args.tp * args.dp
+    granularity = Granularity(tp_units=args.tp_units, expert_classes=args.expert_classes,
+                              dense_groups=args.dense_groups)
+    plan = plan_shape_free_layout(
+        L.shape_free_rank_parameters(geometry, tp=args.tp, ep=ep, world=world),
+        algorithm="grpo",
+        components=(ComponentIdentity(role="actor", model_revision=args.model_revision.lower(),
+                                      config_hash=hashlib.sha256(raw).hexdigest()),),
+        role="actor",
+        granularity=granularity,
+        minimum_fragments=args.minimum_fragments,
+        max_fragment_bytes=args.fragment_max_bytes,
+        matrix_merge=args.matrix_merge,
+    )
+    layout = plan.layout
+    fragment_bytes = [fragment.numel * 4 for fragment in layout.fragments.fragments]
+    owned = {}
+    for fragment in plan.fragments:
+        owned[fragment.owner] = owned.get(fragment.owner, 0) + fragment.numel
+    print(json.dumps({
+        "config_sha256": hashlib.sha256(raw).hexdigest(),
+        "model_revision": args.model_revision.lower(),
+        "layout": "shape-free",
+        "granularity": {"tp_units": args.tp_units, "expert_classes": args.expert_classes,
+                        "dense_groups": args.dense_groups},
+        "parallel": {"tp": args.tp, "ep": ep, "pp": 1, "cp": 1, "dp": args.dp, "training_gpus": world},
+        "parameter_tensor_count": len(layout.specs),
+        "parameter_scalar_count": sum(spec.numel for spec in layout.specs),
+        "matrix_merge": args.matrix_merge,
+        "fragments": layout.fragments.num_fragments,
+        "fragment_bytes": {"max": max(fragment_bytes), "min": min(fragment_bytes)},
+        "owner_scalars": {"max": max(owned.values()), "min": min(owned.values()), "owners": len(owned)},
+        "member_segments": sum(len(fragment.members) for fragment in plan.fragments),
+        "parameter_layout_sha256": layout.layout_hash,
     }, indent=1))
     return 0
 

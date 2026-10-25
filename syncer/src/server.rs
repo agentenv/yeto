@@ -62,6 +62,20 @@ pub struct Config {
     pub grace_gamma: f64,
     /// Compute-overlap budget τ, in learner inner steps.
     pub grace_tau: f64,
+    /// Lower bound on the grace window of a round that reached quorum, in ms
+    /// (still capped by `grace_ms`). 0 = off: the adaptive window alone.
+    pub grace_min_ms: u64,
+    /// Arrival-gap floor on the grace window: at least this quantile of the
+    /// recent gaps between a round's first push and each later push of the
+    /// same round, late pushes included (`ArrivalGaps`). Still capped by
+    /// `grace_ms`. 0 = off.
+    pub grace_arrival_quantile: f64,
+    /// Terminal grace, in ms: the last round of each fragment waits up to
+    /// this long for every expected member (not capped by `grace_ms`). No
+    /// later round of that fragment exists to carry a late push, so without
+    /// it a late delta of a last round never reaches the final parameters.
+    /// 0 = off.
+    pub terminal_grace_ms: u64,
     /// Fragment rounds in flight at once (two by default, matching the
     /// default overlap budget τ=2). While one round sits in its quorum/grace window,
     /// the next fragment's pull is already out — sync latency overlaps
@@ -107,6 +121,10 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
+    /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
+    /// below `total_steps`. Empty: none.
+    pub checkpoint_at_steps: Vec<u64>,
     /// Policy-sweep only: persist each per-round checkpoint on a blocking
     /// writer instead of the scheduler, and broadcast that round only after
     /// the write is durable. Merge results, versions, and checkpoint bytes
@@ -174,6 +192,12 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// S27 P2 task dispenser (`dispense.rs`): islands claim the rows they
+    /// train over TASK_* connections. Hands out data only, never changes a
+    /// merge, so it is not in the semantic profile hash. None: off.
+    pub dispense: Option<crate::dispense::DispenseConfig>,
+    /// JSONL log of every dispenser event (`task-dispense.jsonl`).
+    pub dispense_log: Option<std::path::PathBuf>,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -182,6 +206,9 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
+const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
+const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
+const EVAL_CHECKPOINTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-eval-checkpoints-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -227,6 +254,28 @@ impl Config {
         // Appended only when on, so every existing hash stays unchanged.
         if self.final_cut_manifest_only {
             encoded.extend_from_slice(FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN);
+        }
+        // Appended only when a floor is on, so every existing hash stays unchanged.
+        if self.grace_min_ms > 0 || self.grace_arrival_quantile > 0.0 {
+            encoded.extend_from_slice(GRACE_FLOOR_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&self.grace_min_ms.to_le_bytes());
+            encoded.extend_from_slice(&self.grace_arrival_quantile.to_bits().to_le_bytes());
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.terminal_grace_ms > 0 {
+            encoded.extend_from_slice(TERMINAL_GRACE_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&self.terminal_grace_ms.to_le_bytes());
+        }
+        // Evaluation checkpoints change no merge, but a step that comes due
+        // during the previous write stalls the scheduler, and the list sits
+        // beside the checkpoint settings above. Appended only when set, so
+        // every existing hash stays unchanged.
+        if !self.checkpoint_at_steps.is_empty() {
+            encoded.extend_from_slice(EVAL_CHECKPOINTS_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&(self.checkpoint_at_steps.len() as u64).to_le_bytes());
+            for step in &self.checkpoint_at_steps {
+                encoded.extend_from_slice(&step.to_le_bytes());
+            }
         }
         Sha256::digest(encoded).into()
     }
@@ -300,6 +349,8 @@ struct Group {
     msg_id: AtomicU64,
     rr: AtomicUsize,
     reasm: Mutex<HashMap<u64, PartialMsg>>,
+    /// Wire bytes of this learner (shared by every generation of the learner).
+    wire: Arc<WireCounter>,
 }
 
 impl Group {
@@ -606,6 +657,8 @@ struct RegistryState {
     /// Where the membership record (syncer epoch, retired generations) is
     /// persisted next to the checkpoint; None: not persisted.
     membership_record: Option<std::path::PathBuf>,
+    /// The task dispenser (S27 P2); its record is a checkpoint sidecar.
+    dispense: Option<Arc<crate::dispense_service::DispenseService>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -739,6 +792,27 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The task dispenser of `cfg` (S27 P2): restored from the record next to
+/// the checkpoint on `--resume`, which retires every island process of the
+/// record and puts their unreported positions back first.
+fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
+    let Some(dispense) = cfg.dispense.clone() else { return Ok(None) };
+    if cfg.shard.index != 0 {
+        bail!("--dispense runs on shard 0 of a sharded head only");
+    }
+    let record = cfg.checkpoint_path.as_deref().map(crate::dispense_service::record_path);
+    let restore = record.as_deref().filter(|p| cfg.resume && p.exists());
+    let service = crate::dispense_service::DispenseService::new(
+        dispense,
+        cfg.dispense_log.clone(),
+        cfg.syncer_epoch,
+        cfg.island_hmac_key.clone(),
+        restore,
+    )?;
+    info!(restored = restore.is_some(), "task dispenser on");
+    Ok(Some(Arc::new(service)))
+}
+
 /// Registry membership for `cfg`: on resume the persisted record restores
 /// the syncer epoch and the retired generations; the configured epoch only
 /// raises the restored one.
@@ -771,6 +845,109 @@ fn adaptive_grace(
     let Some(step) = step_secs else { return cap };
     let slack = tau * step - quorum_secs - sync_secs;
     Duration::from_secs_f64((gamma * slack).max(0.0)).min(cap)
+}
+
+/// Grace window of a round that just reached quorum and the floor in it:
+/// the larger of the adaptive window and the floor, capped by `grace_ms`.
+/// A `terminal` round (the last round of its fragment) waits at least
+/// `terminal_grace_ms`, which the cap does not bound.
+fn round_grace(
+    cfg: &Config,
+    terminal: bool,
+    step_secs: Option<f64>,
+    quorum_secs: f64,
+    sync_secs: f64,
+    gaps: &ArrivalGaps,
+) -> (Duration, Duration) {
+    let cap = Duration::from_millis(cfg.grace_ms);
+    let adaptive =
+        adaptive_grace(cfg.grace_tau, cfg.grace_gamma, step_secs, quorum_secs, sync_secs, cap);
+    let mut floor = grace_floor(cfg.grace_min_ms, cfg.grace_arrival_quantile, gaps);
+    let mut grace = adaptive.max(floor).min(cap);
+    if terminal {
+        let terminal_grace = Duration::from_millis(cfg.terminal_grace_ms);
+        floor = floor.max(terminal_grace);
+        grace = grace.max(terminal_grace);
+    }
+    (grace, floor)
+}
+
+/// Whether step `t` is the last round of its fragment within `total_steps`.
+fn is_terminal_round(schedule: &crate::shard::ShardSchedule, t: u64, total_steps: u64) -> bool {
+    schedule.next_merge_of_fragment(t) > total_steps
+}
+
+/// Floor of the grace window (`--grace-min-ms`, `--grace-arrival-quantile`).
+/// The adaptive window sizes the wait from the learners' step time minus the
+/// time the round took to reach quorum; with a deep pipeline a round opens
+/// long before any push, so that slack is near zero even when the islands
+/// deliver the same fragment seconds apart. The floor waits for that gap.
+fn grace_floor(min_ms: u64, quantile: f64, gaps: &ArrivalGaps) -> Duration {
+    let measured = (quantile > 0.0)
+        .then(|| gaps.quantile(quantile))
+        .flatten()
+        .map_or(Duration::ZERO, Duration::from_secs_f64);
+    Duration::from_millis(min_ms).max(measured)
+}
+
+/// Gaps kept for the arrival quantile (about P/H rounds of history at P=64).
+const ARRIVAL_GAP_WINDOW: usize = 64;
+/// First arrivals remembered for late pushes, oldest dropped first.
+const ARRIVAL_FIRSTS_KEPT: usize = 512;
+
+/// Recent gaps between the first accepted push of a round `(step, fragment)`
+/// and each later push of that round, whether it joined the round or came
+/// after the round closed (a late push). Only the grace floor reads them.
+#[derive(Default)]
+struct ArrivalGaps {
+    gaps: std::collections::VecDeque<f64>,
+    firsts: BTreeMap<(u64, usize), Instant>,
+}
+
+impl ArrivalGaps {
+    /// An accepted push of an open round: the first one starts the clock,
+    /// each later one is a gap.
+    fn note_accepted(&mut self, step: u64, fragment: usize, now: Instant) {
+        match self.firsts.get(&(step, fragment)) {
+            Some(first) => self.note(now.saturating_duration_since(*first)),
+            None => {
+                self.firsts.insert((step, fragment), now);
+                while self.firsts.len() > ARRIVAL_FIRSTS_KEPT {
+                    self.firsts.pop_first();
+                }
+            }
+        }
+    }
+
+    /// A push for a round that is no longer open.
+    fn note_late(&mut self, step: u64, fragment: usize, now: Instant) {
+        if let Some(first) = self.firsts.get(&(step, fragment)) {
+            self.note(now.saturating_duration_since(*first));
+        }
+    }
+
+    /// A relaunched attempt starts its own clock.
+    fn forget(&mut self, step: u64, fragment: usize) {
+        self.firsts.remove(&(step, fragment));
+    }
+
+    fn note(&mut self, gap: Duration) {
+        if self.gaps.len() == ARRIVAL_GAP_WINDOW {
+            self.gaps.pop_front();
+        }
+        self.gaps.push_back(gap.as_secs_f64());
+    }
+
+    /// Nearest-rank quantile of the kept gaps; None before the first gap.
+    fn quantile(&self, q: f64) -> Option<f64> {
+        if self.gaps.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<f64> = self.gaps.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        let rank = (q.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
+        Some(sorted[rank.clamp(1, sorted.len()) - 1])
+    }
 }
 
 /// Round-launch floor: the manual ms floor, raised to H·ξ_step/P once a
@@ -1015,6 +1192,39 @@ fn validate_config(cfg: &Config) -> Result<()> {
             bail!("--async-checkpoint does not support --learner-budget-steps");
         }
     }
+    validate_eval_checkpoints(cfg)
+}
+
+/// `--checkpoint-at-steps` is for fragment rounds that write their
+/// checkpoint at the quiescent cut after a round (`publish_round`).
+fn validate_eval_checkpoints(cfg: &Config) -> Result<()> {
+    if cfg.checkpoint_at_steps.is_empty() {
+        return Ok(());
+    }
+    if cfg.checkpoint_path.is_none() {
+        bail!("--checkpoint-at-steps requires --checkpoint-path (it writes <checkpoint-path>.step-<t>)");
+    }
+    crate::eval_checkpoint::validate_steps(&cfg.checkpoint_at_steps, cfg.total_steps)?;
+    // A sweep checkpoint is the commit record of its broadcast; with
+    // --async-checkpoint its own snapshot writer is already in flight.
+    if cfg.policy_sweep_fragments.is_some() {
+        bail!(
+            "--checkpoint-at-steps does not support --policy-sweep-fragments: sweep checkpoints \
+             are commit records written before their broadcast"
+        );
+    }
+    if checkpoint_before_broadcast(cfg) {
+        bail!(
+            "--checkpoint-at-steps does not support --checkpoint-every 1: every step is already \
+             written to --checkpoint-path before its broadcast, which stalls the scheduler anyway"
+        );
+    }
+    if cfg.shard.is_sharded() {
+        bail!(
+            "--checkpoint-at-steps does not support --shard-count > 1: shards advance on their \
+             own, so no shard holds the whole model at one step"
+        );
+    }
     Ok(())
 }
 
@@ -1242,6 +1452,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
         .with_context(|| format!("bind port {}", cfg.port))?;
+    tokio::spawn(wire_bytes_logger());
     let semantic_profile_sha256: String = semantic_profile_hash
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -1255,8 +1466,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
+    let dispense = initial_dispense(&cfg)?;
     let registry: Registry = Arc::new(Mutex::new(RegistryState {
         membership_record,
+        dispense: dispense.clone(),
         ..RegistryState::new(membership)
     }));
     registry.lock().unwrap().persist_membership();
@@ -1287,6 +1500,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
                     let hello_auth = hello_auth.clone();
+                    let dispense = dispense.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -1299,6 +1513,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             tx,
                             budget_cutoff,
                             hello_auth,
+                            dispense,
                         )
                         .await
                         {
@@ -1574,12 +1789,14 @@ async fn handle_connection(
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
+    dispense: Option<Arc<crate::dispense_service::DispenseService>>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {other}"),
+        MSG_TASK_HELLO => Ok(4096),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {other}"),
     })
     .await
     {
@@ -1697,6 +1914,7 @@ async fn handle_connection(
                 msg_id: AtomicU64::new(0),
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
+                wire: wire_counter(learner_id),
             });
             let registration =
                 { registry.lock().unwrap().register_group_with(group.clone(), Instant::now(), ext) };
@@ -1728,7 +1946,7 @@ async fn handle_connection(
                     bail!(message);
                 }
             };
-            tokio::spawn(writer_task(wr, rx));
+            tokio::spawn(writer_task(wr, rx, group.wire.clone()));
             info!(
                 learner_id,
                 generation, num_streams, "learner connected (layout: {} fragments)", num_fragments
@@ -1750,6 +1968,9 @@ async fn handle_connection(
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             registry.lock().unwrap().unregister(member);
             event_tx.send(Event::Disconnected { member }).await.ok();
+            if let Some(line) = wire_bytes_line(&wire_bytes_snapshot()) {
+                info!(learner_id, generation, "learner control connection closed; wire bytes per learner: {line}");
+            }
             res
         }
         MSG_DATA_HELLO => {
@@ -1801,7 +2022,7 @@ async fn handle_connection(
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                 bail!(message);
             }
-            tokio::spawn(writer_task(wr, rx));
+            tokio::spawn(writer_task(wr, rx, group.wire.clone()));
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
         MSG_BW_PROBE => {
@@ -1824,7 +2045,15 @@ async fn handle_connection(
                 .await
                 .context("BW_PROBE timed out")?
         }
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {t}"),
+        MSG_TASK_HELLO => match dispense {
+            Some(service) => crate::dispense_service::serve(rd, wr, &first.payload, service).await,
+            None => {
+                let message = "dispense refused: this syncer has no task dispenser (--dispense)";
+                let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                bail!(message)
+            }
+        },
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {t}"),
     }
 }
 
@@ -1908,7 +2137,80 @@ async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> R
     Ok(())
 }
 
-async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>) {
+/// Bytes on the wire per learner (every connection generation and stream):
+/// frames this syncer wrote to an island (`sent`, the downlink a head pays
+/// egress for) and frames it read from it (`recv`), 13-byte frame header
+/// included. Bandwidth probes and refused connections are not counted.
+/// Lock-free on the frame path: each connection holds its learner's counter.
+#[derive(Debug, Default)]
+struct WireCounter {
+    sent: AtomicU64,
+    recv: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WireBytes {
+    sent: u64,
+    recv: u64,
+}
+
+/// Interval of the `wire bytes per learner` log line (only when a count changed).
+const WIRE_BYTES_LOG_EVERY: Duration = Duration::from_secs(60);
+
+fn wire_counters() -> &'static Mutex<BTreeMap<u32, Arc<WireCounter>>> {
+    static WIRE: std::sync::OnceLock<Mutex<BTreeMap<u32, Arc<WireCounter>>>> = std::sync::OnceLock::new();
+    WIRE.get_or_init(Default::default)
+}
+
+/// The counter of `learner_id`, created on first use (looked up once per connection).
+fn wire_counter(learner_id: u32) -> Arc<WireCounter> {
+    wire_counters().lock().unwrap().entry(learner_id).or_default().clone()
+}
+
+fn wire_bytes_snapshot() -> BTreeMap<u32, WireBytes> {
+    wire_counters()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(learner, c)| {
+            (*learner, WireBytes { sent: c.sent.load(Ordering::Relaxed), recv: c.recv.load(Ordering::Relaxed) })
+        })
+        .collect()
+}
+
+/// `learner 0 sent=<B> recv=<B>; learner 1 ...`, None before any frame.
+fn wire_bytes_line(counts: &BTreeMap<u32, WireBytes>) -> Option<String> {
+    if counts.is_empty() {
+        return None;
+    }
+    let total = counts.values().fold(WireBytes::default(), |acc, c| WireBytes {
+        sent: acc.sent + c.sent,
+        recv: acc.recv + c.recv,
+    });
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(learner, c)| format!("learner {learner} sent={} recv={}", c.sent, c.recv))
+        .collect();
+    Some(format!("{}; total sent={} recv={}", parts.join("; "), total.sent, total.recv))
+}
+
+/// Log the per-learner wire bytes every [`WIRE_BYTES_LOG_EVERY`] while they change.
+async fn wire_bytes_logger() {
+    let mut last: Option<BTreeMap<u32, WireBytes>> = None;
+    loop {
+        tokio::time::sleep(WIRE_BYTES_LOG_EVERY).await;
+        let counts = wire_bytes_snapshot();
+        if last.as_ref() == Some(&counts) {
+            continue;
+        }
+        if let Some(line) = wire_bytes_line(&counts) {
+            info!("wire bytes per learner: {line}");
+        }
+        last = Some(counts);
+    }
+}
+
+async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>, wire: Arc<WireCounter>) {
     while let Some(frame) = rx.recv().await {
         let len: usize = frame.parts.iter().map(|p| p.len()).sum();
         let mut header = [0u8; 13];
@@ -1923,7 +2225,9 @@ async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>) {
             std::io::Result::Ok(())
         };
         match tokio::time::timeout(WRITE_TIMEOUT, write).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                wire.sent.fetch_add(len as u64 + 13, Ordering::Relaxed);
+            }
             Ok(Err(e)) => {
                 warn!("write failed: {e}");
                 return;
@@ -1975,6 +2279,7 @@ async fn read_loop(
                 return Err(error);
             }
         };
+        group.wire.recv.fetch_add(frame.payload.len() as u64 + 13, Ordering::Relaxed);
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
                 Ok(Some((inner, recv_seconds))) => {
@@ -2543,6 +2848,9 @@ async fn scheduler(
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
                     let mut st = new_state_for(&group, &cfg)?;
+                    if let Some(service) = registry.lock().unwrap().dispense.clone() {
+                        st.checkpoint_sidecars.push(service);
+                    }
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
                             if let Err(error) = st.load_checkpoint(path) {
@@ -2703,6 +3011,7 @@ async fn scheduler(
     let num_fragments = schedule.owned().len() as u64;
     let last_step = schedule.last_step(cfg.total_steps);
     let mut step_rates = StepRates::default();
+    let mut arrival_gaps = ArrivalGaps::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
     // Once a marked run is actually going to make more progress, the old
@@ -2771,6 +3080,12 @@ async fn scheduler(
     let mut late_carry = LateCarry::new(cfg.max_base_lag, fixed_roster);
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
+    // --checkpoint-at-steps: evaluation copies written off the scheduler.
+    let mut eval_checkpoints = crate::eval_checkpoint::EvalCheckpoints::new(
+        &cfg.checkpoint_at_steps,
+        cfg.checkpoint_path.as_deref(),
+        st.global_step,
+    )?;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
@@ -2870,6 +3185,9 @@ async fn scheduler(
                     bail!("fragment {p} lost its busy ownership at commit");
                 }
             }
+            // The cut at the step just committed; later rounds keep merging
+            // while an evaluation copy of it is written.
+            eval_checkpoints.after_commit(&st).await?;
             next_commit_t = schedule.step_after(next_commit_t);
             if dynamic {
                 write_pool_status(&cfg, &registry, st.global_step, "running");
@@ -2950,14 +3268,9 @@ async fn scheduler(
             if r.grace_deadline.is_none() && r.quorum_reached() {
                 let step_secs = step_rates.max_step_secs_for(&r.expected_members);
                 let quorum_secs = r.started.elapsed().as_secs_f64();
-                let grace = adaptive_grace(
-                    cfg.grace_tau,
-                    cfg.grace_gamma,
-                    step_secs,
-                    quorum_secs,
-                    last_sync_secs,
-                    Duration::from_millis(cfg.grace_ms),
-                );
+                let terminal = is_terminal_round(&schedule, r.t, cfg.total_steps);
+                let (grace, floor) =
+                    round_grace(&cfg, terminal, step_secs, quorum_secs, last_sync_secs, &arrival_gaps);
                 if r.pushes.len() < r.expected_members.len() {
                     info!(
                         step = r.t,
@@ -2966,6 +3279,8 @@ async fn scheduler(
                         quorum_secs,
                         sync_secs = last_sync_secs,
                         grace_ms = grace.as_millis() as u64,
+                        grace_floor_ms = floor.as_millis() as u64,
+                        terminal,
                         "grace window armed"
                     );
                 }
@@ -3072,6 +3387,7 @@ async fn scheduler(
                         }
                     }
                     r.pushes.clear();
+                    arrival_gaps.forget(r.t, r.p);
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
                     r.soft_deadline = cfg.membership.soft_deadline.map(|soft| r.started + soft);
@@ -3350,6 +3666,12 @@ async fn scheduler(
                     // peer whose pushes keep missing their round is exactly
                     // the one the grace window must be sized for.
                     step_rates.note(member, local_step, Instant::now());
+                    if !inflight
+                        .iter()
+                        .any(|round| round.t == global_step && round.p == fragment_id as usize)
+                    {
+                        arrival_gaps.note_late(global_step, fragment_id as usize, Instant::now());
+                    }
                     let base_version = push.base_version;
                     if let Some(carry) = late_carry.as_mut() {
                         if carry.reuses_anchor(member, &push) {
@@ -3407,6 +3729,7 @@ async fn scheduler(
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
                         PushDisposition::Accepted => {
+                            arrival_gaps.note_accepted(global_step, fragment_id as usize, Instant::now());
                             if let Some(carry) = late_carry.as_mut() {
                                 carry.note_gathered(member, fragment_id as usize, base_version);
                             }
@@ -3740,6 +4063,7 @@ async fn scheduler(
         // branch has had its bounded opportunity to quiesce.
         drain_result?;
         reports_result?;
+        eval_checkpoints.finish().await?;
         save_budget_checkpoint(&cfg, &st)?;
         info!(
             cancelled_inflight,
@@ -3763,9 +4087,21 @@ async fn scheduler(
             busy_fragments
         );
     }
+    // A late push queued for a fragment whose last round already merged has
+    // no round left to join (`--terminal-grace-ms` keeps last rounds open).
+    if let Some(carry) = late_carry.as_ref() {
+        let dropped: usize = carry.queued.values().map(Vec::len).sum();
+        if dropped > 0 {
+            let mut fragments: Vec<usize> = carry.queued.keys().copied().collect();
+            fragments.sort_unstable();
+            warn!(dropped, fragments = ?fragments, "late pushes left out of the final cut: no later round");
+        }
+    }
     // Explicitly drain and health-check every SVD worker before a checkpoint
     // or marker can publish the terminal cut.
     st.drain_iso_backend().await?;
+    // The final checkpoint never shares the disk with an evaluation copy.
+    eval_checkpoints.finish().await?;
 
     // The outer loop is now quiescent: every launched round has completed
     // and every computed result has committed in strict t order.
@@ -6328,6 +6664,23 @@ mod hello_auth_tests {
     }
 
     #[test]
+    fn wire_bytes_line_lists_each_learner_and_the_total() {
+        let mut counts = BTreeMap::new();
+        assert_eq!(wire_bytes_line(&counts), None);
+        counts.insert(1, WireBytes { sent: 30, recv: 4 });
+        counts.insert(0, WireBytes { sent: 10, recv: 2 });
+        assert_eq!(
+            wire_bytes_line(&counts).unwrap(),
+            "learner 0 sent=10 recv=2; learner 1 sent=30 recv=4; total sent=40 recv=6"
+        );
+        let counter = wire_counter(4_000_000_001);
+        counter.sent.fetch_add(7, Ordering::Relaxed);
+        wire_counter(4_000_000_001).sent.fetch_add(6, Ordering::Relaxed);
+        counter.recv.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(wire_bytes_snapshot().get(&4_000_000_001), Some(&WireBytes { sent: 13, recv: 5 }));
+    }
+
+    #[test]
     fn mac_covers_the_compat_group_trailer_and_comes_last() {
         // body = ... num_streams:u16 | b"YCG1" | u32 n | n bytes ; then 32-byte MAC
         let mut rest = 0u16.to_le_bytes().to_vec();
@@ -6369,6 +6722,7 @@ mod hello_auth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
 
@@ -6482,6 +6836,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         })
     }
 
@@ -6504,6 +6859,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         })
     }
 
@@ -6535,6 +6891,7 @@ mod tests {
             msg_id: AtomicU64::new(0),
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
         });
         (group, if data_stream { data_rx } else { control_rx })
     }
@@ -6678,6 +7035,9 @@ mod tests {
             grace_ms: 0,
             grace_gamma: 0.5,
             grace_tau: 0.0,
+            grace_min_ms: 0,
+            grace_arrival_quantile: 0.0,
+            terminal_grace_ms: 0,
             pipeline: 1,
             min_round_interval_ms: 0,
             sync_interval_steps: 0.0,
@@ -6693,6 +7053,7 @@ mod tests {
             final_state: None,
             checkpoint_path: None,
             checkpoint_every: 0,
+            checkpoint_at_steps: Vec::new(),
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -6711,11 +7072,15 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            dispense: None,
+            dispense_log: None,
             shard: Default::default(),
         }
     }
 
     const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
+    const GRACE_FLOOR_VECTOR: &str = "6f9104e302f894575fe2203cfe91a93ff37d16e37b4e75c4367b060d13748d12";
+    const TERMINAL_GRACE_VECTOR: &str = "6f40c5c1c02e6c63b99bf5aa77fab924fed928a42a9e0d88811583a19fc1aa39";
 
     #[test]
     fn semantic_profile_hash_matches_the_python_canonical_vector() {
@@ -6769,6 +7134,26 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
+        // A grace floor appends its own block; off keeps the hash. Python
+        // vector in tests/test_s27_grace_floor.py.
+        config.final_cut_manifest_only = false;
+        config.grace_arrival_quantile = 0.0;
+        config.grace_min_ms = 0;
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.grace_min_ms = 15_000;
+        config.grace_arrival_quantile = 0.9;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, GRACE_FLOOR_VECTOR);
+        config.grace_min_ms = 0;
+        assert_ne!(config.semantic_profile_hash(), original);
+        // So does a terminal grace (same Python test file).
+        config.grace_arrival_quantile = 0.0;
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.terminal_grace_ms = 120_000;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, TERMINAL_GRACE_VECTOR);
     }
 
     #[test]
@@ -7754,6 +8139,272 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    // --checkpoint-at-steps (crate::eval_checkpoint).
+
+    /// A fragment round at `step` of a two-fragment state, on the fragment's
+    /// current version.
+    fn eval_test_round(state: &GlobalState, step: u64, learner: Member) -> Round {
+        let fragment = ((step - 1) % 2) as usize;
+        let mut round = sweep_test_round(step, fragment, 1, step, learner);
+        round.base_version = state.versions[fragment];
+        for push in round.pushes.values_mut() {
+            push.base_version = round.base_version;
+        }
+        round
+    }
+
+    /// Holds every eval write before it starts: the writer reports its step
+    /// on the returned receiver, and one message on the sender lets it go.
+    fn eval_write_gate() -> (BeforeWrite, std::sync::mpsc::Receiver<u64>, std::sync::mpsc::Sender<()>) {
+        let (entered, writes) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let gate: BeforeWrite = Arc::new(move |step| {
+            entered.send(step).unwrap();
+            released.lock().unwrap().recv().unwrap();
+        });
+        (gate, writes, release)
+    }
+
+    fn eval_test_config(checkpoint: &std::path::Path, steps: &[u64]) -> Config {
+        let mut config = round_test_config(6);
+        config.checkpoint_path = Some(checkpoint.to_path_buf());
+        config.checkpoint_every = 8;
+        config.checkpoint_at_steps = steps.to_vec();
+        validate_config(&config).unwrap();
+        config
+    }
+
+    const WRITER_WAIT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn eval_checkpoint_holds_its_step_while_later_rounds_merge_and_broadcast() {
+        let directory = unique_test_directory("eval-checkpoint-cut");
+        let checkpoint = directory.join("state.ckpt");
+        let config = eval_test_config(&checkpoint, &[2]);
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut state = two_fragment_streaming_state();
+        let (gate, writes, release) = eval_write_gate();
+        let mut evals = EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), 0)
+            .unwrap()
+            .with_before_write(gate);
+        let synchronous = directory.join("synchronous-at-2.ckpt");
+        let mut sync_seconds = 0.0;
+        for step in 1..=4u64 {
+            let round = eval_test_round(&state, step, learner);
+            complete_round(&config, &mut state, &registry, &mut sync_seconds, round).await.unwrap();
+            if step == 2 {
+                state.save_checkpoint(&synchronous).unwrap();
+            }
+            evals.after_commit(&state).await.unwrap();
+            if step == 2 {
+                assert_eq!(writes.recv_timeout(WRITER_WAIT).unwrap(), 2);
+            }
+            // Steps 3 and 4 merge and broadcast while the copy of step 2 is
+            // still being written.
+            assert_eq!(chunked_inner_type(&frames.try_recv().unwrap()), MSG_BCAST_FRAGMENT);
+            assert_eq!(state.global_step, step);
+            assert_eq!(evals.is_writing(), step >= 2);
+        }
+        let written = eval_checkpoint_path(&checkpoint, 2);
+        assert_eq!(written, directory.join("state.ckpt.step-2"));
+        assert!(!written.exists(), "the file appears only once it is complete");
+        release.send(()).unwrap();
+        evals.finish().await.unwrap();
+        assert!(!evals.is_writing());
+        assert_eq!(std::fs::read(&written).unwrap(), std::fs::read(&synchronous).unwrap());
+        assert_ne!(state.encode_checkpoint().unwrap(), std::fs::read(&synchronous).unwrap());
+        let mut restored = two_fragment_streaming_state();
+        restored.load_checkpoint(&written).unwrap();
+        assert_eq!((restored.global_step, restored.versions.clone()), (2, vec![1, 2]));
+        assert!(!directory.join("state.ckpt.step-2.tmp").exists());
+        assert!(!checkpoint.exists(), "an eval copy never writes --checkpoint-path");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn one_eval_write_at_a_time_and_the_terminal_waits_for_it() {
+        let directory = unique_test_directory("eval-checkpoint-serial");
+        let checkpoint = directory.join("state.ckpt");
+        let config = eval_test_config(&checkpoint, &[1, 2]);
+        let learner = member(0, 30);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut state = two_fragment_streaming_state();
+        let (gate, writes, release) = eval_write_gate();
+        let mut evals = EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), 0)
+            .unwrap()
+            .with_before_write(gate);
+        let mut sync_seconds = 0.0;
+        let mut cuts = Vec::new();
+        for step in 1..=2u64 {
+            let round = eval_test_round(&state, step, learner);
+            complete_round(&config, &mut state, &registry, &mut sync_seconds, round).await.unwrap();
+            cuts.push(state.encode_checkpoint().unwrap());
+            if step == 2 {
+                // Step 2 is due while step 1 is still being written: it waits.
+                assert!(evals.is_writing());
+                let releaser = std::thread::spawn({
+                    let release = release.clone();
+                    move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        let at = Instant::now();
+                        release.send(()).unwrap();
+                        at
+                    }
+                });
+                evals.after_commit(&state).await.unwrap();
+                assert!(Instant::now() >= releaser.join().unwrap());
+                assert!(eval_checkpoint_path(&checkpoint, 1).exists());
+            } else {
+                evals.after_commit(&state).await.unwrap();
+            }
+            assert_eq!(writes.recv_timeout(WRITER_WAIT).unwrap(), step);
+        }
+        // The terminal cut waits for the running write of step 2.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let at = Instant::now();
+            release.send(()).unwrap();
+            at
+        });
+        evals.finish().await.unwrap();
+        assert!(Instant::now() >= releaser.join().unwrap());
+        for (step, cut) in [1u64, 2].into_iter().zip(&cuts) {
+            assert_eq!(&std::fs::read(eval_checkpoint_path(&checkpoint, step)).unwrap(), cut);
+        }
+        // Nothing is left to wait for.
+        evals.finish().await.unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn resume_reads_only_the_checkpoint_path_and_rewrites_eval_steps_after_its_cut() {
+        let directory = unique_test_directory("eval-checkpoint-resume");
+        let checkpoint = directory.join("state.ckpt");
+        let mut config = eval_test_config(&checkpoint, &[1, 3]);
+        config.resume = true;
+        let learner = member(0, 30);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut sync_seconds = 0.0;
+        let mut before_crash = two_fragment_streaming_state();
+        for step in 1..=2u64 {
+            let round = eval_test_round(&before_crash, step, learner);
+            complete_round(&config, &mut before_crash, &registry, &mut sync_seconds, round)
+                .await
+                .unwrap();
+        }
+        before_crash.save_checkpoint(&checkpoint).unwrap();
+        // Stray eval files: an older step, the step the resumed run redoes,
+        // and an unfinished temporary.
+        let stale = b"not a checkpoint".as_slice();
+        for path in [
+            eval_checkpoint_path(&checkpoint, 1),
+            eval_checkpoint_path(&checkpoint, 3),
+            directory.join("state.ckpt.step-3.tmp"),
+        ] {
+            std::fs::write(path, stale).unwrap();
+        }
+        // None of the files the syncer reads next to the checkpoint is one.
+        for sidecar in [
+            checkpoint.with_extension("tmp"),
+            profile_record_path(&checkpoint),
+            membership_record_path(&checkpoint),
+            crate::state::final_marker_path(&checkpoint),
+        ] {
+            assert!(!sidecar.to_string_lossy().contains(".step-"), "{}", sidecar.display());
+        }
+        check_resume_checkpoint(&config).unwrap();
+        let mut resumed = two_fragment_streaming_state();
+        resumed.load_checkpoint(config.checkpoint_path.as_ref().unwrap()).unwrap();
+        assert_eq!(resumed.encode_checkpoint().unwrap(), before_crash.encode_checkpoint().unwrap());
+        // Step 1 is behind the resumed cut (skipped, its file untouched);
+        // step 3 is written again over the stale file.
+        let mut evals =
+            EvalCheckpoints::new(&config.checkpoint_at_steps, Some(&checkpoint), resumed.global_step)
+                .unwrap();
+        let round = eval_test_round(&resumed, 3, learner);
+        complete_round(&config, &mut resumed, &registry, &mut sync_seconds, round).await.unwrap();
+        evals.after_commit(&resumed).await.unwrap();
+        evals.finish().await.unwrap();
+        assert_eq!(std::fs::read(eval_checkpoint_path(&checkpoint, 1)).unwrap(), stale);
+        assert_eq!(
+            std::fs::read(eval_checkpoint_path(&checkpoint, 3)).unwrap(),
+            resumed.encode_checkpoint().unwrap()
+        );
+        assert!(!directory.join("state.ckpt.step-3.tmp").exists());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn eval_checkpoint_steps_are_checked_and_unsupported_profiles_refused() {
+        let error = |config: &Config| format!("{:#}", validate_config(config).unwrap_err());
+        let eval = |steps: &[u64]| {
+            let mut config = round_test_config(10);
+            config.checkpoint_path = Some(std::path::PathBuf::from("state.ckpt"));
+            config.checkpoint_at_steps = steps.to_vec();
+            config
+        };
+        // Any periodic interval but 1, including none, takes eval steps.
+        for every in [0, 2, 8, 1000] {
+            let mut config = eval(&[1, 4, 9]);
+            config.checkpoint_every = every;
+            validate_config(&config).unwrap();
+        }
+        let mut config = eval(&[3]);
+        config.checkpoint_path = None;
+        assert!(error(&config).contains("requires --checkpoint-path"));
+        for steps in [vec![0, 3], vec![3, 3], vec![7, 3]] {
+            assert!(error(&eval(&steps)).contains("positive and strictly increasing"), "{steps:?}");
+        }
+        assert!(error(&eval(&[3, 10])).contains("below --total-steps 10"));
+        let mut config = eval(&[3]);
+        config.checkpoint_every = 1;
+        assert!(error(&config).contains("does not support --checkpoint-every 1"));
+        let mut config = sweep_test_config(2, 10);
+        config.checkpoint_at_steps = vec![4];
+        assert!(error(&config).contains("does not support --policy-sweep-fragments"));
+        let mut config = eval(&[3]);
+        config.shard = crate::shard::ShardPlan::new(0, 2).unwrap();
+        assert!(error(&config).contains("does not support --shard-count > 1"));
+        // Without steps nothing changes.
+        validate_config(&eval(&[])).unwrap();
+    }
+
+    const EVAL_CHECKPOINTS_BASE_VECTOR: &str = "bcbef730a6bc46e6c1901e90b6ce5a5382b035292863ed5cfea0285da408cafe";
+    const EVAL_CHECKPOINTS_VECTOR: &str = "2e395d5104892c355f6cd2609bcf3f5011a26407848fb805b5e262bf912584f3";
+
+    #[test]
+    fn eval_checkpoint_steps_append_to_the_profile_hash_like_python() {
+        // Python: tests/test_s27_eval_checkpoints.py.
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 8;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        let hex = |config: &Config| -> String {
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect()
+        };
+        assert_eq!(hex(&config), EVAL_CHECKPOINTS_BASE_VECTOR);
+        config.checkpoint_at_steps = vec![3, 5];
+        assert_eq!(hex(&config), EVAL_CHECKPOINTS_VECTOR);
+        config.checkpoint_at_steps = vec![3, 6];
+        assert_ne!(hex(&config), EVAL_CHECKPOINTS_VECTOR);
+    }
+
     #[tokio::test]
     async fn policy_sweep_checkpoint_resume_mid_sweep_does_not_double_account() {
         let directory = std::env::temp_dir().join(format!(
@@ -8359,6 +9010,114 @@ mod tests {
         );
         // Huge slack → capped.
         assert_eq!(adaptive_grace(2.0, 0.8, Some(60.0), 0.0, 0.0, CAP), CAP);
+    }
+
+    #[test]
+    fn arrival_gaps_measure_joined_and_late_pushes() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        assert_eq!(gaps.quantile(0.9), None);
+        gaps.note_accepted(9, 8, start); // first push starts the clock
+        gaps.note_accepted(9, 8, start + Duration::from_secs(4)); // joined the round
+        gaps.note_late(9, 8, start + Duration::from_secs(16)); // after the round closed
+        gaps.note_late(10, 9, start + Duration::from_secs(30)); // round never seen: no gap
+        assert_eq!(gaps.quantile(0.5), Some(4.0));
+        assert_eq!(gaps.quantile(0.9), Some(16.0));
+        assert_eq!(gaps.quantile(1.0), Some(16.0));
+        // A relaunched attempt restarts its clock.
+        gaps.forget(9, 8);
+        gaps.note_accepted(9, 8, start + Duration::from_secs(40));
+        gaps.note_accepted(9, 8, start + Duration::from_secs(41));
+        assert_eq!(gaps.quantile(0.0), Some(1.0));
+    }
+
+    #[test]
+    fn arrival_gaps_keep_a_bounded_window() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        for step in 0..(ARRIVAL_GAP_WINDOW as u64 + 10) {
+            gaps.note_accepted(step, 0, start);
+            gaps.note_accepted(step, 0, start + Duration::from_secs(step));
+        }
+        assert_eq!(gaps.gaps.len(), ARRIVAL_GAP_WINDOW);
+        assert_eq!(gaps.quantile(0.0), Some(10.0)); // the 10 oldest gaps were dropped
+        for step in 0..(ARRIVAL_FIRSTS_KEPT as u64 + 5) {
+            gaps.note_accepted(1_000 + step, 1, start);
+        }
+        assert_eq!(gaps.firsts.len(), ARRIVAL_FIRSTS_KEPT);
+        assert!(!gaps.firsts.contains_key(&(1_000, 1))); // oldest first arrival forgotten
+    }
+
+    #[test]
+    fn terminal_rounds_are_the_last_round_of_each_fragment() {
+        let unsharded = crate::shard::ShardPlan::default().schedule(4).unwrap();
+        let terminal: Vec<u64> =
+            (1..=12).filter(|&t| is_terminal_round(&unsharded, t, 12)).collect();
+        assert_eq!(terminal, vec![9, 10, 11, 12]);
+        // A total that is not a multiple of P: fragment 3 last merges at step 8.
+        let terminal: Vec<u64> =
+            (1..=10).filter(|&t| is_terminal_round(&unsharded, t, 10)).collect();
+        assert_eq!(terminal, vec![7, 8, 9, 10]);
+        // Shard 1 of 2 owns fragments 2..4 and runs steps 3, 4, 7, 8, 11, 12.
+        let shard = crate::shard::ShardPlan::new(1, 2).unwrap().schedule(4).unwrap();
+        let terminal: Vec<u64> = (1..=12)
+            .filter(|&t| shard.owns_step(t) && is_terminal_round(&shard, t, 12))
+            .collect();
+        assert_eq!(terminal, vec![11, 12]);
+    }
+
+    #[test]
+    fn terminal_grace_holds_a_last_round_past_the_cap_and_is_off_by_default() {
+        let gaps = ArrivalGaps::default();
+        let mut config = round_test_config(8);
+        config.grace_ms = 30_000;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        // No slack: the adaptive window is 0 s for a terminal round too when off.
+        assert_eq!(round_grace(&config, true, Some(1.0), 5.0, 1.0, &gaps).0, Duration::ZERO);
+        config.terminal_grace_ms = 120_000;
+        assert_eq!(
+            round_grace(&config, true, Some(1.0), 5.0, 1.0, &gaps),
+            (Duration::from_secs(120), Duration::from_secs(120))
+        );
+        // Not a terminal round: unchanged.
+        assert_eq!(round_grace(&config, false, Some(1.0), 5.0, 1.0, &gaps).0, Duration::ZERO);
+    }
+
+    #[test]
+    fn grace_floor_takes_the_larger_bound_and_stays_off_by_default() {
+        let start = Instant::now();
+        let mut gaps = ArrivalGaps::default();
+        assert_eq!(grace_floor(0, 0.9, &gaps), Duration::ZERO); // no gap measured yet
+        assert_eq!(grace_floor(15_000, 0.9, &gaps), Duration::from_secs(15));
+        for (step, secs) in [(1u64, 2u64), (2, 25), (3, 30)] {
+            gaps.note_accepted(step, 0, start);
+            gaps.note_late(step, 0, start + Duration::from_secs(secs));
+        }
+        assert_eq!(grace_floor(0, 0.0, &gaps), Duration::ZERO); // off
+        assert_eq!(grace_floor(0, 0.5, &gaps), Duration::from_secs(25));
+        assert_eq!(grace_floor(40_000, 0.5, &gaps), Duration::from_secs(40));
+        // The arming site caps the larger of the adaptive window and the floor.
+        // E1-like inputs: τ·ξ_step − ξ_quorum − ξ_sync = 54 − 33.7 − 8.2 s,
+        // so the adaptive window alone is under 10 s.
+        let mut config = round_test_config(8);
+        config.grace_ms = 300_000;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        let (grace, floor) = round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps);
+        assert!(grace < Duration::from_secs(10));
+        assert_eq!(floor, Duration::ZERO);
+        config.grace_arrival_quantile = 0.9;
+        assert_eq!(round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps).0, Duration::from_secs(30));
+        config.grace_ms = 20_000; // the cap still bounds the floor
+        assert_eq!(round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps).0, Duration::from_secs(20));
+        config.grace_ms = 300_000;
+        config.grace_arrival_quantile = 0.0;
+        config.grace_min_ms = 45_000;
+        assert_eq!(
+            round_grace(&config, false, Some(27.0), 33.7, 8.2, &gaps),
+            (Duration::from_secs(45), Duration::from_secs(45))
+        );
     }
 
     #[test]

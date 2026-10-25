@@ -109,3 +109,53 @@ def test_dashboard_shows_hardware_record():
     view = red.page_view(now=2.0)
     assert view["islands"]["0"]["hardware"] == {"compat_group": "nvidia-h100",
                                                 "driver_version": "550.54", "cuda_version": "12.8"}
+
+
+def test_launch_compat_group_explicit_replaces_the_card_group():
+    # G-DF C8: `yeto launch --rl-compat-group` declares one group on every island (mixed cards)
+    assert catalog.launch_compat_group("H100") == "nvidia-h100"
+    assert catalog.launch_compat_group("H100", None) == "nvidia-h100"
+    assert catalog.launch_compat_group("H100", "nvidia-h200") == "nvidia-h200"
+    assert catalog.launch_compat_group("H200", "nvidia-h200") == "nvidia-h200"
+    with pytest.raises(ValueError):
+        catalog.launch_compat_group("H100", "H200")  # not '<vendor>-<card>' lower case
+    with pytest.raises(catalog.UnknownCardType):
+        catalog.launch_compat_group("NOT-A-CARD", "nvidia-h200")  # the card is still checked
+
+
+def test_launcher_exports_the_declared_group_to_each_island(capsys):
+    from types import SimpleNamespace
+
+    from yeto.launch.rl_island_task import _island_compat_group
+
+    spec = SimpleNamespace(gpu="H100")
+    assert _island_compat_group(SimpleNamespace(), spec, 1) == "nvidia-h100"
+    assert capsys.readouterr().err == ""
+    assert _island_compat_group(SimpleNamespace(rl_compat_group="nvidia-h200"), spec, 1) == "nvidia-h200"
+    err = capsys.readouterr().err
+    assert "island 1: --rl-compat-group nvidia-h200 replaces the card group nvidia-h100" in err
+    assert _island_compat_group(SimpleNamespace(rl_compat_group="nvidia-h200"), SimpleNamespace(gpu="H200"), 0) \
+        == "nvidia-h200"
+    assert capsys.readouterr().err == ""
+
+
+def test_launch_parser_accepts_rl_compat_group():
+    from yeto import cli
+
+    launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
+    actions = {opt: a for a in launch._actions for opt in a.option_strings}
+    assert actions["--rl-compat-group"].default is None
+
+
+def test_spot_without_volume_drops_the_island_bucket():
+    # G-DF T3: a Nebius spot island without a store credential keeps no completed-groups bucket
+    from types import SimpleNamespace
+
+    from yeto import cli
+    from yeto.cloud.droppable import island_keeps_spot_volume
+
+    launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
+    actions = {opt: a for a in launch._actions for opt in a.option_strings}
+    assert actions["--spot-without-volume"].dest == "spot_without_volume"
+    assert island_keeps_spot_volume(SimpleNamespace(spot=True))
+    assert not island_keeps_spot_volume(SimpleNamespace(spot=True, spot_without_volume=True))

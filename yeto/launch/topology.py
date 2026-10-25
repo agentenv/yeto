@@ -196,22 +196,86 @@ def rl_island_gpu_env(args, spec) -> str:
             f'(CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"\n')
 
 
-def rl_island_ray_storage(args, *, head: bool) -> str:
+# Clouds whose RL island runs in sky's docker runtime with a fixed /dev/shm:
+# Ray refuses an object store larger than /dev/shm at `ray start`. Nebius gives
+# the container 200 GB (G-DF yeto-df-6: "configured object store size (644 GB)
+# exceeds /dev/shm size (200 GB)").
+SHM_CAPPED_STORE_CLOUDS = frozenset({"nebius"})
+SHM_STORE_FRACTION = (9, 10)  # the store gets at most 90% of /dev/shm
+
+
+def shm_capped_store_bytes(requested: int) -> str:
+    """Shell for ``min(requested, 90% of /dev/shm)`` in bytes, evaluated on the node
+    at ``ray start`` (the requested size when /dev/shm cannot be read); prints a
+    note to stderr when it lowers the size."""
+    num, den = SHM_STORE_FRACTION
+    return ("$(r=%d; s=$(df -B1 --output=size /dev/shm 2>/dev/null | tail -1 | tr -dc 0-9); "
+            "s=$(( ${s:-0} * %d / %d )); "
+            "if [ \"$s\" -gt 0 ] && [ \"$s\" -lt \"$r\" ]; then "
+            "echo \"[yeto-island] Ray object store lowered from $r to $s bytes (90%% of /dev/shm)\" >&2; "
+            "echo \"$s\"; else echo \"$r\"; fi)") % (requested, num, den)
+
+
+def rl_island_ray_storage(args, *, head: bool, cloud: str | None = None) -> str:
     """``ray start`` flags for the island's object store size and spill dir.
 
     The spill directory is a cluster setting, so only the head gets it (its
-    raylets read it from the GCS); every node gets the store size."""
+    raylets read it from the GCS); every node gets the store size. On a cloud in
+    :data:`SHM_CAPPED_STORE_CLOUDS` the size is capped at 90% of the node's
+    /dev/shm when the node starts Ray."""
     flags = ""
     store_gib = getattr(args, "rl_island_ray_object_store_gib", None)
+    if store_gib is not None and int(store_gib) < 1:
+        raise ValueError("--rl-island-ray-object-store-gib must be >= 1")
+    head_gib = getattr(args, "rl_island_ray_head_object_store_gib", None)
+    if head_gib is not None and int(head_gib) < 1:
+        raise ValueError("--rl-island-ray-head-object-store-gib must be >= 1")
+    if head and head_gib is not None:
+        store_gib = head_gib
     if store_gib is not None:
-        if int(store_gib) < 1:
-            raise ValueError("--rl-island-ray-object-store-gib must be >= 1")
-        flags += f" --object-store-memory={int(store_gib) << 30}"
+        requested = int(store_gib) << 30
+        if cloud in SHM_CAPPED_STORE_CLOUDS:
+            flags += f' --object-store-memory="{shm_capped_store_bytes(requested)}"'
+        else:
+            flags += f" --object-store-memory={requested}"
     spill_dir = getattr(args, "rl_island_ray_spill_dir", None)
     if head and spill_dir:
         spilling = json.dumps({"type": "filesystem", "params": {"directory_path": spill_dir}})
         flags += " --system-config=" + shlex.quote(json.dumps({"object_spilling_config": spilling}))
     return flags
+
+
+RAY_HEAD_START_WAIT_DEFAULT_S = 120  # Ray 2.58's raylet_start_wait_time_s when preallocating
+
+
+def rl_island_ray_head_env(args) -> str:
+    """Environment prefix for the head's ``ray start`` ("" when unset).
+
+    ``--rl-island-ray-head-preallocate`` sets RAY_preallocate_plasma_memory=1:
+    the head raylet's plasma store maps its whole store with MAP_POPULATE at
+    start (S27 RAY-SEGV R1).  In Ray 2.58 the store binds its socket only
+    after that populate, while the raylet connects to it with
+    raylet_client_num_connect_attempts tries 1 s apart (default 10) and
+    aborts on failure; ``ray start`` waits raylet_start_wait_time_s for the
+    node to register (read from the Ray source).  Both get the start-wait
+    seconds.  On a Modal CPU container (gVisor) the populate returned at once
+    and a 300 GiB preallocated head started in 8.4 s (S27 G-CQ)."""
+    prealloc = bool(getattr(args, "rl_island_ray_head_preallocate", False))
+    wait_s = getattr(args, "rl_island_ray_head_start_wait_s", None)
+    if wait_s is not None and int(wait_s) < 1:
+        raise ValueError("--rl-island-ray-head-start-wait-s must be >= 1")
+    if prealloc and getattr(args, "rl_island_ray_head_object_store_gib", None) is None \
+            and getattr(args, "rl_island_ray_object_store_gib", None) is None:
+        raise ValueError("--rl-island-ray-head-preallocate needs --rl-island-ray-head-object-store-gib "
+                         "or --rl-island-ray-object-store-gib (Ray's default store size would be "
+                         "populated in full)")
+    env = "RAY_preallocate_plasma_memory=1 " if prealloc else ""
+    if prealloc and wait_s is None:
+        wait_s = RAY_HEAD_START_WAIT_DEFAULT_S
+    if wait_s is not None:
+        env += (f"RAY_raylet_start_wait_time_s={int(wait_s)} "
+                f"RAY_raylet_client_num_connect_attempts={int(wait_s)} ")
+    return env
 
 
 def rl_island_ray_spill_dir_prelude(args) -> str:
