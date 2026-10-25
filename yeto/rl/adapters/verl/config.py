@@ -81,6 +81,15 @@ class VerlRunConfig:
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
+    # S27 G-EQ2: load the model and tokenizer with the checkpoint's own code
+    # (``--trust-remote-code``, the launcher's flag the Miles islands already
+    # take). Needed for an architecture whose support lives in the repository
+    # rather than in the installed transformers: the official Ascend verl
+    # image's transformers 5.3 has nemotron_h, but its NemotronHModel sets
+    # supports_gradient_checkpointing = False, while the checkpoint's own
+    # modeling_nemotron_h.py sets it True. Default off: an NVIDIA island is
+    # unchanged, and remote code is only run when the launch asks for it.
+    trust_remote_code: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -164,6 +173,8 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         f"data.seed={cfg.seed}",
+        f"data.trust_remote_code={cfg.trust_remote_code}",
+        f"actor_rollout_ref.model.trust_remote_code={cfg.trust_remote_code}",
         f"actor_rollout_ref.model.path={cfg.model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",

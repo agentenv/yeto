@@ -422,3 +422,34 @@ def test_island_takes_a_staged_model_directory(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
     assert island_entry.island_model_path("org/repo", "b" * 40) == "/hub/x"
     assert calls == [("org/repo", "b" * 40)]
+
+
+def test_trust_remote_code_reaches_the_verl_overrides():
+    """S27 G-EQ2: the checkpoint's own modeling code is what supports gradient
+    checkpointing for nemotron_h (the Ascend image's transformers 5.3 sets
+    supports_gradient_checkpointing = False), so the island has to ask for it."""
+    from yeto.rl.adapters.verl import config as vconf
+
+    def overrides(**kw):
+        return vconf.build_overrides(vconf.VerlRunConfig(
+            model_path="/m", train_file="/t", val_file="/v", out_dir="/o", **kw))
+
+    off = overrides()
+    assert "actor_rollout_ref.model.trust_remote_code=False" in off
+    assert "data.trust_remote_code=False" in off  # default: NVIDIA islands unchanged
+    on = overrides(trust_remote_code=True)
+    assert "actor_rollout_ref.model.trust_remote_code=True" in on
+    assert "data.trust_remote_code=True" in on
+
+
+def test_the_island_parses_trust_remote_code():
+    from yeto.rl.adapters.verl import island_entry
+
+    base = ["--model", "m", "--model-revision", "r", "--data", "d", "--learner-id", "0",
+            "--reward-function", "gsm8k_reward:score", "--global-rounds", "1",
+            "--groups-per-round", "1", "--samples-per-group", "1",
+            "--rollout-max-response-len", "8", "--event-tape", "t", "--inner-lr", "1e-6",
+            "--seq-len", "16", "--seed", "1"]
+    assert island_entry.parse_args(base)[0].trust_remote_code is False
+    args, ignored = island_entry.parse_args([*base, "--trust-remote-code"])
+    assert args.trust_remote_code is True and "--trust-remote-code" not in ignored

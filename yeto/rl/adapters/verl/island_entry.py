@@ -69,6 +69,9 @@ def parse_args(argv):
     # S26 E3: bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
+    # S27 G-EQ2: the launcher passes this to every island; the verl island used to
+    # ignore it, so a model whose HF support ships with the checkpoint could not load
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
@@ -649,6 +652,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
+        trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)
