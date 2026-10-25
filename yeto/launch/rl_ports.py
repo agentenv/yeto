@@ -295,7 +295,19 @@ def _synced_launch_uses_store(args) -> bool:
     from ..rl.engine.sample_roles import is_synced_trainer
 
     return (is_synced_trainer(args) or island_cuts_requested(args)
-            or bool(getattr(args, "rl_peer_recovery", False)) or hf_exports_requested(args))
+            or bool(getattr(args, "rl_peer_recovery", False)) or hf_exports_requested(args)
+            or _catch_up_keeps_data_positions(args))
+
+
+def _catch_up_keeps_data_positions(args) -> bool:
+    """S27 G-DS: asynchronous full-parameter rounds without peer recovery
+    (``--rl-island-state-source catch-up``; verl always) keep the islands'
+    data positions in the store (:func:`data_positions_kept`), so a relaunched
+    island that takes the syncer's catch-up continues at its next row."""
+    from .syncer import rl_full_parameter_async
+
+    return (data_positions_kept(args) and rl_full_parameter_async(args)
+            and not getattr(args, "rl_peer_recovery", False))
 
 
 def _check_hf_export_launch_flags(args) -> None:
@@ -312,7 +324,12 @@ def _check_hf_export_launch_flags(args) -> None:
     if not getattr(args, "rl_checkpoint_store", None):
         raise ValueError(f"{EXPORT_HF_FLAG} needs --rl-checkpoint-store (the exports go to <store>/hf)")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles only")
+        # S27 G-DC: a backend may wire it for some of its runs (verl: the Megatron island)
+        supported = getattr(_rl_backend_module(args, "run_config_rules"), "hf_export_supported", None)
+        if not (callable(supported) and supported(args)):
+            raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles and the runs its backend's "
+                             "run_config_rules.hf_export_supported accepts only (verl: synced full-parameter "
+                             "islands, --rl-sync-preset full-parameter)")
     if getattr(args, "rl_elastic", False):
         raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
     if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)
