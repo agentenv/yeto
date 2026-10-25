@@ -318,6 +318,10 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
+    if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
+        from .driver_extras import wire_full_parameter_extras
+
+        wire_full_parameter_extras(driver, island, plan)
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",

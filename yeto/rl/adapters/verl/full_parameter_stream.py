@@ -32,7 +32,10 @@ Differences from the Miles binding, all deliberate:
   target); verl offers no optimizer-state receipts, so the stream's optimizer
   proof is off (``_optimizer_states`` returns None);
 * not offered: sync/train overlap, deferred or lazy capture, MoE expert token
-  weights, peer recovery and broadcast deltas (refused at configuration).
+  weights and peer recovery (refused at configuration);
+* bf16 broadcast deltas (``--bcast-delta``, S27 G-DS) need nothing here: the
+  ``SyncerClient`` decodes them into the f32 fragment before the inbound sink
+  sees a byte (``yeto.downlink`` module doc), so the sink stays f32-only.
 """
 
 from __future__ import annotations
@@ -71,7 +74,6 @@ def refuse_unsupported(config: RoleStreamConfig) -> None:
         ("sync/train overlap (--sweep-overlap)", config.overlap),
         ("MoE expert token weights", config.expert_token_weights),
         ("peer recovery", config.peer_recovery is not None),
-        ("broadcast deltas (--bcast-delta)", config.bcast_delta),
     ) if on]
     if config.algorithm != "grpo" or config.role != "actor":
         refused.append(f"{config.algorithm}/{config.role} (verl trains the GRPO actor only)")
@@ -731,6 +733,7 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
         partial_quorum=async_rounds,
         local_init=bool(section["local_init"]),
         matrix_merge=section["matrix_merge"],
+        bcast_delta=bool(section.get("bcast_delta", False)),
         **({"island_lease_s": float(pool["lease_s"]), "syncer_epoch": int(pool["syncer_epoch"])} if pool else {}),
     )
 
@@ -850,6 +853,47 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--sweep-overlap", action="store_true")
     parser.add_argument("--sweep-expert-token-weights", action="store_true")
     parser.add_argument("--rl-peer-recovery-store", default=None)
+    # S27 G-DS: the island's HF exports and data position (Miles island spellings;
+    # see full_parameter_extras). Added only when the island parser has none yet:
+    # the verl Megatron island (S27 G-DC) parses the export flags itself.
+    for flag in ("--rl-export-hf-rounds", "--rl-export-hf-store", "--rl-data-position-store"):
+        if flag not in parser._option_string_actions:
+            parser.add_argument(flag, default=None)
+
+
+def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
+    """S27 G-DS: the plan keys of a full-parameter island's HF exports and data
+    position, both absent when off (the plans of other runs are unchanged).
+
+    * ``hf_exports`` (``--rl-export-hf-rounds`` with ``--rl-export-hf-store``,
+      ``yeto.rl.engine.hf_export``): ``{"rounds", "store"}`` with the island's
+      own export store, as on a Miles island (``miles.island_entry.hf_export_config``);
+      :mod:`.driver_extras` gives the driver the :mod:`.hf_export` writer;
+    * ``data_position_store`` (``--rl-data-position-store``,
+      ``yeto.rl.engine.data_position``): the synced island's data position log,
+      so a relaunched island continues at its next row.
+
+    Refused before any work: an export on an island that does not generate and
+    train, a data position store on an island without an outer sync."""
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds, export_store_path
+
+    out: dict[str, Any] = {}
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if bool(rounds) != bool(getattr(args, "rl_export_hf_store", None)):
+        raise ValueError(f"{EXPORT_HF_FLAG} and --rl-export-hf-store go together")
+    if rounds:
+        if sample_roles.sample_role(args) != sample_roles.BOTH:
+            raise ValueError(f"{EXPORT_HF_FLAG} needs an island that generates and trains (sample role both)")
+        out["hf_exports"] = {"rounds": str(rounds),
+                             "store": export_store_path(str(args.rl_export_hf_store),
+                                                        learner_id=int(args.learner_id))}
+    store = getattr(args, "rl_data_position_store", None)
+    if store:
+        if sync == "none":
+            raise ValueError("--rl-data-position-store belongs to a synced full-parameter island")
+        out["data_position_store"] = str(store)
+    return out
 
 
 def _sha256_hex(value: Any) -> bool:
@@ -874,7 +918,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     if not config_path.is_file():
         raise ValueError("full-parameter model has no config.json")
     model_config_sha256 = file_sha256(config_path)
-    out: dict[str, Any] = {"model_config_sha256": model_config_sha256}
+    out: dict[str, Any] = {"model_config_sha256": model_config_sha256, **full_parameter_extras(args, sync=sync)}
     if sync == "none":
         return out
     async_rounds = args.full_parameter_rounds == "async"
@@ -894,7 +938,6 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         ("--sweep-overlap", getattr(args, "sweep_overlap", False)),
         ("--sweep-expert-token-weights", getattr(args, "sweep_expert_token_weights", False)),
         ("--rl-peer-recovery-store", getattr(args, "rl_peer_recovery_store", None) is not None),
-        ("--bcast-delta", getattr(args, "bcast_delta", False)),
     ) if on]
     if refused:
         raise ValueError("verl 全参数岛不支持: " + ", ".join(refused))
@@ -939,4 +982,6 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         "matrix_merge": args.rl_sync_matrix_merge,
         "island_pool": pool,
     }
+    if getattr(args, "bcast_delta", False):  # S27 G-DS: absent when off (plans unchanged)
+        out["full_parameter"]["bcast_delta"] = True
     return out

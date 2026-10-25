@@ -101,8 +101,6 @@ def test_a_miles_full_parameter_launch_still_needs_fixed_partition():
     (("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"), "fixed-partition"),
     (("--rl-sync-full-parameter-rounds", "sweep", "--rl-sync-overlap"), "no --rl-sync-overlap"),
     (("--rl-sync-expert-token-weights",), "no --rl-sync-expert-token-weights"),
-    (("--rl-sync-full-parameter-rounds", "sweep", "--rl-sync-bcast-delta-full-every", "4"),
-     "no --rl-sync-bcast-delta-full-every"),
 ])
 def test_verl_refuses_what_its_stream_does_not_offer(extra, match):
     with pytest.raises(ValueError, match=match):
@@ -177,7 +175,7 @@ def test_every_push_and_transport_option_reaches_the_stream_config(model_dir):
     assert section["max_local_rounds_ahead"] == 2
 
 
-@pytest.mark.parametrize("flag", ["--sweep-overlap", "--sweep-expert-token-weights", "--bcast-delta"])
+@pytest.mark.parametrize("flag", ["--sweep-overlap", "--sweep-expert-token-weights"])
 def test_the_island_refuses_the_flags_its_stream_does_not_offer(model_dir, flag):
     args = _prepared(_verl_args())
     parsed, _ignored = island_entry.parse_args(_island_argv(args, 0) + [flag])

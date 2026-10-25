@@ -92,8 +92,6 @@ def full_parameter_problems(args) -> list[str]:
                          ("rl_peer_recovery", "--rl-peer-recovery")):
         if getattr(args, dest, False):
             problems.append(f"no {option} (not offered by the verl stream)")
-    if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0):
-        problems.append("no --rl-sync-bcast-delta-full-every (the verl island takes f32 broadcasts only)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
         problems.append(f"the verl layout hash and fragment count from `{FULL_PARAMETER_PLAN_COMMAND}`")
     return problems
