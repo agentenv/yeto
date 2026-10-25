@@ -1071,6 +1071,7 @@ def translate_run_config(
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
+        values.extend(harbor_rollout_argv(agent.custom_agent_function_path, sample_buffer=sample_buffer))
     if agent.agent_max_seq_len is not None:
         values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
@@ -1289,6 +1290,20 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
     if fraction > 0:
         values.extend((*OPTIMIZER_OFFLOAD_ARGV, "--optimizer-offload-fraction", repr(fraction)))
     return tuple(values)
+
+
+def harbor_rollout_argv(agent_function: str, *, sample_buffer: Any = None) -> tuple[str, ...]:
+    """The Harbor agent's rollout function: the stock one plus boat VM cleanup at
+    ``RolloutExecutor.dispose()`` (``harbor_rollout``). Without it the pool's idle
+    VMs outlive the island until their boat TTL. ``()`` for any other agent."""
+    from .harbor_agent import AGENT_FUNCTION, ROLLOUT_FUNCTION
+
+    if agent_function != AGENT_FUNCTION:
+        return ()
+    if sample_buffer is not None:
+        raise MilesConfigError("the Harbor agent's rollout function and the sample buffer rollout "
+                               "both replace Miles' rollout function; use one of them")
+    return ("--rollout-function-path", ROLLOUT_FUNCTION)
 
 
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:

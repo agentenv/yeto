@@ -22,7 +22,7 @@ from .storage import (
     _rl_checkpoint_storage_name, droppable_rejoins_in_new_container, modal_checkpoint_store,
     resumes_in_new_container,
 )
-from .harness_env import modal_sandbox_secret_name
+from .harness_env import harbor_island_envs, harbor_relay_tunnel_port, is_harbor_agent, modal_sandbox_secret_name
 from .fleet import TEARDOWN_UNVERIFIED_EXIT
 
 
@@ -73,6 +73,9 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs[key] = value
     if rl:  # 0.20: Modal ships cfg.envs as a modal.Secret
         envs.update(island_hmac_secret(args))
+    harbor = rl and is_harbor_agent(args)
+    if harbor:  # boat token and the gate relay port (tunnelled by rank 0)
+        envs.update(harbor_island_envs(envs))
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
@@ -129,6 +132,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
         checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        harbor_layer=harbor,
+        harbor_relay_port=harbor_relay_tunnel_port(envs) if harbor else None,
         named_secrets=((modal_sandbox_secret_name(args, spec),)
                        if getattr(args, "modal_sandbox_secret", None) else ()),
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,

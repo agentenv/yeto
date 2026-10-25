@@ -1,10 +1,20 @@
-"""Launch-side island environment: the Modal sandbox secret and the CompactionRL switch."""
+"""Launch-side island environment: the Modal sandbox secret, the Harbor agent's
+island pieces and the CompactionRL switch."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+
+# Miles' Harbor examples that the Harbor agent imports by module name
+# (``harbor_agent_function``; ``generate`` for ``harbor_rollout``), as Miles'
+# own launcher puts them on the workers' PYTHONPATH
+# (``examples/experimental/harbor/launch_common.agentic_pythonpath_dirs``).
+HARBOR_EXAMPLE_DIRS = ("examples/experimental/harbor", "examples/swe-agent-harbor-docker")
+# The gate relay port a Modal island forwards through a Modal tunnel when the
+# launch sets none (one fixed port: the tunnel URL names exactly one).
+DEFAULT_HARBOR_RELAY_PORT = 31500
 
 
 def modal_sandbox_secret_name(args, spec) -> str | None:
@@ -20,6 +30,57 @@ def modal_sandbox_secret_name(args, spec) -> str | None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(name)):
         raise ValueError(f"--modal-sandbox-secret {name!r} is not a Modal Secret name")
     return str(name)
+
+
+def is_harbor_agent(args) -> bool:
+    """True when the run's custom agent is yeto's Harbor agent (``harbor_agent.run``)."""
+    from ..rl.adapters.miles.harbor_agent import AGENT_FUNCTION
+
+    return getattr(args, "custom_agent_function_path", None) == AGENT_FUNCTION
+
+
+def harbor_example_pythonpath(args, miles_root: str = "$HOME/miles") -> str:
+    """PYTHONPATH entries (each with a trailing ``:``) the Harbor agent needs on the island, or ""."""
+    if not is_harbor_agent(args):
+        return ""
+    return "".join(f"{miles_root}/{d}:" for d in HARBOR_EXAMPLE_DIRS)
+
+
+def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None) -> dict[str, str]:
+    """Environment a Modal Harbor island adds to ``envs`` (which it does not change).
+
+    * ``BOAT_API_KEY`` when the sandbox provider is boat (``HARBOR_ENV_TYPE=boat``)
+      and the launch did not give one: the token of the launching machine
+      (``boat_client.load_token``: ``BOAT_API_KEY``, else the boat CLI config).
+      It travels as a Modal Secret like ``HF_TOKEN`` and is never printed.
+    * ``YETO_HARBOR_GATE_RELAY_PORT`` (default :data:`DEFAULT_HARBOR_RELAY_PORT`)
+      unless the launch set a public relay base itself: the island's rank 0
+      forwards that port through a Modal tunnel (``harbor_relay_tunnel_port``).
+    """
+    from ..rl.adapters.miles import harbor_agent
+
+    out: dict[str, str] = {}
+    if str(envs.get("HARBOR_ENV_TYPE", "")).strip().lower() == "boat" and not envs.get("BOAT_API_KEY"):
+        if load_boat_token is None:
+            from ..rl.harness.harbor.boat_client import load_token as load_boat_token
+        out["BOAT_API_KEY"] = load_boat_token()
+    if not envs.get(harbor_agent.RELAY_PUBLIC_BASE_ENV) and not envs.get(harbor_agent.RELAY_PORT_ENV):
+        out[harbor_agent.RELAY_PORT_ENV] = str(DEFAULT_HARBOR_RELAY_PORT)
+    return out
+
+
+def harbor_relay_tunnel_port(envs: dict[str, str]) -> int | None:
+    """The relay port rank 0 forwards through a Modal tunnel, or None (the launch
+    gave its own ``YETO_HARBOR_GATE_RELAY_PUBLIC_BASE``, or no relay port).
+    The tunnel URL names one port, so a port range is refused."""
+    from ..rl.adapters.miles import harbor_agent
+
+    raw = str(envs.get(harbor_agent.RELAY_PORT_ENV, "") or "").strip()
+    if not raw or envs.get(harbor_agent.RELAY_PUBLIC_BASE_ENV):
+        return None
+    if not raw.isdigit() or not 0 < int(raw) <= 65535:
+        raise ValueError(f"{harbor_agent.RELAY_PORT_ENV}={raw!r}: a Modal tunnel forwards one fixed port")
+    return int(raw)
 
 
 def rl_gae_variant(args) -> str | None:
