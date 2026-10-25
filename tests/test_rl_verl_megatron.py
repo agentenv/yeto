@@ -509,7 +509,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     compile(util, "util.py", "exec")
     assert patch_verl.SEND_HOOK not in (tmp_path / patch_verl.SEND_TARGET).read_text()
     engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
-    assert engine.count("_yeto_sub_key") == 3 and engine.count("time.sleep(1.0)  # yeto") == 1
+    assert engine.count("_yeto_sub_key") == 2 and engine.count("time.sleep(1.0)  # yeto") == 1
     compile(engine, "nccl_checkpoint_engine.py", "exec")
     with pytest.raises(SystemExit, match="unknown profile"):
         patch_verl.apply(tmp_path, "nope")
