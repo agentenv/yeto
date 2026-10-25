@@ -467,3 +467,62 @@ def test_sg_link_and_unlink():
     with pytest.raises(RuntimeError, match="not found"):
         link.link("eu-north1", "a1", "zz", utils=utils, log=lambda line: None)
     assert link.unlink("eu-north1", "a1", "zz", utils=utils, log=lambda line: None) == 0
+
+
+# ---- design v2: the engine cluster comes and goes, the trainer stays
+
+def test_recover_flag_arms_the_trainer_and_declares_the_cells(monkeypatch):
+    sky = _fake_sky(monkeypatch)
+    args = _rl_args(extra=("--rl-engine-cluster-recover-s", "3600"))
+    (split,) = _plan(args).values()
+    tasks = ec.build_tasks(sky, args, split, _make(args))
+    assert tasks.trainer.envs["YETO_ISLAND_ENGINE_RECOVERY_S"] == "3600"
+    learner = [line for line in tasks.trainer.run.splitlines() if "--actor-num-nodes" in line]
+    assert len(learner) == 1 and learner[0].endswith(
+        " --rl-elastic-declare-cells --rl-elastic-cells e0,e1,e2,e3")  # 8 GPUs / TP2 engines
+    off = ec.build_tasks(sky, _rl_args(), split, _make(_rl_args()))
+    assert "YETO_ISLAND_ENGINE_RECOVERY_S" not in off.trainer.envs
+    assert "--rl-elastic-declare-cells" not in off.trainer.run
+
+
+def test_plan_refuses_verl(monkeypatch):
+    _fake_sky(monkeypatch)
+    args = _rl_args()
+    args.rl_backend = "verl"
+    with pytest.raises(ValueError, match="needs --rl-backend miles"):
+        _plan(args)
+
+
+def test_engine_only_relaunch_keeps_the_trainer_job(monkeypatch):
+    sky, links = _LaunchSky(), []
+    island, submits = _island(monkeypatch, sky, links)
+    island.finish(sky, island.submit())
+    calls_before = len(sky.calls)
+    assert island.relaunch_engine(sky) == 3 and island.engine_relaunches == 1
+    new = sky.calls[calls_before:]
+    assert [s[1] for s in submits] == ["run1-l0-eu-north1", "run1-l0-eu-north1-eng",
+                                       "run1-l0-eu-north1-eng"]  # no trainer launch
+    assert ("cancel", "run1-l0-eu-north1-eng", (3,)) in new
+    assert not [c for c in new if c[0] == "cancel" and c[1] == "run1-l0-eu-north1"]
+    assert [c for c in new if c[0] == "exec"][0][2][ec.HEAD_ADDR_ENV] == "10.0.0.5"
+    assert links[-1][0] == "link"
+
+
+def test_watcher_relaunches_a_lost_engine_cluster_once(monkeypatch):
+    import threading
+
+    sky, links = _LaunchSky(), []
+    island, _ = _island(monkeypatch, sky, links)
+    island.finish(sky, island.submit())
+    lost = {"n": 1}
+
+    def engine_lost(_sky):
+        if lost["n"]:
+            lost["n"] -= 1
+            return True
+        island.stop_watch = True
+        return False
+
+    island.engine_lost = engine_lost
+    island.watch(sky, threading.Event(), poll_s=0.0)
+    assert island.engine_relaunches == 1
