@@ -356,6 +356,18 @@ def with_cut_metadata(header: Mapping[str, Any], payload: bytes) -> bytes:
 SPOT_SYNCER_ENV = "YETO_SPOT_SYNCER"  # sampler island: subscribe to this syncer (host:port)
 
 
+def trainer_relay_env(syncer: tuple[str, int], learner_id: int, *, groups_per_round: int,
+                      prefetch: int | None = None) -> dict[str, str]:
+    """The relay variables of a training island (``--rl-sample-relay``; both backends,
+    S27 G-EA / G-EV): the syncer that serves the relay, the island's channel (its
+    learner id) and the groups the pump keeps unread (default two rounds)."""
+    host, port = syncer
+    if prefetch is None:
+        prefetch = 2 * int(groups_per_round)
+    return {RELAY_ADDR_ENV: f"{host}:{port}", RELAY_CHANNEL_ENV: str(int(learner_id)),
+            RELAY_PREFETCH_ENV: str(int(prefetch))}
+
+
 def relay_sampler_buffer(environ: Mapping[str, str] | None = None) -> "RelaySampleBuffer | None":
     """A sampler's buffer over the relay when :data:`RELAY_ADDR_ENV` is set (the
     Miles sampler island's ``open_buffer(sampler=True)``); None otherwise. The

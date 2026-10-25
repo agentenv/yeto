@@ -152,7 +152,7 @@ class FullyAsyncRolloutPool:
                 isl.start_rollouter()
             isl.rollouter_started = True
         started = time.monotonic()
-        collector = RoundCollector(isl.vmap, rollout_id, isl.limit, isl.required)
+        collector = self._collector(rollout_id)
         pulled = 0
         while not collector.full:
             if pulled >= self.max_pulls:
@@ -173,7 +173,7 @@ class FullyAsyncRolloutPool:
             isl.call("yeto_keep_last" if keep else "yeto_drop_last")
         queue = isl.call("yeto_assemble")
         version, digest = isl.published
-        groups = group_metadata(collector, rollout_id, isl.hashes)
+        groups = self._group_metadata(collector, rollout_id)
         carry = {**collector.carry_over_fields(), "queue_size_after": queue.get("queue_size"),
                  "pulled_samples": pulled}
         discard = cutoff_fields(collector.discard_tally())
@@ -199,6 +199,15 @@ class FullyAsyncRolloutPool:
             # showed null on every round).
             **(discard if collector.discarded else {"aborted_in_flight_groups": 0}),
         )
+
+    def _collector(self, rollout_id: int) -> RoundCollector:
+        """The round's collector: ages in the island's policy versions (a relay
+        trainer counts merged versions, ``relay_trainer.RelayRolloutPool``)."""
+        isl = self.island
+        return RoundCollector(isl.vmap, rollout_id, isl.limit, isl.required)
+
+    def _group_metadata(self, collector: RoundCollector, rollout_id: int):
+        return group_metadata(collector, rollout_id, self.island.hashes)
 
     def abort(self) -> None:
         return None

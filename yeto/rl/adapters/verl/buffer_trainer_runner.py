@@ -119,6 +119,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
 
         from .buffer_feed import RowShape
         from .buffer_ports import install_buffer_ports, release_weights_for
+        from .relay_trainer import RELAY_SECTION_KEY, install_relay_ports, relay_buffer
         from .trainer import run_fully_async_island
 
         check_island_credentials()  # secret-handling-hardening D4 (buffer trainer Ray actor)
@@ -131,6 +132,22 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
             return ray.get(getattr(trainer, name).remote(*args), timeout=timeout)
 
         environ = dict(os.environ)
+        shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
+                         int(tokenizer.pad_token_id))
+        if section.get(RELAY_SECTION_KEY):  # S27 G-EV: the spot samplers' groups through the relay
+            buffer, pump = relay_buffer(int(plan["learner_id"]), environ=environ)
+
+            def relay_ports(island):
+                return install_relay_ports(island, buffer=buffer, shape=shape, tokenize=tokenizer.encode,
+                                           wait_s=float(section.get("wait_s") or 3600.0),
+                                           poll_s=float(section.get("poll_s") or 2.0))
+
+            try:
+                return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
+                                              buffer_ports=relay_ports)
+            finally:
+                if pump is not None:
+                    pump.stop()
         store = store_for(section["store"], environ=environ)
         # S25 C3: a synced trainer reads its lane of the buffer (section "lane": "M/N")
         buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
@@ -138,8 +155,6 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                      shards=section.get("shards"))
         releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
                                                 environ=environ))
-        shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
-                         int(tokenizer.pad_token_id))
 
         def ports(island):
             return install_buffer_ports(island, buffer=buffer, releases=releases, shape=shape,

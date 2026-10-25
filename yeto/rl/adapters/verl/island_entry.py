@@ -104,6 +104,11 @@ def parse_args(argv):
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
     p.add_argument("--rl-sample-lanes", type=int, default=None)
+    # S27 G-EV: a relay trainer (spot samplers through the head's sample relay,
+    # .relay_trainer) and the layout board for the spot subscribers (island 0)
+    p.add_argument("--rl-sample-relay", action="store_true")
+    p.add_argument("--rl-sample-relay-prefetch", type=int, default=None)
+    p.add_argument("--rl-spot-subscribers", type=int, default=0)
     # N7.6b round cuts (same flags as the Miles island)
     p.add_argument("--rl-resume-state-dir", default=None)
     p.add_argument("--rl-cut-every", type=int, default=None)
@@ -369,6 +374,7 @@ def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
     buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
+    spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
@@ -556,6 +562,7 @@ def main(argv=None) -> int:
     workdir = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = workdir + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["YETO_VERL_PLAN"] = str(plan_path)
+    env.update(spot_env)
     if args.rl_echo_events:  # tape lines also on stdout (head launcher / relaunch-proof copy)
         from yeto.rl.event_echo import ECHO_ENV
 
@@ -806,6 +813,41 @@ def sample_buffer_section(args) -> dict | None:
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
+
+
+def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
+    """S27 G-EV (SPOT-ROLLOUT.md §12.9 item 1): the environment of the spot-rollout
+    channel on a verl island ({} when off; ``YETO_`` variables reach verl's Ray actors).
+
+    * ``--rl-spot-subscribers N``: island 0 publishes its fragment layout on the relay
+      board (the engine-neutral stream does it, ``layout_manifest.maybe_publish``);
+    * ``--rl-sample-relay`` on a full-parameter buffer trainer: the relay variables
+      (``trainer_relay_env``); the buffer trainer then reads the relay
+      (``relay_trainer``). Any other island refuses it (it would be ignored)."""
+    env: dict[str, str] = {}
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
+        from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
+
+        if args.parameter_mode != vconf.FULL_PARAMETER_MODE or args.rl_single_island_no_sync:
+            raise SystemExit("--rl-spot-subscribers 需要同步的 verl 全参数岛（订阅者收合并后的全参数分片）")
+        env[PUBLISH_ENV] = "1"
+    if getattr(args, "rl_sample_relay", False):
+        from yeto.rl.spot_rollout.relay_buffer import trainer_relay_env
+
+        from .full_parameter_stream import syncer_addresses
+        from .relay_trainer import RELAY_SECTION_KEY
+
+        if (buffer_section is None or args.parameter_mode != vconf.FULL_PARAMETER_MODE
+                or args.rl_single_island_no_sync or not args.syncer):
+            raise SystemExit("--rl-sample-relay 只接同步的 verl 全参数缓冲训练岛（--rl-sample-role trainer，"
+                             "全参数，有 syncer）")
+        addresses = syncer_addresses(args.syncer)
+        if len(addresses) != 1:
+            raise SystemExit("--rl-sample-relay 需要不分片的 syncer（--syncer-shards 1）")
+        buffer_section[RELAY_SECTION_KEY] = {"channel": int(args.learner_id)}
+        env.update(trainer_relay_env(addresses[0], int(args.learner_id), groups_per_round=int(args.groups_per_round),
+                                     prefetch=args.rl_sample_relay_prefetch))
+    return env
 
 
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *, pools=None):
