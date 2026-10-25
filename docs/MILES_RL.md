@@ -412,14 +412,28 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
   No row goes to two islands; a fast island claims more often, so it trains
   more rows and never waits for a slow one; the rows a relaunched, preempted
   or silent island did not finish go first to the next claim of any island;
-  an island added later just claims. Position `p` is row
+  an island added later just claims. A row counts as trained only after its
+  round trained and passed the sync boundary (the driver commits the round,
+  `rl_dispense_commit`); an island process that dies earlier leaves the
+  round's rows to the next claim (a row is trained twice only when the
+  process dies between the boundary and the syncer's answer to the commit).
+  Position `p` is row
   `pass_order(rows, --seed, p // rows)[p % rows]`: pass 0 in data order, every
   later pass reshuffled. A row whose group is too stale to train can be given
   out again (`--rl-dispense-max-redo`, default 1); `--rl-data-passes N` ends
-  the data after N passes (default: unlimited). The syncer logs every grant
+  the data after N passes (default: unlimited): an island that cannot fill
+  a batch any more gives its rows back and ends FINISHED (`rl_data_ended`;
+  a full-parameter island of asynchronous rounds leaves without the final
+  cut). Only for islands that may end on their own (asynchronous rounds or
+  an island pool; a strict roster is refused at launch). The rows of the last
+  incomplete batches are not trained. The syncer logs every grant
   and report in `~/yeto-output/task-dispense.jsonl`;
   `python -m tools.eval.dispense_check` replays it (no row granted twice,
-  none trained twice, every row accounted for). Miles only, not with
+  none trained twice, every row accounted for). The launcher next to the
+  syncer copies the log and its check into the run directory
+  (`task-dispense.jsonl`, `dispense-check.json`, one `[launcher] task
+  dispenser:` line); `yeto launch --controller head` pulls both from the head
+  when the head job ends. Miles only, not with
   fully_async rollouts, island round cuts or a sharded head (refused at
   launch).
 

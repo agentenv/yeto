@@ -650,7 +650,7 @@ def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | Non
     """S27 P2: the task dispenser runs in the actor syncer (shard 0) only."""
     if syncer.role != "actor" or (shard_plan is not None and shard_plan[0] != 0):
         return ""
-    from .island_tasks import dispense_syncer_flags
+    from .data_split_plan import dispense_syncer_flags
 
     return dispense_syncer_flags(args)
 

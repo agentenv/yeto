@@ -15,13 +15,33 @@ own cursor (``yeto.rl.engine.task_dispense`` module doc):
   reported dropped and another position is taken.
 * :func:`on_trained` runs in the sample filter hook at the end of every
   training rollout (``rollout_meta_hook``): the positions of the kept groups
-  are reported trained. Miles puts the aborted groups of a partial rollout
-  back into its buffer only after the hook (``sglang_rollout.generate_rollout``),
-  so the other positions taken so far are reported dropped (filtered or
-  aborted for good) at the next draw or hook, unless they are in the buffer
-  by then. So a position is reported when its group enters a training batch;
-  the rows of a round the island never finishes are lost to the run (at most
-  once, never twice).
+  wait for that round's commit. Miles puts the aborted groups of a partial
+  rollout back into its buffer only after the hook
+  (``sglang_rollout.generate_rollout``), so the other positions taken so far
+  are reported dropped (filtered or aborted for good) at the next draw or
+  hook, unless they are in the buffer by then.
+* :func:`commit_round` runs when the island driver passed the round's sync
+  boundary (``IslandDriver._commit_round_data``, through ``__ray_call__``):
+  the kept positions of that round (and of earlier rounds) are reported
+  trained, and the call waits for the dispenser's answer (bounded). So a
+  position is reported trained only after its round trained and passed the
+  sync boundary. An island process that dies before that point leaves the
+  round's positions unreported; the dispenser gives them out again (first in
+  line) when the relaunched process opens (``superseded``) or when the lease
+  of the dead process ends. Semantics: a row may be generated more than once,
+  and trained more than once only when the process dies between the sync
+  boundary and the dispenser's answer to the commit (a short window).
+* The end of the data (``--rl-data-passes``): a draw the dispenser cannot fill
+  any more (WAIT: nothing fresh is left, other holders may still give rows
+  back) while this island holds rows of the rollout it is drawing gives up:
+  those rows and the prefetched ones are released (other islands may still
+  fill a batch with them) and :class:`DispenseEnded` is raised. An island that
+  holds no rows of the rollout waits instead, until rows come back or the
+  dispenser answers END (also :class:`DispenseEnded`). The island driver ends
+  the run FINISHED on it (``IslandDriver._ends_on_data_end``). So the rows of
+  the last, incomplete batches of a limited run are not trained.
+* :func:`close_source` (the driver, at the end of a finished run): every
+  position not trained yet goes back to the dispenser (release).
 * Miles' own cursor (``sample_offset``, ``epoch_id``) does not move; the
   dispenser keeps the data position, so a relaunched island needs none.
 
@@ -34,12 +54,14 @@ from __future__ import annotations
 import atexit
 import copy
 import logging
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from yeto.rl.engine.data_split import DATA_ROW_KEY
 from yeto.rl.engine.task_dispense import (
     DISPENSE_POSITION_KEY,
+    DispenseEnded,
     PositionMap,
     TaskSource,
     tcp_connector,
@@ -49,6 +71,10 @@ logger = logging.getLogger(__name__)
 
 _ATTR = "_yeto_task_dispense"
 _CURRENT: "DispensedSource | None" = None  # the one dispensed source of this process
+
+# how long a round's commit waits for the dispenser's answer; on timeout the
+# report stays queued (sent when the head answers again) and the round goes on
+COMMIT_ACK_TIMEOUT_S = 30.0
 
 
 class DispenseInstallError(RuntimeError):
@@ -74,7 +100,8 @@ def _position(group: Sequence[Any]) -> int | None:
 class DispensedSource:
     """Wraps one Miles data source (module doc)."""
 
-    def __init__(self, data_source: Any, tasks: TaskSource, positions: PositionMap) -> None:
+    def __init__(self, data_source: Any, tasks: TaskSource, positions: PositionMap,
+                 executor: Any = None) -> None:
         dataset = getattr(data_source, "dataset", None)
         if dataset is None:
             raise DispenseInstallError("the rollout data source has no dataset "
@@ -98,17 +125,32 @@ class DispensedSource:
         # positions the last rollout took and did not keep: dropped at the next
         # draw or hook unless Miles put their group back into its buffer
         self._candidates: set[int] = set()
+        # rollout id -> kept positions waiting for that round's commit (module doc)
+        self._pending: dict[int, set[int]] = {}
+        self._hooks = 0
+        self._executor = executor
+        self.gave_up: str | None = None
+        # the generation thread draws and runs the hook; the driver's commit and
+        # close arrive on the actor's own thread (``__ray_call__``)
+        self._lock = threading.RLock()
         data_source.get_samples = self.get_samples
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
-        self._settle()
+        with self._lock:
+            self._settle()
         wanted = int(num_samples)
         groups: list[list[Any]] = []
         if callable(self._buffer_draw):
             groups.extend(self._buffer_draw(wanted))
         args = self.source.args
         while len(groups) < wanted:
-            for position in self.tasks.take(wanted - len(groups)):
+            need = wanted - len(groups)
+            holding = self._holds_rows()
+            # holding rows of this rollout: a draw the dispenser cannot fill returns short
+            taken = self.tasks.take(need, drained_ok=holding)
+            if not taken:
+                self._give_up(need)
+            for position in taken:
                 prompt = self.by_row.get(self.positions.row(position))
                 if prompt is None:  # Miles filtered this row at load
                     self.tasks.report(dropped=[position])
@@ -126,6 +168,29 @@ class DispensedSource:
                 self.drawn += 1
         return groups
 
+    def pending_positions(self) -> set[int]:
+        """Kept positions waiting for their round's commit."""
+        with self._lock:
+            return set().union(*self._pending.values()) if self._pending else set()
+
+    def _holds_rows(self) -> bool:
+        """Whether this island holds rows besides those waiting for a commit: rows
+        of the rollout being drawn, or groups back in Miles' buffer."""
+        return bool(self.tasks.taken() - self.pending_positions())
+
+    def _give_up(self, need: int) -> None:
+        """The data ended for this rollout (module doc): release what it holds."""
+        with self._lock:
+            pending = self.pending_positions()
+            prefetched = self.tasks.release_ready(stop_claims=True)
+            held = sorted(self.tasks.taken() - pending)
+            self.tasks.report(release=held)
+            self._candidates = set()
+            self.gave_up = (f"the dispenser has no rows left to fill this rollout ({need} more "
+                            f"wanted): {len(held)} drawn and {prefetched} prefetched rows released")
+        logger.info("task dispenser: %s", self.gave_up)
+        raise DispenseEnded(self.gave_up)
+
     def buffered_positions(self) -> set[int]:
         out = set()
         for group in getattr(self.source, "buffer", None) or ():
@@ -136,24 +201,69 @@ class DispensedSource:
 
     def _settle(self) -> int:
         """Report the previous rollout's taken, unkept positions dropped unless
-        their group is back in Miles' buffer; returns how many."""
+        their group is back in Miles' buffer; returns how many. Under the lock."""
         if not self._candidates:
             return 0
-        dropped = (self._candidates & self.tasks.taken()) - self.buffered_positions()
+        dropped = ((self._candidates & self.tasks.taken()) - self.buffered_positions()
+                   - self.pending_positions())
         self._candidates = set()
         if dropped:
             self.tasks.report(dropped=sorted(dropped))
         return len(dropped)
 
-    def on_trained(self, kept: Iterable[Sequence[Any]]) -> dict[str, int]:
-        """Report the kept groups trained; the other taken positions become
-        drop candidates (module doc). Returns the counts reported now."""
-        dropped = self._settle()
-        trained = {p for p in (_position(g) for g in kept) if p is not None}
-        taken = self.tasks.taken()
-        self.tasks.report(trained=sorted(trained & taken))
-        self._candidates = taken - trained
-        return {"trained": len(trained & taken), "dropped": dropped}
+    def _hook_round(self) -> int:
+        """The rollout id of the batch the hook sees: the executor's (Miles
+        ``RolloutExecutor.get`` sets ``rollout_id`` before it generates), else
+        the number of hooks this process ran (rounds count from 0 in every
+        process of a full-parameter island)."""
+        value = getattr(self._executor, "rollout_id", None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return self._hooks
+
+    def on_trained(self, kept: Iterable[Sequence[Any]], rollout_id: int | None = None) -> dict[str, int]:
+        """The kept groups wait for their round's commit; the other taken
+        positions become drop candidates (module doc). Returns the counts."""
+        with self._lock:
+            dropped = self._settle()
+            round_id = self._hook_round() if rollout_id is None else int(rollout_id)
+            self._hooks += 1
+            pending = self.pending_positions()
+            taken = self.tasks.taken()
+            kept_now = {p for p in (_position(g) for g in kept) if p is not None} & taken
+            kept_now -= pending
+            if kept_now:
+                self._pending.setdefault(round_id, set()).update(kept_now)
+            self._candidates = taken - kept_now - pending
+            return {"kept": len(kept_now), "dropped": dropped, "rollout_id": round_id}
+
+    def commit(self, rollout_id: int, *, timeout_s: float = COMMIT_ACK_TIMEOUT_S) -> dict[str, Any]:
+        """Report the kept positions of rounds <= ``rollout_id`` trained and wait
+        (``timeout_s``) for the dispenser's answer (module doc)."""
+        with self._lock:
+            due = sorted(r for r in self._pending if r <= int(rollout_id))
+            positions: set[int] = set()
+            for round_id in due:
+                positions |= self._pending.pop(round_id)
+            taken = self.tasks.taken()
+            trained = sorted(positions & taken)
+            self.tasks.report(trained=trained)
+        acked = self.tasks.flush(timeout_s) if trained else True
+        return {"rounds": due, "trained": len(trained), "acked": bool(acked),
+                # fenced while they waited: the dispenser gave them out again
+                "lost": len(positions) - len(trained)}
+
+    def close(self) -> dict[str, Any]:
+        """Release every position not trained yet and stop (module doc)."""
+        with self._lock:
+            pending = self.pending_positions()
+            self._pending.clear()
+            self._candidates = set()
+            held = len(self.tasks.taken()) + self.tasks.ready_count()
+        self.tasks.close(release=True)
+        return {"released": held, "uncommitted": len(pending),
+                **{k: self.tasks.stats[k] for k in ("granted", "trained", "dropped", "release",
+                                                     "fenced", "lost_reports")}}
 
 
 def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict[str, Any]:
@@ -179,7 +289,8 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
                        emit=lambda kind, **fields: logger.info("%s %s", kind, fields))
     tasks.start()
     try:
-        wrapped = DispensedSource(source, tasks, PositionMap(rows, seed=int(config.get("seed", 0))))
+        wrapped = DispensedSource(source, tasks, PositionMap(rows, seed=int(config.get("seed", 0))),
+                                  executor=executor)
     except BaseException:
         tasks.close(release=True)
         raise
@@ -201,3 +312,26 @@ def on_trained(kept: Iterable[Sequence[Any]]) -> dict[str, int] | None:
     """The sample filter hook's call (``rollout_meta_hook``); None without a dispenser."""
     source = _CURRENT
     return None if source is None else source.on_trained(list(kept))
+
+
+def commit_round(executor: Any, rollout_id: int) -> dict[str, Any] | None:
+    """Runs INSIDE the rollout executor actor (``MilesRolloutPool.commit_dispensed``):
+    the round passed its sync boundary (module doc). None without a dispenser."""
+    source = _CURRENT
+    if source is None:
+        return None
+    try:
+        return source.commit(int(rollout_id))
+    except Exception as error:  # noqa: BLE001 - bookkeeping must not fail the round
+        logger.warning("task dispenser: commit of round %s failed: %r", rollout_id, error)
+        return {"acked": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def close_source(executor: Any) -> dict[str, Any] | None:
+    """Runs INSIDE the rollout executor actor (``MilesRolloutPool.close_dispensed``)."""
+    global _CURRENT
+    source = _CURRENT
+    if source is None:
+        return None
+    _CURRENT = None
+    return source.close()

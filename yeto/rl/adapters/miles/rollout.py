@@ -715,6 +715,7 @@ class MilesRolloutPool:
         self._data_passes_pending = bool(getattr(args, "yeto_rl_data_slot", None))
         # S27 P2: an island that claims its rows from the dispenser (task_dispense)
         self._dispense_pending = bool(getattr(args, "yeto_rl_data_dispense", None))
+        self._dispense_installed = False
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
@@ -847,6 +848,26 @@ class MilesRolloutPool:
                                       island_hmac_key_from_env())
         logger.info("task dispenser installed in the rollout executor: %s", installed)
         self._dispense_pending = False
+        self._dispense_installed = True
+
+    def commit_dispensed(self, rollout_id: int) -> dict[str, Any] | None:
+        """S27 P2 (driver, after the round's sync boundary): the rollout executor
+        reports the round's kept rows trained (``task_dispense.commit_round``).
+        None when this island takes no rows from the dispenser."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import commit_round
+
+        return self._in_executor(commit_round, int(rollout_id))
+
+    def close_dispensed(self) -> dict[str, Any] | None:
+        """S27 P2 (driver, finished run): release every row not trained yet."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import close_source
+
+        self._dispense_installed = False
+        return self._in_executor(close_source)
 
     def _install_data_passes(self) -> None:
         """Once, before the first draw or seek (``data_passes`` module doc)."""

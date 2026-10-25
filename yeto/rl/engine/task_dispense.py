@@ -360,10 +360,14 @@ class TaskSource:
         self._thread.start()
         return self
 
-    def take(self, count: int, *, timeout_s: float | None = None) -> list[int]:
+    def take(self, count: int, *, timeout_s: float | None = None,
+             drained_ok: bool = False) -> list[int]:
         """``count`` positions, in grant order. Waits while none are ready or the
         lease is not valid on this island's clock (head unreachable). Raises
-        :class:`DispenseEnded` when the data ended and nothing is ready."""
+        :class:`DispenseEnded` when the data ended and nothing is ready.
+        ``drained_ok``: when nothing fresh is left (the latest claim got WAIT)
+        return what there is at once, possibly nothing, instead of waiting for
+        rows other islands may give back."""
         count = int(count)
         out: list[int] = []
         deadline = None if timeout_s is None else self._clock() + float(timeout_s)
@@ -381,6 +385,8 @@ class TaskSource:
                     break  # a short draw at the end of the data: hand back what there is
                 if not self._ready and self._ended:
                     raise DispenseEnded("the dispenser gave out every pass and every row was reported")
+                if not self._ready and self._starved and drained_ok:
+                    break  # nothing fresh is left: the caller decides (it holds rows)
                 if self._ready:
                     self.stats["offline_waits"] += 1
                 remaining = None if deadline is None else deadline - self._clock()
@@ -415,6 +421,25 @@ class TaskSource:
         with self._cv:
             return set(self._owner)
 
+    def ready_count(self) -> int:
+        """Positions granted and not taken yet (prefetched)."""
+        with self._cv:
+            return len(self._ready)
+
+    def release_ready(self, *, stop_claims: bool = False) -> int:
+        """Release the prefetched positions (granted, not taken); with
+        ``stop_claims`` no new block is claimed afterwards. Returns how many."""
+        with self._cv:
+            if stop_claims:
+                self._closing = True
+            ready = [p for p, _ in self._ready]
+            for position, block in self._ready:
+                self._owner[position] = block
+            self._ready.clear()
+        if ready:
+            self.report(release=ready)
+        return len(ready)
+
     def flush(self, timeout_s: float = 30.0) -> bool:
         """Wait until every queued report is acknowledged; False on timeout."""
         deadline = self._clock() + float(timeout_s)
@@ -439,12 +464,8 @@ class TaskSource:
                    and self._thread.is_alive() and self._clock() < deadline):
                 self._cv.wait(timeout=0.05)
         if release and self._thread.is_alive():
-            with self._cv:
-                ready = [p for p, _ in self._ready]
-                for position, block in self._ready:
-                    self._owner[position] = block
-                self._ready.clear()
-            self.report(release=ready + sorted(self.taken()))
+            self.release_ready()
+            self.report(release=sorted(self.taken()))
             try:
                 self.flush(timeout_s)
             except BaseException as error:  # noqa: BLE001 - closing anyway

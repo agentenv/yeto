@@ -53,8 +53,14 @@ def test_dry_run_gives_the_islands_the_dispenser_instead_of_slots(tmp_path, monk
     from yeto import launcher
     from yeto.launch.syncer import syncer_command
 
+    strict = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "dispense",
+                   "--rl-data-passes", "2")
+    with pytest.raises(ValueError, match="strict roster"):
+        launcher._prepare_rl_args(strict)  # every island trains every round: no early end
+    # an island pool: an island whose data ended may leave on its own
     args = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "dispense",
-                 "--rl-data-passes", "2", "--rl-dispense-max-redo", "0")
+                 "--rl-data-passes", "2", "--rl-dispense-max-redo", "0",
+                 "--rl-sync-island-lease-s", "60")
     launcher._prepare_rl_args(args)
     plan = launcher.dry_run_plan(args)
     commands = [i["learner_command"] for i in plan["island_requests"]]
@@ -170,13 +176,16 @@ def test_miles_hook_draws_rows_by_position_and_reports_the_kept_groups(syncer_bi
         # Miles keeps groups 0 and 3 (the hook runs first); then it puts the aborted
         # group 1 back into its buffer (sglang_rollout.generate_rollout: add_samples)
         counts = hook.on_trained([groups[0], groups[2]])
-        assert counts == {"trained": 2, "dropped": 0}
+        assert counts == {"kept": 2, "dropped": 0, "rollout_id": 0}
+        assert hook.current().pending_positions() == {0, 3}, "kept: wait for the round's commit"
+        assert hook.commit_round(executor, 0) == {"rounds": [0], "trained": 2, "acked": True, "lost": 0}
         fake.buffer.append(groups[1])
         # next round: the buffered group first (not dropped), then new positions
         again = fake.get_samples(3)
         assert again[0] is groups[1]
         assert [g[0].metadata[td.DISPENSE_POSITION_KEY] for g in again[1:]] == [4, 5]
-        assert hook.on_trained([again[0], again[2]]) == {"trained": 2, "dropped": 0}
+        assert hook.on_trained([again[0], again[2]]) == {"kept": 2, "dropped": 0, "rollout_id": 1}
+        assert hook.commit_round(executor, 1)["trained"] == 2
         # group 4 was filtered for good: dropped at the next draw
         fake.get_samples(1)
         assert 4 not in hook.current().tasks.taken()
@@ -213,6 +222,7 @@ def test_two_miles_islands_and_a_relaunch_share_the_rows(syncer_binary, tmp_path
         def round_of(fake, wrapped):
             groups = fake.get_samples(4)
             wrapped.on_trained(groups)
+            wrapped.commit(wrapped._hooks)
             trained.extend(g[0].metadata[td.DISPENSE_POSITION_KEY] for g in groups)
 
         round_of(a_src, a)
@@ -229,6 +239,7 @@ def test_two_miles_islands_and_a_relaunch_share_the_rows(syncer_binary, tmp_path
                 except td.DispenseEnded:
                     return
                 wrapped.on_trained(groups)
+                wrapped.commit(wrapped._hooks)
                 with lock:
                     trained.extend(g[0].metadata[td.DISPENSE_POSITION_KEY] for g in groups)
                 time.sleep(0.01 if wrapped is a else 0.03)

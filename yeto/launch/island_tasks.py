@@ -15,6 +15,12 @@ from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
 from ..rl.engine.run_flags import CLI, rl_option
+from .data_split_plan import (  # noqa: F401 - re-exported
+    _data_split_islands,
+    _plan_data_split,
+    data_split_plan,
+    dispense_syncer_flags,
+)
 
 
 ISLAND_TASKS_DIR = "island-tasks"
@@ -93,20 +99,6 @@ def overlap_warning(task_lists, *, flag: str) -> str | None:
             "those tasks are trained by each of these islands")
 
 
-def _data_split_islands(args) -> tuple[list[int], bool]:
-    """``(learner ids of the same-card training islands, whether the launch has
-    sample roles)``. With sample roles (samplers, buffer trainers, convertible
-    nodes) no island of the launch both generates and trains on ``--data``."""
-
-    from ..rl.engine import sample_roles
-
-    count = len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1  # rl_island_count
-    roles = sample_roles.island_roles(args, count)
-    if roles or sample_roles.sample_role(args) != sample_roles.BOTH:
-        return [], True
-    return list(range(count)), False
-
-
 def _check_data_split(args) -> None:
     """``--rl-data-split``: plan which rows each training island reads, refuse a
     request the launch cannot honour, print the plan and cache it on ``args``.
@@ -149,6 +141,10 @@ def _check_dispense(args, plan) -> None:
     passes = getattr(args, "rl_data_passes", None)
     if passes is not None and int(passes) < 1:
         raise ValueError("--rl-data-passes must be >= 1")
+    if passes is not None and _strict_roster(args):
+        raise ValueError("--rl-data-passes needs islands that may end on their own when the data "
+                         "ends (asynchronous rounds or an island pool); a strict roster trains "
+                         "every island in every round")
     if int(getattr(args, "rl_dispense_max_redo", 1)) < 0:
         raise ValueError("--rl-dispense-max-redo must be >= 0")
     if not float(getattr(args, "rl_dispense_lease_s", 300.0)) > 0:
@@ -173,20 +169,20 @@ def _check_dispense(args, plan) -> None:
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense is wired for the Miles backend only (verl: later)")
 
 
-def dispense_syncer_flags(args) -> str:
-    """The actor syncer's ``--dispense`` flags (S27 P2); empty without the dispenser."""
+def _strict_roster(args) -> bool:
+    """Whether every island must train every round (the island bridge's
+    ``ends_on_data_end`` is False): a full-parameter strict sweep, or
+    strict-avg without an island pool (also with a critic)."""
 
-    plan = data_split_plan(args)
-    if not plan.dispense:
-        return ""
-    flags = (" --dispense"
-             f" --dispense-lease-s {float(getattr(args, 'rl_dispense_lease_s', 300.0))!r}"
-             f" --dispense-max-redo {int(getattr(args, 'rl_dispense_max_redo', 1))}"
-             " --dispense-log ~/yeto-output/task-dispense.jsonl")
-    passes = getattr(args, "rl_data_passes", None)
-    if passes is not None:
-        flags += f" --dispense-passes {int(passes)}"
-    return flags
+    from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS
+    from .syncer import island_pool
+
+    preset = str(getattr(args, "rl_sync_preset", "strict-avg"))
+    if preset in FULL_PARAMETER_SYNC_PRESETS:
+        return str(getattr(args, "rl_sync_full_parameter_rounds", "sweep")) != "async"
+    if preset == "strict-avg":
+        return not island_pool(args)
+    return False
 
 
 def _relaunch_position_warning(args, plan) -> str | None:
@@ -201,24 +197,6 @@ def _relaunch_position_warning(args, plan) -> str | None:
         return None
     return ("a full-parameter island that is relaunched into the running pool starts again "
             "at the first of its rows (it keeps no data position without --rl-checkpoint-store)")
-
-
-def data_split_plan(args):
-    """The launch's :class:`~yeto.rl.engine.data_split.DataSplitPlan` (cached by
-    :func:`_check_data_split`; computed here for a caller that skipped the launch
-    checks, e.g. a dry run or a unit test that builds one island task)."""
-
-    plan = getattr(args, "_data_split_plan", None)
-    return _plan_data_split(args) if plan is None else plan
-
-
-def _plan_data_split(args):
-    from ..rl.engine.data_split import plan_data_split
-
-    islands, roles = _data_split_islands(args)
-    return plan_data_split(getattr(args, "rl_data_split", None), islands=islands,
-                           tasks=bool(getattr(args, "rl_island_tasks", None)), sample_roles=roles,
-                           external_learners=int(getattr(args, "external_learners", 0) or 0))
 
 
 def _refuse_island_tasks(args, path: str) -> None:

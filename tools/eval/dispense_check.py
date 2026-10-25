@@ -21,8 +21,12 @@ log and, per island, the positions it was granted and trained and the passes
 it read. With ``--tapes`` and ``--seed`` it also maps every trained position
 to its row (``task_dispense.PositionMap``) and compares, per island, the rows
 the island tapes trained (``rl_round_data_rows``) with the rows of the
-positions that island reported trained: a tape row that no report covers is
-a problem.
+positions that island reported trained: a tape row of a committed round
+(``rl_dispense_commit`` names the round) that no report covers is a problem.
+A round the tape trained but never committed (the process died between the
+train step and the commit; the dispenser gave its rows out again) is
+counted, not a problem. A tape without ``rl_dispense_commit`` records (before
+the commit existed) counts every round as committed.
 
     python -m tools.eval.dispense_check task-dispense.jsonl [--tapes rl-island-*.jsonl --seed S]
 """
@@ -187,10 +191,43 @@ def check(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], *, seed: int) -> list[str]:
-    """Rows the island tapes trained (``rl_round_data_rows``) against the rows of
-    the positions each island reported trained (as multisets)."""
+def tape_rows(tapes: Iterable[Mapping[str, Any]]) -> tuple[dict[int, Counter[int]], dict[int, Counter[int]]]:
+    """``(committed, uncommitted)`` trained tape rows per island (module doc).
+    Records are read in order; ``rl_driver_start`` starts a new process."""
     from yeto.rl.engine.data_split import rows_of_runs
+
+    records = [r for r in tapes if r.get("island_id") is not None]
+    with_commits = {int(r["island_id"]) for r in records if r.get("event") == "rl_dispense_commit"}
+    committed: dict[int, Counter[int]] = defaultdict(Counter)
+    uncommitted: dict[int, Counter[int]] = defaultdict(Counter)
+    waiting: dict[int, dict[int, Counter[int]]] = defaultdict(dict)  # island -> round -> rows
+    for record in records:  # every island tape record carries its island_id
+        island, event = int(record["island_id"]), record.get("event")
+        if event == "rl_driver_start":
+            for counts in waiting.pop(island, {}).values():
+                uncommitted[island].update(counts)
+        elif event == "rl_round_data_rows":
+            counts = Counter(rows_of_runs(record.get("rows") or []))
+            if island not in with_commits:
+                committed[island].update(counts)
+            else:
+                waiting[island].setdefault(int(record.get("rollout_id", -1)), Counter()).update(counts)
+        elif event == "rl_dispense_commit":  # a commit names the rounds it reported
+            for round_id in record.get("rounds") or ():
+                counts = waiting[island].pop(int(round_id), None)
+                if counts:
+                    committed[island].update(counts)
+    for island, rounds in waiting.items():
+        for counts in rounds.values():
+            uncommitted[island].update(counts)
+    return dict(committed), dict(uncommitted)
+
+
+def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], *,
+                seed: int, info: dict[str, Any] | None = None) -> list[str]:
+    """Rows the island tapes trained in committed rounds (``rl_round_data_rows``)
+    against the rows of the positions each island reported trained (as multisets).
+    ``info`` receives the uncommitted tape rows per island."""
     from yeto.rl.engine.task_dispense import PositionMap
 
     rows = summary.get("rows")
@@ -200,17 +237,17 @@ def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], 
     reported: dict[int, Counter[int]] = {
         int(i): Counter(pmap.row(p) for p in ps)
         for i, ps in summary.get("trained_positions_by_island", {}).items()}
-    taped: dict[int, Counter[int]] = defaultdict(Counter)
-    for record in tapes:  # every island tape record carries its island_id
-        if record.get("event") == "rl_round_data_rows" and record.get("island_id") is not None:
-            taped[int(record["island_id"])].update(rows_of_runs(record.get("rows") or []))
+    committed, uncommitted = tape_rows(tapes)
+    if info is not None:
+        info["tape_rows_committed"] = {str(i): sum(c.values()) for i, c in sorted(committed.items())}
+        info["tape_rows_uncommitted"] = {str(i): sum(c.values()) for i, c in sorted(uncommitted.items())}
     problems = []
-    for isl, counts in sorted(taped.items()):
+    for isl, counts in sorted(committed.items()):
         missing = counts - reported.get(isl, Counter())
         if missing:
             sample = sorted(missing)[:10]
-            problems.append(f"island {isl}: {sum(missing.values())} trained tape rows have no "
-                            f"trained report (e.g. rows {sample})")
+            problems.append(f"island {isl}: {sum(missing.values())} trained tape rows of committed "
+                            f"rounds have no trained report (e.g. rows {sample})")
     return problems
 
 
@@ -225,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.tapes:
         if args.seed is None:
             parser.error("--tapes needs --seed")
-        tape_problems = check_tapes(summary, read_records(args.tapes), seed=args.seed)
+        tape_problems = check_tapes(summary, read_records(args.tapes), seed=args.seed, info=summary)
         summary["tape_problems"] = tape_problems
         summary["ok"] = summary["ok"] and not tape_problems
     if not args.positions:
