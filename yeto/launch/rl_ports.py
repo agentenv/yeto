@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
-from ..rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pairs
+from ..rl.engine.run_flags import CLI, check_verify_every, rl_forward_pairs, rl_option, rl_option_pairs
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
 from .topology import rl_island_count, rl_island_placement_args
@@ -493,6 +493,7 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-megatron-ref-load needs an absolute path without whitespace")
     if getattr(args, "rl_boot_only", False) and not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
+    check_verify_every(args)
     from ..rl.engine import sample_roles
 
     if sample_roles.is_convertible_pool(args):  # L7.5: every island convertible
@@ -651,6 +652,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-profile-trainer"
     if getattr(args, "rl_verify_every_round", False):
         flags += " --rl-verify-every-round"
+    if getattr(args, "rl_verify_every", None) is not None:
+        flags += f" --rl-verify-every {int(args.rl_verify_every)}"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
