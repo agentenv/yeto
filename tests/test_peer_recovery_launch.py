@@ -37,8 +37,8 @@ def test_peer_recovery_reaches_the_syncer_and_every_island():
 
 
 def test_explicit_store_and_ttl():
-    _, plan = _plan(ASYNC + ("--rl-peer-recovery", "--rl-peer-recovery-store", "~/nfs/snapshots",
-                             "--rl-peer-recovery-ttl-s", "900"))
+    _, plan = _plan(ASYNC + ("--rl-peer-recovery", "--rl-checkpoint-store", "~/nfs/run",
+                             "--rl-peer-recovery-store", "~/nfs/snapshots", "--rl-peer-recovery-ttl-s", "900"))
     island_command = plan["island_requests"][0]["learner_command"]
     assert _flag(island_command, "--rl-peer-recovery-store") == "~/nfs/snapshots"
     assert _flag(island_command, "--rl-peer-recovery-ttl-s") == "900.0"
@@ -157,3 +157,73 @@ def test_fault_injection_turns_a_relaunch_into_a_catch_up_rejoin(tmp_path, capsy
     options = peer_recovery_options(args, environ={**env, MODAL_INCARNATION_ENV: "2"})
     assert options.recover is False and options.store == str(tmp_path)
     assert "re-run 2 rejoins by catch-up" in capsys.readouterr().err
+
+
+# -- S27 G-EL: an explicit store reaches the island as a path under its mount ----
+
+
+def test_explicit_modal_volume_store_becomes_the_island_mount_path():
+    """s27-elastic-a: the URI reached the island as it was, and the island took it
+    for a relative directory on its local disk (the donor snapshot never left the
+    donor container). It must become the Volume mount path, as the checkpoint
+    store and the data positions do."""
+    _, plan = _plan(ASYNC + ("--rl-peer-recovery", "--rl-checkpoint-store", "modal-volume://yeto-vol/run-a",
+                             "--rl-peer-recovery-store", "modal-volume://yeto-vol/run-a-peer"))
+    for island in plan["island_requests"]:
+        assert _flag(island["learner_command"], "--rl-peer-recovery-store") == \
+            "/root/yeto-checkpoint-store/run-a-peer"
+
+
+@pytest.mark.parametrize("store, peer, expected", [
+    ("modal-volume://v/run", "modal-volume://v/run-peer", "/root/yeto-checkpoint-store/run-peer"),
+    ("modal-volume://v/run", "modal-volume://v", "/root/yeto-checkpoint-store"),
+    ("modal-volume://v/run", "/root/yeto-checkpoint-store/peer/", "/root/yeto-checkpoint-store/peer"),
+    ("s3://bkt/run", "s3://bkt/peer", "~/yeto-checkpoint-store/peer"),
+    (None, "/nfs/peer", "/nfs/peer"),
+    ("/nfs/run", "~/nfs/peer", "~/nfs/peer"),
+])
+def test_island_store_path(store, peer, expected):
+    from yeto.launch.storage import island_store_path
+
+    args = SimpleNamespace(rl_checkpoint_store=store)
+    assert island_store_path(args, peer, flag="--rl-peer-recovery-store") == expected
+
+
+@pytest.mark.parametrize("store, peer, message", [
+    ("modal-volume://v/run", "modal-volume://other/peer", "only through the mount"),
+    (None, "modal-volume://v/peer", "only through the mount"),
+    ("s3://bkt/run", "s3://other/peer", "only through the mount"),
+    ("s3://bkt/run", "modal-volume://bkt/peer", "only through the mount"),
+    ("modal-volume://v/run", "/tmp/peer", "local disk"),
+    ("modal-volume://v/run", "relative/peer", "absolute"),
+    ("/nfs/run", "/nfs/../etc", "absolute"),
+])
+def test_island_store_path_refusals(store, peer, message):
+    from yeto.launch.storage import island_store_path
+
+    with pytest.raises(ValueError, match=message):
+        island_store_path(SimpleNamespace(rl_checkpoint_store=store), peer, flag="--rl-peer-recovery-store")
+
+
+def test_modal_islands_refuse_a_snapshot_store_without_the_volume():
+    with pytest.raises(ValueError, match="no Volume is mounted"):
+        _plan(ASYNC + ("--rl-peer-recovery", "--rl-peer-recovery-store", "~/nfs/snapshots"))
+    with pytest.raises(ValueError, match="only through the mount"):
+        _plan(ASYNC + ("--rl-peer-recovery", "--rl-checkpoint-store", "modal-volume://yeto-vol/run-a",
+                       "--rl-peer-recovery-store", "modal-volume://another-vol/run-a-peer"))
+
+
+@pytest.mark.parametrize("environ", [{}, {"YETO_RL_STORE_IMPL": "yeto.cloud.modal_ckpt_store:store_from_env",
+                                          "YETO_RL_STORE_MODAL_VOLUME": "v"}])
+def test_an_island_refuses_a_store_uri_for_a_path(tmp_path, environ):
+    """Fail closed on the island too: a store URI is never a directory there."""
+    from yeto.rl.engine.resume import STORE_IMPL_ENV, store_for
+    from yeto.rl.peer_recovery import snapshot_store_for
+
+    if environ:
+        assert STORE_IMPL_ENV in environ
+    with pytest.raises(ValueError, match="is a URI"):
+        store_for("modal-volume://v/run-peer", environ=environ)
+    with pytest.raises(ValueError, match="is a URI"):
+        snapshot_store_for("modal-volume://v/run-peer", environ=environ)
+    assert store_for(str(tmp_path), environ={}).root == tmp_path

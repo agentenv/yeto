@@ -36,19 +36,23 @@ def peer_recovery_store(args) -> str | None:
 
 
 def snapshot_store_path(args) -> str | None:
-    """The snapshot store path the island would use, whether or not recovery is on."""
+    """The snapshot store path the island would use, whether or not recovery is on:
+    ``--rl-peer-recovery-store`` mapped to the island's mount like every other store
+    path (:func:`yeto.launch.storage.island_store_path`; raises ValueError when the
+    island cannot reach it), else the ``--rl-checkpoint-store`` path on the island."""
+    from .storage import island_store_path, rl_checkpoint_store_plan
+
     explicit = getattr(args, "rl_peer_recovery_store", None)
     if explicit:
-        return str(explicit)
-    from .storage import rl_checkpoint_store_plan
-
+        return island_store_path(args, str(explicit), flag="--rl-peer-recovery-store")
     plan = rl_checkpoint_store_plan(args)
     return None if plan is None else plan[0]
 
 
-def check_peer_recovery(args) -> None:
+def check_peer_recovery(args, clouds=None) -> None:
     """Refuse ``--rl-peer-recovery`` options that do not apply. Every recovery
-    option without ``--rl-peer-recovery`` is refused too."""
+    option without ``--rl-peer-recovery`` is refused too. ``clouds``: the island
+    clouds; on Modal the snapshot store must be on the mounted Volume."""
     from .syncer import rl_full_parameter_async, syncer_shard_count
 
     options = [flag for dest, flag in (
@@ -57,6 +61,8 @@ def check_peer_recovery(args) -> None:
         ("rl_recovery_donor_timeout_s", "--rl-recovery-donor-timeout-s"),
         ("rl_peer_recovery_store", "--rl-peer-recovery-store"),
         ("rl_peer_recovery_ttl_s", "--rl-peer-recovery-ttl-s"),
+        ("rl_peer_recovery_manifest_wait_s", "--rl-peer-recovery-manifest-wait-s"),
+        ("rl_peer_recovery_donor_write", "--rl-peer-recovery-donor-write"),
     ) if getattr(args, dest, None) is not None]
     if not peer_recovery_enabled(args):
         if options:
@@ -70,9 +76,18 @@ def check_peer_recovery(args) -> None:
         raise ValueError("--rl-peer-recovery needs one syncer process (--syncer-shards 1)")
     if getattr(args, "rl_sync_bcast_delta_full_every", 0):
         raise ValueError("--rl-peer-recovery resends whole fragments: it excludes broadcast deltas")
-    if peer_recovery_store(args) is None:
+    store = peer_recovery_store(args)  # raises when the island cannot reach the explicit store
+    if store is None:
         raise ValueError("--rl-peer-recovery needs --rl-peer-recovery-store or --rl-checkpoint-store "
                          "(a store every island reaches)")
+    if clouds and "modal" in clouds and not getattr(args, "rl_checkpoint_store", None):
+        # A Modal island mounts no store without --rl-checkpoint-store
+        # modal-volume://... (the launch refuses any other store form on Modal), so
+        # every path is local to one container. With a Volume store,
+        # island_store_path already keeps the path under its mount.
+        raise ValueError(f"--rl-peer-recovery snapshot store {store!r} on Modal islands: without "
+                         "--rl-checkpoint-store modal-volume://NAME[/PREFIX] no Volume is mounted and "
+                         "a container path is local to one container")
     for dest, flag in (("rl_recovery_bound_steps", "--rl-recovery-bound-steps"),
                        ("rl_recovery_max_donor_tries", "--rl-recovery-max-donor-tries"),
                        ("rl_recovery_donor_timeout_s", "--rl-recovery-donor-timeout-s")):
@@ -82,6 +97,9 @@ def check_peer_recovery(args) -> None:
     ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
     if ttl is not None and not ttl > 0:
         raise ValueError("--rl-peer-recovery-ttl-s must be positive")
+    wait = getattr(args, "rl_peer_recovery_manifest_wait_s", None)
+    if wait is not None and not wait >= 0:
+        raise ValueError("--rl-peer-recovery-manifest-wait-s must be >= 0")
     if getattr(args, "rl_syncer_epoch", None) is not None and args.rl_syncer_epoch < 0:
         raise ValueError("--rl-syncer-epoch must be >= 0")
 
@@ -99,6 +117,12 @@ def island_flags(args) -> str:
     ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
     if ttl is not None:
         flags += f" --rl-peer-recovery-ttl-s {float(ttl)!r}"
+    wait = getattr(args, "rl_peer_recovery_manifest_wait_s", None)
+    if wait is not None:
+        flags += f" --rl-peer-recovery-manifest-wait-s {float(wait)!r}"
+    write = getattr(args, "rl_peer_recovery_donor_write", None)
+    if write is not None:
+        flags += f" --rl-peer-recovery-donor-write {write}"
     return flags
 
 
