@@ -470,6 +470,41 @@ class _ArrayFiles:
         return versions
 
 
+def digest_fingerprint(rows: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> str:
+    """One short digest over every row's ``path`` and ``keys``: the donor logs it
+    when it writes a snapshot and the recovering island when it restored one, so
+    the two log lines show the same trainer state."""
+    body = sorted([str(r.get("path")), *(str(r.get(k)) for k in keys)] for r in rows)
+    return hashlib.sha256(json.dumps(body).encode()).hexdigest()[:16]
+
+
+def check_restored_digests(saved: Sequence[Mapping[str, Any]], restored: Sequence[Mapping[str, Any]],
+                           keys: Sequence[str]) -> str | None:
+    """A sharded trainer's restore must re-export the donor's per-shard digests.
+
+    ``saved``: the snapshot's shard rows (``path`` + ``keys``, written by the
+    donor); ``restored``: the rows each rank reports after its restore. Rows
+    without every key are not checked (an older donor). Returns the digest
+    fingerprint of the checked rows (None when none carries the keys); raises
+    RuntimeError when a rank restored other state: the trainer is not the
+    donor's and must not train."""
+    checked = [row for row in saved if all(k in row for k in keys)]
+    if not checked:
+        return None
+    by_path = {row.get("path"): row for row in restored}
+    problems = []
+    for row in checked:
+        now = by_path.get(row["path"])
+        if now is None:
+            problems.append(f"{row['path']}: no restore summary")
+            continue
+        problems += [f"{row['path']}: restored {k} differs from the donor's (rank diff {now.get('diff')})"
+                     for k in keys if now.get(k) != row[k]]
+    if problems:
+        raise RuntimeError("peer snapshot restore is not the donor's state: " + "; ".join(problems[:8]))
+    return digest_fingerprint([by_path[row["path"]] for row in checked], keys)
+
+
 def as_file_island(island: Any) -> FileRecoverableIsland:
     if callable(getattr(island, "write_recovery_snapshot", None)):
         return island

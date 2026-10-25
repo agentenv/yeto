@@ -122,17 +122,19 @@ def test_verl_problems_cover_the_island_refusals():
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))
     for needle in ("--rl-placement colocated", "--rl-sample-role trainer", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
-                   "--expert-full-count", "--rl-peer-recovery"):
+                   "--expert-full-count"):
         assert needle in problems, needle
+    assert "--rl-peer-recovery" not in problems  # S27 G-ED: the verl stream recovers from a peer
 
 
-def test_the_async_mode_never_turns_peer_recovery_on_for_verl():
+def test_the_async_mode_turns_peer_recovery_on_for_verl_as_for_miles():
+    """S27 G-ED: without a snapshot store it stays off; a store turns it on (as on Miles)."""
     from yeto.launch.rl_args import _peer_recovery_applies
 
     args = _prepared(_verl_args())
     assert args.rl_sync_mode_effective == "async" and args.rl_peer_recovery is False
-    args.rl_checkpoint_store = "modal-volume://v/run"  # a snapshot store would turn it on for Miles
-    assert _peer_recovery_applies(args) is False
+    args.rl_checkpoint_store = "modal-volume://v/run"
+    assert _peer_recovery_applies(args) is True
 
 
 # ----------------------------------------------------------------------------- the island argv

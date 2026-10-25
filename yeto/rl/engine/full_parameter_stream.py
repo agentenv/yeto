@@ -123,6 +123,17 @@ def first_push_phase(fragment_id: int, fragments: int, horizon: int) -> int:
 
 
 # Lazy capture: every N-th local round still captures with content hashes
+# Switches of the deferred and lazy capture (S27 G-AA / G-AY), the same for
+# every engine that offers them: "0" keeps the whole capture.
+DEFER_CAPTURE_ENV = "YETO_FULL_PARAMETER_DEFER_CAPTURE"
+LAZY_CAPTURE_ENV = "YETO_FULL_PARAMETER_LAZY_CAPTURE"
+
+
+def capture_switch_on(env: str) -> bool:
+    """Whether the capture option behind ``env`` is on (default on)."""
+    return os.environ.get(env, "1") != "0"
+
+
 # and the whole-model model/master check (0: never).
 FULL_CHECK_EVERY_ENV = "YETO_FULL_PARAMETER_FULL_CHECK_EVERY"
 DEFAULT_FULL_CHECK_EVERY = 16
@@ -604,6 +615,7 @@ class FullParameterRoleStream:
         self._donor = None
         self._donor_refusals_reported = 0
         self.recovery_outcome = None
+        self.recovered_scheduler_samples = None
         self._routed_at_base = RoutedTokens()
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
@@ -934,6 +946,9 @@ class FullParameterRoleStream:
             self.group = self.adapter = self.client = self.sink = self.current = None
             raise
         self.recovery_outcome = outcome
+        # S27 G-ED: the donor's scheduler position the restored trainer continues
+        # from (its round cuts count from there, FullParameterSync.start)
+        self.recovered_scheduler_samples = getattr(island, "scheduler_samples", None)
         print(f"[yeto-peer-recovery] {self.config.role} learner {self.config.learner_id}: "
               f"{outcome.path} recovery (donor {outcome.donor}) in {outcome.steps} syncer step(s), "
               f"{outcome.seconds:.1f}s; fragment versions {list(self.fragment_versions)}",

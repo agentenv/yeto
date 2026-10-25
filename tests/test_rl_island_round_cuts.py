@@ -282,11 +282,15 @@ def test_island_cut_store_refusals(extra, no_sync):
         _learner(*extra, no_sync=no_sync)
 
 
-def test_verl_refuses_the_timed_interval():
+def test_verl_takes_the_timed_interval():
+    """S27 G-ED: the verl island wires the timed interval as Miles does."""
     from yeto.rl.adapters.verl.round_cuts import resume_config
 
-    with pytest.raises(ValueError, match="not wired for verl"):
+    with pytest.raises(ValueError, match="need --rl-resume-store"):
         resume_config(SimpleNamespace(rl_cut_auto_mtbf_s=60.0))
+    config = resume_config(SimpleNamespace(rl_cut_auto_mtbf_s=60.0, rl_resume_store="/s",
+                                           rl_single_island_no_sync=True))
+    assert config["auto_mtbf_s"] == 60.0 and "every" not in config
 
 
 def test_write_only_cuts_commit_inline_for_a_buffer_reader():

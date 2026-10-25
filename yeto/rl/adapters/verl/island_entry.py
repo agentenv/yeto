@@ -108,6 +108,10 @@ def parse_args(argv):
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
+    # S27 G-ED: island cuts of a synced island (S27 R-2) and the timed cut interval
+    p.add_argument("--rl-island-cut-store", default=None)
+    p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
+    p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     # S27 G-DC: the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
@@ -131,6 +135,10 @@ def parse_args(argv):
     from .full_parameter_stream import add_island_flags
 
     add_island_flags(p)
+    # S27 G-EN: the Miles island's heldout eval flags (VERL-PARITY #34, .eval_port)
+    from .eval_port import add_island_flags as add_eval_flags
+
+    add_eval_flags(p)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -448,8 +456,6 @@ def main(argv=None) -> int:
 
         from .full_parameter_stream import plan_section
 
-        if resume:
-            raise SystemExit("round cuts of a full-parameter verl island are not wired (V9)")
         try:
             full_plan = plan_section(
                 args, run.to_dict(), model_path=model_path, sync=sync,
@@ -466,6 +472,31 @@ def main(argv=None) -> int:
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
 
         asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
+    if full and megatron is None:  # S27 G-EC: the Miles training options verl can express (.train_options);
+        # the Megatron island maps its own (megatron_engine.build_overrides)
+        from .train_options import apply_training_options
+
+        try:
+            overrides, asserted_keys = apply_training_options(
+                args, overrides, asserted_keys, max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    try:  # S27 G-EN: heldout eval through verl's _validate (.eval_port); the sync trainer only
+        from . import eval_port
+
+        if megatron is not None or limit or buffer_section is not None:
+            eval_port.refuse_unwired(args, "Megatron island" if megatron is not None
+                                     else "fully_async" if limit else "buffer trainer")
+            eval_plan = None
+        else:
+            eval_plan = eval_port.eval_section(
+                args, work=work / "data", max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len, temperature=run.temperature,
+                top_p=run.top_p)
+        overrides, asserted_keys = eval_port.apply_eval_overrides(eval_plan, overrides, asserted_keys)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
@@ -504,6 +535,7 @@ def main(argv=None) -> int:
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
         "rollout_quant": quant_summary,
+        **({eval_port.PLAN_KEY: eval_plan} if eval_plan else {}),
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))

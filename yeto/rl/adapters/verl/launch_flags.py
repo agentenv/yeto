@@ -64,9 +64,9 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
 # (the model's HF config on the meta device), not from the Miles layout probe.
 FULL_PARAMETER_PLACEMENT = "colocated"  # the default
 FULL_PARAMETER_PLACEMENTS = ("colocated", "fixed-partition")
-# The stream refuses peer recovery (full_parameter_stream.refuse_unsupported),
-# so the async mode must not turn it on by default (rl_args._peer_recovery_applies).
-FULL_PARAMETER_PEER_RECOVERY = False
+# S27 G-ED: the verl stream recovers from a peer (adapters/verl/peer_recovery.py),
+# so the async mode turns it on by default as on Miles (rl_args._peer_recovery_applies).
+FULL_PARAMETER_PEER_RECOVERY = True
 FULL_PARAMETER_PLAN_COMMAND = (
     "python -m yeto.rl.adapters.verl.full_parameter_plan --model <M> --model-revision <R> "
     "--fragments <P> --matrix-merge <avg|rda>")
@@ -97,8 +97,7 @@ def full_parameter_problems(args) -> list[str]:
     if int(getattr(args, "expert_full_count", 0) or 0):
         problems.append("no --expert-full-count (DeepSeek V4 expert-full is a Miles recipe)")
     for dest, option in (("rl_sync_overlap", "--rl-sync-overlap"),
-                         ("rl_sync_expert_token_weights", "--rl-sync-expert-token-weights"),
-                         ("rl_peer_recovery", "--rl-peer-recovery")):
+                         ("rl_sync_expert_token_weights", "--rl-sync-expert-token-weights")):
         if getattr(args, dest, False):
             problems.append(f"no {option} (not offered by the verl stream)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
@@ -107,26 +106,44 @@ def full_parameter_problems(args) -> list[str]:
                if getattr(args, dest, off) not in (off, None)]
     if ignored:
         problems.append("no " + ", ".join(ignored) + " (the verl full-parameter island has no such option; "
-                        "it would ignore it)")
+                        "it would ignore it: " + "; ".join(f"{option}: {NOT_MAPPED_REASONS[option]}"
+                                                           for option in ignored) + ")")
+    schedule = getattr(args, "rl_lr_schedule", None)
+    if schedule not in (None, "auto", "constant"):  # S27 G-EC: verl.train_options
+        problems.append(f"--rl-lr-schedule constant (got {schedule}; verl's FSDP2 optimizer schedules are "
+                        "constant and cosine, not Miles' linear decay)")
     return problems
 
 
 # S27 G-DS: options the launcher forwards to every island that the verl island
 # entry does not parse (parse_known_args would drop them without a word):
 # (args dest, value when off, option). Refused instead, before any cloud work.
+# S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
+# constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
+# --rl-observe-timeline, --rl-resource-sample-interval) and S27 G-EN one more
+# (--rl-eval-interval: verl's _validate behind the driver's evaluate hook,
+# verl.eval_port); the rest stay here.
 IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_verify_every_round", False, "--rl-verify-every-round"),
-    ("rl_lr_schedule", "auto", "--rl-lr-schedule"),
-    ("rl_eval_interval", None, "--rl-eval-interval"),
-    ("rl_max_tokens_per_gpu", None, "--rl-max-tokens-per-gpu"),
     ("rl_deterministic_trainer", False, "--rl-deterministic-trainer"),
-    ("rl_activation_recompute", False, "--rl-activation-recompute"),
     ("rl_gradient_accumulation_fusion", False, "--rl-gradient-accumulation-fusion"),
     ("rl_async_buffer_rounds", None, "--rl-async-buffer-rounds"),
     ("rl_lora_dropout", None, "--rl-lora-dropout"),
     ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
-    ("rl_observe_timeline", False, "--rl-observe-timeline"),
     ("rl_profile_trainer", False, "--rl-profile-trainer"),
     ("rl_debug_dump", False, "--rl-debug-dump"),
-    ("rl_resource_sample_interval", None, "--rl-resource-sample-interval"),
 )
+# Why each option above has no verl mapping yet (the launcher's refusal says it).
+NOT_MAPPED_REASONS = {
+    "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
+                               "(VERL-PARITY #25)",
+    "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
+    "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
+    "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",
+    "--rl-lora-dropout": "a full-parameter island has no LoRA adapter",
+    "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
+    "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
+                            "there",
+    "--rl-debug-dump": "Miles' rollout/train data dump has no verl counterpart (the island writes its own "
+                       "verl-dump criteria tensors)",
+}
