@@ -32,8 +32,9 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
 * ``serial`` (default since S27 G-DJ): Miles' own ``fill_replay_data`` with
   ``torch.set_num_threads(1)`` for the call; the same code as ``legacy``, and
   the fill is pure fill/cat/slice/copy (no reduction), so the thread count does
-  not change the tensors (a CPU test pins this on Nano-like shapes; the GPU
-  shadow check, ``YETO_REPLAY_FILL_CHECK``, has not run on serial yet);
+  not change the tensors (a CPU test pins this on Nano-like shapes; on GPU,
+  s27-dj-2 ran 24 shadow checks, ``YETO_REPLAY_FILL_CHECK``, 3 rounds x 8
+  ranks x 184 tensors, all equal);
 * ``legacy``: Miles' own ``fill_replay_data`` on the process's torch threads;
 * ``compact``: :func:`compact_fill_replay_data` -- per micro-batch one
   stream-major buffer (pinned when CUDA is available) with per-stream row
@@ -48,8 +49,9 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
 * ``serial-ab``: ``serial`` on odd rollout ids, ``legacy`` on even ones;
 * ``cycle``: ``legacy``, ``compact``, ``serial`` by rollout id modulo 3.
 
-On GPU (s27-dj-1, 8 trainer ranks of 64 torch threads each on a 100-CPU
-gVisor node) the legacy fill took 11.7-12.3 s and ``serial`` 0.04 s; compact
+On GPU (s27-dj-1 and s27-dj-2, 8 trainer ranks of 64 torch threads each on a
+100-CPU gVisor node) the legacy fill took 12.1 s per round (median of 15
+rounds) and ``serial`` 0.037 s (median of 16 rounds); compact
 was refused there, because Megatron registers the routing streams with
 ``register_replay_list_moe`` (layer ids from the model), not with
 ``register_replay_list_sequential``.
