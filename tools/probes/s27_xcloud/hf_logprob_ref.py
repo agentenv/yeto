@@ -11,7 +11,10 @@ same samples teacher-forced with the base weights (version 0):
 * ``builtin_naive``: the same with the Mamba CUDA kernels off (``use_mamba_kernels``
   False and the module's kernel symbols set to None), i.e. the naive torch path the
   Ascend trainer runs (no mamba kernels on the NPU); calls of ``torch_forward`` /
-  ``cuda_kernels_forward`` are counted to show which path ran.
+  ``cuda_kernels_forward`` are counted to show which path ran;
+* ``builtin_naive_fixed``: the naive path with ``yeto.rl.nemotron_h_torch_fix`` applied;
+* ``remote_naive``: the checkpoint's own implementation with its module's
+  ``is_fast_path_available`` set False (its torch fallback), calls counted.
 
 Input ids per sample = ``tokenizer.encode(prompt)`` + the response ids from the payload.
 SGLang tokenizes text input with the same HF tokenizer (``encode`` with special tokens;
@@ -83,6 +86,19 @@ def compare(a: list[list[float]], b: list[list[float]]) -> dict:
             "per_sample_mean_abs": [round(sum(abs(d) for d in r) / max(1, len(r)), 4) for r in diffs]}
 
 
+def count_calls(mixer) -> dict:
+    calls = {"torch_forward": 0, "cuda_kernels_forward": 0}
+    for meth in calls:
+        if hasattr(mixer, meth):
+            orig = getattr(mixer, meth)
+
+            def wrapped(self, *a, _orig=orig, _m=meth, **k):
+                calls[_m] += 1
+                return _orig(self, *a, **k)
+            setattr(mixer, meth, wrapped)
+    return calls
+
+
 def naive_paths() -> dict:
     """Turn the built-in nemotron_h Mamba kernels off and count which forward runs."""
     import transformers.models.nemotron_h.modeling_nemotron_h as nh
@@ -146,10 +162,17 @@ def ref(tag: str, variants: str = "remote,builtin") -> dict:
     rollout = [list(s["rollout_log_probs"]) for s in samples]
     scores: dict[str, list[list[float]]] = {"sglang": rollout}
     for label in variants.split(","):
-        remote = label == "remote"
         began = time.monotonic()
         try:
-            naive = naive_paths() if label == "builtin_naive" else None
+            naive = None
+            if label == "builtin_naive_fixed":
+                from yeto.rl import nemotron_h_torch_fix
+
+                fixinfo = nemotron_h_torch_fix.apply()
+                naive = {**naive_paths(), "fix": fixinfo}
+            elif label == "builtin_naive":
+                naive = naive_paths()
+            remote = label.startswith("remote")
             config = AutoConfig.from_pretrained(BASE_DIR, trust_remote_code=remote)
             if naive is not None:
                 naive["use_mamba_kernels_was"] = getattr(config, "use_mamba_kernels", "absent")
@@ -157,6 +180,11 @@ def ref(tag: str, variants: str = "remote,builtin") -> dict:
             model = AutoModelForCausalLM.from_pretrained(BASE_DIR, config=config, trust_remote_code=remote,
                                                          torch_dtype=torch.bfloat16, device_map="cuda")
             model.eval()
+            if label == "remote_naive":
+                mod = sys.modules[type(model).__module__]
+                naive = {"is_fast_path_available_was": getattr(mod, "is_fast_path_available", "absent")}
+                mod.is_fast_path_available = False
+                naive["calls"] = count_calls(getattr(mod, "NemotronHMamba2Mixer"))
             loaded = time.monotonic() - began
             scores[label] = score(model, samples, tok)
             result[label] = {"class": type(model).__name__, "module": type(model).__module__,
@@ -169,7 +197,8 @@ def ref(tag: str, variants: str = "remote,builtin") -> dict:
         torch.cuda.empty_cache()
         save()
     for x, y in (("sglang", "remote"), ("sglang", "builtin"), ("remote", "builtin"),
-                 ("sglang", "builtin_naive"), ("builtin", "builtin_naive")):
+                 ("sglang", "builtin_naive"), ("builtin", "builtin_naive"),
+                 ("sglang", "builtin_naive_fixed"), ("sglang", "remote_naive")):
         if x in scores and y in scores:
             result[f"{x}_vs_{y}"] = compare(scores[x], scores[y])  # diff = x - y
     save()
