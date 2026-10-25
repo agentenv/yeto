@@ -490,3 +490,76 @@ def test_the_session_binds_round_evidence_only_under_rollout_ahead():
     session._driver = SimpleNamespace(rollout_ahead=1, expected_token=f"yeto:5:{HASH}")
     with pytest.raises(RuntimeError, match="trains from published policy v5"):
         session._round_trajectories(4)
+
+
+# -- a single-island store that holds only the HF exports (S27 G-CO) -------------------------------
+
+SINGLE = ("--rl-single-island-no-sync", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
+          "--rl-algorithm-spec", "tools/eval/efficiency/algo-eff-miles.json")
+AHEAD = ("--rl-max-policy-age", "1", "--rl-rollout-ahead", "1")
+STORE = ("--rl-checkpoint-store", "modal-volume://vol/run-d", "--rl-export-hf-rounds", "final")
+
+
+def _single_launch(extra, monkeypatch, *, ahead=True):
+    from test_rl_full_parameter_async import _launcher_args
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", (*SINGLE, *(AHEAD if ahead else ()), *extra), gpu="modal:2xh100")
+    args.controller = "local"
+    _prepare_rl_args(args)
+    return args, dry_run_plan(args)
+
+
+def test_rollout_ahead_still_refuses_the_single_island_resume_store(monkeypatch):
+    # the store of a single island is its resume store: a ledger and round cuts,
+    # which assume nothing in flight at their safe point (ROLLOUT-OVERLAP 2.4)
+    with pytest.raises(ValueError, match="resume ledger"):
+        _single_launch(STORE, monkeypatch)
+
+
+def test_rollout_ahead_accepts_a_store_that_holds_only_the_hf_exports(monkeypatch):
+    from yeto.launch import rl_ports, storage
+    from yeto.launcher import _resume_marker_env
+
+    args, plan = _single_launch((*STORE, "--rl-checkpoint-store-export-only"), monkeypatch)
+    (island,) = plan["island_requests"]
+    command = island["learner_command"]
+    assert " --rl-rollout-ahead 1" in command
+    assert "--rl-export-hf-rounds final" in command
+    assert "--rl-export-hf-store /root/yeto-checkpoint-store/run-d/hf" in command
+    for flag in ("--rl-resume-store", "--rl-cut-every", "--rl-island-cut-store", "--rl-data-position-store"):
+        assert flag not in command
+    assert rl_ports._check_resume_launch_flags(args) is False
+    # no resume store: a Modal re-run is a failure, not a resume, and no reclaim marker
+    assert storage.resumes_in_new_container(args) is False
+    assert _resume_marker_env(args, "modal") == {}
+    args.rl_checkpoint_store_export_only = False
+    assert storage.resumes_in_new_container(args) is True and _resume_marker_env(args, "modal")
+
+
+@pytest.mark.parametrize(("extra", "message"), [
+    (("--rl-checkpoint-store-export-only",), "needs --rl-checkpoint-store"),
+    (("--rl-checkpoint-store", "modal-volume://vol/run-d", "--rl-checkpoint-store-export-only"),
+     "needs --rl-export-hf-rounds"),
+    ((*STORE, "--rl-checkpoint-store-export-only", "--rl-cut-every", "4"), "no --rl-cut-every"),
+    ((*STORE, "--rl-checkpoint-store-export-only", "--rl-stop-after-rounds", "3"),
+     "no --rl-stop-after-rounds"),
+    ((*STORE, "--rl-checkpoint-store-export-only", "--rl-resume-allow-config-change"),
+     "no --rl-resume-allow-config-change"),
+])
+def test_the_export_only_store_refuses_what_needs_a_resume_store(monkeypatch, extra, message):
+    with pytest.raises(ValueError, match=message):
+        _single_launch(extra, monkeypatch, ahead=False)
+
+
+def test_the_export_only_store_needs_a_single_island_launch():
+    from yeto.launch import rl_ports
+
+    args = SimpleNamespace(rl_checkpoint_store="/s", rl_checkpoint_store_export_only=True,
+                           rl_single_island_no_sync=False, rl_elastic=False, rl_export_hf_rounds="final")
+    with pytest.raises(ValueError, match="needs --rl-single-island-no-sync"):
+        rl_ports._check_resume_launch_flags(args)
+    args.rl_single_island_no_sync, args.rl_elastic = True, True
+    with pytest.raises(ValueError, match="without --rl-elastic"):
+        rl_ports._check_resume_launch_flags(args)

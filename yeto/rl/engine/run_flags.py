@@ -578,6 +578,13 @@ _RESUME = (
              "there after every commit point and restores from it when its state dir "
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
+    # S27 G-CO: a single-island store that holds only the HF exports
+    cli_flag("--rl-checkpoint-store-export-only", action="store_true", default=False,
+             help="with --rl-single-island-no-sync, --rl-checkpoint-store and "
+             "--rl-export-hf-rounds: the store holds only the HF exports. The launcher "
+             "forwards no --rl-resume-store (no resume ledger, no round cuts), so the run "
+             "does not resume across launches; --rl-rollout-ahead accepts this store. "
+             "Refused with the cut and resume flags"),
     # rl-identity-tiering L9.4-L9.6
     cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch", "release"], default="auto",
              help="git-patch: pack the local git tree (commit + dirty patch with untracked "
