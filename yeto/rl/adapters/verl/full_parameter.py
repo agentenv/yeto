@@ -235,10 +235,35 @@ def remote_manifest(worker_dict) -> dict:
         "param_dtypes": dtypes,
         "buffers": {name: list(_global_shape(buffer)) for name, buffer in buffers},
         "buffer_dtypes": sorted({str(buffer.dtype) for _name, buffer in buffers}),
+        # S27 G-EQ3: a fingerprint per buffer, so the island can see that every rank
+        # holds the same buffer values (:func:`agree_on_buffers`)
+        "buffer_digests": {name: _buffer_digest(buffer) for name, buffer in buffers},
         "rank": int(dist.get_rank()) if initialized else 0,
         "world_size": int(dist.get_world_size()) if initialized else 1,
         "sharded": any(hasattr(parameter, "device_mesh") for _name, parameter in named),
     }
+
+
+def _buffer_digest(buffer) -> list[float]:
+    """``[sum, sum of absolute values, number of values]`` of one buffer, as floats.
+
+    Why (S27 G-EQ3): a persistent buffer is **not sharded**, so every rank keeps
+    its own copy and each rank's forward reads its own. A rank whose copy is
+    wrong computes wrong log-probs while the parameters are perfectly fine -- for
+    a MoE model the router's correction bias decides which experts a token goes
+    to. The values come from the checkpoint through rank 0 (verl's
+    ``fsdp2_load_full_state_dict`` broadcasts every buffer after the parameters),
+    and this fingerprint is how the island checks that it happened.
+    """
+
+    import torch
+
+    with torch.no_grad():
+        values = buffer.detach()
+        if hasattr(values, "full_tensor"):  # a sharded buffer: its local part is enough here
+            values = values.to_local() if hasattr(values, "to_local") else values
+        values = values.to("cpu", torch.float64).reshape(-1)
+        return [float(values.sum()), float(values.abs().sum()), float(values.numel())]
 
 
 def _global_shape(parameter) -> tuple[int, ...]:
@@ -457,6 +482,35 @@ def _reset_moments(worker_dict) -> int:
                 state[key].zero_()
                 zeroed += 1
     return zeroed
+
+
+def agree_on_buffers(manifests: Sequence[Mapping[str, object]]) -> dict[str, list[float]]:
+    """One ``{buffer name: fingerprint}`` from every worker's manifest, or an error
+    naming the first buffer whose ranks disagree (:func:`_buffer_digest`).
+
+    A manifest without ``buffer_digests`` (an older worker) is skipped, so this
+    never turns a missing field into a failure.
+    """
+
+    # "absent" (an older worker) is not "empty" (a worker that reports no buffer)
+    digests = [dict(m.get("buffer_digests") or {}) for m in manifests if "buffer_digests" in m]
+    if not digests or not any(digests):
+        return {}
+    first = digests[0]
+    for index, other in enumerate(digests[1:], start=1):
+        if sorted(other) != sorted(first):
+            only_first = sorted(set(first) - set(other))
+            only_other = sorted(set(other) - set(first))
+            raise VerlFullParameterError(
+                f"worker 0 与 worker {index} 的 buffer 集合不一致: 仅 0 有 {only_first[:4]}, "
+                f"仅 {index} 有 {only_other[:4]}")
+        for name in sorted(first):
+            if other[name] != first[name]:
+                raise VerlFullParameterError(
+                    f"buffer {name!r} 在 worker 0 与 worker {index} 上的值不同（和/绝对值和/元素数: "
+                    f"{first[name]} 对 {other[name]}）。持久 buffer 不分片，每个 rank 用自己那份；"
+                    f"值不同说明加载没有把它广播到所有 rank，这个 rank 的前向会算错（MoE 路由偏置就是一例）")
+    return first
 
 
 def agree_on_shapes(manifests: Sequence[Mapping[str, object]], *,

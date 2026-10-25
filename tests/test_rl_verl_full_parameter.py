@@ -240,3 +240,20 @@ def test_the_manifest_and_the_export_include_persistent_buffers():
     assert torch.equal(exported["gate.bias"], torch.full((4,), 0.5))
     assert fp.agree_on_shapes([manifest]) == {name: tuple(shape)
                                               for name, shape in manifest["shapes"].items()}
+
+
+def test_a_rank_whose_buffer_differs_stops_the_island():
+    """S27 G-EQ3: persistent buffers are not sharded, so each rank's forward reads
+    its own copy; a rank that did not get the checkpoint's values computes wrong
+    log-probs while the parameters are fine."""
+    good = fp.remote_manifest(_worker(_Module(buffers={"gate.bias": (4,)})))
+    assert good["buffer_digests"] == {"gate.bias": [2.0, 2.0, 4.0]}  # 4 x 0.5
+    assert fp.agree_on_buffers([good, good]) == good["buffer_digests"]
+    other = _Module(buffers={"gate.bias": (4,)})
+    other._buffers["gate.bias"] = torch.zeros(4)  # an uninitialised copy
+    bad = fp.remote_manifest(_worker(other))
+    with pytest.raises(fp.VerlFullParameterError, match="持久 buffer 不分片"):
+        fp.agree_on_buffers([good, bad])
+    with pytest.raises(fp.VerlFullParameterError, match="buffer 集合不一致"):
+        fp.agree_on_buffers([good, fp.remote_manifest(_worker(_Module()))])
+    assert fp.agree_on_buffers([{"shapes": {}}]) == {}  # an older worker: no field, no failure
