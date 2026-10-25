@@ -17,8 +17,10 @@ S27 G-EY: in run s27-elastic-c the replay then never ended. With one island
 merging, versions were published about as fast as the link to the recovering
 island took them, so the forwarder's pending map almost never emptied, and
 "empty" was the tail condition. The last test reads the recovering island's
-data socket at a fixed rate below the publish rate: the tail must run once the
-versions owed at the start are handed over.
+data sockets at a fixed rate below the publish rate: the tail must run once the
+versions owed at the start are handed over. That island is slowed by the
+client's own test-only read limit (``YETO_SYNC_TEST_RECOVERY_READ_BPS``), the
+one a GPU run sets with ``--modal-env``.
 """
 
 from __future__ import annotations
@@ -84,56 +86,13 @@ class GatedClient(SyncerClient):
         super()._recv_loop(gen, sock)
 
 
-class Link:
-    """Read rate of a learner's data sockets in bytes/s (None: unlimited)."""
-
-    READ_CHUNK = 64 * 1024
-
-    def __init__(self, rate: float | None) -> None:
-        self.rate = rate
-
-
-class _ThrottledSocket:
-    """A data socket read at most at ``link.rate`` bytes/s."""
-
-    def __init__(self, sock: socket.socket, link: Link) -> None:
-        self._sock = sock
-        self._link = link
-
-    def recv_into(self, buffer, nbytes=0, flags=0):
-        rate = self._link.rate
-        if rate is None:
-            return self._sock.recv_into(buffer, nbytes, flags)
-        got = self._sock.recv_into(buffer, min(nbytes or len(buffer), Link.READ_CHUNK), flags)
-        time.sleep(got / rate)
-        return got
-
-    def __getattr__(self, name):
-        return getattr(self._sock, name)
-
-
-class ThrottledClient(SyncerClient):
-    """Reads its data streams at ``link.rate`` (control frames unthrottled):
-    a learner on a slow link that keeps reading."""
-
-    def __init__(self, *args, link: Link, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.link = link
-
-    def _recv_loop(self, gen, sock):
-        if self._socks and sock is not self._socks[0]:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 16)
-            sock = _ThrottledSocket(sock, self.link)
-        super()._recv_loop(gen, sock)
-
-
 class LightIsland(threading.Thread):
     """Answers every PULL with a zero delta (weights stay put; versions are
     what the test follows), heartbeats its lease, finalizes. A
     :class:`~yeto.rl.peer_recovery.RecoverableIsland` for the degraded path."""
 
     def __init__(self, learner_id: int, port: int, store: Path, *, recover_on_start: bool = False,
-                 gate: threading.Event | None = None, link: Link | None = None) -> None:
+                 gate: threading.Event | None = None) -> None:
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.store = DirectorySnapshotStore(store)
@@ -144,14 +103,11 @@ class LightIsland(threading.Thread):
         self.anchored = [False] * FRAGMENTS
         self.steps = 0
         kwargs = dict(syncer_epoch=0, recover=recover_on_start, num_streams=1)
-        if gate is not None:
+        if gate is None:
+            self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, **kwargs)
+        else:
             self.client = GatedClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, gate=gate,
                                       **kwargs)
-        elif link is not None:
-            self.client = ThrottledClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, link=link,
-                                          **kwargs)
-        else:
-            self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, **kwargs)
         self.heartbeat = LeaseHeartbeat(self.client, LEASE_S, progress=lambda: self.steps)
         self.zero = np.zeros(NUMEL, np.float32).tobytes()
         self.killed = threading.Event()
@@ -200,6 +156,7 @@ class LightIsland(threading.Thread):
         self.heartbeat.start()
         if self.recover_on_start:
             self.outcome = recover(self.client, self, self.store, timeout=self.recover_timeout)
+            self.client.mark_initial_cut_received()  # as the stream does after a recovery
         elif self.learner_id == 0:
             for p in range(FRAGMENTS):
                 self.client.send_init(p, self.zero)
@@ -436,8 +393,31 @@ def _log_seconds(line: str) -> float:
     return datetime.fromisoformat(line.split()[0].replace("Z", "+00:00")).timestamp()
 
 
+def test_recovery_read_limit_holds_only_while_a_recovering_client_waits_for_its_cut(monkeypatch):
+    from yeto.protocol import RECOVERY_READ_BPS_ENV, _ReadRate, recovery_read_bps_from_env
+
+    assert recovery_read_bps_from_env({}) is None
+    assert recovery_read_bps_from_env({RECOVERY_READ_BPS_ENV: "0"}) is None
+    assert recovery_read_bps_from_env({RECOVERY_READ_BPS_ENV: "2.5e6"}) == 2.5e6
+    monkeypatch.setenv(RECOVERY_READ_BPS_ENV, "1000000")
+    layout = make_layout()
+    plain = SyncerClient(("127.0.0.1", 9), 0, layout, DTYPE_F32, syncer_epoch=0)
+    assert plain._recovery_read_rate is None
+    recovering = SyncerClient(("127.0.0.1", 9), 1, layout, DTYPE_F32, syncer_epoch=0, recover=True)
+    rate = recovering._recovery_read_rate
+    assert rate is not None and rate.active()
+    recovering.mark_initial_cut_received()
+    assert not rate.active()
+    # The budget is shared: 4 x 50 kB at 1 MB/s take at least 0.2 s.
+    budget = _ReadRate(1e6, lambda: True)
+    started = time.monotonic()
+    for _ in range(4):
+        budget.spend(50_000)
+    assert time.monotonic() - started >= 0.19
+
+
 @pytest.mark.timeout(300)
-def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path):
+def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path, monkeypatch):
     """A recovering island on a link slower than island 0's publications gets
     RECOVERY_DONE while the link is still slow: the tail waits only for the
     versions owed when the replay started, not for an empty pending map.
@@ -454,7 +434,9 @@ def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path):
          "--island-lease-s", str(LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2",
          "--recovery-max-donor-tries", "1", "--recovery-donor-timeout-s", "1"],
         stdout=log, stderr=subprocess.STDOUT, text=True)
-    link = Link(SLOW_LINK)
+    from yeto.protocol import RECOVERY_READ_BPS_ENV
+
+    monkeypatch.setenv(RECOVERY_READ_BPS_ENV, str(SLOW_LINK))  # applies to the recovering client only
     islands: list[LightIsland] = []
     try:
         store = tmp_path / "store"
@@ -469,7 +451,7 @@ def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path):
         b.join(timeout=10)
         # Island 0 never answers the snapshot request: the donor times out,
         # the source is degraded and the replay is every fragment.
-        back = LightIsland(1, port, store, recover_on_start=True, link=link)
+        back = LightIsland(1, port, store, recover_on_start=True)
         back.recover_timeout = RECOVERY_WINDOW_S + 60
         islands.append(back)
         back.start()
@@ -482,10 +464,9 @@ def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path):
             raise back.exc
         done_at = time.time()
         # Not the degraded DONE an island gets when the run ends first (the
-        # old tail condition never let the replay end before that).
+        # old tail condition never let the replay end before that). The read
+        # limit ends with the recovery (mark_initial_cut_received).
         assert back.outcome.replayed == FRAGMENTS, f"RECOVERY_DONE without the replay: {back.outcome}"
-        time.sleep(2.0)  # the island trains on, still on the slow link
-        link.rate = None
         for island in (a, back):
             island.join(timeout=180)
             assert not island.is_alive(), f"island {island.learner_id} did not finish"
