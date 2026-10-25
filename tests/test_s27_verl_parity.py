@@ -419,6 +419,47 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
     process, port, profile = _start_syncer(syncer_binary, tmp_path, fragments=fragments, rounds=rounds, extra=(
         "--rl-sync-full-parameter-rounds", "async", "--rl-sync-final-cut", "download",
         "--rl-sync-quorum", "1", "--rl-sync-island-lease-s", "3"))
+    # Quorum 1 closes a round with its first push, so whether the restarted
+    # island ever wins a round was a race (S27 G-EI, REJOIN-FLAKY.md; the Miles
+    # restart test, s27-rejoin-flaky 26b3c4c3). Island 0 leaves one PULL that
+    # the restarted island was asked for (that step or a later one) unanswered,
+    # so that round can close only with the restarted island's delta.
+    from yeto.rl.engine import full_parameter_stream as engine_stream
+
+    real_client = engine_stream.SyncerClient
+    lock = threading.Lock()
+    leave = {"from": None, "left": [], "clients": {}}
+
+    def client_factory(*args, **kwargs):
+        client = real_client(*args, **kwargs)
+        learner = int(args[1])
+        with lock:
+            leave["clients"][learner] = leave["clients"].get(learner, 0) + 1
+            restarted = learner == 1 and leave["clients"][learner] == 2
+        drain = client.drain_pulls
+        if learner == 0:
+            def drain_leaving_one():
+                permits = drain()
+                with lock:
+                    start = leave["from"]
+                    for permit in permits:
+                        if not leave["left"] and start is not None and permit.global_step >= start:
+                            leave["left"].append(permit.global_step)
+                            return [p for p in permits if p is not permit]
+                return permits
+            client.drain_pulls = drain_leaving_one
+        elif restarted:
+            def drain_and_leave():
+                permits = drain()
+                if permits:
+                    with lock:
+                        if leave["from"] is None:
+                            leave["from"] = min(permit.global_step for permit in permits)
+                return permits
+            client.drain_pulls = drain_and_leave
+        return client
+
+    monkeypatch.setattr(engine_stream, "SyncerClient", client_factory)
     results: dict = {}
     try:
         plans = [_pool_plan(i, port, profile, rounds=rounds, fragments=fragments) for i in range(2)]
@@ -451,6 +492,10 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
     island_1 = [r for r in records if r.get("island_id") == 1]
     rejoin = next(i for i, r in enumerate(island_1) if r.get("kind") == "pool_join" and r.get("catch_up"))
     assert any(r["kind"] == "delta_accepted" for r in island_1[rejoin + 1:]), "the restarted island never contributed"
+    # The round island 0 left closed with the restarted island's delta alone.
+    assert len(leave["left"]) == 1, "the restarted island never got a PULL that island 0 could leave to it"
+    closed_by = {r["step"]: r["raw_weights"] for r in records if r.get("kind") == "outer_step"}
+    assert [weight[0] for weight in closed_by[leave["left"][0]]] == [1], (leave["left"], closed_by.get(leave["left"][0]))
 
 
 @needs_cargo
