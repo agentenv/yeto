@@ -848,6 +848,11 @@ _SCHEDULING = (
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
              "after the launch (default: the launched islands; not with the "
              "full-parameter preset, whose session binds the roster)"),
+    cli_flag("--rl-sync-inline-resend", action="store_true", default=False,
+             help="S27 G-EL: the syncer sends a rejoin catch-up and a recovery replay from its "
+             "scheduler, waiting on the island's link for each fragment (the behavior before "
+             "G-EL; a whole-model resend then stalls every round and lease). Default: a "
+             "forwarder task per island sends them while rounds, heartbeats and leases go on"),
     cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
              help="membership: after the last step the syncer waits this long for the "
              "islands still connected to take the final cut, then finishes without the "
@@ -899,6 +904,16 @@ _SCHEDULING = (
     shared_flag("--rl-peer-recovery-ttl-s", type=float, default=None, metavar="S",
                 help="--rl-peer-recovery: snapshots older than this are removed (a donor "
                 "or recovering island died); longer than a snapshot transfer (default 3600)"),
+    shared_flag("--rl-peer-recovery-manifest-wait-s", type=float, default=None, metavar="S",
+                help="--rl-peer-recovery: a recovering island that does not find the donor's "
+                "snapshot manifest reloads the store again with backoff for up to S seconds "
+                "before it refuses the snapshot (default 120; 0: refuse at once, the behavior "
+                "before S27 G-EL)"),
+    shared_flag("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None,
+                help="--rl-peer-recovery: background (default): at its safe point the donor "
+                "copies its state to host memory and trains on while every rank writes its "
+                "shard; inline: the donor writes the shards before its next round (the "
+                "behavior before S27 G-EL)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
                 "island's strict pause budget input (default: syncer default 900)"),

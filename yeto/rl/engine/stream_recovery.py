@@ -17,10 +17,13 @@ the part between the two that the Miles and the verl islands share:
   donor's digests (else the restore fails and the island must not train). A
   backend gives three verbs: the rank layout, save every rank's shard, restore
   every rank's shard (Miles: ``cut_plugin``; verl: the FSDP2 rank files of
-  :mod:`yeto.rl.adapters.verl.cut`);
+  :mod:`yeto.rl.adapters.verl.cut`). S27 G-EL: a backend may also give the
+  three capture verbs (copy every rank's state at the safe point, write the
+  shards while training goes on; Miles: ``cut_plugin`` ``background="host"``);
 * :class:`StreamRecoveryIsland`: the
   :class:`~yeto.rl.peer_recovery.FileRecoverableIsland` of one role stream
-  over such a trainer.
+  over such a trainer, and :class:`CapturingStreamRecoveryIsland` when its
+  trainer captures (the donor service then writes in the background).
 
 Replay. After the restore the island reports "nothing held", so the syncer
 resends the current value of every fragment, and the stream applies the
@@ -44,6 +47,7 @@ from typing import Any
 
 from yeto.protocol import BcastFragment
 from yeto.rl.peer_recovery import (
+    DEFAULT_MANIFEST_WAIT_S,
     SnapshotIntegrityError,
     SnapshotRefused,
     check_restored_digests,
@@ -57,6 +61,7 @@ PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"
 # must re-export the donor's state, RNG and LR scheduler position exactly.
 DIGEST_KEYS = ("state_digest", "rng_digest", "scheduler_samples")
 DEFAULT_TTL_S = 3600.0
+DONOR_WRITES = ("background", "inline")
 LOG_PREFIX = "[yeto-peer-recovery] "
 
 
@@ -67,24 +72,36 @@ class PeerRecoveryOptions:
     ``store``: checkpoint store path of the snapshots (resolved with
     :func:`yeto.rl.peer_recovery.snapshot_store_for`). ``recover``: this
     process lost its trainer state and asks the syncer for a donor.
-    ``staging``: local directory for object-store transfers."""
+    ``staging``: local directory for object-store transfers.
+    S27 G-EL: ``manifest_wait_s`` (``--rl-peer-recovery-manifest-wait-s``): how
+    long a recovering island re-reads a snapshot whose MANIFEST is not visible
+    yet; ``donor_write`` (``--rl-peer-recovery-donor-write``): ``background``
+    (a trainer that captures copies at the safe point and writes while it
+    trains on) or ``inline`` (the write before)."""
 
     store: str
     recover: bool = False
     ttl_s: float = DEFAULT_TTL_S
     timeout_s: float = DEFAULT_TTL_S
     staging: str | None = None
+    manifest_wait_s: float = DEFAULT_MANIFEST_WAIT_S
+    donor_write: str = "background"
 
     def __post_init__(self) -> None:
         if not self.store:
             raise ValueError("peer recovery needs a snapshot store")
         if not self.ttl_s > 0 or not self.timeout_s > 0:
             raise ValueError("peer recovery ttl and timeout must be positive")
+        if not self.manifest_wait_s >= 0:
+            raise ValueError("peer recovery manifest wait must be >= 0")
+        if self.donor_write not in DONOR_WRITES:
+            raise ValueError(f"peer recovery donor write {self.donor_write!r}: background or inline")
 
     def to_plan(self) -> dict[str, Any]:
         """JSON form (an island plan written before the trainer process starts)."""
         return {"store": self.store, "recover": self.recover, "ttl_s": self.ttl_s,
-                "timeout_s": self.timeout_s, "staging": self.staging}
+                "timeout_s": self.timeout_s, "staging": self.staging,
+                "manifest_wait_s": self.manifest_wait_s, "donor_write": self.donor_write}
 
     @classmethod
     def from_plan(cls, raw: Mapping[str, Any] | None) -> "PeerRecoveryOptions | None":
@@ -93,16 +110,28 @@ class PeerRecoveryOptions:
         return cls(store=str(raw["store"]), recover=bool(raw.get("recover", False)),
                    ttl_s=float(raw.get("ttl_s", DEFAULT_TTL_S)),
                    timeout_s=float(raw.get("timeout_s", raw.get("ttl_s", DEFAULT_TTL_S))),
-                   staging=raw.get("staging"))
+                   staging=raw.get("staging"),
+                   manifest_wait_s=float(raw.get("manifest_wait_s", DEFAULT_MANIFEST_WAIT_S)),
+                   donor_write=str(raw.get("donor_write", "background")))
 
 
 def peer_recovery_options(args: Any, environ: Mapping[str, str] | None = None) -> PeerRecoveryOptions | None:
     """Peer recovery of a full-parameter island, or None without
     ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
-    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`)."""
+    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`), unless
+    the test-only catch-up fault injection picks this re-run (S27 G-DU,
+    ``yeto.rl.engine.driver.catch_up_incarnation``)."""
     store = getattr(args, "rl_peer_recovery_store", None)
     env = os.environ if environ is None else environ
     recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
+    if recover and store is not None:
+        from yeto.rl.engine.driver import catch_up_incarnation
+
+        incarnation = catch_up_incarnation(env)
+        if incarnation is not None:  # test-only fault injection: both state sources in one run
+            _stderr(f"{LOG_PREFIX}fault injection: re-run {incarnation} rejoins by catch-up "
+                    "(peer recovery skipped)")
+            recover = False
     if store is None:
         if recover or getattr(args, "rl_peer_recovery_staging", None):
             raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
@@ -117,6 +146,11 @@ def peer_recovery_options(args: Any, environ: Mapping[str, str] | None = None) -
         # snapshot write, commit, read and the full resend take tens of minutes).
         timeout_s=ttl_s,
         staging=getattr(args, "rl_peer_recovery_staging", None),
+        # S27 G-EL: both default on; the flags bring the behavior before back
+        **({} if getattr(args, "rl_peer_recovery_manifest_wait_s", None) is None
+           else {"manifest_wait_s": float(args.rl_peer_recovery_manifest_wait_s)}),
+        **({} if getattr(args, "rl_peer_recovery_donor_write", None) is None
+           else {"donor_write": str(args.rl_peer_recovery_donor_write)}),
     )
 
 
@@ -140,11 +174,17 @@ class RankShardSnapshot:
     backend verbs (:meth:`rank_layout`, :meth:`save_ranks`,
     :meth:`restore_ranks`). A rank result is a mapping with ``path`` (relative
     to the snapshot directory), ``sha256``, ``bytes``, ``coord`` and, when the
-    backend reports them, the :data:`DIGEST_KEYS`."""
+    backend reports them, the :data:`DIGEST_KEYS`.
+
+    S27 G-EL: a subclass that sets :attr:`captures` also gives
+    :meth:`start_ranks`, :meth:`poll_ranks` and :meth:`finish_ranks` (copy at
+    the safe point, write while training goes on); :meth:`start`,
+    :meth:`written` and :meth:`finish` are then the capture-then-write save."""
 
     schema: str = ""
     tag_prefix: str = ""
     digest_keys: tuple[str, ...] = DIGEST_KEYS
+    captures: bool = False
 
     def __init__(self, parameter_layout_hash: str, *, log: Callable[[str], Any] = _stderr) -> None:
         self.parameter_layout_hash = parameter_layout_hash
@@ -169,6 +209,22 @@ class RankShardSnapshot:
         cannot (the trainer may be partly written: it must not train)."""
         raise NotImplementedError
 
+    # -- optional capture verbs (S27 G-EL; with :attr:`captures`) ---------------
+    async def start_ranks(self, directory: Path) -> None:
+        """Every rank copies its state now and writes its shard into
+        ``directory`` on a thread of its own; returns at once. Raise
+        :class:`~yeto.rl.peer_recovery.SnapshotRefused` when a rank refuses
+        (after the other ranks' writes ended)."""
+        raise NotImplementedError
+
+    async def poll_ranks(self) -> bool:
+        """Whether every rank's write finished (never waits)."""
+        raise NotImplementedError
+
+    async def finish_ranks(self) -> list[Mapping[str, Any]]:
+        """Every rank's result of its finished write (as :meth:`save_ranks`)."""
+        raise NotImplementedError
+
     # -- neutral part ----------------------------------------------------------
     async def layout_tag(self) -> str:
         if self._tag is None:
@@ -179,7 +235,23 @@ class RankShardSnapshot:
     async def save(self, directory: Path) -> None:
         """Every rank writes its shard; refuses unless every shard is here."""
         directory = Path(directory)
-        results = [dict(r) for r in await self.save_ranks(directory)]
+        await self._record(directory, [dict(r) for r in await self.save_ranks(directory)])
+
+    async def start(self, directory: Path) -> Path:
+        """Capture: every rank copies its state and starts writing (:meth:`start_ranks`)."""
+        await self.start_ranks(Path(directory))
+        return Path(directory)
+
+    async def written(self) -> bool:
+        return bool(await self.poll_ranks())
+
+    async def finish(self, directory: Path) -> None:
+        """Collect every rank's written shard (after :meth:`written`); refuses
+        unless every shard is here."""
+        await self._record(Path(directory), [dict(r) for r in await self.finish_ranks()])
+
+    async def _record(self, directory: Path, results: list[dict[str, Any]]) -> None:
+        """The rank list of the snapshot (:data:`RANKS`) from every rank's result."""
         files = [{"path": r["path"], "sha256": r["sha256"], "bytes": int(r["bytes"]), "coord": r["coord"],
                   **{k: r[k] for k in self.digest_keys if k in r}} for r in results]
         missing = [f["path"] for f in files if not (directory / f["path"]).is_file()]
@@ -291,3 +363,25 @@ class StreamRecoveryIsland:
         for stored in self.resent.values():
             stored.release()
         self.resent.clear()
+
+
+class CapturingStreamRecoveryIsland(StreamRecoveryIsland):
+    """:class:`StreamRecoveryIsland` over a trainer that captures
+    (:attr:`RankShardSnapshot.captures`): the donor copies at the safe point and
+    writes while it trains on (S27 G-EL, ``DonorService`` ``capture``)."""
+
+    def start_recovery_snapshot(self, directory: Path) -> Path:
+        return self._call(self.shards.start(Path(directory)))
+
+    def recovery_snapshot_written(self, handle: Path) -> bool:
+        return bool(self._call(self.shards.written()))
+
+    def finish_recovery_snapshot(self, handle: Path) -> None:
+        self._call(self.shards.finish(handle))
+
+
+def recovery_island(stream: Any, shards: Any, loop: asyncio.AbstractEventLoop, *,
+                    recovering: bool) -> StreamRecoveryIsland:
+    """The stream island of ``shards``: capturing when the trainer captures."""
+    cls = CapturingStreamRecoveryIsland if getattr(shards, "captures", False) else StreamRecoveryIsland
+    return cls(stream, shards, loop, recovering=recovering)

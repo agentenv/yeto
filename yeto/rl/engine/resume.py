@@ -318,6 +318,15 @@ def store_for(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None
     own settings from ``environ``; ``impl_kwargs`` are passed through, e.g. a test
     double); otherwise a bucket mount or a plain shared directory."""
     env = os.environ if environ is None else environ
+    if "://" in str(path):
+        # S27 G-EL: a store URI here is a launch bug (s27-elastic-a: a peer snapshot
+        # store URI reached the Modal island and its Volume store took it for a
+        # relative directory on the container's local disk). Every store
+        # implementation takes the island's path of the store (the mount or the
+        # object stage, yeto.launch.storage); refuse instead of writing somewhere no
+        # other island reads.
+        raise ValueError(f"store path {str(path)!r} is a URI: the island needs the path of the "
+                         "store's mount (yeto.launch.storage), not the URI")
     spec = env.get(STORE_IMPL_ENV)
     if spec:
         return _store_impl(spec)(path, environ=env, **impl_kwargs)

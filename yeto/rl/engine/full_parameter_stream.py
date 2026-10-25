@@ -613,7 +613,6 @@ class FullParameterRoleStream:
         self._tokens_at_base = 0
         # S27 E-3 peer recovery: the donor service, and how this stream started.
         self._donor = None
-        self._donor_refusals_reported = 0
         self.recovery_outcome = None
         self.recovered_scheduler_samples = None
         self._routed_at_base = RoutedTokens()
@@ -899,7 +898,9 @@ class FullParameterRoleStream:
         from yeto.rl.peer_recovery import snapshot_store_for
 
         options = self.config.peer_recovery
-        return snapshot_store_for(options.store, staging=options.staging)
+        wait = getattr(options, "manifest_wait_s", None)
+        return snapshot_store_for(options.store, staging=options.staging,
+                                  **({} if wait is None else {"manifest_wait_s": float(wait)}))
 
     async def _initialize_recovering(self, group, adapter, initial, client, sink, heartbeat) -> None:
         """S27 E-3: this trainer is fresh after the island lost its state.
@@ -964,14 +965,18 @@ class FullParameterRoleStream:
             from yeto.rl.peer_recovery import DonorService
 
             island = self._recovery_island(self.group, self.adapter, recovering=False)
+            # A file island (rank shards with the FP32 main copy and moments, hundreds
+            # of GB for a 30B model): the service hashes and commits in the background
+            # and logs each refused or finished snapshot.
+            # S27 G-EL: an island that can copy its state at the safe point and write
+            # it while it trains on does so, unless --rl-peer-recovery-donor-write inline.
+            inline = getattr(self.config.peer_recovery, "donor_write", "background") == "inline"
             self._donor = DonorService(self.client, island, self._snapshot_store(),
-                                       ttl_s=self.config.peer_recovery.ttl_s)
-        served = await asyncio.to_thread(self._donor.poll)
-        for request, reason in self._donor.refused[self._donor_refusals_reported:]:
-            print(f"[yeto-peer-recovery] {self.config.role} donor refused a snapshot for learner "
-                  f"{request.recovering_id}: {reason}", file=sys.stderr, flush=True)
-        self._donor_refusals_reported = len(self._donor.refused)
-        return served
+                                       ttl_s=self.config.peer_recovery.ttl_s,
+                                       capture=False if inline else None,
+                                       log=lambda text: print(text, file=sys.stderr, flush=True),
+                                       name=self.config.role)
+        return await asyncio.to_thread(self._donor.poll)
 
     def _local_version_zero(self, adapter, initial, sink):
         """Local init: this island's own version-0 cut is its version-0

@@ -1153,6 +1153,10 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--rl-peer-recovery-ttl-s", type=float, default=None)
     parser.add_argument("--rl-peer-recover", action="store_true")
     parser.add_argument("--rl-peer-recovery-staging", default=None)
+    # S27 G-EL (neutral since the s27-next2 merge, engine.stream_recovery): the
+    # MANIFEST re-read wait; the donor write mode (no capture on verl: inline either way)
+    parser.add_argument("--rl-peer-recovery-manifest-wait-s", type=float, default=None)
+    parser.add_argument("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None)
     # S27 G-DS: the island's HF exports and data position (Miles island spellings;
     # see full_parameter_extras). Added only when the island parser has none yet:
     # the verl Megatron island (S27 G-DC) parses the export flags itself.

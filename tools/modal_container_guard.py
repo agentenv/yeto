@@ -29,6 +29,14 @@ Rules (one poll every ``--interval-s``):
   3. an extra container has been present for more than ``--extra-max-s`` seconds.
 
   Without ``--progress-log`` rule 2 is off; rules 1 and 3 still apply.
+* Expected island relaunches (``--replacement-containers K``, default 0: off). A
+  run that kills an island on purpose (fault injection) and has the launcher
+  start it again gets new containers once the island's original containers are
+  gone. While at most K extra containers were ever seen, rules 1 and 3 do not
+  apply; the app is stopped only when more than ``--nodes`` started containers
+  are present for more than ``--extra-max-s`` seconds (old and new containers
+  billed together) or by rule 2. The (K+1)-th extra container brings back the
+  three rules.
 * Cost guard (kind ``cost``): the estimate is the sum over polls of (containers
   in the app, extra containers included) x ``--rate`` x seconds since the last
   poll, plus ``--head-rate`` x seconds since the guard started. A failed
@@ -105,6 +113,7 @@ class GuardConfig:
     cost_alert: float | None = None
     extra_max_s: float = DEFAULT_EXTRA_MAX_S
     extra_stall_s: float = DEFAULT_EXTRA_STALL_S
+    replacements: int = 0  # extra containers of expected island relaunches (0: none expected)
 
 
 @dataclass
@@ -128,6 +137,8 @@ class ContainerGuard:
     def __init__(self, config: GuardConfig, *, started: float) -> None:
         if config.nodes < 1:
             raise ValueError("nodes must be >= 1")
+        if config.replacements < 0:
+            raise ValueError("replacements must be >= 0")
         self.config = config
         self.started = float(started)
         self.originals: list[str] = []
@@ -143,6 +154,7 @@ class ContainerGuard:
         self.last_progress = float(started)
         self.alerted = False
         self.stopped: tuple[str, str] | None = None
+        self.over_since: float | None = None  # first poll with more than nodes started containers
 
     def cap(self, override: float | None = None) -> float | None:
         return self.config.cost_cap if override is None else override
@@ -195,11 +207,18 @@ class ContainerGuard:
                 decision.events.append({"event": "original_gone", "utc": utc(now), "container_id": cid,
                                         "extras_present": sorted(self.extras)})
         self.present = list(rows)
+        if len(rows) > self.config.nodes:
+            self.over_since = now if self.over_since is None else self.over_since
+        else:
+            self.over_since = None
 
     def _container_stop(self, now: float, progress: int | None) -> tuple[str, str] | None:
         if not self.extras:
             return None
         extras = sorted(self.extras)
+        expected = len(self.extras) + len(self.extras_gone) <= self.config.replacements
+        if expected:
+            return self._replacement_stop(now, progress, extras)
         missing = [o for o in self.originals if o not in self.present]
         if missing:
             return RESCHED, (f"original container(s) {missing} gone while extra container(s) {extras} "
@@ -214,6 +233,20 @@ class ContainerGuard:
         if oldest > self.config.extra_max_s:
             return RESCHED, (f"extra container(s) {extras} in the app for {oldest:.0f} s "
                              f"(limit {self.config.extra_max_s:.0f} s)")
+        return None
+
+    def _replacement_stop(self, now: float, progress: int | None, extras: list[str]) -> tuple[str, str] | None:
+        """Every extra container so far is an expected relaunch (``replacements``)."""
+        if progress is not None:
+            since = min(info["first_seen"] for info in self.extras.values())
+            quiet = now - max(self.last_progress, since)
+            if quiet > self.config.extra_stall_s:
+                return RESCHED, (f"no progress line for {quiet:.0f} s (limit {self.config.extra_stall_s:.0f} s) "
+                                 f"while relaunched container(s) {extras} are in the app")
+        if self.over_since is not None and now - self.over_since > self.config.extra_max_s:
+            return RESCHED, (f"{len(self.present)} started containers (more than {self.config.nodes}) for "
+                             f"{now - self.over_since:.0f} s (limit {self.config.extra_max_s:.0f} s): "
+                             f"relaunched container(s) {extras} run beside old ones")
         return None
 
     def _cost_stop(self, cost: float, cap_override: float | None) -> tuple[str, str] | None:
@@ -354,6 +387,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cost-alert", type=float, default=None)
     ap.add_argument("--extra-max-s", type=float, default=DEFAULT_EXTRA_MAX_S)
     ap.add_argument("--extra-stall-s", type=float, default=DEFAULT_EXTRA_STALL_S)
+    ap.add_argument("--replacement-containers", type=int, default=0,
+                    help="extra containers of expected island relaunches (fault injection runs; default 0)")
     ap.add_argument("--progress-log", default=None)
     ap.add_argument("--progress-re", default=None)
     ap.add_argument("--modal", default="modal", help="the modal CLI (default: modal on PATH)")
@@ -382,7 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     guard = ContainerGuard(GuardConfig(nodes=args.nodes, rate=args.rate, head_rate=args.head_rate,
                                        cost_cap=args.cost_cap, cost_alert=args.cost_alert,
-                                       extra_max_s=args.extra_max_s, extra_stall_s=args.extra_stall_s),
+                                       extra_max_s=args.extra_max_s, extra_stall_s=args.extra_stall_s,
+                                       replacements=args.replacement_containers),
                            started=started)
     progress = None if args.progress_log is None else ProgressCounter(args.progress_log, args.progress_re)
     command = shlex.split(args.list_cmd) if args.list_cmd else [*shlex.split(args.modal), "container", "list",
