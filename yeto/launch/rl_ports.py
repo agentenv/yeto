@@ -330,8 +330,8 @@ def _check_hf_export_launch_flags(args) -> None:
         supported = getattr(_rl_backend_module(args, "run_config_rules"), "hf_export_supported", None)
         if not (callable(supported) and supported(args)):
             raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles and the runs its backend's "
-                             "run_config_rules.hf_export_supported accepts only (verl: synced full-parameter "
-                             "islands, --rl-sync-preset full-parameter)")
+                             "run_config_rules.hf_export_supported accepts only (the verl Megatron island, TP/PP/EP > 1; "
+                             "verl: synced full-parameter islands, --rl-sync-preset full-parameter)")
     if getattr(args, "rl_elastic", False):
         raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
     if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)

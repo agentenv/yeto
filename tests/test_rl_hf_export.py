@@ -443,9 +443,10 @@ def test_verl_lora_and_elastic_launches_are_refused():
     from yeto.launch import rl_ports
 
     args = _cli("--rl-export-hf-rounds", "2", "--rl-checkpoint-store", "/s")
-    # S27 G-DS: a verl launch exports only from synced full-parameter islands
+    # S27 G-DS / G-DC: a verl launch exports only from synced full-parameter islands and the Megatron
+    # island; a strict-avg FSDP2 verl launch is still refused
     args.rl_backend = "verl"
-    with pytest.raises(ValueError, match="verl: synced full-parameter islands"):
+    with pytest.raises(ValueError, match="verl Megatron island.*verl: synced full-parameter islands"):
         rl_ports._check_hf_export_launch_flags(args)
     args.rl_backend, args.rl_elastic = "miles", True
     with pytest.raises(ValueError, match="--rl-elastic"):

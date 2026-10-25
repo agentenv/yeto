@@ -33,8 +33,9 @@ from typing import Any
 from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
+from . import megatron_engine
 from . import run_config_rules
-from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
+from .pins import VERL_COMMIT, VERL_ROOT, expected_versions_for_engine
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -101,6 +102,23 @@ def parse_args(argv):
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
+    # S27 G-DC: the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
+    # --parameter-mode comes from add_island_flags below (choices lora/full, default lora)
+    p.add_argument("--tensor-parallel", type=int, default=1)
+    p.add_argument("--pipeline-parallel", type=int, default=1)
+    p.add_argument("--expert-parallel", type=int, default=None)
+    p.add_argument("--actor-num-nodes", type=int, default=1)
+    p.add_argument("--actor-num-gpus-per-node", type=int, default=None)
+    p.add_argument("--rl-island-gpus-per-node", type=int, default=None)
+    p.add_argument("--rl-placement", default=None)
+    p.add_argument("--rollout-num-gpus", type=int, default=None)
+    p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+    p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
+    p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
+    p.add_argument("--use-rollout-routing-replay", action="store_true")
+    p.add_argument("--rl-lr-schedule", default=None)
+    p.add_argument("--rl-export-hf-rounds", default=None)
+    p.add_argument("--rl-export-hf-store", default=None)
     # S27 B10: a full-parameter island and its outer sync (Miles island spellings)
     from .full_parameter_stream import add_island_flags
 
@@ -133,7 +151,9 @@ def algorithm_options(spec_dict: dict | None) -> dict:
         problems.append("critic")
     correction = spec.correction
     method = (correction.method or "none") if correction is not None else "none"
-    out = {"correction": method, "tis_upper": 2.0}
+    out = {"correction": method, "tis_upper": 2.0,
+           # S27 G-DC: mapped by the Megatron island (megatron_engine.build_overrides)
+           "eps_clip": loss.eps_clip, "eps_clip_high": loss.eps_clip_high}
     if method == "tis":
         out["tis_upper"] = float(correction.tis_clip if correction.tis_clip is not None else 2.0)
         out["tis_lower"] = float(correction.tis_clip_low or 0.0)
@@ -142,7 +162,7 @@ def algorithm_options(spec_dict: dict | None) -> dict:
     return out
 
 
-def runtime_manifest(learner_id: int, device_family: str | None = None) -> dict:
+def runtime_manifest(learner_id: int, device_family: str | None = None, engine: str = "fsdp2") -> dict:
     """Versions this island actually runs, with the per-family expected pins.
 
     ``device_family`` None reads the family from this node's accelerator, so an
@@ -156,7 +176,8 @@ def runtime_manifest(learner_id: int, device_family: str | None = None) -> dict:
     from yeto.hw.catalog import runtime_versions
 
     family = device_family if device_family is not None else detect_device_family()
-    expected = expected_versions(family)
+    # S27 G-DC: the Megatron engine island also asserts the Megatron stack (pins)
+    expected = expected_versions_for_engine(engine, family)
     versions = {}
     for name in expected:
         try:
@@ -228,9 +249,14 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
 
     root.mkdir(parents=True, exist_ok=True)
     out = {}
+    local = Path(os.path.expanduser(data))
     for split in ("train", "test"):
-        src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
-        frame = pd.read_parquet(src)
+        if local.is_file():  # S27 G-DC: a local JSONL task file (one file: train; its head: test)
+            # parsed with json, not pd.read_json: pandas would turn a label "34" into 34.0
+            frame = pd.DataFrame([json.loads(line) for line in local.read_text().splitlines() if line.strip()])
+        else:
+            src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
+            frame = pd.read_parquet(src)
         rows = [{
             "data_source": "yeto/" + data,
             "prompt": [{"role": m["role"], "content": m["content"]} for m in row["messages"]],
@@ -328,7 +354,10 @@ def main(argv=None) -> int:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
-    manifest = runtime_manifest(lid)
+    engine = megatron_engine.engine_for(tensor_parallel=args.tensor_parallel,
+                                        pipeline_parallel=args.pipeline_parallel,
+                                        expert_parallel=args.expert_parallel or 1)
+    manifest = runtime_manifest(lid, engine=engine)
     manifest["ignored_flags"] = ignored
     (OUTPUT / f"verl-runtime-{lid}.json").write_text(json.dumps(manifest, indent=1))
     subprocess.run(f"uv pip freeze --python {sys.executable} > {OUTPUT}/verl-pip-freeze-{lid}.txt 2>/dev/null"
@@ -375,28 +404,20 @@ def main(argv=None) -> int:
     max_prompt = 512
     limit = int(args.rl_max_policy_age or 0)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
-    if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
-        raise SystemExit("verl 全参数岛只接同步共置路径：不支持 --rl-max-policy-age > 0、"
-                         "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
-    run = vconf.VerlRunConfig(
-        model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
-        parameter_mode=args.parameter_mode,
-        lora_rank=0 if full else args.lora_r, lora_alpha=0 if full else args.lora_r, lr=args.inner_lr,
-        groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
-        max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
-        total_rounds=args.global_rounds, correction=algo["correction"],
-        # limit > 0: the correction is mapped by offpolicy_correction in
-        # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
-        tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
-        gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
-        max_model_len=max_prompt + args.rollout_max_response_len,
-        reward_path=str(Path(__file__).with_name("reward_fn.py")),
-        reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
-        n_gpus=island_gpus(ray_info), experiment_name=f"yeto-verl-{lid}")
-    overrides = vconf.build_overrides(run) + [
-        "actor_rollout_ref.rollout.agent.num_workers=2",
-        "reward.num_workers=2",
-    ]
+    if engine == megatron_engine.ENGINE_MEGATRON:  # S27 G-DC: verl Megatron island
+        megatron = megatron_island_plan(
+            args, model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
+            algo=algo, chat=chat, ray_info=ray_info, reward_path=str(Path(__file__).with_name("reward_fn.py")),
+            reward_name=function_for(args.reward_function))
+        run, overrides = megatron["run"], megatron["overrides"]
+    else:
+        megatron = None
+        if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
+            raise SystemExit("verl 全参数岛只接同步共置路径：不支持 --rl-max-policy-age > 0、"
+                             "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
+        run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
+                                         val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
+                                         ray_info=ray_info, max_prompt=max_prompt, limit=limit)
     if args.rl_single_island_no_sync:
         sync = "none"
     elif args.rl_island_pool:
@@ -412,7 +433,7 @@ def main(argv=None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     full_plan: dict = {}
-    if full:  # S27 B10: model identity, and the outer full-parameter sync when synced
+    if full and megatron is None:  # S27 B10: model identity, and the outer full-parameter sync when synced
         from yeto.rl.engine.algorithm import AlgorithmSpec
 
         from .full_parameter_stream import plan_section
@@ -427,6 +448,10 @@ def main(argv=None) -> int:
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
+    store_note = None
+    if megatron is not None:
+        asserted_keys = megatron_engine.ASSERTED_KEYS
+        resume, store_note = megatron_resume(args, resume)
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
@@ -449,8 +474,11 @@ def main(argv=None) -> int:
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "bcast_delta": bool(args.bcast_delta),
-        "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
+        "thresholds_key": ["verl", engine, "vllm-" + str(manifest["versions"].get("vllm")),
                            _threshold_card(manifest)],
+        "engine": engine,
+        **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
+            "store_note": store_note} if megatron is not None else {}),
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
         "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
@@ -495,6 +523,128 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
+                    chat: dict, ray_info: dict, max_prompt: int, limit: int):
+    """The FSDP2 island's ``VerlRunConfig`` and Hydra overrides (unchanged by S27 G-DC,
+    except that a spec clip range is refused: only the Megatron island maps it)."""
+    clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
+    if clips:
+        raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
+    full = args.parameter_mode == vconf.FULL_PARAMETER_MODE  # S27 B10
+    run = vconf.VerlRunConfig(
+        model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,
+        parameter_mode=args.parameter_mode,
+        lora_rank=0 if full else args.lora_r, lora_alpha=0 if full else args.lora_r, lr=args.inner_lr,
+        groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
+        max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
+        total_rounds=args.global_rounds, correction=algo["correction"],
+        # limit > 0: the correction is mapped by offpolicy_correction in
+        # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
+        tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
+        gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
+        max_model_len=max_prompt + args.rollout_max_response_len,
+        reward_path=str(Path(__file__).with_name("reward_fn.py")),
+        reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
+        n_gpus=island_gpus(ray_info), experiment_name=f"yeto-verl-{args.learner_id}")
+    overrides = vconf.build_overrides(run) + [
+        "actor_rollout_ref.rollout.agent.num_workers=2",
+        "reward.num_workers=2",
+    ]
+    return run, overrides
+
+
+def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
+    """The Megatron island has no round cuts. The launcher sends a no-sync island with
+    a checkpoint store ``--rl-resume-store`` as well; the island then uses the store
+    for its HF exports only and says so (plan ``store_note`` and the island log).
+    An explicit cut flag is refused."""
+    from .round_cuts import RESUME_FLAGS, _flag
+
+    given = [_flag(n) for n in RESUME_FLAGS if getattr(args, n, None) is not None]
+    if given:
+        raise SystemExit("verl Megatron 岛没有接切点：" + ", ".join(given))
+    if resume is None:
+        return None, None
+    note = (f"--rl-resume-store {resume['store']}: round cuts are not wired for the verl Megatron "
+            "island; the store holds the HF exports only, and a relaunched island starts from the base model")
+    print(f"[yeto-verl] WARNING: {note}", file=sys.stderr, flush=True)
+    return None, note
+
+
+def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
+                         chat: dict, ray_info: dict, reward_path: str, reward_name: str) -> dict:
+    """S27 G-DC: the Megatron island (``megatron_engine``): full parameters, trainer and
+    rollout pools apart, age 0, no outer sync. Returns run, overrides and the plan
+    sections ``megatron`` (the shape) and ``hf_exports``; every flag the island cannot
+    honour is refused here, before verl starts."""
+    from .megatron_engine import MegatronShape, build_overrides
+
+    problems = []
+    if (args.parameter_mode or "lora") != "full":
+        problems.append("--tuning full (parameter mode full)")
+    if not args.rl_single_island_no_sync:
+        problems.append("--rl-single-island-no-sync (outer sync is not wired)")
+    if (args.rl_placement or "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
+    if int(args.rl_max_policy_age or 0) != 0:
+        problems.append("--rl-max-policy-age 0 (the fully_async path is not wired)")
+    if args.rl_sample_role or args.rl_rollout_quant_tier:
+        problems.append("no --rl-sample-role / --rl-rollout-quant-tier")
+    if args.rl_data_slot:
+        problems.append("no --rl-data-slot (one island)")
+    if problems:
+        raise SystemExit("verl Megatron 岛需要：" + "; ".join(problems))
+    total = island_gpus(ray_info)
+    per_node = int(args.rl_island_gpus_per_node or args.actor_num_gpus_per_node or total)
+    rollout_gpus = int(args.rollout_num_gpus or 0)
+    trainer_gpus_per_node = int(args.actor_num_gpus_per_node or per_node)
+    trainer_gpus = int(args.actor_num_nodes) * trainer_gpus_per_node
+    if rollout_gpus <= 0 or rollout_gpus % min(per_node, rollout_gpus):
+        raise SystemExit(f"verl Megatron 岛：--rollout-num-gpus {rollout_gpus} 不能按每节点 {per_node} 卡排布")
+    if trainer_gpus + rollout_gpus != total:
+        raise SystemExit(f"verl Megatron 岛：训练 {trainer_gpus} + rollout {rollout_gpus} 卡 != 岛内 Ray 的 {total} 卡")
+    rollout_per_node = min(per_node, rollout_gpus)
+    with open(Path(model_path) / "config.json") as handle:
+        num_experts = json.load(handle).get("n_routed_experts")
+    shape = MegatronShape(
+        trainer_nodes=int(args.actor_num_nodes), trainer_gpus_per_node=trainer_gpus_per_node,
+        rollout_nodes=rollout_gpus // rollout_per_node, rollout_gpus_per_node=rollout_per_node,
+        rollout_tp=int(args.rollout_num_gpus_per_engine or 1), tp=int(args.tensor_parallel or 1),
+        pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
+        max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
+        router_replay="R3" if args.use_rollout_routing_replay else "disabled",
+        # the launcher's engine memory flag is spelled for SGLang; on this island it is vLLM's
+        gpu_memory_utilization=float(args.sglang_mem_fraction_static or 0.8),
+        num_experts=int(num_experts) if num_experts else None)
+    max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
+    run = vconf.VerlRunConfig(
+        model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,
+        parameter_mode=vconf.FULL_PARAMETER_MODE, lora_rank=0, lora_alpha=0, lr=args.inner_lr,
+        groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
+        max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
+        total_rounds=args.global_rounds, correction=algo["correction"],
+        tis_lower=algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
+        max_model_len=max_prompt + args.rollout_max_response_len, reward_path=reward_path,
+        reward_name=reward_name, chat_template_kwargs=chat, n_gpus=trainer_gpus,
+        experiment_name=f"yeto-verl-{args.learner_id}")
+    overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
+                                eps_clip_high=algo.get("eps_clip_high")) + [
+        "actor_rollout_ref.rollout.agent.num_workers=8",
+        "reward.num_workers=8",
+    ]
+    from yeto.rl.engine.hf_export import ExportRounds, export_store_path
+
+    rounds = ExportRounds.parse(args.rl_export_hf_rounds)
+    if bool(rounds) != bool(args.rl_export_hf_store):
+        raise SystemExit("--rl-export-hf-rounds and --rl-export-hf-store go together")
+    exports = ({"rounds": str(rounds), "store": export_store_path(str(args.rl_export_hf_store),
+                                                                  learner_id=int(args.learner_id))}
+               if rounds else None)
+    if args.rl_lr_schedule not in (None, "constant"):
+        raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
+    return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports}
 
 
 def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:

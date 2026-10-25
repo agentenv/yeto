@@ -38,6 +38,9 @@ class YetoTaskRunner:
 
         import yeto.rl.adapters.verl.trainer  # noqa: F401  (registers trainer_mode yeto_sync)
 
+        megatron = plan.get("engine") == "megatron"
+        if megatron:  # S27 G-DC: registers trainer_mode yeto_separate (Megatron island)
+            import yeto.rl.adapters.verl.separate_trainer  # noqa: F401
         configure_verl_logging()
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
         config.transfer_queue.enable = True
@@ -50,9 +53,14 @@ class YetoTaskRunner:
                 config=config, llm_client=trainer.get_llm_client(),
                 teacher_client=trainer.get_teacher_client(),
                 reward_loop_worker_handles=trainer.get_reward_handles())
+            resolved = OmegaConf.to_container(config, resolve=True)
+            if megatron:
+                from yeto.rl.adapters.verl.megatron_ports import run_megatron_island
+
+                return run_megatron_island(trainer, manager, plan, resolved)
             from yeto.rl.adapters.verl.trainer import run_island
 
-            return run_island(trainer, manager, plan, OmegaConf.to_container(config, resolve=True))
+            return run_island(trainer, manager, plan, resolved)
         finally:
             tq.close()
 
@@ -104,10 +112,13 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
 
     check_island_credentials()  # secret-handling-hardening D4 (driver, both paths)
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
+    # S27 G-DC: the Megatron island syncs weights over the same disaggregated NCCL
+    # checkpoint engine as the fully_async path, so it gets the same NCCL host setting
+    disaggregated = fully_async or plan.get("engine") == "megatron"
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
-        ray.init(address=address, runtime_env=_runtime_env(fully_async), namespace="yeto-verl")
+        ray.init(address=address, runtime_env=_runtime_env(disaggregated), namespace="yeto-verl")
     return plan
 
 

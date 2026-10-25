@@ -323,7 +323,10 @@ class ModalIslandConfig:
 # ``<backend>-build:<40-hex commit>``: an engine image Modal builds from the
 # backend's own recipe (``yeto.rl.engine.backends`` role ``image``), pinned by the
 # engine commit and the engine's lock file; there is no registry digest.
-ENGINE_BUILT_IMAGE_RE = re.compile(r"(?P<backend>[a-z][a-z0-9]*)-build:(?P<commit>[0-9a-f]{40})")
+# ``<backend>-build:<commit>`` or ``<backend>-<variant>-build:<commit>`` (S27 G-DC:
+# ``verl-megatron-build``, the verl image with the Megatron engine layers)
+ENGINE_BUILT_IMAGE_RE = re.compile(
+    r"(?P<backend>[a-z][a-z0-9]*)(?:-(?P<variant>[a-z][a-z0-9]*))?-build:(?P<commit>[0-9a-f]{40})")
 
 
 def image_ref_from_rl_image(rl_image: str) -> str:
@@ -1356,7 +1359,8 @@ class ModalOps:
         if built:
             from yeto.rl.engine import backends
 
-            image = backends.module("image", built["backend"]).modal_image(modal, built["commit"])
+            variant = {"variant": built["variant"]} if built["variant"] else {}
+            image = backends.module("image", built["backend"]).modal_image(modal, built["commit"], **variant)
         elif cfg.training_mode == "rl":
             creds = cfg.registry_creds or (
                 registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None

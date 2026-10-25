@@ -17,6 +17,7 @@ CPU only; the real-syncer tests need cargo.
 """
 from __future__ import annotations
 
+import inspect
 import hashlib
 import json
 import socket
@@ -530,8 +531,13 @@ def test_every_refused_option_is_one_the_verl_island_does_not_parse():
     from yeto.rl.adapters.verl import launch_flags
 
     parser_options = set(island_entry.parse_args(_parsed_argv())[0].__dict__)
+    # S27 G-DC: the Megatron island parses these two for itself (megatron_island_plan);
+    # the FSDP2 path still never reads them, so the launcher keeps refusing them there.
+    megatron_only = {"rl_lr_schedule", "rl_max_tokens_per_gpu"}
     for dest, _off, _option in launch_flags.IGNORED_ON_VERL_FULL_PARAMETER:
-        assert dest not in parser_options, dest
+        assert dest not in parser_options - megatron_only, dest
+    fsdp = inspect.getsource(island_entry.fsdp_island_run)
+    assert not any(dest in fsdp for dest in megatron_only)
 
 
 def _parsed_argv():
