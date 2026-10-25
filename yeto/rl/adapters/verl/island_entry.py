@@ -712,6 +712,16 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         "actor_rollout_ref.rollout.agent.num_workers=2",
         "reward.num_workers=2",
     ]
+    from yeto.hw.catalog import device_family
+
+    if device_family() == "ascend":
+        # S27 G-EQ2 (npu1): verl compiles the entropy/log-prob helpers with
+        # torch.compile by default (actor.use_torch_compile, actor.yaml:110).
+        # An Ascend image carries triton-ascend, which has no inductor backend:
+        # the first training step dies in dynamo with "cannot import name
+        # 'Language' from 'triton.backends.compiler'" (it even tried to load
+        # triton's AMD backend). Eager is correct, only slower.
+        overrides += ["actor_rollout_ref.actor.use_torch_compile=False"]
     return run, overrides
 
 
