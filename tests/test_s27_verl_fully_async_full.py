@@ -140,8 +140,8 @@ def test_a_synced_plan_needs_the_full_parameter_section(tmp_path):
 def test_the_island_entry_refuses_each_unwired_path_on_its_own_line():
     source = inspect.getsource(island_entry.main)
     assert "if full and limit and buffer_section is None:" in source
-    assert "if full and buffer_section is not None:" in source
     assert "if full and args.rl_rollout_quant_tier:" in source
+    # the buffer trainer's line is gone: VERL-PARITY #14 (test_s27_verl_sample_role.py)
 
 
 def test_the_sync_path_takes_its_policy_from_the_shared_function():

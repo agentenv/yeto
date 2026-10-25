@@ -117,6 +117,23 @@ def full_release_weights(writer: Callable[[int, Path], None]):
     return weights
 
 
+def release_weights_for(island: FullyAsyncIsland, plan: Mapping[str, Any]):
+    """What a release of this buffer trainer writes (:class:`ReleaseWeights`):
+    None for a LoRA trainer (the publisher's default: the adapter merged into the
+    base); for a full-parameter trainer (S27 G-EW, VERL-PARITY #14) the trainer's
+    own weights, written by the island's HF writer over its full-parameter group
+    (``hf_export.VerlHfWriter``; ``island.full_group`` is set by
+    ``fully_async_full.full_parameter_ports`` before the ports are installed)."""
+    if plan.get("parameter_mode") != "full":
+        return None
+    from .full_parameter_stream import _LoopRunner
+    from .hf_export import VerlHfWriter
+
+    if island.full_group is None:
+        raise RuntimeError("a full-parameter buffer trainer installs its ports after its policy state")
+    return full_release_weights(VerlHfWriter(island.full_group, plan["model_path"], run=_LoopRunner().run))
+
+
 class BufferReleasePublisher:
     """yeto publication as a store release of the merged policy (module doc).
 

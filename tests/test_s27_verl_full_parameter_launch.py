@@ -117,13 +117,16 @@ def test_a_missing_layout_hash_names_the_verl_planner():
 def test_verl_problems_cover_the_island_refusals():
     from types import SimpleNamespace
 
-    args = SimpleNamespace(rl_placement="standby-only", rl_sample_role="trainer", rl_max_policy_age=2,
+    # S27 G-EW: synced buffer trainers (--rl-sample-role trainer) are accepted (VERL-PARITY #14,
+    # test_s27_verl_sample_role.py), so this island generates its own samples
+    args = SimpleNamespace(rl_placement="standby-only", rl_max_policy_age=2,
                            rl_rollout_quant_tier=1, expert_full_count=2, rl_peer_recovery=True,
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))
-    for needle in ("--rl-placement colocated", "--rl-sample-role trainer", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
+    for needle in ("--rl-placement colocated", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
                    "--expert-full-count"):
         assert needle in problems, needle
+    assert "--rl-sample-role" not in problems
     assert "--rl-peer-recovery" not in problems  # S27 G-ED: the verl stream recovers from a peer
 
 
