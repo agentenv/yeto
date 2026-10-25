@@ -165,6 +165,19 @@ class JsonlPrompts:
         return items
 
 
+def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key: str,
+                      label_key: str | None, groups_per_round: int,
+                      render: Callable[[Any], str] = str, key: bytes | None = None) -> "Any":
+    """The engine sampler's prompts from the task dispenser (S27 P4): the
+    sibling of :class:`JsonlPrompts` that a sampler island of any backend uses
+    (``task_dispense.DispensedPrompts``). ``config``: ``prompts.dispense`` of the
+    spec (address, island id, seed, prefetch blocks; the mix / label streams)."""
+    from .task_dispense import DispensedPrompts
+
+    return DispensedPrompts.open(path, config, input_key=input_key, label_key=label_key,
+                                 groups_per_round=groups_per_round, render=render, key=key)
+
+
 def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False) -> Callable[[Any], str]:
     from transformers import AutoTokenizer  # noqa: PLC0415 - only the chat format needs it
 
@@ -190,6 +203,16 @@ def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
         if not tokenizer:
             raise SamplerSpecError("prompts.format chat needs prompts.tokenizer or a base_dir")
         render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)))
+    if prompts.get("dispense"):  # S27 P4: rows from the task dispenser, not a slot
+        if prompts.get("data_slot"):
+            raise SamplerSpecError("prompts.dispense and prompts.data_slot exclude each other")
+        from yeto.protocol import island_hmac_key_from_env  # noqa: PLC0415
+
+        return dispensed_prompts(_require(prompts, "path", "prompts"), prompts["dispense"],
+                                 input_key=str(_require(prompts, "input_key", "prompts")),
+                                 label_key=prompts.get("label_key"),
+                                 groups_per_round=int(_require(prompts, "groups_per_round", "prompts")),
+                                 render=render, key=island_hmac_key_from_env())
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
                         groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
@@ -379,6 +402,12 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         raise
     finally:
         watcher.stop()
+        close = getattr(prompts, "close", None)
+        if callable(close):  # S27 P4: the rows this sampler holds go back to the dispenser
+            try:
+                emit("rl_dispense_close", **(close() or {}))
+            except Exception as error:  # noqa: BLE001 - the lease returns them anyway
+                emit("rl_dispense_close", error=f"{type(error).__name__}: {error}")
         try:
             engine.stop()
         finally:

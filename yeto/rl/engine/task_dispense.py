@@ -260,6 +260,40 @@ def sampler_holder_id(sampler_id: str) -> int:
     return SAMPLER_HOLDER_BASE | (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF)
 
 
+# the sampler process id string (sampler_resume.new_incarnation; forwarded to Ray workers)
+SAMPLER_INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"
+MEMBER_INCARNATION_ENV = "YETO_MEMBER_INCARNATION"  # set here when the above is not
+
+
+def member_incarnation(environ: Any = None) -> int:
+    """This island process's member incarnation (docs/PROTOCOL.md "Sampler
+    members"): one nonzero u64 for every channel the process opens to the head
+    (task dispenser, spot rollout subscriber and relay), so that the head sees
+    one member. From the sampler process id (``YETO_SAMPLER_INCARNATION``) when
+    set, else a random value kept in ``YETO_MEMBER_INCARNATION``."""
+    env = os.environ if environ is None else environ
+    text = env.get(SAMPLER_INCARNATION_ENV)
+    if text:
+        value = int.from_bytes(hashlib.sha256(f"yeto-member:{text}".encode()).digest()[:8], "little")
+        return value or 1
+    text = env.get(MEMBER_INCARNATION_ENV)
+    if not text:
+        text = f"{int.from_bytes(os.urandom(8), 'little') or 1:016x}"
+        env[MEMBER_INCARNATION_ENV] = text
+    return int(text, 16)
+
+
+def member_incarnations(environ: Any = None) -> Callable[[], int]:
+    """``TaskSource(incarnation=...)`` for a sampler member: the process's member
+    incarnation first; after a fence (the head retired it) a new random one."""
+    first = [member_incarnation(environ)]
+
+    def next_incarnation() -> int:
+        return first.pop() if first else (int.from_bytes(os.urandom(8), "little") or 1)
+
+    return next_incarnation
+
+
 def stream_of(position: int) -> int:
     return int(position) >> STREAM_SHIFT
 
@@ -910,6 +944,250 @@ class TaskSource:
                 with self._cv:
                     if not self._stopped:
                         self._cv.wait(timeout=0.2)
+
+
+# ------------------------------------------------------- dispensed rows (neutral)
+
+# how long a round's commit waits for the dispenser's answer; on timeout the
+# report stays queued (sent when the head answers again) and the round goes on
+COMMIT_ACK_TIMEOUT_S = 30.0
+
+
+class DispensedRows:
+    """The bookkeeping of the rows one island process took from the dispenser,
+    whatever its backend (Miles data source, verl, the engine sampler): which
+    taken positions wait for their round's commit (kept by the round's filter),
+    which are drop candidates, and the reports trained / dropped / released.
+
+    A backend port subclasses it, takes positions with :meth:`take_rows`,
+    builds its own samples from :attr:`positions` (``PositionMap``) and calls
+    :meth:`kept` (the round's filter kept these), :meth:`commit` (the round
+    passed its sync boundary), :meth:`written` (a sampler: the groups are in
+    the sample buffer) and :meth:`close`. :meth:`held_back` names positions the
+    backend put back into its own buffer (not dropped); :meth:`_hook_round`
+    the round a filter call belongs to. Rules: ``adapters.miles.task_dispense``
+    module doc (the P2 Miles port, the first one)."""
+
+    def __init__(self, tasks: TaskSource, positions: PositionMap) -> None:
+        self.tasks = tasks
+        self.positions = positions
+        # positions the last round took and did not keep: dropped at the next
+        # draw or filter call unless the backend put their group back
+        self._candidates: set[int] = set()
+        # round id -> kept positions waiting for that round's commit
+        self._pending: dict[int, set[int]] = {}
+        self._hooks = 0
+        self.gave_up: str | None = None
+        # the generation thread draws and filters; the driver's commit and close
+        # may arrive on another thread
+        self._lock = threading.RLock()
+
+    def held_back(self) -> set[int]:
+        """Positions whose group the backend put back into its own buffer."""
+        return set()
+
+    def _hook_round(self) -> int:
+        """The round of a filter call (default: filter calls in this process)."""
+        return self._hooks
+
+    def take_rows(self, need: int) -> list[int]:
+        """``need`` positions for the round being drawn; gives up (raises
+        :class:`DispenseEnded`) when the dispenser cannot fill it any more while
+        this island holds rows of the round (module doc of the Miles port)."""
+        holding = self._holds_rows()
+        taken = self.tasks.take(need, drained_ok=holding)
+        if not taken:
+            self._give_up(need)
+        return taken
+
+    def pending_positions(self) -> set[int]:
+        """Kept positions waiting for their round's commit."""
+        with self._lock:
+            return set().union(*self._pending.values()) if self._pending else set()
+
+    def _holds_rows(self) -> bool:
+        """Whether this island holds rows besides those waiting for a commit: rows
+        of the rollout being drawn, or groups back in Miles' buffer."""
+        return bool(self.tasks.taken() - self.pending_positions())
+
+    def _give_up(self, need: int) -> None:
+        """The data ended for this rollout (module doc): release what it holds."""
+        with self._lock:
+            pending = self.pending_positions()
+            prefetched = self.tasks.release_ready(stop_claims=True)
+            held = sorted(self.tasks.taken() - pending)
+            self.tasks.report(release=held)
+            self._candidates = set()
+            self.gave_up = (f"the dispenser has no rows left to fill this rollout ({need} more "
+                            f"wanted): {len(held)} drawn and {prefetched} prefetched rows released")
+        logger.info("task dispenser: %s", self.gave_up)
+        raise DispenseEnded(self.gave_up)
+
+    def _settle(self) -> int:
+        """Report the previous rollout's taken, unkept positions dropped unless
+        their group is back in Miles' buffer; returns how many. Under the lock."""
+        if not self._candidates:
+            return 0
+        dropped = ((self._candidates & self.tasks.taken()) - self.held_back()
+                   - self.pending_positions())
+        self._candidates = set()
+        if dropped:
+            self.tasks.report(dropped=sorted(dropped))
+        return len(dropped)
+
+    def kept(self, kept: Iterable[int], rollout_id: int | None = None) -> dict[str, int]:
+        """The round's filter kept the groups of ``kept`` (positions): they wait
+        for the round's commit; the other taken positions become drop
+        candidates. Returns the counts."""
+        with self._lock:
+            dropped = self._settle()
+            round_id = self._hook_round() if rollout_id is None else int(rollout_id)
+            self._hooks += 1
+            pending = self.pending_positions()
+            taken = self.tasks.taken()
+            kept_now = {int(p) for p in kept} & taken
+            kept_now -= pending
+            if kept_now:
+                self._pending.setdefault(round_id, set()).update(kept_now)
+            self._candidates = taken - kept_now - pending
+            return {"kept": len(kept_now), "dropped": dropped, "rollout_id": round_id}
+
+    def commit(self, rollout_id: int, *, timeout_s: float = COMMIT_ACK_TIMEOUT_S) -> dict[str, Any]:
+        """Report the kept positions of rounds <= ``rollout_id`` trained and wait
+        (``timeout_s``) for the dispenser's answer (module doc)."""
+        with self._lock:
+            due = sorted(r for r in self._pending if r <= int(rollout_id))
+            positions: set[int] = set()
+            for round_id in due:
+                positions |= self._pending.pop(round_id)
+            taken = self.tasks.taken()
+            trained = sorted(positions & taken)
+            self.tasks.report(trained=trained)
+        acked = self.tasks.flush(timeout_s) if trained else True
+        return {"rounds": due, "trained": len(trained), "acked": bool(acked),
+                # fenced while they waited: the dispenser gave them out again
+                "lost": len(positions) - len(trained)}
+
+    def written(self, rollout_id: int, positions: Iterable[int], *,
+                timeout_s: float = COMMIT_ACK_TIMEOUT_S, unwritten: str = "drop") -> dict[str, Any]:
+        """Sampler island (S27 P4): the groups of ``positions`` are in the sample
+        buffer, so their rows are done: report them trained (the sampler's
+        "trained" is "written for the trainers") and wait (``timeout_s``) for
+        the dispenser's answer. Every other position of the round that is still
+        taken becomes a drop candidate (dropped at the next draw unless Miles put
+        its group back into its buffer, as for a training island)."""
+        with self._lock:
+            done = {int(p) for p in positions} & self.tasks.taken()
+            self._pending = {r: kept - done for r, kept in self._pending.items()
+                             if r > int(rollout_id) and kept - done}
+            self.tasks.report(trained=sorted(done))
+            rest = self.tasks.taken() - done - self.pending_positions()
+            released = 0
+            if unwritten == "release":  # never in the buffer: give them out again now
+                rest -= self.held_back()
+                self.tasks.report(release=sorted(rest))
+                released, rest = len(rest), set()
+            self._candidates = rest
+        acked = self.tasks.flush(timeout_s) if done or released else True
+        return {"rollout_id": int(rollout_id), "trained": len(done), "released": released,
+                "acked": bool(acked)}
+
+    def close(self) -> dict[str, Any]:
+        """Release every position not trained yet and stop (module doc)."""
+        with self._lock:
+            pending = self.pending_positions()
+            self._pending.clear()
+            self._candidates = set()
+            held = len(self.tasks.taken()) + self.tasks.ready_count()
+        self.tasks.close(release=True)
+        return {"released": held, "uncommitted": len(pending),
+                **{k: self.tasks.stats[k] for k in ("granted", "trained", "dropped", "release",
+                                                     "fenced", "lost_reports")}}
+
+
+class DispensedPrompts(DispensedRows):
+    """The engine sampler's prompts (``engine_sampler_entry.JsonlPrompts``'s
+    interface) from the task dispenser (S27 P4): a sampler island of any
+    backend (the verl sampler island, the engine sampler) takes one block of
+    positions per round, maps them to rows of its prompt file and reports a
+    position trained once its group is in the sample buffer (``EngineRound``
+    calls :meth:`written`); the rows of a round it did not write go back at
+    once (released)."""
+
+    def __init__(self, path: str | os.PathLike[str], tasks: TaskSource, positions: PositionMap, *,
+                 input_key: str, label_key: str | None, groups_per_round: int,
+                 render: Callable[[Any], str] = str) -> None:
+        import json
+
+        super().__init__(tasks, positions)
+        with open(os.path.expanduser(str(path)), encoding="utf-8") as handle:
+            self.rows = [json.loads(line) for line in handle if line.strip()]
+        if len(self.rows) != positions.rows:
+            raise ValueError(f"the prompt file has {len(self.rows)} rows, the dispenser {positions.rows}")
+        self.input_key, self.label_key = input_key, label_key
+        self.groups_per_round = int(groups_per_round)
+        self.render = render
+        self.drawn = 0
+
+    @classmethod
+    def open(cls, path: str | os.PathLike[str], config: Mapping[str, Any], *, input_key: str,
+             label_key: str | None, groups_per_round: int, render: Callable[[Any], str] = str,
+             key: bytes | None = None, connect: Callable[[int], DispenseConnection] | None = None
+             ) -> "DispensedPrompts":
+        """Open the island's connection (``config``: ``address``, ``learner_id``,
+        ``seed``, ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for
+        the streams) and start taking rows."""
+        rows, digest = file_fingerprint(path)
+        mix, labels = config.get("mix"), config.get("labels")
+        by_label = bool(config.get("by_label")) or bool(labels)
+        table = None
+        accept = None
+        if mix or by_label:
+            table = StreamTable.from_prompts(path, mix=list(mix) if mix else None, by_label=by_label)
+            accept = table.accept(list(labels)) if labels else None
+            if table.single and accept is None:
+                table = None
+        connect = connect or tcp_connector(
+            str(config["address"]), learner_id=int(config["learner_id"]), rows=rows, fingerprint=digest,
+            key=key, streams=None if table is None else table.decl(), accept=accept)
+        tasks = TaskSource(connect=connect, block=int(groups_per_round),
+                           prefetch_blocks=int(config.get("prefetch_blocks", 2) or 2),
+                           incarnation=member_incarnations())
+        seed = int(config.get("seed", 0) or 0)
+        positions = PositionMap(rows, seed=seed) if table is None else PositionMap(seed=seed, table=table)
+        tasks.start()
+        try:
+            return cls(path, tasks, positions, input_key=input_key, label_key=label_key,
+                       groups_per_round=groups_per_round, render=render)
+        except BaseException:
+            tasks.close(release=True)
+            raise
+
+    def cursor(self, rollout_id: int) -> dict[str, int]:
+        """The rows drawn so far (the ``sampler_round`` record documents it; the
+        dispenser keeps the data position)."""
+        del rollout_id
+        return {"dispensed": int(self.drawn)}
+
+    def __call__(self, rollout_id: int) -> list[Any]:
+        from .engine_sampler import PromptItem  # noqa: PLC0415 - engine_sampler imports this module
+
+        del rollout_id
+        with self._lock:
+            self._settle()
+        items = []
+        while len(items) < self.groups_per_round:
+            for position in self.take_rows(self.groups_per_round - len(items)):
+                index = self.positions.row(position)
+                row = self.rows[index]
+                if self.input_key not in row:
+                    self.tasks.report(dropped=[position])
+                    continue
+                items.append(PromptItem(prompt_id=f"row{index}", prompt=self.render(row[self.input_key]),
+                                        label=row.get(self.label_key) if self.label_key else None,
+                                        metadata={"row": index, DISPENSE_POSITION_KEY: int(position)}))
+                self.drawn += 1
+        return items
 
 
 def tcp_connector(address: str | tuple[str, int], *, learner_id: int, rows: int, fingerprint: bytes,

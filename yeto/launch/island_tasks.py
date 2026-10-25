@@ -172,12 +172,16 @@ def _check_dispense(args, plan) -> None:
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover Miles fully_async rollouts "
                          "(--rl-max-policy-age without --rl-rollout-ahead) yet")
     for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"):
-        if getattr(args, name, None) is not None:
+        # S27 P4: a buffer trainer's cut keeps its buffer position, not a data position
+        if plan.islands and getattr(args, name, None) is not None:
             raise ValueError(f"{DATA_SPLIT_FLAG} dispense and island round cuts "
                              f"({rl_option(name, CLI)}) exclude each other: the dispenser, not the "
                              "island cut, keeps the data position")
-    if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError(f"{DATA_SPLIT_FLAG} dispense is wired for the Miles backend only (verl: later)")
+    if plan.islands and (getattr(args, "rl_backend", None) or "miles") != "miles":
+        # sampler islands of either backend claim through the engine-neutral
+        # DispensedPrompts / the Miles data source; verl training islands: later
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense covers verl sampler islands, not verl "
+                         "training islands yet (Miles only)")
 
 
 def dispensing_islands(args, plan) -> list[int]:

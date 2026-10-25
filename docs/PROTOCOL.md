@@ -751,6 +751,28 @@ END once all of them are exhausted and reported. One stream with weight 1 and
 an empty name, accepted by every island, is the P2 dispenser: the island then
 speaks version 1 and positions are row sequence numbers.
 
+Sampler members (S27 P4; shared with the spot rollout subscribers and sample
+relay of S27 G-EA, `syncer/src/members.rs`): every head service that keeps
+per-process state for islands outside the learner session uses one membership
+rule.
+
+- Member = `(id, incarnation)`. `id`: a training island's learner id; a
+  sampler island's `2^31 | (u32_be(SHA-256("yeto-sampler:" + sampler_id)[0..4]) & 0x7fffffff)`
+  (`sampler_id` = its buffer shard name, `--rl-sampler-node`;
+  `task_dispense.sampler_holder_id`, `spot_rollout.release_store.subscriber_id_for`).
+  `incarnation`: one nonzero random u64 per island process, the same on every
+  channel the process opens (TASK_HELLO, SUBSCRIBE, RELAY_HELLO):
+  `task_dispense.member_incarnation()` (from `YETO_SAMPLER_INCARNATION`, the
+  sampler process id that Ray workers inherit).
+- A new incarnation of an id supersedes the current one at once; a member
+  silent on every channel for the lease (`--dispense-lease-s`) expires. A
+  superseded or expired member is retired: its later requests on any channel
+  are refused (`fenced: ...`); each service returns what the member held (the
+  dispenser: its unreported positions, to the front of the queue).
+- A fenced process opens again with a new incarnation on all its channels.
+- One `Members` table per head process (target; today the dispenser owns its
+  own table and the spot rollout services keep their connection state).
+
 Sampler islands (S27 P4) claim like training islands; their `learner_id` is
 `2^31` plus 31 bits of SHA-256 of their sampler id (buffer shard name), so a
 relaunched sampler supersedes its old process and the ids never meet a

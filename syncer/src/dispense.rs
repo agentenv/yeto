@@ -48,10 +48,13 @@
 //! clock reading is passed in. Events for the `task-dispense.jsonl` log are
 //! collected in `take_events`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
+
+pub use crate::members::Holder;
+use crate::members::{Join, Members, RETIRED_LIMIT};
 
 /// Magic and version of the persisted dispenser record (YDS1: the P2 record,
 /// one stream; still restored).
@@ -82,9 +85,6 @@ pub fn local_of(position: u64) -> u64 {
 pub fn position_of(stream: usize, local: u64) -> u64 {
     ((stream as u64) << STREAM_SHIFT) | local
 }
-/// Retired incarnations remembered (fencing). Incarnations are random
-/// 64-bit values; this only has to cover realistic restart storms.
-const RETIRED_LIMIT: usize = 4096;
 /// Live holders admitted at once (one per island process).
 const LIVE_LIMIT: usize = 4096;
 /// Hint for a WAIT answer: when to claim again.
@@ -128,13 +128,6 @@ impl DispenseConfig {
         ensure!(self.max_block >= 1, "--dispense-max-block must be >= 1");
         Ok(())
     }
-}
-
-/// One island process.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Holder {
-    pub learner_id: u32,
-    pub incarnation: u64,
 }
 
 /// One stream of the run's rows (module doc): its row count, its integer
@@ -436,9 +429,9 @@ enum Answer {
     Report(ReportTotals),
 }
 
+/// The dispenser's state of a live holder (its lease is in [`Members`]).
 #[derive(Debug)]
 struct Live {
-    last_seen: Instant,
     blocks: BTreeSet<u64>,
     /// A WAIT was logged since the last grant (one log line per wait period).
     waiting: bool,
@@ -483,15 +476,15 @@ pub struct Dispenser {
     blocks: BTreeMap<u64, Block>,
     next_block: u64,
     live: BTreeMap<Holder, Live>,
-    /// Live incarnation per island.
-    current: HashMap<u32, u64>,
-    retired: (VecDeque<Holder>, std::collections::HashSet<Holder>),
+    /// Leases, current incarnations and fencing (`members.rs`, shared rules).
+    members: Members,
     pub totals: Totals,
     events: Vec<DispenseEvent>,
 }
 
 impl Dispenser {
     pub fn new(cfg: DispenseConfig) -> Self {
+        let members = Members::new(cfg.lease);
         Self {
             cfg,
             data: None,
@@ -499,8 +492,7 @@ impl Dispenser {
             blocks: BTreeMap::new(),
             next_block: 1,
             live: BTreeMap::new(),
-            current: HashMap::new(),
-            retired: (VecDeque::new(), Default::default()),
+            members,
             totals: Totals::default(),
             events: Vec::new(),
         }
@@ -531,7 +523,7 @@ impl Dispenser {
     }
 
     pub fn is_retired(&self, holder: Holder) -> bool {
-        self.retired.1.contains(&holder)
+        self.members.is_retired(holder)
     }
 
     /// Positions waiting in the queues (returned, requeued, released).
@@ -568,15 +560,7 @@ impl Dispenser {
     }
 
     fn retire(&mut self, holder: Holder) {
-        let (order, set) = &mut self.retired;
-        if set.insert(holder) {
-            order.push_back(holder);
-            while order.len() > RETIRED_LIMIT {
-                if let Some(old) = order.pop_front() {
-                    set.remove(&old);
-                }
-            }
-        }
+        self.members.retire(holder);
     }
 
     /// Put spans back at the front of their streams' queues, ascending.
@@ -590,9 +574,6 @@ impl Dispenser {
     /// Retire `holder` and return its unreported positions to the queue front.
     fn reclaim(&mut self, holder: Holder, reason: ReclaimReason) -> u64 {
         let Some(live) = self.live.remove(&holder) else { return 0 };
-        if self.current.get(&holder.learner_id) == Some(&holder.incarnation) {
-            self.current.remove(&holder.learner_id);
-        }
         self.retire(holder);
         let mut spans = Vec::new();
         for id in live.blocks {
@@ -677,7 +658,7 @@ impl Dispenser {
         };
         let logged_accept = (accept_list.len() < streams).then(|| accept_list.clone());
         if let Some(live) = self.live.get_mut(&holder) {
-            live.last_seen = now;
+            self.members.touch(holder, now);
             live.accept = accept_list;
             self.events.push(DispenseEvent::Open {
                 holder,
@@ -691,16 +672,14 @@ impl Dispenser {
         if self.live.len() >= LIVE_LIMIT {
             return Err(DispenseError::Refused(format!("more than {LIVE_LIMIT} live islands")));
         }
-        let previous = self.current.get(&holder.learner_id).copied();
+        let previous = self.members.current(holder.learner_id).map(|h| h.incarnation);
         let mut reclaimed = 0;
         if let Some(incarnation) = previous {
             reclaimed = self.reclaim(Holder { learner_id: holder.learner_id, incarnation }, ReclaimReason::Superseded);
         }
-        self.current.insert(holder.learner_id, holder.incarnation);
-        self.live.insert(
-            holder,
-            Live { last_seen: now, blocks: BTreeSet::new(), waiting: false, last: None, accept: accept_list },
-        );
+        let joined = self.members.join(holder, now);
+        debug_assert_eq!(joined, Join::Joined { superseded: None }, "the old incarnation was reclaimed above");
+        self.live.insert(holder, Live { blocks: BTreeSet::new(), waiting: false, last: None, accept: accept_list });
         self.events.push(DispenseEvent::Open {
             holder,
             superseded: previous,
@@ -712,12 +691,9 @@ impl Dispenser {
     }
 
     fn require_live(&mut self, holder: Holder, request: &'static str, now: Instant) -> DResult<()> {
-        match self.live.get_mut(&holder) {
-            Some(live) => {
-                live.last_seen = now;
-                Ok(())
-            }
-            None => {
+        match self.live.contains_key(&holder) && self.members.touch(holder, now) {
+            true => Ok(()),
+            false => {
                 self.events.push(DispenseEvent::Fenced { holder, request });
                 Err(DispenseError::Fenced(format!(
                     "incarnation {:016x} of island {} holds no lease",
@@ -990,13 +966,7 @@ impl Dispenser {
 
     /// Expire every holder silent for the lease; returns them in order.
     pub fn expire(&mut self, now: Instant) -> Vec<Holder> {
-        let lease = self.cfg.lease;
-        let gone: Vec<Holder> = self
-            .live
-            .iter()
-            .filter(|(_, live)| now.saturating_duration_since(live.last_seen) >= lease)
-            .map(|(&holder, _)| holder)
-            .collect();
+        let gone: Vec<Holder> = self.members.expired(now);
         for &holder in &gone {
             self.reclaim(holder, ReclaimReason::Expired);
         }
@@ -1005,7 +975,7 @@ impl Dispenser {
 
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn next_expiry(&self) -> Option<Instant> {
-        self.live.values().map(|live| live.last_seen + self.cfg.lease).min()
+        self.members.next_expiry()
     }
 
     /// Persisted record: the state as if every live holder were reclaimed
@@ -1030,11 +1000,7 @@ impl Dispenser {
             queue.extend(held.iter().copied().filter(|span| stream_of(span.start) == s));
             queue.extend(state.queue.iter().copied());
         }
-        let mut retired: Vec<Holder> = self.retired.0.iter().copied().collect();
-        retired.extend(self.live.keys().copied().filter(|h| !self.retired.1.contains(h)));
-        if retired.len() > RETIRED_LIMIT {
-            retired.drain(..retired.len() - RETIRED_LIMIT);
-        }
+        let retired: Vec<Holder> = self.members.fence_list();
         let mut out = Vec::new();
         out.extend_from_slice(PERSIST_MAGIC);
         out.push(u8::from(self.data.is_some()));
@@ -1295,6 +1261,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     const FP: [u8; 32] = [7; 32];
 

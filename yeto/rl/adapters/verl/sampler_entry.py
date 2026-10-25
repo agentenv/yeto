@@ -62,10 +62,20 @@ def sampler_reward(reward_function: str) -> str:
 
 def prompt_rows(rows: Iterable[Mapping[str, Any]], render: Callable[[list], str]) -> list[dict[str, str]]:
     """``{"text", "label"}`` records of the dataset rows (``messages``, ``label``)."""
+    from yeto.rl.engine.task_dispense import DATA_SOURCE_KEY, TASK_LABEL_KEY
+
     out = []
     for row in rows:
         messages = [{"role": m["role"], "content": m["content"]} for m in row["messages"]]
-        out.append({"text": render(messages), "label": str(row["label"])})
+        record = {"text": render(messages), "label": str(row["label"])}
+        # S27 P3/P4: the dispenser's streams read a row's task label and --data-mix source
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        label = row.get(TASK_LABEL_KEY, metadata.get(TASK_LABEL_KEY))
+        if label is not None:
+            record[TASK_LABEL_KEY] = label
+        if DATA_SOURCE_KEY in metadata:
+            record["metadata"] = {DATA_SOURCE_KEY: metadata[DATA_SOURCE_KEY]}
+        out.append(record)
     if not out:
         raise SamplerIslandError("the prompt data has no rows")
     return out
@@ -109,11 +119,33 @@ def sampler_spec(args: Any, *, model_path: str, prompts_path: str, card_model: s
     }
     if getattr(args, "rl_sampler_data_slot", None):
         spec["prompts"]["data_slot"] = str(args.rl_sampler_data_slot)
+    if getattr(args, "rl_data_dispense", False):
+        spec["prompts"]["dispense"] = dispense_spec(args, str(sampler_id))
     if getattr(args, "rl_buffer_shards", None):
         spec["buffer_shards"] = list(args.rl_buffer_shards)
     if getattr(args, "rl_sampler_min_round_seconds", None) is not None:
         spec["min_round_s"] = float(args.rl_sampler_min_round_seconds)
     return spec
+
+
+def dispense_spec(args: Any, sampler_id: str) -> dict[str, Any]:
+    """``prompts.dispense`` of a sampler island that claims its rows from the task
+    dispenser (S27 P4; ``task_dispense.DispensedPrompts``): the dispenser's address,
+    the sampler's island id (from its sampler id), and the streams' flags."""
+    from yeto.rl.engine.task_dispense import sampler_holder_id
+
+    if getattr(args, "rl_sampler_data_slot", None):
+        raise SamplerIslandError("--rl-data-dispense and --rl-sampler-data-slot exclude each other")
+    addr = getattr(args, "rl_dispense_addr", None)
+    if not addr:
+        raise SamplerIslandError("--rl-data-dispense on a sampler island needs --rl-dispense-addr")
+    mix = getattr(args, "rl_dispense_mix", None)
+    labels = getattr(args, "rl_dispense_labels", None)
+    return {"address": str(addr).split(",")[0].strip(), "learner_id": sampler_holder_id(sampler_id),
+            "seed": int(args.seed), "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2),
+            "mix": mix.split(",") if mix else None,
+            "by_label": bool(getattr(args, "rl_dispense_by_label", False)),
+            "labels": labels.split(",") if labels else None}
 
 
 def run_sampler_island(args: Any, *, manifest: Mapping[str, Any], card: str, output: Path) -> int:

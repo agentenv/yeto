@@ -382,6 +382,9 @@ def test_a_synced_groups_samplers_claim_from_its_syncer(tmp_path, monkeypatch, c
     labelled = _group(tmp_path, monkeypatch, "--rl-data-split", "dispense", "--rl-data-passes", "1")
     with pytest.raises(ValueError, match="sampler islands do not end"):
         _commands(labelled)
+    # the buffer trainers' round cuts keep their buffer position: allowed with sampler dispensing
+    _, cut = _commands(_group(tmp_path, monkeypatch, "--rl-data-split", "dispense", "--rl-cut-every", "1"))
+    assert all("--rl-data-dispense" in shlex.split(c) for c in cut[2:])
 
 
 def test_sampler_dispense_is_refused_without_a_syncer_and_a_sampler_launch_names_one(tmp_path, monkeypatch):
@@ -458,7 +461,11 @@ class StandInSampler:
     def __init__(self, plugin, hook, port, name, rows, root, shards):
         from yeto.rl.engine.sampler_resume import new_incarnation
 
+        import os
+
         self.hook, self.name = hook, name
+        # one sampler process: its member incarnation comes from its process id (run_sampler_island)
+        os.environ[td.SAMPLER_INCARNATION_ENV] = new_incarnation()
         self.fake = BufferMilesSource(rows)
         config = {"address": f"127.0.0.1:{port}", "learner_id": td.sampler_holder_id(name), "rows": rows,
                   "fingerprint": FP.hex(), "seed": 9, "block": 4, "prefetch_blocks": 1}
@@ -591,6 +598,9 @@ def test_samplers_share_rows_survive_preemption_and_accept_a_new_sampler(
         bad = tape[:1] + [{**tape[1], "rows": row_runs([999])}]
         assert check_tapes(summary, bad, seed=9) and "reported by no sampler" in check_tapes(summary, bad, seed=9)[0]
     finally:
+        import os
+
+        os.environ.pop(td.SAMPLER_INCARNATION_ENV, None)
         hook._CURRENT = None
         syncer.stop()
 
@@ -655,3 +665,162 @@ def test_the_sampler_entry_installs_and_closes_the_hook_in_the_rollout_executor(
     finally:
         hook._CURRENT = None
         syncer.stop()
+
+
+# ------------------------------------- P4 backend-neutral engine sampler (verl)
+
+
+class _Engine:
+    """A SamplerEngine as far as ``EngineRound`` needs it (no live update)."""
+
+    updates_during_generation = False
+
+    def served_version(self):
+        return 1
+
+    def generate(self, prompts, sampling):
+        from yeto.rl.engine.sampler_engine import Completion
+
+        return [[Completion((1, 2), (-0.1, -0.2), "x", "stop")] for _ in prompts]
+
+
+class _Writer:
+    sampler_id = "s"
+
+    def __init__(self):
+        self.records = []
+
+    def write(self, samples, *, group_key, provenance=None, sampler_round=None):
+        self.records.append(sampler_round)
+
+
+def _engine_round(prompts, writer, *, reclaimed=lambda: False):
+    from yeto.rl.engine.engine_sampler import EngineRound
+    from yeto.rl.engine.sampler_engine import EngineIdentity, Provenance, SamplingParams
+
+    identity = EngineIdentity("vllm", "0.10", "cuda", "H100", "bf16", "bf16", "tp1")
+    sampling = SamplingParams(max_tokens=4)
+    events = []
+    return EngineRound(_Engine(), writer, prompts=prompts, reward=lambda i, c: 1.0, sampling=sampling,
+                       provenance=Provenance.of(identity, sampler_id="s", sampling=sampling),
+                       emit=lambda e, **f: events.append((e, f)), incarnation="inc1",
+                       reclaimed=reclaimed), events
+
+
+def test_engine_samplers_claim_from_the_dispenser_and_give_back_what_they_did_not_write(
+        syncer_binary, tmp_path):
+    """The backend-neutral port (verl sampler islands and the engine sampler):
+    two samplers draw disjoint rows, each written group's row is reported, a
+    round a leaving sampler did not write goes straight back."""
+    from yeto.rl.engine.engine_sampler_entry import build_prompts
+
+    prompts_file = _rows(tmp_path / "prompts.jsonl",
+                         [{"text": f"q{i}", "label": str(i), "task_label": "web" if i % 2 else "pwn"}
+                          for i in range(12)])
+    syncer = Syncer(syncer_binary, tmp_path, "--dispense-passes", "1")
+    try:
+        def sampler(name, **extra):
+            spec = {"prompts": {"path": str(prompts_file), "input_key": "text", "label_key": "label",
+                                "groups_per_round": 2,
+                                "dispense": {"address": f"127.0.0.1:{syncer.port}",
+                                             "learner_id": td.sampler_holder_id(name), "seed": 4,
+                                             "prefetch_blocks": 1, **extra}}}
+            return build_prompts(spec)
+
+        import os
+
+        os.environ["YETO_ISLAND_HMAC_KEY"] = KEY.decode()
+        a, b = sampler("a"), sampler("b")
+        writer_a, writer_b = _Writer(), _Writer()
+        round_a, events_a = _engine_round(a, writer_a)
+        leaving = {"now": False}
+        round_b, events_b = _engine_round(b, writer_b, reclaimed=lambda: leaving["now"])
+        round_a(0)
+        round_b(0)
+        leaving["now"] = True
+        round_b(1)  # b is leaving: nothing written, its two rows go back at once
+        written_b = [f for e, f in events_b if e == "rl_dispense_written"]
+        assert written_b[-1]["released"] == 2 and written_b[-1]["trained"] == 0
+        b.close()  # the leaving sampler's run ends: its prefetched rows go back too
+        for rid in range(1, 10):
+            try:
+                round_a(rid)
+            except td.DispenseEnded:
+                break
+        positions = [r["dispense_position"] for r in writer_a.records + writer_b.records]
+        assert sorted(positions) == list(range(12)), "every row written once, b's lost round by a"
+        assert all(r["dispense_position"] is not None for r in writer_a.records)
+        a.close()
+        summary = check(syncer.records())
+        assert summary["ok"] and summary["trained"] == 12, summary
+        # every sampler of a run declares the same streams: a label split is another run
+        with pytest.raises(td.DispenseMismatch, match="other streams"):
+            sampler("c", by_label=True, labels=["web"])
+    finally:
+        syncer.stop()
+    labelled = Syncer(syncer_binary, tmp_path, name="labels")
+    try:
+        syncer = labelled
+        c = sampler("c", by_label=True, labels=["web"])
+        assert {int(i.metadata["row"]) % 2 for i in c(0)} == {1}, "only its own label's rows"
+        c.close()
+    finally:
+        os.environ.pop("YETO_ISLAND_HMAC_KEY", None)
+        labelled.stop()
+
+
+def test_a_verl_sampler_spec_claims_from_the_dispenser():
+    from yeto.rl.adapters.verl import sampler_entry as verl
+
+    args = SimpleNamespace(rl_sampler_node="island3", learner_id=0, rl_resume_store="/s", groups_per_round=4,
+                           rl_sampler_max_backlog_rounds=None, rollout_max_response_len=64,
+                           samples_per_group=2, seed=7, global_rounds=5, reward_function="gsm8k_reward:score",
+                           rl_sampler_data_slot=None, rl_buffer_shards=None, rl_sampler_min_round_seconds=None,
+                           rl_data_dispense=True, rl_dispense_addr="10.0.0.1:29400,10.0.0.1:29401",
+                           rl_dispense_prefetch_blocks=2, rl_dispense_mix=None, rl_dispense_by_label=True,
+                           rl_dispense_labels="web")
+    try:
+        spec = verl.sampler_spec(args, model_path="/m", prompts_path="/p.jsonl", card_model="H100",
+                                 engine_version="0.10", event_tape="/t.jsonl")
+    except verl.SamplerIslandError as error:  # the reward mapping of this checkout
+        pytest.skip(str(error))
+    dispense = spec["prompts"]["dispense"]
+    assert dispense["address"] == "10.0.0.1:29400" and dispense["labels"] == ["web"] and dispense["by_label"]
+    assert dispense["learner_id"] == td.sampler_holder_id("island3")
+    assert "data_slot" not in spec["prompts"]
+    rows = verl.prompt_rows([{"messages": [{"role": "user", "content": "hi"}], "label": 1,
+                              "task_label": "web", "metadata": {td.DATA_SOURCE_KEY: 1}},
+                             {"messages": [{"role": "user", "content": "yo"}], "label": 2}], str)
+    assert rows[0]["task_label"] == "web" and rows[0]["metadata"] == {td.DATA_SOURCE_KEY: 1}
+    assert set(rows[1]) == {"text", "label"}, "rows without them keep the old record"
+    from yeto.rl.adapters.verl.island_entry import parse_args
+
+    parsed = parse_args(["--rl-data-dispense", "--rl-dispense-addr", "h:1", "--rl-dispense-labels", "web",
+                         *_verl_required()])
+    parsed = parsed[0] if isinstance(parsed, tuple) else parsed
+    assert parsed.rl_data_dispense and parsed.rl_dispense_addr == "h:1"
+
+
+def _verl_required():
+    """The verl island entry's required flags (whatever this checkout requires)."""
+    from yeto.rl.adapters.verl import island_entry
+
+    parser_src = open(island_entry.__file__).read()
+    out = []
+    for line in parser_src.splitlines():
+        line = line.strip()
+        if line.startswith('p.add_argument("--') and "required=True" in line:
+            out += [line.split('"')[1], "1"]
+    return out
+
+
+def test_a_sampler_process_has_one_member_incarnation_for_every_channel():
+    env = {"YETO_SAMPLER_INCARNATION": "ab12cd34"}
+    assert td.member_incarnation(env) == td.member_incarnation(dict(env)) != 0
+    other = {}
+    first = td.member_incarnation(other)
+    assert other["YETO_MEMBER_INCARNATION"] and td.member_incarnation(other) == first
+    seq = td.member_incarnations(env)
+    assert seq() == td.member_incarnation(env) and seq() != td.member_incarnation(env), "a new one after a fence"
+    # the spot rollout channels use the same island id (S27 G-EA release_store.subscriber_id_for)
+    assert td.sampler_holder_id("island2") >> 31 == 1
