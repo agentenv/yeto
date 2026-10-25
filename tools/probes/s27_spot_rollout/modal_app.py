@@ -7,6 +7,14 @@ as a receive-only subscriber, loads each cut through the post-load checks and
 writes its groups to relay channel ``--channel``. An on-demand Modal H100 stands
 in for a spot node; ``modal app stop`` of this app stands in for a reclaim.
 
+Reclaim (S27 G-EM): Modal stops a container with SIGINT, for a preemption and
+for ``modal app stop`` alike (G-EE saw ``KeyboardInterrupt`` in the sampler).
+The sampler runs with ``YETO_SPOT_RECLAIM_MARKER``: SIGINT/SIGTERM write the
+marker, and the sampler leaves PREEMPTED (``engine_sampler_entry``). This
+function also writes the marker on its own SIGINT/SIGTERM and keeps waiting
+for the sampler instead of killing it, and commits the Volume once the marker
+appears, so the tape keeps the leave record.
+
     YETO_SPOT_APP=yeto-<run>-spot1 YETO_ISLAND_HMAC_KEY=... \\
       modal run --detach tools/probes/s27_spot_rollout/modal_app.py \\
       --tag <run>/spot1 --syncer HOST:PORT --channel 0 --sampler-id spot-0
@@ -33,12 +41,13 @@ import modal
 HERE = Path(__file__).resolve()
 REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")
 WORKDIR = "/root/yeto"
-# the image the training islands run (yeto.rl.adapters.miles.pins.MILES_NEXT_IMAGE, b666250-2fa8801)
+# the image the training islands run (yeto.rl.adapters.miles.pins.MILES_NEXT_IMAGE, 9708070-2fa8801)
 IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-         "92b5055bbde358cd863cd420885e6f6ec196e70d5d1b9eab3916c39af32eee83")
+         "d639e258709b9d4ae4a980c63818562daf62137c9e364f779010bc0b753e867a")
 MODEL, MODEL_REVISION = "Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca"
 GPU_NAME = "H100"
 TASKS = "e11-tasks.jsonl"  # the training launch's prompt file (the run snapshot root)
+RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"  # sampler_resume.DEFAULT_RECLAIM_MARKER
 TIMEOUT_S = int(os.environ.get("YETO_SPOT_TIMEOUT_S", "2400"))
 # Post-load probe: teacher-forced continuations; a wrong Megatron -> HF conversion moves
 # their mean log-prob by several nats, a few RL steps at lr 1e-5 by far less than 0.5.
@@ -83,7 +92,8 @@ def _render_prompts(base: Path, out: Path) -> int:
 
 
 def _spec(base: Path, prompts: Path, out: Path, *, syncer: str, channel: int, sampler_id: str,
-          groups_per_round: int, samples_per_group: int, max_backlog_groups: int, engine_version: str) -> dict:
+          groups_per_round: int, samples_per_group: int, max_backlog_groups: int, engine_version: str,
+          syncer_lost_s: float = 600.0, data_slot: str = "") -> dict:
     server = {"base_dir": str(base), "card_model": GPU_NAME, "device_family": "cuda",
               "engine_version": engine_version, "precision": "bf16", "quant_scheme": "bf16",
               "topology": "tp1", "max_model_len": 4096, "python": sys.executable, "in_place_reload": True,
@@ -97,7 +107,9 @@ def _spec(base: Path, prompts: Path, out: Path, *, syncer: str, channel: int, sa
         "sampling": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "n": samples_per_group},
         "max_backlog_groups": max_backlog_groups, "max_prompt_tokens": 512,
         "prompts": {"path": str(prompts), "input_key": "prompt", "label_key": "label",
-                    "groups_per_round": groups_per_round, "format": "text"},
+                    "groups_per_round": groups_per_round, "format": "text",
+                    # G-EM: samplers on one run draw disjoint prompt rows (I/N)
+                    **({"data_slot": data_slot} if data_slot else {})},
         "reward": "yeto.rl.gsm8k_reward:score", "reward_kind": "miles",
         # bf16 dense model: no expert count; Qwen3-0.6B answers raw GSM8K text unreliably, so a
         # missing answer is recorded only; empty / unreadable output and the probe jump still fail
@@ -106,7 +118,8 @@ def _spec(base: Path, prompts: Path, out: Path, *, syncer: str, channel: int, sa
         "event_tape": str(out / "events.jsonl"),
         "base_dir": str(base), "base_model": str(base), "model_name": "qwen3",
         "syncer": syncer, "channel": int(channel), "work_dir": "/tmp/spot-work",
-        "reload_every": 1, "layout_timeout_s": 1500.0, "syncer_lost_s": 600.0,
+        "reload_every": 1, "layout_timeout_s": 1500.0, "syncer_lost_s": float(syncer_lost_s),
+        "relay_gone_s": float(syncer_lost_s),
     }
 
 
@@ -114,6 +127,7 @@ def _mirror(out: Path, stop: threading.Event) -> None:
     """Print every new tape line (``[spot-tape]``) and commit the Volume every 30 s."""
     offsets: dict[Path, int] = {}
     last_commit = 0.0
+    reclaim_committed = False
     while True:
         for tape in sorted(out.glob("events.*.jsonl")):
             try:
@@ -128,7 +142,11 @@ def _mirror(out: Path, stop: threading.Event) -> None:
             offsets[tape] = offsets.get(tape, 0) + end + 1
             for line in data[:end].split(b"\n"):
                 print("[spot-tape] " + line.decode("utf-8", "replace")[:800], flush=True)
-        if time.monotonic() - last_commit >= 30.0:
+        reclaimed = not reclaim_committed and Path(RECLAIM_MARKER).exists()
+        if reclaimed:
+            reclaim_committed = True
+            time.sleep(3.0)  # the sampler's leave record (reclaim watcher polls every 0.5 s)
+        if reclaimed or time.monotonic() - last_commit >= 30.0:
             try:
                 logs.commit()
             except Exception as error:  # noqa: BLE001 - a failed commit is retried
@@ -141,7 +159,8 @@ def _mirror(out: Path, stop: threading.Event) -> None:
 @app.function(image=image, volumes={"/data/logs": logs}, gpu=f"{GPU_NAME}!:1", cpu=8, memory=65536,
               timeout=TIMEOUT_S, secrets=secrets)
 def run(tag: str, syncer: str, channel: int, sampler_id: str, groups_per_round: int = 16,
-        samples_per_group: int = 8, max_backlog_groups: int = 32) -> int:
+        samples_per_group: int = 8, max_backlog_groups: int = 32, syncer_lost_s: float = 600.0,
+        data_slot: str = "") -> int:
     from huggingface_hub import snapshot_download
 
     out = Path("/data/logs") / tag
@@ -163,7 +182,8 @@ def run(tag: str, syncer: str, channel: int, sampler_id: str, groups_per_round: 
     rows = _render_prompts(base, prompts)
     spec = _spec(base, prompts, out, syncer=syncer, channel=channel, sampler_id=sampler_id,
                  groups_per_round=groups_per_round, samples_per_group=samples_per_group,
-                 max_backlog_groups=max_backlog_groups, engine_version=sglang.__version__)
+                 max_backlog_groups=max_backlog_groups, engine_version=sglang.__version__,
+                 syncer_lost_s=syncer_lost_s, data_slot=data_slot)
     (out / "spec.json").write_text(json.dumps(spec, indent=1))
     meta = {"tag": tag, "gpu": gpu, "sglang": sglang.__version__, "model": MODEL, "revision": MODEL_REVISION,
             "prompt_rows": rows, "syncer": syncer, "channel": channel, "sampler_id": sampler_id,
@@ -177,10 +197,14 @@ def run(tag: str, syncer: str, channel: int, sampler_id: str, groups_per_round: 
     stop = threading.Event()
     mirror = threading.Thread(target=_mirror, args=(out, stop), daemon=True)
     mirror.start()
-    env = {**os.environ, "PYTHONPATH": WORKDIR}
+    env = {**os.environ, "PYTHONPATH": WORKDIR, "YETO_SPOT_RECLAIM_MARKER": RECLAIM_MARKER}
+    Path(RECLAIM_MARKER).unlink(missing_ok=True)
+    _mark_on_signal()
     with open(out / "sampler.log", "ab") as log:
-        rc = subprocess.run([sys.executable, "-m", "yeto.rl.spot_rollout.sampler", "--spec", str(out / "spec.json")],
-                            cwd=WORKDIR, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+        child = subprocess.Popen([sys.executable, "-m", "yeto.rl.spot_rollout.sampler", "--spec",
+                                  str(out / "spec.json")], cwd=WORKDIR, env=env, stdout=log,
+                                 stderr=subprocess.STDOUT)
+        rc = child.wait()  # a signal only writes the marker (never kills the sampler)
     nvml.terminate()
     stop.set()
     mirror.join(timeout=30)
@@ -188,6 +212,24 @@ def run(tag: str, syncer: str, channel: int, sampler_id: str, groups_per_round: 
     logs.commit()
     print(f"[spot] sampler exited rc={rc}", flush=True)
     return rc
+
+
+def _mark_on_signal() -> None:
+    """SIGINT/SIGTERM of this function write the reclaim marker (module doc)."""
+    import signal
+
+    def mark(signum: int, _frame: object) -> None:
+        try:
+            Path(RECLAIM_MARKER).write_text(json.dumps({"signal": int(signum), "time": time.time()}) + "\n")
+        except OSError:
+            pass
+        print(f"[spot] signal {signum}: reclaim marker written", flush=True)
+
+    for name in ("SIGINT", "SIGTERM"):
+        try:
+            signal.signal(getattr(signal, name), mark)
+        except ValueError:  # not the main thread: the sampler's own handler still marks
+            print(f"[spot] {name} handler not installed (not the main thread)", flush=True)
 
 
 @app.function(image=image, cpu=2, memory=4096, timeout=1800)
@@ -205,6 +247,7 @@ def prebuild() -> dict:
 
 @app.local_entrypoint()
 def main(tag: str, syncer: str, channel: int = 0, sampler_id: str = "spot-0", groups_per_round: int = 16,
-         samples_per_group: int = 8, max_backlog_groups: int = 32) -> None:
-    call = run.spawn(tag, syncer, channel, sampler_id, groups_per_round, samples_per_group, max_backlog_groups)
+         samples_per_group: int = 8, max_backlog_groups: int = 32, data_slot: str = "") -> None:
+    call = run.spawn(tag, syncer, channel, sampler_id, groups_per_round, samples_per_group, max_backlog_groups,
+                     600.0, data_slot)
     print(f"spawned run {call.object_id}")

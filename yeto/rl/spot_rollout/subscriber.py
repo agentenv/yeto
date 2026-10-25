@@ -18,7 +18,9 @@ streams) with SUBSCRIBE instead of HELLO:
   (``fragment u32 | version u64 | bf16 values``): every fragment at its
   current version once (at the first merge after it connected), then each
   merged version; a slow link skips versions (newest wins per fragment);
-* at the end of the run the syncer sends ERROR ``subscriber: run finished``.
+* at the end of the run the syncer sends ERROR ``subscriber: run finished``
+  (S27 G-EM: the client keeps that notice even when it arrives on a link the
+  client is already tearing down, and then stops redialing).
 
 A reconnect (new generation) gets every fragment again. The session is
 never blocked by a subscriber: the syncer only queues versions for it.
@@ -42,6 +44,7 @@ from dataclasses import dataclass
 from yeto.fragments import FragmentLayout
 from yeto.protocol import (
     DTYPE_BF16,
+    MSG_ERROR,
     MSG_SUBSCRIBE,
     SUBSCRIBE_MAC_DOMAIN,
     SUBSCRIBER_ID_BIT,
@@ -49,6 +52,7 @@ from yeto.protocol import (
     SyncerClient,
     encode_subscribe_incarnation,
 )
+from yeto.rl.engine.external_policy import fragment_digest
 from yeto.rl.engine.full_parameter_sync import merged_version
 
 RUN_FINISHED = "subscriber: run finished"
@@ -87,6 +91,19 @@ class SubscriberClient(SyncerClient):
         self.subscriber_id = int(subscriber_id)
         self.heartbeat_s = None if heartbeat_s is None else float(heartbeat_s)
         self._beats = threading.Event()
+        self._run_finished = threading.Event()
+
+    def _dispatch(self, gen: int, msg_type: int, payload) -> None:
+        # S27 G-EM: the end-of-run notice counts on any connection generation. The
+        # syncer closes the data streams right after it; when their end reaches
+        # the client first, the client starts a new generation and the base class
+        # would drop the notice as a late message (A run s27-ea-a1: the sampler
+        # kept redialing a finished head).
+        if msg_type == MSG_ERROR and RUN_FINISHED in bytes(payload).decode("utf-8", errors="replace"):
+            self._run_finished.set()
+            self._closed.set()  # no redial: the run is over
+            self._failure.set()
+        super()._dispatch(gen, msg_type, payload)
 
     def _hello_body_suffix(self) -> bytes:
         return self._trailer
@@ -117,7 +134,7 @@ class SubscriberClient(SyncerClient):
 
     def run_finished(self) -> bool:
         """True once the syncer said the run ended (the client is closed)."""
-        return RUN_FINISHED in self._error_text()
+        return self._run_finished.is_set() or RUN_FINISHED in self._error_text()
 
     def fenced(self) -> bool:
         """True once the syncer retired this member (a newer incarnation of the
@@ -131,6 +148,8 @@ class WeightCut:
 
     versions: tuple[int, ...]
     fragments: tuple[bytes, ...]
+    # S27 G-EM: SHA-256 of each fragment's bytes (empty: not computed)
+    digests: tuple[bytes, ...] = ()
 
     @property
     def merged_version(self) -> int:
@@ -152,6 +171,7 @@ class WeightFollower:
         self.num_fragments = int(num_fragments)
         self._data: list[bytes | None] = [None] * self.num_fragments
         self._versions: list[int] = [-1] * self.num_fragments
+        self._digests: list[bytes | None] = [None] * self.num_fragments
         self._lock = threading.Lock()
         self.on_update = on_update
         self.received = 0
@@ -166,8 +186,14 @@ class WeightFollower:
             with self._lock:
                 if update.version <= self._versions[update.fragment_id]:
                     continue
+            data = bytes(update.data)
+            digest = fragment_digest(data)  # outside the lock: about 1 s per GB
+            with self._lock:
+                if update.version <= self._versions[update.fragment_id]:
+                    continue
                 self._versions[update.fragment_id] = int(update.version)
-                self._data[update.fragment_id] = bytes(update.data)
+                self._data[update.fragment_id] = data
+                self._digests[update.fragment_id] = digest
                 taken += 1
                 self.received += 1
                 self.received_bytes += len(update.data)
@@ -199,7 +225,8 @@ class WeightFollower:
         with self._lock:
             if any(d is None for d in self._data):
                 return None
-            return WeightCut(tuple(self._versions), tuple(d for d in self._data if d is not None))
+            return WeightCut(tuple(self._versions), tuple(d for d in self._data if d is not None),
+                             tuple(d for d in self._digests if d is not None))
 
     def wait_complete(self, timeout_s: float, *, poll_s: float = 0.2,
                       should_stop: Callable[[], bool] = lambda: False) -> WeightCut | None:

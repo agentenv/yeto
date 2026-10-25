@@ -173,6 +173,10 @@ class RolloutBatchHandle:
     # driver's ``offpolicy_gate`` event. None = not reported ("unknown").
     backend: str | None = field(default=None, compare=False)
 
+    # S27 G-EM relay mode: (merged version, policy-age limit) the driver checked the
+    # groups' external merged cuts against (``external_policy``); None off relay mode.
+    external_cut: tuple[int, int] | None = field(default=None, compare=False)
+
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
 

@@ -528,6 +528,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             work_dir=Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"),
             sampler_id=sampler_id, emit=emit)
         spot_finished = (lambda: False) if releases is None else releases.finished
+        spot = releases is not None
+        if spot and hasattr(buffer, "cut_of"):
+            # S27 G-EM: every relay item names the cut that generated it
+            buffer.cut_of = releases.cut_identity
         if releases is None:
             releases = release_store(config, environ, scheme=scheme, mirror=default_mirror(environ))
         follower = PolicyFollower(releases,
@@ -850,10 +854,16 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         # S27 G-EA: the samplers subscribe to the syncer and send groups through the
         # relay; the trainer releases nothing and gates on the merged version (the
         # version the subscribers stamp on their samples), also on its own lane.
+        # S27 G-EM: the driver names the groups' policies as external merged cuts
+        # (yeto.rl.engine.external_policy) and counts their age in merged versions.
+        from yeto.rl.engine.external_policy import ExternalMergedCuts
         from yeto.rl.engine.merged_release import merged_version as merged_policy_version
 
+        from .buffer_rollout import executor_set_relay_gate_version
+
+        driver.external_policy = ExternalMergedCuts()
         driver.publisher = GateVersionPublisher(
-            driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)),
+            driver.publisher, lambda v: in_executor(executor_set_relay_gate_version, int(v)),
             lambda state: merged_policy_version(driver, state))
         driver.emit("rl_policy_release_role", learner_id=None if lane is None else lane.index,
                     num_learners=None if lane is None else lane.count, publisher=False,
