@@ -93,7 +93,7 @@ def dispense_blockers(args) -> list[str]:
     ``--rl-data-split auto`` falls back to the row slots (stride) on any of
     these; an explicit ``dispense`` is refused on them (``island_tasks``)."""
 
-    from ..rl.engine.selection import SAO_STREAMING_SYNC_PRESET
+    from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS, SAO_STREAMING_SYNC_PRESET
 
     out = []
     if getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET:
@@ -123,6 +123,13 @@ def dispense_blockers(args) -> list[str]:
             out.append(f"{flag} (island round cuts keep their own data position)")
     if getattr(args, "eval_only", False):
         out.append("--eval-only")
+    if (getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_peer_recovery", False)
+            and not getattr(args, "rl_export_hf_rounds", None)
+            and str(getattr(args, "rl_sync_preset", "")) in FULL_PARAMETER_SYNC_PRESETS):
+        # S27 G-DS catch-up: the store keeps only the islands' data positions, which the
+        # dispenser would make unused (the launch would then refuse the store)
+        out.append("--rl-checkpoint-store kept for the islands' data positions (catch-up without "
+                   "peer recovery)")
     return out
 
 
