@@ -314,6 +314,11 @@ def test_the_no_sync_policy_state_exports_a_resident_whole_cut():
     first = state.export(policy_version=3)
     assert first.policy_version == 3 and first.layout_hash == state.layout_hash
     assert first.digest.payload_bytes == 4 * sum(t.numel() for t in island.model.values().values())
+    # S27 G-EZ2: the digest comes from the workers' hashes; no payload stays in the driver
+    assert getattr(state.adapter, "resident", None) is None
+    assert state.adapter.last_stats["digest"]["fragments"] == state.adapter.layout.fragments.num_fragments
+    cut = state.runner.run(state.adapter.capture(state.group, policy_version=3, local_step_generation=0))
+    assert (cut.policy_hash, cut.content_hash) == (first.digest.policy_tensor_hash, first.digest.payload_hash)
     with torch.no_grad():
         island.model.model.norm.weight.add_(1.0)
     assert state.export(policy_version=3).policy_tensor_hash() != first.policy_tensor_hash()
