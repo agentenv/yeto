@@ -570,6 +570,56 @@ def test_verl_auto_class_patch_prefers_the_architecture_task():
     assert run(["YForVision2Seq"], v2s) == "AutoModelForVision2Seq"
 
 
+def test_verl_meta_init_patch_builds_non_zero_ranks_without_weights():
+    """S27 G-EZ2: under accelerate.init_empty_weights, transformers 5.x
+    from_pretrained still read the weights, so every FSDP2 rank held a whole FP32
+    model in host memory (npu1: 120B on 16 ranks, 1432 -> 125 GiB available)."""
+    import contextlib
+
+    import torch
+
+    from yeto.rl.adapters.verl import patch_verl
+
+    assert patch_verl.META_INIT in patch_verl.PROFILES["fsdp"]
+    assert patch_verl.META_INIT not in patch_verl.PROFILES["megatron"]
+    target, anchor, hook, mode = patch_verl.META_INIT
+    assert target == "verl/workers/engine/fsdp/transformer_impl.py" and mode == "replace"
+    body = "\n".join(line[16:] for line in hook.splitlines())  # indented inside verl's _build_module
+    calls = []
+
+    class Auto:
+        @staticmethod
+        def from_config(config, **kwargs):
+            calls.append(("from_config", torch.empty(1).device.type, kwargs))
+            return "meta-model"
+
+        @staticmethod
+        def from_pretrained(**kwargs):
+            calls.append(("from_pretrained", None, kwargs))
+            return "loaded-model"
+
+    @contextlib.contextmanager
+    def init_empty_weights():
+        yield
+
+    def run(init_context):
+        cfg = SimpleNamespace(hf_config="cfg", local_path="/m", trust_remote_code=False)
+        ns = {"torch": torch, "auto_class": Auto, "init_context": init_context, "torch_dtype": torch.float32,
+              "self": SimpleNamespace(model_config=cfg)}
+        exec(body, ns)  # noqa: S102 - the patch body under test
+        return ns["module"]
+
+    assert run(init_empty_weights) == "meta-model"
+    name, device, kwargs = calls[-1]
+    assert (name, device) == ("from_config", "meta")
+    assert kwargs == {"torch_dtype": torch.float32, "trust_remote_code": False}  # config.dtype would be bf16
+    assert run(lambda: torch.device("cpu")) == "loaded-model"  # rank 0 (and tied embeddings) still load
+    assert calls[-1][0] == "from_pretrained" and calls[-1][2]["pretrained_model_name_or_path"] == "/m"
+    # the anchor is verl's own call, replaced whole; applying twice is a no-op
+    text = patch_verl._patched("x\n" + anchor + "y\n", anchor, hook, mode)
+    assert text.count("from_pretrained(") == 1 and "from_config(" in text and anchor not in text
+
+
 def test_ascend_island_turns_torch_compile_off(monkeypatch):
     """S27 G-EQ2: triton-ascend has no inductor backend, so verl's default
     torch.compile of the entropy/log-prob helpers kills the first training step."""
