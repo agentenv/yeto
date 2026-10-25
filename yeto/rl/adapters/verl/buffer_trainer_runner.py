@@ -13,6 +13,10 @@ instead of verl's rollouter (:mod:`.buffer_feed`, :mod:`.buffer_ports`).
   (``_YetoTrainerMixin``: assemble, train step with the mismatch criteria and
   the per-source off-policy metrics, LoRA export) plus ``yeto_add_group`` (one
   kept group's rows as a verl ``RolloutSample``) and ``yeto_param_version``.
+* A full-parameter trainer (S27 G-EW, VERL-PARITY #14): the same actor; its
+  sync and policy state are the full-parameter island's
+  (:mod:`.fully_async_full`) and each release is its own weights in the model's
+  dtype (``buffer_ports.release_weights_for``). The samplers load full releases as before.
 
 verl itself is not changed. Only exercised on a GPU; the logic it relies on is
 in the CPU-tested :mod:`.buffer_feed` and :mod:`.buffer_ports`.
@@ -114,7 +118,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
         from .buffer_feed import RowShape
-        from .buffer_ports import install_buffer_ports
+        from .buffer_ports import install_buffer_ports, release_weights_for
         from .trainer import run_fully_async_island
 
         check_island_credentials()  # secret-handling-hardening D4 (buffer trainer Ray actor)
@@ -142,7 +146,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
                                         wait_s=float(section.get("wait_s") or 3600.0),
                                         poll_s=float(section.get("poll_s") or 2.0),
-                                        cursor_log=lane_cursor_log(buffer))
+                                        cursor_log=lane_cursor_log(buffer),
+                                        weights=release_weights_for(island, plan))
 
         return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
                                       buffer_ports=ports)

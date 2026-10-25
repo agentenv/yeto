@@ -429,10 +429,16 @@ def main(argv=None) -> int:
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
-        if full and (limit or buffer_section is not None or args.rl_rollout_quant_tier):
-            raise SystemExit("verl 全参数岛只接同步路径：不支持 --rl-max-policy-age > 0、"
-                             "--rl-sample-role trainer 与 --rl-rollout-quant-tier")
+        # S27 G-EW: one refusal per path, each lifted by the change that wires it
+        # (VERL-PARITY #11: fully_async with a rollouter; #14: the buffer trainer)
+        if full and limit and buffer_section is None:
+            raise SystemExit("verl 全参数岛不支持 --rl-max-policy-age > 0（全参数 fully_async 路径未接，VERL-PARITY #11）")
+        if full and args.rl_rollout_quant_tier:
+            raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
         pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
+        if pools is not None and buffer_section is not None:  # S27 G-EW: no rollout on a buffer trainer
+            raise SystemExit("verl 全参数缓冲训练岛（--rl-sample-role trainer）不接 --rl-placement fixed-partition："
+                             "它没有 rollout 卡，采样岛生成")
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)

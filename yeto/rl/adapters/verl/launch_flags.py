@@ -88,9 +88,13 @@ def full_parameter_problems(args) -> list[str]:
                         "on the same cards, or in verl's separate mode on its own trainer and rollout cards)")
     if placement == "fixed-partition" and int(getattr(args, "rl_standby_gpus", 0) or 0):
         problems.append("no --rl-standby-gpus (verl's separate mode has no standby cards)")
-    if is_synced_trainer(args):
-        problems.append("no --rl-sample-role trainer (a verl full-parameter island generates its own samples)")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0):
+    if is_synced_trainer(args) and placement == "fixed-partition":  # S27 G-EW (VERL-PARITY #14)
+        problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (a verl buffer "
+                        "trainer starts no engine; the sampler islands generate)")
+    # S27 G-EW: a synced buffer trainer runs verl's fully_async trainer over the sample buffer
+    # (--rl-max-policy-age >= 1, sample_roles); a full-parameter island with its own rollout
+    # runs the synchronous trainer (VERL-PARITY #11)
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args):
         problems.append("--rl-max-policy-age 0 (the verl full-parameter island runs the synchronous trainer)")
     if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
         problems.append("no --rl-rollout-quant-tier")
