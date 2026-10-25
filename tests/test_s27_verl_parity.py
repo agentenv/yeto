@@ -515,13 +515,13 @@ def test_syncer_checkpoint_options_reach_the_syncer_and_leave_the_verl_islands_u
 
 # ----------------------------------------------------------------------------- nothing ignored
 @pytest.mark.parametrize("extra", [
-    ("--rl-verify-every-round",), ("--rl-lr-schedule", "constant"), ("--rl-max-tokens-per-gpu", "4096"),
-    ("--rl-deterministic-trainer",), ("--rl-activation-recompute",), ("--rl-gradient-accumulation-fusion",),
-    ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-observe-timeline",),
-    ("--rl-profile-trainer",), ("--rl-debug-dump",), ("--rl-resource-sample-interval", "5"),
+    ("--rl-verify-every-round",), ("--rl-deterministic-trainer",), ("--rl-gradient-accumulation-fusion",),
+    ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-profile-trainer",),
+    ("--rl-debug-dump",),
 ])
 def test_options_a_verl_full_parameter_island_would_ignore_are_refused(extra):
-    """Each of these reached the verl island and was dropped by parse_known_args."""
+    """Each of these reached the verl island and was dropped by parse_known_args
+    (S27 G-EC mapped five others: tests/test_s27_verl_train_options.py)."""
     with pytest.raises(ValueError, match="would ignore it"):
         _prepared(_verl_args(*extra))
 

@@ -427,6 +427,15 @@ def main(argv=None) -> int:
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
+    if full:  # S27 G-EC: the Miles training options verl can express (.train_options)
+        from .train_options import apply_training_options
+
+        try:
+            overrides, asserted_keys = apply_training_options(
+                args, overrides, asserted_keys, max_prompt_len=max_prompt,
+                max_response_len=args.rollout_max_response_len)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides

@@ -98,26 +98,45 @@ def full_parameter_problems(args) -> list[str]:
                if getattr(args, dest, off) not in (off, None)]
     if ignored:
         problems.append("no " + ", ".join(ignored) + " (the verl full-parameter island has no such option; "
-                        "it would ignore it)")
+                        "it would ignore it: " + "; ".join(f"{option}: {NOT_MAPPED_REASONS[option]}"
+                                                           for option in ignored) + ")")
+    schedule = getattr(args, "rl_lr_schedule", None)
+    if schedule not in (None, "auto", "constant"):  # S27 G-EC: verl.train_options
+        problems.append(f"--rl-lr-schedule constant (got {schedule}; verl's FSDP2 optimizer schedules are "
+                        "constant and cosine, not Miles' linear decay)")
     return problems
 
 
 # S27 G-DS: options the launcher forwards to every island that the verl island
 # entry does not parse (parse_known_args would drop them without a word):
 # (args dest, value when off, option). Refused instead, before any cloud work.
+# S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
+# constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
+# --rl-observe-timeline, --rl-resource-sample-interval); the rest stay here.
 IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_verify_every_round", False, "--rl-verify-every-round"),
-    ("rl_lr_schedule", "auto", "--rl-lr-schedule"),
     ("rl_eval_interval", None, "--rl-eval-interval"),
-    ("rl_max_tokens_per_gpu", None, "--rl-max-tokens-per-gpu"),
     ("rl_deterministic_trainer", False, "--rl-deterministic-trainer"),
-    ("rl_activation_recompute", False, "--rl-activation-recompute"),
     ("rl_gradient_accumulation_fusion", False, "--rl-gradient-accumulation-fusion"),
     ("rl_async_buffer_rounds", None, "--rl-async-buffer-rounds"),
     ("rl_lora_dropout", None, "--rl-lora-dropout"),
     ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
-    ("rl_observe_timeline", False, "--rl-observe-timeline"),
     ("rl_profile_trainer", False, "--rl-profile-trainer"),
     ("rl_debug_dump", False, "--rl-debug-dump"),
-    ("rl_resource_sample_interval", None, "--rl-resource-sample-interval"),
 )
+# Why each option above has no verl mapping yet (the launcher's refusal says it).
+NOT_MAPPED_REASONS = {
+    "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
+                               "(VERL-PARITY #25)",
+    "--rl-eval-interval": "no verl eval port yet (the driver's evaluate hook over verl's _validate is "
+                          "not wired or GPU-checked)",
+    "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
+    "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
+    "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",
+    "--rl-lora-dropout": "a full-parameter island has no LoRA adapter",
+    "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
+    "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
+                            "there",
+    "--rl-debug-dump": "Miles' rollout/train data dump has no verl counterpart (the island writes its own "
+                       "verl-dump criteria tensors)",
+}

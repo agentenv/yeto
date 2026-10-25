@@ -1146,11 +1146,16 @@ def add_island_flags(parser) -> None:
     for flag in ("--rl-export-hf-rounds", "--rl-export-hf-store", "--rl-data-position-store"):
         if flag not in parser._option_string_actions:
             parser.add_argument(flag, default=None)
+    # S27 G-EC: the Miles training and observation options verl can express.
+    from .train_options import add_island_flags as add_train_option_flags
+
+    add_train_option_flags(parser)
 
 
 def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
     """S27 G-DS: the plan keys of a full-parameter island's HF exports and data
-    position, both absent when off (the plans of other runs are unchanged).
+    position, both absent when off (the plans of other runs are unchanged);
+    S27 G-EC: also the observation keys of :func:`.train_options.observation_plan`.
 
     * ``hf_exports`` (``--rl-export-hf-rounds`` with ``--rl-export-hf-store``,
       ``yeto.rl.engine.hf_export``): ``{"rounds", "store"}`` with the island's
@@ -1180,6 +1185,9 @@ def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
         if sync == "none":
             raise ValueError("--rl-data-position-store belongs to a synced full-parameter island")
         out["data_position_store"] = str(store)
+    from .train_options import observation_plan  # S27 G-EC: absent when off
+
+    out.update(observation_plan(args))
     return out
 
 
