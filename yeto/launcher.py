@@ -197,7 +197,8 @@ def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
     (S26 E9.1). Modal signals only the container's main process (the runner), so
     the runner writes the marker and the driver's watcher thread -- in a Ray actor
     on verl -- writes the store's preemption notice."""
-    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
+    if (cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False)
+            or getattr(iargs, "rl_checkpoint_store_export_only", False)):  # no resume store
         return {}
     from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
 
