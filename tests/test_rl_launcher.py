@@ -1829,6 +1829,18 @@ def test_nebius_island_caps_the_ray_object_store_at_dev_shm(tmp_path):
         out = subprocess.run(["bash", "-c", f"echo {word}"], capture_output=True, text=True,
                              env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, check=True)
         assert out.stdout.strip() == f"--object-store-memory={want}"
+    # s27-next: a head-only size (S27 RAY-SEGV) on a Nebius island is capped the same way on node 0;
+    # the workers keep the island size, also capped
+    both = _args(("--gpu", "nebius:2x4xh100@eu-north1", "--rl-island-ray-object-store-gib", "600",
+                  "--rl-island-ray-head-object-store-gib", "300"))
+    both.model_revision, both.data_revision = "a" * 40, "b" * 40
+    both.source_sha256, both.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(both)
+    run = make_miles_island_task(both, parse_gpu_spec(both.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    head = run[run.index("ray start --head"):].split("\n", 1)[0]
+    worker = run[run.index('ray start --address="$MASTER_ADDR:6379"'):].split("&&", 1)[0]
+    assert f'--object-store-memory="$(r={300 << 30};' in head and f"r={600 << 30};" not in head
+    assert f'--object-store-memory="$(r={600 << 30};' in worker
     # other clouds keep the literal size
     aws = _args(("--gpu", "aws:2x4xa100@us-east-1", "--rl-island-ray-object-store-gib", "600"))
     aws.model_revision, aws.data_revision = "a" * 40, "b" * 40
