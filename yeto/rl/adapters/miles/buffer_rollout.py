@@ -139,8 +139,9 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
     the index, and reads like a trainer. ``shards``: the sampler shards of a
     launch with several sampler islands (a sampler writes the one named by its
     sampler id, the trainer merges them all). ``lane``: a synced trainer's
-    buffer lane. ``data_slot``: a sampler's slot of the prompt data
-    (``sample_roles.DataSlot``; several sampler islands draw disjoint prompts)."""
+    buffer lane. ``data_slot``: a sampler's or a convertible node's slot of the
+    prompt data (``sample_roles.DataSlot``; several sampler islands, or the nodes of
+    a convertible pool, draw disjoint prompts)."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -169,8 +170,8 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
             raise ValueError("only a trainer reads a buffer lane")
         env[LANE_ENV] = lane.env()
     if data_slot:
-        if role != SAMPLER:
-            raise ValueError("only a sampler island draws a data slot")
+        if role not in (SAMPLER, CONVERTIBLE):
+            raise ValueError("only a sampler island or a convertible node draws a data slot")
         env[DATA_SLOT_ENV] = DataSlot.parse(data_slot).env()
     return env
 

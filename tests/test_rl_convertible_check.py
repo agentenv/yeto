@@ -20,6 +20,7 @@ import threading
 import pytest
 import torch
 
+from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401 - fixtures
 from test_rl_engine_driver import NAME, PROFILE, _driver
 
 from yeto.rl.agentic.types import OUTCOME_KEY
@@ -614,3 +615,32 @@ def test_buffer_rollout_dispose_without_a_boat_pool_imports_nothing(monkeypatch)
     fn = plugin.ConvertibleRolloutFn.__new__(plugin.ConvertibleRolloutFn)
     asyncio.run(fn.dispose())
     assert events == ["miles_dispose"] and plugin.BOAT_POOL_MODULE not in sys.modules
+
+
+# ---------------------------------------------------------------- prompts: one data slot per node
+def test_pool_nodes_draw_disjoint_data_slots(_no_modal_listing, _fake_sky):
+    """Without a slot every node of a pool reads the same rows in the same order
+    (Miles' data source starts at row 0 and does not shuffle by default), so the
+    trainer trains each prompt once per node. Each node now draws its own slot,
+    as sampler islands do: the island command carries it, the island exports it
+    to the rollout process, and the slots split the rows."""
+    import types
+
+    from test_rl_convertible_pool_launch import _args, _flag, _island_tokens
+
+    from yeto.launcher import dry_run_plan
+    from yeto.rl.adapters.miles import island_entry
+    from yeto.rl.adapters.miles.buffer_rollout import DATA_SLOT_ENV
+    from yeto.rl.engine.data_split import DataSlot
+
+    plan = dry_run_plan(_args())
+    slots = []
+    for m, island in enumerate(plan["island_requests"]):
+        tokens = _island_tokens(island["learner_command"])
+        assert _flag(tokens, "--rl-sampler-data-slot") == f"{m}/2"
+        env = {}
+        island_entry.apply_sample_role(island_entry.parse_args(tokens), types.SimpleNamespace(), env)
+        slots.append(DataSlot.parse(env[DATA_SLOT_ENV]))
+    rows = list(range(10))
+    drawn = [set(slot.rows(rows)) for slot in slots]
+    assert not drawn[0] & drawn[1] and drawn[0] | drawn[1] == set(rows)

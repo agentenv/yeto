@@ -412,6 +412,11 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
         out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
+        # each node draws its own slot of the data, as sampler islands do (S26 E9.3);
+        # without it every node generates the same prompts in the same order
+        nodes = convertible_islands(args)
+        out.rl_sampler_data_slot = (DataSlot(nodes.index(island), len(nodes)).env()
+                                    if len(nodes) > 1 else None)
     elif out.rl_sample_role == SAMPLER:
         out.rl_sample_wait_s = None
     else:
