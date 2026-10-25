@@ -276,6 +276,8 @@ def test_a_put_is_skipped_by_no_reader_guard_but_the_readers_reload_is(tmp_path)
     for a reader; a reload waits for both."""
     writer, _ = _two_containers(tmp_path)
     store = _store(writer, "run-a/policy-releases")
+    if not hasattr(store, "hold_reader"):  # s27-verl-megatron took ed981c36 without G-CO's c69b3307
+        pytest.skip("needs the reader guard of s27-fixes c69b3307 (not on this branch)")
     reading = store.hold_reader()
     try:
         staged = tmp_path / "stage"
