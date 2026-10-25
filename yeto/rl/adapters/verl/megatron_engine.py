@@ -190,6 +190,9 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={shape.rollout_tp}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={shape.gpu_memory_utilization}",
         "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        # Mamba SSM state cache in fp32 (the checkpoint's mamba_ssm_cache_dtype; NeMo-RL's
+        # Nemotron vLLM setting), written out so the rollout never falls back to bf16
+        "++actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_ssm_cache_dtype=float32",
         f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={tokens}",
         "actor_rollout_ref.model.trust_remote_code=False",
         "actor_rollout_ref.model.use_fused_kernels=False",
