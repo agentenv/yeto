@@ -527,7 +527,9 @@ def main(argv=None) -> int:
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
-        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
+        overrides, asserted_keys = fully_async_plan(
+            limit, overrides, spec_dict, args, sync,
+            trainer_cards=run.n_gpus if buffer_section is not None else None)
         append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
@@ -872,10 +874,16 @@ def sample_buffer_section(args) -> dict | None:
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
-def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
+def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *,
+                     trainer_cards: int | None = None):
     """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
     and a TIS correction) so a wrong spec fails before verl starts.
+
+    ``trainer_cards`` (S27 G-EZ2): a buffer trainer's island cards; its trainer
+    pool is all of them over ``--actor-num-nodes`` nodes
+    (``fully_async_round.buffer_trainer_shape``). None keeps the in-island
+    rollout split (one rollout card, one trainer card).
 
     The ``algorithm.rollout_correction`` overrides come from the correction
     mapping (rl-offpolicy-correction-passthrough D2/D3): decoupled PPO with
@@ -884,8 +892,8 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
-    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, execution_profile_for,
-                                    fully_async_run_overrides)
+    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, VerlTranslationError, buffer_trainer_shape,
+                                    execution_profile_for, fully_async_run_overrides)
     from .offpolicy_correction import apply_to_overrides, correction_mapping
     from .policy_age import SUPPORT
 
@@ -894,8 +902,16 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     profile = execution_profile_for(spec, limit, groups_per_round=args.groups_per_round,
                                     samples_per_group=args.samples_per_group, sync=sync)
     check_algorithm_contract(profile, spec)
+    shape = {}
+    if trainer_cards is not None:
+        try:
+            nodes, per_node = buffer_trainer_shape(trainer_cards, getattr(args, "actor_num_nodes", 1),
+                                                   getattr(args, "actor_num_gpus_per_node", None))
+        except VerlTranslationError as exc:
+            raise SystemExit(str(exc)) from exc
+        shape = {"trainer_gpus": per_node, "trainer_nodes": nodes}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
-                                    rounds=args.global_rounds)
+                                    rounds=args.global_rounds, **shape)
     out = apply_to_overrides(out, correction_mapping(spec))
     from yeto.hw.catalog import device_family
 

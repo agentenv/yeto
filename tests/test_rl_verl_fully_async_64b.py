@@ -56,6 +56,7 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert f"rollout.total_rollout_steps={8 * (2 * 5 + 1 + 1)}" in out
     assert not any(o.startswith(("trainer.use_v1=", "trainer.v1.trainer_mode=")) for o in out)
     assert sum(o.startswith("trainer.n_gpus_per_node=") for o in out) == 1
+    assert sum(o.startswith("trainer.nnodes=") for o in out) == 1 and "trainer.nnodes=1" in out
     assert "actor_rollout_ref.actor.ppo_mini_batch_size=8" in out  # require_batches * 8 = one round
     assert not any("multi_turn" in o for o in out)  # no agent loop configured
     agentic = far.fully_async_run_overrides(
@@ -66,6 +67,48 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
         far.fully_async_run_overrides(sync, 0, groups_per_round=8, rounds=5)
     # sync path at limit 0 unchanged (6.3)
     assert not any("staleness" in o for o in vconf.build_overrides(run))
+
+
+def test_buffer_trainer_gets_every_island_card_over_its_nodes():
+    """S27 G-EZ2 (npu1): a buffer trainer's pool was [1] * 1 whatever the island
+    held; one WorkerDict came up on a 16-card, two-node island."""
+    import yeto.rl.adapters.verl.config as vconf
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=4, samples_per_group=4, n_gpus=16)
+    sync = vconf.build_overrides(run)
+    assert far.buffer_trainer_shape(16, 2) == (2, 8)
+    assert far.buffer_trainer_shape(16, 2, 8) == (2, 8)
+    assert far.buffer_trainer_shape(8) == (1, 8)
+    out = far.fully_async_run_overrides(sync, 4, groups_per_round=4, rounds=3, trainer_gpus=8, trainer_nodes=2)
+    assert [o for o in out if o.startswith(("trainer.n_gpus_per_node=", "trainer.nnodes="))] == [
+        "trainer.n_gpus_per_node=8", "trainer.nnodes=2"]
+    default = far.fully_async_run_overrides(sync, 4, groups_per_round=4, rounds=3)
+    assert "trainer.nnodes=1" in default and "trainer.n_gpus_per_node=1" in default
+    assert "trainer.nnodes" in far.FULLY_ASYNC_ASSERTED_KEYS
+    for bad in ((16, 3, None), (16, 2, 4), (1, 2, None)):
+        with pytest.raises(far.VerlTranslationError):
+            far.buffer_trainer_shape(*bad)
+
+
+def test_island_plan_gives_a_buffer_trainer_its_two_node_shape():
+    import argparse
+
+    import yeto.rl.adapters.verl.config as vconf
+    from yeto.rl.adapters.verl.island_entry import fully_async_plan
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=4, samples_per_group=4, n_gpus=16)
+    args = argparse.Namespace(groups_per_round=4, samples_per_group=4, global_rounds=3,
+                              actor_num_nodes=2, actor_num_gpus_per_node=8)
+    spec = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=4),
+                         correction=CorrectionSpec(method="tis", lower=0.0, upper=2.0)).to_dict()
+    out, asserted = fully_async_plan(4, vconf.build_overrides(run), spec, args, "none", trainer_cards=16)
+    assert "trainer.n_gpus_per_node=8" in out and "trainer.nnodes=2" in out
+    assert "trainer.nnodes" in asserted
+    args.actor_num_gpus_per_node = 4
+    with pytest.raises(SystemExit, match="actor-num-gpus-per-node 4"):
+        fully_async_plan(4, vconf.build_overrides(run), spec, args, "none", trainer_cards=16)
 
 
 def test_verl_declares_stage_two_up_to_limit_four():
