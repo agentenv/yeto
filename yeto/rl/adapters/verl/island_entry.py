@@ -423,9 +423,7 @@ def main(argv=None) -> int:
         print("[yeto-verl] Ray restart did not give enough CPU slots", file=sys.stderr, flush=True)
         return 3
 
-    from huggingface_hub import snapshot_download
-
-    model_path = snapshot_download(args.model, revision=args.model_revision)
+    model_path = island_model_path(args.model, args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
                                         slot=island_data_slot(args))
@@ -592,6 +590,26 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def island_model_path(model: str, revision: str | None) -> str:
+    """This island's model directory: a hub repo id at the pinned revision, or a
+    directory that already exists on this node.
+
+    S27 G-EQ2 (npu1): an on-prem cluster stages the weights itself and its nodes
+    may have no route to the hub at all (npu1's n2-n4 do not), so a directory is
+    used as is. The pinned revision then cannot be checked -- the plan keeps the
+    flag's value and the island's identity still fingerprints ``config.json`` of
+    the files actually loaded (``full_parameter_stream.plan_section``)."""
+    local = Path(os.path.expanduser(model))
+    if local.is_dir():
+        if not (local / "config.json").is_file():
+            raise SystemExit(f"--model {model} 是本机目录但没有 config.json")
+        print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} 未校验)", flush=True)
+        return str(local)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model, revision=revision)
 
 
 def fsdp_separate_pools(args, ray_info: dict):
