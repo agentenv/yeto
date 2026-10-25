@@ -378,7 +378,9 @@ def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
     group.release_memory = release_memory
     writer = VerlHfWriter(group, base, run=_run)
     writer(1, tmp_path / "out")
-    assert calls == [True]
+    # once per written file (the step after an export has to fit on the same card)
+    # plus once at the end, which is the one last_layout reports
+    assert len(calls) == 3, calls
     assert writer.last_layout["freed"] == {"reserved_before": 40, "reserved_after": 8, "workers": 2}
 
 

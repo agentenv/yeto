@@ -415,6 +415,7 @@ def remote_release_memory(worker_dict) -> dict:
 
     device = torch.npu if hasattr(torch, "npu") and torch.npu.is_available() else torch.cuda
     before = {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}
+    device.synchronize()  # blocks still referenced by pending work are not freed
     device.empty_cache()
     return {"before": before,
             "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}

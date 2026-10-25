@@ -182,6 +182,7 @@ class VerlHfWriter:
             total = self._write_regrouped(shapes, directory)
         self.last_layout = {"layout": "base" if plan is not None else "regrouped", "why": why,
                             "bytes": total, "freed": self._release_memory()}
+        print(f"[yeto hf export] device memory after the export: {self.last_layout['freed']}", flush=True)
         print(f"[yeto hf export] {self.last_layout['layout']} layout: {why}", flush=True)
         copy_model_files(self.model_path, directory)
         (directory / COMPLETE_MARKER).write_text("")
@@ -194,7 +195,11 @@ class VerlHfWriter:
         release = getattr(self.group, "release_memory", None)
         if release is None:
             return None
-        results = [dict(result) for result in (self.run(release()) or ())]
+        try:
+            results = [dict(result) for result in (self.run(release()) or ())]
+        except Exception as error:  # noqa: BLE001 -- the export matters, freeing is an optimisation
+            print(f"[yeto hf export] could not free device memory: {error!r}", flush=True)
+            return None
         if not results:
             return None
         return {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
@@ -228,6 +233,10 @@ class VerlHfWriter:
             for name in needed:
                 if last_use[name] <= position:
                     cache.pop(name, None)
+            # Free the device blocks of this file's gathers before the next one: the
+            # step after an export has to fit on the same card, and on a 64 GiB card
+            # the margin is under one activation group (S27 G-EQ3, npu1).
+            self._release_memory()
         if plan.index:
             shutil.copyfile(plan.model_path / INDEX_FILE, directory / INDEX_FILE)
         return total

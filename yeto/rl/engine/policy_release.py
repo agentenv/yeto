@@ -695,15 +695,41 @@ class PolicyReleaseStore:
                      "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}
 
     def _kept_names(self) -> set[str]:
-        """The newest ``keep`` releases and every base their deltas need."""
+        """The newest ``keep`` releases and every base their deltas need.
+
+        A base is read from this writer's own deltas (``_bases``) and, for a
+        release this process did not write, from the release's record in the
+        store (S27 G-EQ3): a restarted trainer starts with an empty ``_bases``,
+        and without the record it deleted the base its kept delta needs -- after
+        which no sampler could rebuild that delta (measured on npu1: a restarted
+        island pruned ``r1-v0`` while keeping the delta ``r2-v1``). An unreadable
+        record keeps the release rather than dropping a base that may be needed.
+        """
         kept = set(self._names[-self.keep:])
         pending = list(kept)
         while pending:
-            base = self._bases.get(pending.pop())
+            name = pending.pop()
+            base = self._bases.get(name)
+            if base is None:
+                base = self._recorded_base(name)
             if base is not None and base not in kept:
                 kept.add(base)
                 pending.append(base)
         return kept
+
+    def _recorded_base(self, name: str) -> str | None:
+        """The base a stored release's record names (None: a full release, or no
+        readable record). Remembered, so a prune reads each record once."""
+        if name in self._bases:
+            return self._bases[name]
+        try:
+            record = self._record_at(f"{self.release_dir}/{name}")
+        except Exception:  # noqa: BLE001 -- unreadable: treat as "may have a base"
+            return None
+        base = None if record.delta is None else str(record.delta.get("base_path") or "") or None
+        if base is not None:
+            self._bases[name] = base
+        return base
 
     def _listed_names(self) -> list[str]:
         """The release directories under the root, in ``seq`` order."""
