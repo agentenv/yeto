@@ -359,15 +359,16 @@ class RunFiles:
 
 
 def _log_window(start_time: Any, now: float) -> list[str]:
-    """``--since/--until`` around a container's start (s27-ek-b: without a window the query
-    over the whole app failed with "Logs query hit resource limit")."""
+    """``--since/--until`` around a container's start, in UTC with the offset written out
+    (the CLI reads a time without offset as local time). s27-ek-b: without a window the
+    query over the whole app failed with "Logs query hit resource limit"."""
     begin = now - 600.0
     if start_time:
         try:
             begin = datetime.fromisoformat(str(start_time).replace("Z", "+00:00")).timestamp() - 60.0
         except ValueError:
             pass
-    fmt = "%Y-%m-%dT%H:%M:%S"
+    fmt = "%Y-%m-%dT%H:%M:%S+00:00"
     return ["--since", time.strftime(fmt, time.gmtime(begin)), "--until", time.strftime(fmt, time.gmtime(now + 60.0))]
 
 

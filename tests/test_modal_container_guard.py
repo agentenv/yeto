@@ -313,9 +313,9 @@ def test_extra_log_capture_names_the_function_in_a_time_window(tmp_path, monkeyp
     assert len(commands) == 1
     command = commands[0]
     assert "--show-function-id" in command and command[command.index("--container") + 1] == EK_X
-    assert command[command.index("--since") + 1] == "2026-10-25T14:42:25"  # start - 60 s
-    assert command[command.index("--until") + 1] == "2026-10-25T14:44:42"  # poll + 60 s
-    assert guard_mod._log_window("not a time", now)[1] == "2026-10-25T14:33:42"  # poll - 600 s
+    assert command[command.index("--since") + 1] == "2026-10-25T14:42:25+00:00"  # start - 60 s
+    assert command[command.index("--until") + 1] == "2026-10-25T14:44:42+00:00"  # poll + 60 s
+    assert guard_mod._log_window("not a time", now)[1] == "2026-10-25T14:33:42+00:00"  # poll - 600 s
 
 
 def test_cli_cost_cap_override_file_stops_the_run(tmp_path):
