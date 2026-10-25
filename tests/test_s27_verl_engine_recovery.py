@@ -329,6 +329,23 @@ def test_arming_follows_the_budget_and_the_separate_mode():
     assert not isinstance(driver.rollout, er.TestEngineKill)
 
 
+def test_engine_recovery_with_rollout_ahead_is_refused():
+    """S27 G-FB (s27-next3): G-EV's rollout ahead and G-EW's engine recovery meet on the
+    separate-mode island only in the integration. After a restore in the join of a batch
+    generated ahead, the driver generates that batch with v(rollout_id - 1) still published,
+    and ``VerlRolloutPool.generate`` refuses it, so the island refuses the pair up front."""
+    plan = {"separate": {"trainer_nodes": 1, "rollout_nodes": 1}, "rollout_ahead": 1}
+    driver = _Driver()
+    assert er.arm_verl_engine_outage(driver, _trainer(), plan, run=asyncio.run, environ={},
+                                     ray_module=RAY) is None  # no budget: nothing to refuse
+    with pytest.raises(ValueError, match="rollout-ahead is not wired"):
+        er.arm_verl_engine_outage(driver, _trainer(), plan, run=asyncio.run,
+                                  environ={ENGINE_RECOVERY_ENV: "600"}, ray_module=RAY)
+    assert not hasattr(driver, "engine_outage") and driver.events == []
+    assert er.arm_verl_engine_outage(driver, _trainer(), {**plan, "rollout_ahead": 0}, run=asyncio.run,
+                                     environ={ENGINE_RECOVERY_ENV: "600"}, ray_module=RAY) is not None
+
+
 @pytest.mark.parametrize("incarnation,wrapped", [("0", True), ("1", False)])
 def test_the_test_kill_is_armed_in_the_first_process_only(incarnation, wrapped):
     driver = _Driver()

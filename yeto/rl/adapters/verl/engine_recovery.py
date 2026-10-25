@@ -384,7 +384,16 @@ def arm_verl_engine_outage(driver: Any, trainer: Any, plan: Mapping[str, Any], *
     if not separate:
         raise ValueError("verl engine recovery needs the separate mode (--rl-placement fixed-partition): "
                          "a colocated island's engines share the trainer's cards")
-    nodes = max(int(separate.get("trainer_nodes", 1)), int(separate.get("rollout_nodes", 1)))
+    if int(plan.get("rollout_ahead") or 0):
+        # S27 G-FB (s27-next3 joins G-EV's rollout ahead and G-EW's engine recovery): when
+        # the engines die in a batch generated ahead, the driver restores them, republishes
+        # v(rollout_id - 1) and generates that batch again (driver._finish_ahead_watched);
+        # VerlRolloutPool.generate needs the publication of rollout_id itself. Not wired,
+        # no GPU run: refuse instead of failing in the first outage.
+        raise ValueError("verl engine recovery (YETO_ISLAND_ENGINE_RECOVERY_S) with --rl-rollout-ahead "
+                         "is not wired: after a restore in the join of a batch generated ahead, "
+                         "VerlRolloutPool.generate refuses the policy still published (one version behind)")
+    nodes =max(int(separate.get("trainer_nodes", 1)), int(separate.get("rollout_nodes", 1)))
     port = VerlEngineRecovery(trainer, nodes=nodes, run=run, ray_module=ray_module, emit=driver.emit)
     outage = arm_engine_outage(driver, port, budget_s=budget, nodes=nodes, backend="verl")
     kill = test_kill_at(environ)
