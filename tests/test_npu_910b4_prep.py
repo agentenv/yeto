@@ -586,7 +586,9 @@ def test_ascend_island_turns_torch_compile_off(monkeypatch):
     algo = {"correction": "tis", "tis_lower": 0.0, "tis_upper": 2.0,
             "eps_clip": None, "eps_clip_high": None}
     monkeypatch.setattr(island_entry, "gradient_checkpointing_for", lambda *_a: True)
-    key = "actor_rollout_ref.actor.use_torch_compile"
+    keys = ("actor_rollout_ref.actor.use_torch_compile",
+            "actor_rollout_ref.actor.fsdp_config.use_torch_compile",
+            "actor_rollout_ref.ref.fsdp_config.use_torch_compile")
 
     def run_for(family):
         monkeypatch.setattr(cat, "device_family", lambda *_a: family)
@@ -595,5 +597,8 @@ def test_ascend_island_turns_torch_compile_off(monkeypatch):
             chat={}, ray_info={"before": {"NPU": 8.0}}, max_prompt=512, limit=4)
         return overrides
 
-    assert f"{key}=False" in run_for("ascend")
-    assert not [o for o in run_for("nvidia") if o.startswith(key)]  # NVIDIA unchanged
+    ascend = run_for("ascend")
+    # the engine workers read fsdp_config.use_torch_compile, not the actor's (G-EQ3)
+    assert all(f"{key}=False" in ascend for key in keys)
+    nvidia = run_for("nvidia")
+    assert not [o for o in nvidia if o.split("=")[0] in keys]  # NVIDIA unchanged

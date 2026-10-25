@@ -721,7 +721,13 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         # the first training step dies in dynamo with "cannot import name
         # 'Language' from 'triton.backends.compiler'" (it even tried to load
         # triton's AMD backend). Eager is correct, only slower.
-        overrides += ["actor_rollout_ref.actor.use_torch_compile=False"]
+        # S27 G-EQ3: the *engine* workers read their own key
+        # (``FSDPEngineConfig.use_torch_compile``, engine/fsdp/transformer_impl.py:183),
+        # and the generated config hardcodes it to true instead of selecting the
+        # actor's value, so the actor key alone left compute_log_prob compiling.
+        overrides += ["actor_rollout_ref.actor.use_torch_compile=False",
+                      "actor_rollout_ref.actor.fsdp_config.use_torch_compile=False",
+                      "actor_rollout_ref.ref.fsdp_config.use_torch_compile=False"]
     return run, overrides
 
 
