@@ -74,7 +74,17 @@ def test_relay_driver_accepts_groups_named_by_merged_versions(tmp_path):
     driver = _driver(tmp_path, 2)
     driver.external_policy = HalfMerged()
     _relay_groups(driver, lambda rid: max(0, rid // 2 - 1))  # one merged version behind
+    trained = []
+    original = driver.trainer.train_step
+
+    def train_step(batch):
+        trained.append(batch.external_cut)
+        return original(batch)
+
+    driver.trainer.train_step = train_step
     driver.run()
+    # the trainer gets the merged version and limit the driver checked (its own check reuses them)
+    assert trained == [(0, 2), (0, 2), (1, 2)]
     events = _events(tmp_path)
     assert len([e for e in events if e["event"] == "rl_round_trained"]) == 3
     policies = [e for e in events if e["event"] == "rl_group_policies"]
@@ -273,3 +283,24 @@ def test_relay_gate_set_before_the_reader_exists_reaches_the_first_take():
     br.register_reader(other)  # no pending gate: a synced trainer off relay mode is unchanged
     br._ACTIVE.pop(br.TRAINER, None)
     assert other.gate_version is None
+
+
+def test_miles_trainer_check_applies_the_merged_rule_to_a_relay_batch():
+    """Run s27-ea-b1 (10-25 15:27Z): the Miles trainer's own token check refused the
+    groups the driver had accepted (they name merged versions, not publications)."""
+    from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, require_policy_tokens
+    from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
+
+    def handle(tokens, external=None):
+        groups = tuple(GroupMetadata(group_id=f"g{i}", sample_ids=("s0",), policy_token=t, reward_mean=0.5,
+                                     reward_std=0.5, token_count=4) for i, t in enumerate(tokens))
+        return RolloutBatchHandle(rollout_id=3, policy_version=3, policy_hash=ROUND, groups=groups,
+                                  completed=len(groups), aborted=0, external_cut=external)
+
+    expected = f"yeto:3:{ROUND}"
+    require_policy_tokens(handle(["4", "3", "5"], (4, 1)), expected)
+    with pytest.raises(PolicyTokenMismatch, match="g1='2'"):
+        require_policy_tokens(handle(["4", "2", "12"], (4, 1)), expected)
+    with pytest.raises(PolicyTokenMismatch):  # off relay mode the publication rule is unchanged
+        require_policy_tokens(handle(["4"]), expected)
+    require_policy_tokens(handle([expected]), expected)

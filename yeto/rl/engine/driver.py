@@ -1279,6 +1279,9 @@ class IslandDriver:
                 f"(merged version {merged}, max_policy_age={limit}): " + "; ".join(problems))
         if not batch.groups:
             raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        # the trainer's own check before training applies the same rule (Miles
+        # rollout.require_policy_tokens): its groups name merged versions, not publications
+        batch = dataclasses.replace(batch, external_cut=(merged, limit))
         self.emit("rl_group_policies", rollout_id=rollout_id, kind=EXTERNAL_MERGED_CUT,
                   merged_version=merged, max_policy_age=limit,
                   ages={str(age): n for age, n in ages.items()}, groups=[
