@@ -1026,6 +1026,14 @@ def peer_recovery_options(args, environ=None):
     store = getattr(args, "rl_peer_recovery_store", None)
     env = os.environ if environ is None else environ
     recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
+    if recover and store is not None:
+        from yeto.rl.engine.driver import catch_up_incarnation
+
+        incarnation = catch_up_incarnation(env)
+        if incarnation is not None:  # test-only fault injection: both state sources in one run
+            print(f"[yeto-peer-recovery] fault injection: re-run {incarnation} rejoins by catch-up "
+                  "(peer recovery skipped)", file=sys.stderr, flush=True)
+            recover = False
     if store is None:
         if recover or getattr(args, "rl_peer_recovery_staging", None):
             raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")

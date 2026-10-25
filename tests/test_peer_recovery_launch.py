@@ -137,3 +137,20 @@ def test_island_entry_reads_the_recover_env(tmp_path):
     assert peer_recovery_options(SimpleNamespace(), environ={}) is None
     with pytest.raises(ValueError, match="need --rl-peer-recovery-store"):
         peer_recovery_options(SimpleNamespace(rl_peer_recover=True), environ={})
+
+
+def test_fault_injection_turns_a_relaunch_into_a_catch_up_rejoin(tmp_path, capsys):
+    import json
+
+    from yeto.rl.adapters.miles.island_entry import peer_recovery_options
+    from yeto.rl.engine.driver import FAULT_INJECTION_ENV, MODAL_INCARNATION_ENV
+
+    fault = tmp_path / "fault.json"
+    fault.write_text(json.dumps({"exit_at_round": 5, "exit_islands": [1], "exit_rejoined_after_rounds": 9,
+                                 "catch_up_incarnations": [2]}))
+    args = SimpleNamespace(rl_peer_recovery_store=str(tmp_path), rl_peer_recovery_ttl_s=None)
+    env = {PEER_RECOVER_ENV: "1", FAULT_INJECTION_ENV: str(fault)}
+    assert peer_recovery_options(args, environ={**env, MODAL_INCARNATION_ENV: "1"}).recover is True
+    options = peer_recovery_options(args, environ={**env, MODAL_INCARNATION_ENV: "2"})
+    assert options.recover is False and options.store == str(tmp_path)
+    assert "re-run 2 rejoins by catch-up" in capsys.readouterr().err
