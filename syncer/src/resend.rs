@@ -130,7 +130,6 @@ impl Pending {
         Some((p, version, values))
     }
 
-    #[allow(dead_code)] // same API as the G-EA subscriber map
     pub fn len(&self) -> usize {
         self.entries.len()
     }
