@@ -187,8 +187,7 @@ def check(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], *, seed: int,
-                island_of_tape: Mapping[int, int] | None = None) -> list[str]:
+def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], *, seed: int) -> list[str]:
     """Rows the island tapes trained (``rl_round_data_rows``) against the rows of
     the positions each island reported trained (as multisets)."""
     from yeto.rl.engine.data_split import rows_of_runs
@@ -202,13 +201,9 @@ def check_tapes(summary: Mapping[str, Any], tapes: Iterable[Mapping[str, Any]], 
         int(i): Counter(pmap.row(p) for p in ps)
         for i, ps in summary.get("trained_positions_by_island", {}).items()}
     taped: dict[int, Counter[int]] = defaultdict(Counter)
-    island = None
-    for record in tapes:
-        event = record.get("event") or record.get("kind")
-        if event == "rl_driver_start":
-            island = record.get("learner_id", record.get("island_id"))
-        if event == "rl_round_data_rows" and island is not None:
-            taped[int(island)].update(rows_of_runs(record.get("rows") or []))
+    for record in tapes:  # every island tape record carries its island_id
+        if record.get("event") == "rl_round_data_rows" and record.get("island_id") is not None:
+            taped[int(record["island_id"])].update(rows_of_runs(record.get("rows") or []))
     problems = []
     for isl, counts in sorted(taped.items()):
         missing = counts - reported.get(isl, Counter())

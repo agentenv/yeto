@@ -528,8 +528,8 @@ def test_checker_compares_tape_rows_with_trained_reports():
             "ranges": [[0, 6]], "redo_exhausted": []}]
     summary = check(log)
     rows = [td.PositionMap(4, seed=3).row(p) for p in range(6)]
-    tape = [{"event": "rl_driver_start", "learner_id": 0},
-            {"event": "rl_round_data_rows", "rows": [[r, r, 1] for r in rows]}]
+    tape = [{"event": "rl_driver_start", "island_id": 0},
+            {"event": "rl_round_data_rows", "island_id": 0, "rows": [[r, r, 1] for r in rows]}]
     assert check_tapes(summary, tape, seed=3) == []
-    extra = tape + [{"event": "rl_round_data_rows", "rows": [[3, 3, 1], [3, 3, 1]]}]
+    extra = tape + [{"event": "rl_round_data_rows", "island_id": 0, "rows": [[3, 3, 1], [3, 3, 1]]}]
     assert check_tapes(summary, extra, seed=3)
