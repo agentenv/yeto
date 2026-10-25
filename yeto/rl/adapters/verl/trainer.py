@@ -292,15 +292,28 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         from .separate import driver_options as separate_driver_options
 
         driver_options.update(separate_driver_options(plan, spec, driver_options["capabilities"]))
+    dispense = None
+    if plan.get("dispense"):  # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        from .task_dispense import install as install_dispense
+
+        dispense = install_dispense(trainer, plan["dispense"],
+                                    emit=lambda event, **f: tape.append({"event": event, **f}))
     driver = IslandDriver(
-        learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
+        learner_id=learner_id, rollout=VerlRolloutPool(island, dispense=dispense),
+        trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape,
                                      rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         algorithm=spec, sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
         **driver_options,
         **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
-    driver.data_slot = plan.get("data_slot")  # S27 task assignment
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment ("dispense" with the dispenser)
+    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #25, #26, #35)
+
+    wire_verify(driver, policy_state, plan)
+    wire_debug(island, plan)
+    if dispense is not None and plan["dispense"].get("data_streams"):
+        driver.data_streams = plan["dispense"]["data_streams"]  # S27 P3 streams (rl_driver_start)
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
         from .separate import wire_rollout_ahead

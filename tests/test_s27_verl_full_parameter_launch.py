@@ -154,7 +154,8 @@ def test_the_async_mode_island_argv_reaches_the_verl_stream(model_dir):
         parsed, ignored = island_entry.parse_args(argv)
         assert _flags(ignored) <= MILES_ONLY, _flags(ignored) - MILES_ONLY
         assert parsed.parameter_mode == "full" and parsed.syncer_profile_sha256 == profile
-        assert parsed.rl_data_slot == f"{learner_id}/2"
+        # S27 G-EU: the default split of verl training islands is the task dispenser
+        assert parsed.rl_data_dispense and parsed.rl_data_slot is None
         section = vfs.plan_section(parsed, _run_dict(), model_path=str(model_dir), sync="strict",
                                    algorithm_spec_sha256="a" * 64)["full_parameter"]
         assert section["async_rounds"] and section["local_init"] and section["final_cut"] == "ack"

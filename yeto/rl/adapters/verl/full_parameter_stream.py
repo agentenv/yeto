@@ -1108,6 +1108,12 @@ def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_ident
     return sync, policy_state
 
 
+def _never_materialize(_version: int):
+    from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
+
+    raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
+
+
 class VerlFullParameterLocalState:
     """``PolicyState`` of a full-parameter island without an outer sync
     (``--rl-single-island-no-sync``): every export is a whole cut of the
@@ -1136,30 +1142,77 @@ class VerlFullParameterLocalState:
             self.adapter = VerlChunkedFullParameterAdapter(layout, max_chunk_bytes=self.max_chunk_bytes)
         return self.adapter
 
+    # S27 G-EU (VERL-PARITY #26): --rl-verify-every N turns this on (allow_unverified_rounds);
+    # the rounds the driver does not verify publish export_identity (no whole cut, no hash)
+    supports_unverified_rounds = False
+
     def export(self, *, policy_version: int | None = None):
-        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
-        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
 
         version = self.policy_version if policy_version is None else int(policy_version)
         adapter = self._adapter()
         cut = self.runner.run(adapter.capture(self.group, policy_version=version, local_step_generation=0))
-        trained = self.group.trained_rounds
-
-        def never(_version: int):
-            raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
-
-        def holds(_state) -> None:
-            # S27 G-EV: the separate-mode publisher checks the trainer still holds the
-            # exported cut (no optimizer step since: the group counts every trained round)
-            if self.group.trained_rounds != trained:
-                raise WeightsChanged(f"the trainer trained {self.group.trained_rounds - trained} round(s) "
-                                     f"after the cut of v{version} was exported")
-
-        return TrainerResidentState(
+        state = TrainerResidentState(
             layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
             config_hash=self.component.config_hash, layout_hash=cut.layout_hash, policy_version=version,
             digest=PolicyDigest(cut.policy_hash, cut.content_hash, adapter.expected_parameter_scalar_count * 4, ()),
-            materialize_fn=never, holds_fn=holds)
+            materialize_fn=_never_materialize, weights_mark=self._mark(), holds_fn=self._holds)
+        self._last_verified = state
+        return state
+
+    def _mark(self) -> dict:
+        """The trainer weights version (``TrainerResidentState.weights_mark``): this
+        state object and the group's trained rounds (``VerlFullParameterGroup.record_round``,
+        called by the trainer port after every optimizer step)."""
+        if not hasattr(self, "_process_id"):
+            import uuid
+
+            self._process_id = uuid.uuid4().hex
+        return {"process_id": self._process_id, "version": int(getattr(self.group, "trained_rounds", 0) or 0)}
+
+    def _holds(self, state) -> None:
+        from yeto.rl.engine.policy_digest import WeightsChanged
+
+        if dict(state.weights_mark or {}) != self._mark():
+            raise WeightsChanged(f"the trainer trained since policy v{state.policy_version} was exported "
+                                 f"({state.weights_mark} -> {self._mark()})")
+
+    def export_digest(self, *, policy_version: int, deferred: bool = False):
+        """The driver's resident export (rl-publish-fastpath): the same whole cut as
+        ``export().with_version`` (the driver's fallback), so the policy hash is
+        unchanged; ``deferred`` is never asked (no ``supports_deferred_digest``)."""
+        del deferred
+        state = self.export().with_version(int(policy_version))
+        self._last_verified = state
+        return state
+
+    def allow_unverified_rounds(self) -> None:
+        """S27 G-EU (``--rl-verify-every N``, as Miles' S27 C5): publications the driver
+        does not verify use :meth:`export_identity` (no whole cut, no SHA-256)."""
+        self.supports_unverified_rounds = True
+
+    def export_identity(self, *, policy_version: int):
+        """The resident state of a round whose publication is not verified: the
+        trainer weights version stands in for the content hash
+        (``policy_digest.unverified_identity``). None before the first verified cut
+        (the driver then verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        mark = self._mark()
+        identity = unverified_identity(int(policy_version), mark)
+        print(f"[yeto-verl] full-parameter publication v{policy_version}: unverified (no whole cut; last "
+              f"verified hash {last.policy_tensor_hash()[:12]})", flush=True)
+        return TrainerResidentState(
+            layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
+            config_hash=self.component.config_hash, layout_hash=last.layout_hash,
+            policy_version=int(policy_version),
+            digest=PolicyDigest(identity, identity, last.digest.payload_bytes, ()),
+            materialize_fn=_never_materialize, weights_mark=mark, holds_fn=self._holds, verified=False)
 
     def apply(self, state, *, optimizer: str, local_step: int) -> None:
         raise RuntimeError("a full-parameter verl island without an outer sync never applies a cut "

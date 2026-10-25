@@ -265,8 +265,9 @@ def test_a_recorded_verl_data_cursor_is_where_a_new_process_seeks_to(tmp_path):
 
 def test_the_launcher_forwards_exports_and_data_positions_to_verl_islands(model_dir):
     store = "modal-volume://v/run"
+    # the row slots keep data positions (the dispenser, the default since S27 G-EU, keeps none)
     args = _prepared(_verl_args("--rl-checkpoint-store", store, "--rl-export-hf-rounds", "2,final",
-                                "--no-rl-peer-recovery"))
+                                "--no-rl-peer-recovery", "--rl-data-split", "stride"))
     assert args.rl_peer_recovery is False and args.rl_island_state_source == "catch-up"
     for learner_id in range(2):
         argv = _island_argv(args, learner_id)
@@ -564,7 +565,6 @@ def test_syncer_checkpoint_options_reach_the_syncer_and_leave_the_verl_islands_u
 @pytest.mark.parametrize("extra", [
     ("--rl-verify-every-round",), ("--rl-deterministic-trainer",), ("--rl-gradient-accumulation-fusion",),
     ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-profile-trainer",),
-    ("--rl-debug-dump",),
 ])
 def test_options_a_verl_full_parameter_island_would_ignore_are_refused(extra):
     """Each of these reached the verl island and was dropped by parse_known_args
@@ -580,8 +580,12 @@ def test_every_refused_option_is_one_the_verl_island_does_not_parse():
     # S27 G-DC: the Megatron island parses these two for itself (megatron_island_plan);
     # the FSDP2 path still never reads them, so the launcher keeps refusing them there.
     megatron_only = {"rl_lr_schedule", "rl_max_tokens_per_gpu"}
+    # S27 G-EU (#25): the island parses --rl-verify-every-round to refuse it itself on a
+    # full-parameter island (train_options.verify_plan), also where the launcher's preset
+    # check does not run (a no-sync island); the launcher still refuses it first
+    refused_by_island = {"rl_verify_every_round"}
     for dest, _off, _option in launch_flags.IGNORED_ON_VERL_FULL_PARAMETER:
-        assert dest not in parser_options - megatron_only, dest
+        assert dest not in parser_options - megatron_only - refused_by_island, dest
     fsdp = inspect.getsource(island_entry.fsdp_island_run)
     assert not any(dest in fsdp for dest in megatron_only)
 

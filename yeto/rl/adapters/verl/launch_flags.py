@@ -126,6 +126,9 @@ def full_parameter_problems(args) -> list[str]:
 # S27 G-DS: options the launcher forwards to every island that the verl island
 # entry does not parse (parse_known_args would drop them without a word):
 # (args dest, value when off, option). Refused instead, before any cloud work.
+# S27 G-EU: the island refuses them too when they reach a full-parameter island the
+# launcher's preset check does not cover (a no-sync island:
+# train_options.refuse_unmapped_argv); --rl-debug-dump is mapped (train_options.debug_plan).
 # S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
 # constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
 # --rl-observe-timeline, --rl-resource-sample-interval) and S27 G-EN one more
@@ -139,12 +142,11 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_lora_dropout", None, "--rl-lora-dropout"),
     ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
     ("rl_profile_trainer", False, "--rl-profile-trainer"),
-    ("rl_debug_dump", False, "--rl-debug-dump"),
 )
 # Why each option above has no verl mapping yet (the launcher's refusal says it).
 NOT_MAPPED_REASONS = {
     "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
-                               "(VERL-PARITY #25)",
+                               "(VERL-PARITY #25; the island refuses it as well, train_options.verify_plan)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
     "--rl-async-buffer-rounds": "Miles' fully_async buffer depth; verl's fully_async rollouter has no such "
@@ -153,6 +155,8 @@ NOT_MAPPED_REASONS = {
     "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
     "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
                             "there",
-    "--rl-debug-dump": "Miles' rollout/train data dump has no verl counterpart (the island writes its own "
-                       "verl-dump criteria tensors)",
 }
+# S27 G-EU (VERL-PARITY #35): the options above that do not apply to a full-parameter
+# FSDP2 island at all (the rest wait for a mapping or for #11 / #25)
+NOT_APPLICABLE_ON_FULL_PARAMETER = ("--rl-gradient-accumulation-fusion", "--rl-lora-dropout",
+                                    "--rl-lora-expert-rank")

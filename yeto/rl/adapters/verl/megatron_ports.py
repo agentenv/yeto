@@ -281,11 +281,38 @@ class MegatronPolicyState:
             raise MegatronTensorExportError("the Megatron parameter layout changed since the island start")
         print(f"[rl] verl megatron digest v{policy_version}: total={time.monotonic() - started:.2f}s "
               f"hash={digest.hash_seconds:.2f}s bytes={digest.payload_bytes}", flush=True)
-        return TrainerResidentState(
+        state = TrainerResidentState(
             layout=LAYOUT_FRAGMENTS, base_model_revision=isl.base_model_revision,
             config_hash=isl.lora_config_hash, layout_hash=isl.layout_hash,
             policy_version=int(policy_version), digest=digest, materialize_fn=self._refuse,
             weights_mark=self._mark(), holds_fn=self._holds)
+        self._last_verified = state
+        return state
+
+    def allow_unverified_rounds(self) -> None:
+        """S27 G-EU (VERL-PARITY #26, ``--rl-verify-every N``): the rounds the driver
+        does not verify publish :meth:`export_identity` (no per-rank SHA-256)."""
+        self.supports_unverified_rounds = True
+
+    def export_identity(self, *, policy_version: int) -> TrainerResidentState | None:
+        """A round whose publication is not verified: the trainer weights version
+        stands in for the content hash (``policy_digest.unverified_identity``);
+        None before the first verified digest (the driver then verifies)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        isl, mark = self.island, self._mark()
+        identity = unverified_identity(int(policy_version), mark)
+        print(f"[rl] verl megatron publication v{policy_version}: unverified (no digest; last verified "
+              f"hash {last.policy_tensor_hash()[:12]})", flush=True)
+        return TrainerResidentState(
+            layout=LAYOUT_FRAGMENTS, base_model_revision=isl.base_model_revision,
+            config_hash=isl.lora_config_hash, layout_hash=isl.layout_hash,
+            policy_version=int(policy_version),
+            digest=PolicyDigest(identity, identity, last.digest.payload_bytes, last.digest.specs),
+            materialize_fn=self._refuse, weights_mark=mark, holds_fn=self._holds, verified=False)
 
     def export(self):
         self._refuse(-1)
@@ -403,6 +430,10 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
     driver.data_slot = plan.get("data_slot")
     wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
     driver.hf_exports = hf_exports_for(plan, island)
+    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #26, #35)
+
+    wire_verify(driver, driver.policy_state, plan)
+    wire_debug(island, plan)
     state = driver.run()
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,

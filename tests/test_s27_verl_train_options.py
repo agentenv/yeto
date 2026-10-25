@@ -103,7 +103,7 @@ def test_values_verl_cannot_run_are_refused():
 @pytest.mark.parametrize("extra", [
     ("--rl-verify-every-round",), ("--rl-deterministic-trainer",), ("--rl-gradient-accumulation-fusion",),
     ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-lora-expert-rank", "4"),
-    ("--rl-profile-trainer",), ("--rl-debug-dump",),
+    ("--rl-profile-trainer",),
 ], ids=lambda extra: extra[0])
 def test_the_options_without_a_verl_mapping_stay_refused_with_their_reason(extra):
     with pytest.raises(ValueError, match="would ignore it") as error:
