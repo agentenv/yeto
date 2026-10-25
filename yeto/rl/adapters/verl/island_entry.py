@@ -759,7 +759,11 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
 
     A model whose implementation supports activation recomputation does not need
     the entropy knobs (the recompute already bounds the head), so they are only
-    added when it is off.
+    added when it is off. Without recomputation the island also offloads the
+    activations themselves: verl's ``enable_activation_offload`` groups them by
+    layer and keeps at most two groups on the card
+    (``verl/utils/activation_offload.py``, whose doc says checkpointing is not
+    required).
     """
     # the key is absent from the generated config (fsdp_config.mixed_precision defaults
     # to None in the dataclass), so it is added, not overridden: hydra needs the "+".
@@ -767,7 +771,10 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
                  "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
     if not gradient_checkpointing:
         overrides += ["actor_rollout_ref.actor.entropy_from_logits_with_chunking=True",
-                      "actor_rollout_ref.actor.entropy_checkpointing=True"]
+                      "actor_rollout_ref.actor.entropy_checkpointing=True",
+                      # the activations themselves go to the host: with them on the card the
+                      # first step fit (63.1 of 65.5 GiB) and the second died asking 9.00 GiB
+                      "actor_rollout_ref.model.enable_activation_offload=True"]
     return overrides
 
 

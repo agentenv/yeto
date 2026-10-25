@@ -668,5 +668,7 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
     assert not [o for o in without if "model_dtype" in o]
     assert "actor_rollout_ref.actor.entropy_checkpointing=True" in without
     assert "actor_rollout_ref.actor.entropy_from_logits_with_chunking=True" in without
+    # the activations themselves go to the host: without it the second step died
+    assert "actor_rollout_ref.model.enable_activation_offload=True" in without
     # a model that can recompute activations bounds the head itself
     assert not [o for o in ascend_memory_overrides(True) if "entropy" in o]
