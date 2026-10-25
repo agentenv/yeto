@@ -9,7 +9,7 @@ import sys
 import time
 
 from ..gpu_spec import ClusterSpec
-from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
+from ..hw.catalog import COMPAT_GROUP_ENV, compat_group, launch_compat_group
 from .code_pack import code_pack_island_flag, code_workdir
 from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
@@ -394,8 +394,9 @@ def make_miles_island_task(
         # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
         SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
-        # card raises here, before any cloud spend (no default).
-        COMPAT_GROUP_ENV: compat_group(spec.gpu),
+        # card raises here, before any cloud spend (no default). An explicit
+        # --rl-compat-group replaces it on every island (mixed cards, operator decision).
+        COMPAT_GROUP_ENV: _island_compat_group(args, spec, learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.
@@ -655,6 +656,23 @@ STORE_CLIENT_SETUP = (
     'python -c "import boto3" 2>/dev/null || pip install -q boto3 '
     "|| { echo '[yeto-setup] boto3 install failed: the s3 store object API is unavailable' >&2; exit 1; }"
 )
+
+
+def _island_compat_group(args, spec, learner_id: int) -> str:
+    """The compat group this island declares (``$YETO_RL_COMPAT_GROUP``).
+
+    The card group from the catalog, or ``--rl-compat-group`` when the operator
+    declares one group for every island (e.g. an H200 island and an H100 island
+    in one session). The replacement is printed, so the launch log says which
+    island merges across card types without a calibrated tolerance."""
+    explicit = getattr(args, "rl_compat_group", None)
+    group = launch_compat_group(spec.gpu, explicit)
+    derived = compat_group(spec.gpu)
+    if group != derived:
+        print(f"[launcher] island {learner_id}: --rl-compat-group {group} replaces the card group "
+              f"{derived} (one declared group for mixed cards; numeric tolerance not calibrated)",
+              file=sys.stderr)
+    return group
 
 
 def _worker_node_ip_flag(cloud: str) -> str:
