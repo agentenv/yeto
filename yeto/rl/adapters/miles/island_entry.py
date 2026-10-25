@@ -1281,18 +1281,10 @@ def _messages(row: dict[str, Any], prompt_column: str | None = None) -> list[dic
 
 def _prompt_split(source, revision: str | None) -> str:
     """`train`, or a Hub dataset's only split when it has no `train`
-    (e.g. HuggingFaceH4/MATH-500 ships just `test`)."""
-    if not isinstance(source, str) or os.path.exists(os.path.expanduser(source)):
-        return "train"
-    try:
-        from datasets import get_dataset_split_names
+    (``yeto.data.prompt_split``; the launcher's label check reads the same split)."""
+    from yeto.data import prompt_split
 
-        names = list(get_dataset_split_names(source, revision=revision))
-    except Exception:  # noqa: BLE001 - load_rows reports the real error
-        return "train"
-    if "train" not in names and len(names) == 1:
-        return names[0]
-    return "train"
+    return prompt_split(source, revision)
 
 
 def prepare_prompt_data(

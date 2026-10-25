@@ -210,11 +210,10 @@ def _data_rows(args):
     """The rows of the run's ``--data`` (the launcher reads them for the label
     check; an HF id is loaded as the island loads it)."""
 
-    from ..data import load_rows
-    from ..rl.adapters.miles.island_entry import _prompt_split  # the split the island reads
+    from ..data import load_rows, prompt_split  # the split the island reads
 
     revision = getattr(args, "data_revision", None)
-    split = _prompt_split(args.data, revision)
+    split = prompt_split(args.data, revision)
     if split == "train":
         return load_rows(args.data, revision=revision)
     return load_rows(args.data, split=split, revision=revision)
