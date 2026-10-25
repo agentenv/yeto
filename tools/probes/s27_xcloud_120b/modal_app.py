@@ -65,7 +65,7 @@ def plan(**overrides: object) -> dict:
     if GPUS % int(cfg["tp"]):
         raise ValueError(f"TP {cfg['tp']} does not divide {GPUS} GPUs")
     return {"model": MODEL, "revision": MODEL_REVISION, "volume_dir": VOLUME_DIR, "shm_dir": SHM_DIR,
-            "image": IMAGE, "gpu": f"H200!:{GPUS}", "timeout_s": TIMEOUT_S, "prompts": PROMPTS_FILE,
+            "image": IMAGE, "gpu": f"H200:{GPUS}", "timeout_s": TIMEOUT_S, "prompts": PROMPTS_FILE,
             "requests": int(cfg["bench_prompts"]) * int(cfg["n"]), **cfg}
 
 
@@ -203,7 +203,8 @@ def compare_greedy(a: list[list], b: list[list]) -> dict:
             "max_first_token_logprob_diff": round(max(first, default=0.0), 6)}
 
 
-@app.function(image=image, volumes={"/models": models, "/data/logs": logs}, gpu=f"H200!:{GPUS}", cpu=32,
+# Modal has no "H200!" form (H200 has no upgrade path); the function checks the GPU names itself.
+@app.function(image=image, volumes={"/models": models, "/data/logs": logs}, gpu=f"H200:{GPUS}", cpu=32,
               memory=655360, timeout=TIMEOUT_S)
 def smoke(tag: str, cfg: dict) -> dict:
     sys.path.insert(0, WORKDIR)
