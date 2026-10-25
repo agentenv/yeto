@@ -228,14 +228,15 @@ def test_local_jsonl_task_file_becomes_verl_parquet(tmp_path):
     pytest.importorskip("pyarrow")
     from yeto.rl.adapters.verl import island_entry
 
-    rows = [{"messages": [{"role": "user", "content": f"q{i}"}], "label": str(i), "metadata": {"task_id": i}}
+    labels = ["0", "1", "2", "3", "0.5"]  # one decimal label: pandas would make the column float
+    rows = [{"messages": [{"role": "user", "content": f"q{i}"}], "label": labels[i], "metadata": {"task_id": i}}
             for i in range(5)]
     src = tmp_path / "tasks.jsonl"
     src.write_text("".join(json.dumps(r) + "\n" for r in rows))
     train, test = island_entry.prepare_data(str(src), None, tmp_path / "out", val_rows=2)
     frame = pd.read_parquet(train)
     assert len(frame) == 5 and len(pd.read_parquet(test)) == 2
-    assert frame.iloc[3]["reward_model"]["ground_truth"] == "3"
+    assert frame.iloc[3]["reward_model"]["ground_truth"] == "3"  # the label text, not "3.0"
     assert list(frame.iloc[0]["prompt"]) == [{"role": "user", "content": "q0"}]
 
 

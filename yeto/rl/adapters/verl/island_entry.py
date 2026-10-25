@@ -248,7 +248,8 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     local = Path(os.path.expanduser(data))
     for split in ("train", "test"):
         if local.is_file():  # S27 G-DC: a local JSONL task file (one file: train; its head: test)
-            frame = pd.read_json(local, lines=True)
+            # parsed with json, not pd.read_json: pandas would turn a label "34" into 34.0
+            frame = pd.DataFrame([json.loads(line) for line in local.read_text().splitlines() if line.strip()])
         else:
             src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
             frame = pd.read_parquet(src)
