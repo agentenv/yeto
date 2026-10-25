@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
-from test_s27_dispense import FP, Syncer, crash, source, syncer_binary  # noqa: F401
+from test_s27_dispense import FP, ROOT, Syncer, crash, source, syncer_binary  # noqa: F401
 from tools.eval.dispense_check import check
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DISPENSE, STRIDE, plan_data_split
@@ -80,7 +80,8 @@ def test_dispense_options_need_dispense_and_island_flags_are_launcher_only(tmp_p
     from yeto import launcher
 
     with pytest.raises(ValueError, match="need --rl-data-split dispense"):
-        launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-passes", "1"))
+        launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "stride",
+                                        "--rl-data-passes", "1"))
     with pytest.raises(ValueError, match="set by the launcher"):
         launcher._prepare_rl_args(_args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-dispense"))
     with pytest.raises(ValueError, match="round cuts"):
@@ -93,9 +94,38 @@ def test_strict_and_stride_syncer_commands_carry_no_dispense_flag(tmp_path, monk
     from yeto import launcher
     from yeto.launch.syncer import syncer_command
 
-    args = _args(tmp_path, monkeypatch, TWO_ISLANDS)
+    args = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-data-split", "stride")
     launcher._prepare_rl_args(args)
     assert "--dispense" not in syncer_command(args, 2)
+
+
+def test_auto_takes_the_dispenser_where_the_launch_can_use_it_else_the_row_slots(
+        tmp_path, monkeypatch, capsys):
+    """S27 G-DH: the default (auto) is the dispenser since its GPU checks; a launch
+    the dispenser does not cover falls back to the row slots and says why."""
+    from yeto import launcher
+    from yeto.launch.syncer import syncer_command
+
+    args = _args(tmp_path, monkeypatch, TWO_ISLANDS)
+    launcher._prepare_rl_args(args)
+    plan = launcher.dry_run_plan(args)
+    assert plan["data_split"]["mode"] == DISPENSE and plan["data_split"]["requested"] == "auto"
+    assert all("--rl-data-dispense" in i["learner_command"] for i in plan["island_requests"])
+    assert " --dispense " in syncer_command(args, 2)
+    assert "data split (dispense)" in capsys.readouterr().err
+    cut = _args(tmp_path, monkeypatch, TWO_ISLANDS, "--rl-cut-every", "2",
+                "--rl-checkpoint-store", str(tmp_path / "store"))
+    launcher._prepare_rl_args(cut)
+    plan = launcher.dry_run_plan(cut)
+    assert plan["data_split"]["mode"] == STRIDE
+    assert "no dispenser: --rl-cut-every" in plan["data_split"]["reason"]
+    assert [_flag(i["learner_command"], "--rl-data-slot") for i in plan["island_requests"]] == ["0/2", "1/2"]
+    assert "--dispense" not in syncer_command(cut, 2)
+    assert "no dispenser: --rl-cut-every" in capsys.readouterr().err
+    # one island: every row, no dispenser
+    single = _args(tmp_path, monkeypatch, "modal:1xh100")
+    launcher._prepare_rl_args(single)
+    assert launcher.dry_run_plan(single)["data_split"]["mode"] != DISPENSE
 
 
 # --------------------------------------------------------------- island side
@@ -259,3 +289,57 @@ def test_two_miles_islands_and_a_relaunch_share_the_rows(syncer_binary, tmp_path
     finally:
         hook._CURRENT = None
         syncer.stop()
+
+
+# ------------------------------------------- auto falls back to the row slots, byte for byte
+
+ASYNC_FULL = ("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
+              "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", "e" * 64, "--fragments", "4",
+              "--rl-sync-full-parameter-rounds", "async")
+UNSUPPORTED = {
+    # path the dispenser does not cover -> extra launch args (2 islands each)
+    "verl": ("--rl-backend", "verl"),
+    "miles_fully_async": ("--rl-max-policy-age", "1", "--rl-algorithm-spec",
+                          str(ROOT / "tools/eval/efficiency/algo-eff-miles.json")),
+    "island_round_cuts": ("--rl-cut-every", "2", "--rl-checkpoint-store", "/tmp/gdh-store"),
+    "sharded_head": ASYNC_FULL + ("--syncer-shards", "2"),
+}
+
+
+def _commands(tmp_path, monkeypatch, extra):
+    from yeto import launcher
+    from yeto.launch.syncer import syncer_command
+
+    args = _args(tmp_path, monkeypatch, "modal:2xh100,modal:2xh100", *extra)
+    launcher._prepare_rl_args(args)
+    plan = launcher.dry_run_plan(args)
+    islands = [i["learner_command"] for i in plan["island_requests"]]
+    return plan["data_split"], islands, syncer_command(args, 2)
+
+
+@pytest.mark.parametrize("path", sorted(UNSUPPORTED))
+def test_auto_on_a_path_the_dispenser_does_not_cover_is_byte_identical_to_stride(
+        tmp_path, monkeypatch, capsys, path):
+    """S27 G-DH: before the default change, auto meant stride. On every path the
+    dispenser does not cover, auto now plans stride again (no error) and names the
+    reason, and the island and syncer commands are byte-identical to stride's."""
+    split, islands, syncer = _commands(tmp_path, monkeypatch, UNSUPPORTED[path])
+    err = capsys.readouterr().err
+    stride_split, stride_islands, stride_syncer = _commands(
+        tmp_path, monkeypatch, UNSUPPORTED[path] + ("--rl-data-split", "stride"))
+    assert split["mode"] == STRIDE and split["requested"] == "auto"
+    assert split["reason"].startswith("no dispenser: ")
+    assert "data split (stride)" in err and "no dispenser: " in err
+    assert islands == stride_islands
+    assert syncer == stride_syncer and "--dispense" not in syncer
+    assert all("--rl-data-dispense" not in c for c in islands)
+
+
+def test_explicit_dispense_on_those_paths_is_still_refused(tmp_path, monkeypatch):
+    from yeto import launcher
+
+    for path in ("verl", "miles_fully_async", "island_round_cuts", "sharded_head"):
+        args = _args(tmp_path, monkeypatch, "modal:2xh100,modal:2xh100",
+                     *UNSUPPORTED[path], "--rl-data-split", "dispense")
+        with pytest.raises(ValueError):
+            launcher._prepare_rl_args(args)
