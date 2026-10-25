@@ -294,7 +294,6 @@ fn head_memory_measured_scaled_down() {
         .unwrap();
     st.commit_merge(delta).unwrap();
     snapshot.save(&path).unwrap();
-    drop(snapshot);
     let snapshot_peak = units(meter::peak_above(base));
     println!(
         "async checkpoint: encoded bytes {encoded:.2}, \

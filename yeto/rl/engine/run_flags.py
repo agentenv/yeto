@@ -141,6 +141,14 @@ def _flag(layers: frozenset[str], options: tuple[str, ...], kwargs: dict[str, An
                   MappingProxyType(dict(island or {})), cli_aliases)
 
 
+def _step_list(text: str) -> tuple[int, ...]:
+    """``T1,T2,...``: comma-separated integer steps (range checks are the launcher's)."""
+    try:
+        return tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected comma-separated integer steps, got {text!r}") from None
+
+
 def cli_flag(*options: str, **kwargs: Any) -> RlFlag:
     """A flag only ``yeto launch`` accepts (the launcher consumes it)."""
 
@@ -1169,6 +1177,19 @@ _SYNC = (
         help="full-parameter only: syncer checkpoint interval in fragment steps "
         "(1, or a multiple of --fragments). Above 1, only checkpointed steps are "
         "persisted before their broadcast; a crash resumes at the newest checkpoint",
+    ),
+    cli_flag(
+        "--rl-sync-checkpoint-at-steps",
+        type=_step_list,
+        default=None,
+        metavar="T1,T2,...",
+        help="full-parameter with --rl-sync-full-parameter-rounds async: the syncer also "
+        "writes the global state at these global steps to <checkpoint>.step-<t> on a "
+        "background thread while rounds keep merging (logs 'eval checkpoint written "
+        "step=<t> path=<p> ...' once the file is durable). A global step is one fragment "
+        "merge, the step= of the syncer log; a run has --total-steps x --fragments of them. "
+        "Comma-separated, strictly increasing, below that total (the final checkpoint holds "
+        "the last step); needs --rl-sync-checkpoint-every above 1",
     ),
     cli_flag(
         "--rl-sync-async-checkpoint",

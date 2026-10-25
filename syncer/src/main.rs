@@ -9,6 +9,7 @@ mod membership;
 mod recovery;
 mod merge;
 mod downlink;
+mod eval_checkpoint;
 mod protocol;
 mod server;
 mod state;
@@ -128,6 +129,12 @@ struct Args {
     /// Write the snapshot every N outer steps (0 disables).
     #[arg(long, default_value_t = 8)]
     checkpoint_every: u64,
+    /// Also write the cut at these global steps (the `step=` of the "outer
+    /// step" log; comma-separated, strictly increasing, below --total-steps)
+    /// to `<checkpoint-path>.step-<t>`, on a background thread while rounds
+    /// keep merging. --resume never reads these files.
+    #[arg(long, value_delimiter = ',')]
+    checkpoint_at_steps: Vec<u64>,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -396,6 +403,7 @@ fn main() -> anyhow::Result<()> {
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
+        checkpoint_at_steps: args.checkpoint_at_steps,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
@@ -486,6 +494,18 @@ mod tests {
         .unwrap();
         assert_eq!(sweep.policy_sweep_fragments, Some(4));
         assert_eq!(sweep.total_steps, 8);
+    }
+
+    #[test]
+    fn checkpoint_at_steps_is_a_comma_separated_step_list() {
+        let base = ["yeto-syncer", "--learners", "1", "--total-steps", "200"];
+        assert!(Args::try_parse_from(base).unwrap().checkpoint_at_steps.is_empty());
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,149,190"]);
+        assert_eq!(Args::try_parse_from(argv).unwrap().checkpoint_at_steps, vec![75, 149, 190]);
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,x"]);
+        assert!(Args::try_parse_from(argv).is_err());
     }
 
     #[test]

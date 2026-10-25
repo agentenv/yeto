@@ -532,6 +532,26 @@ coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the
 periodic interval still leaves an atomic final checkpoint.
 
+`--checkpoint-at-steps T1,T2,...` (launcher: `--rl-sync-checkpoint-at-steps`,
+asynchronous full-parameter rounds) also writes the cut at each listed global
+step `t` (one fragment merge, the `step=` of the `outer step` log, the unit of
+`--total-steps`) to `<checkpoint-path>.step-<t>`. The scheduler takes a shared
+copy-on-write snapshot right after step `t` commits and a background thread
+writes it through `<checkpoint-path>.step-<t>.tmp`, fsync and rename, while
+later rounds keep merging and broadcasting; the file holds the same bytes as a
+checkpoint written synchronously at `t`. A commit during the write copies a
+fragment only if the writer has not written it yet. One write runs at a time:
+a step that comes due earlier waits for it, and so does the final checkpoint.
+The syncer logs `eval checkpoint started step=<t> path=<p>`, then
+`eval checkpoint written step=<t> path=<p> seconds=<s> bytes=<n>
+copied_fragments=<k>` once the file is durable, or
+`eval checkpoint failed step=<t> path=<p> error=<e>` (training continues; the
+temporary is removed). The steps must be strictly increasing and below
+`--total-steps`; policy sweeps, `--checkpoint-every 1` and sharded heads are
+refused. `--resume` reads only `--checkpoint-path`; a resumed run skips the
+listed steps its cut has passed and rewrites the later ones. The list is part
+of the semantic profile hash only when set.
+
 When `--mark-final-checkpoint` is explicitly enabled, the syncer creates
 `<checkpoint-path>.final` only after that terminal checkpoint write. The
 marker contains `YETO_FINAL_V1` and the checkpoint `global_step`; periodic,

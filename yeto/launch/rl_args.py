@@ -177,6 +177,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
     ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
+    ("rl_sync_checkpoint_at_steps", None, "--rl-sync-checkpoint-at-steps"),
     ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
     ("rl_sync_fragment_max_bytes", 2 << 30, "--rl-sync-fragment-max-bytes"),
     ("rl_sync_push_int4_block", 128, "--rl-sync-push-int4-block"),
@@ -221,6 +222,32 @@ def _check_bcast_delta(args) -> None:
 # S27 P2: asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
 # fragment rounds in flight by default and at most
 # FULL_PARAMETER_ASYNC_MAX_PIPELINE (60); both live in rl.engine.run_flags.
+
+
+def _eval_checkpoint_problems(args, *, async_rounds: bool, checkpoint_every: int) -> list[str]:
+    """``--rl-sync-checkpoint-at-steps``: global steps (fragment merges, the
+    syncer's ``step=``) whose cut the syncer also writes to
+    ``<checkpoint>.step-<t>`` off its scheduler (syncer ``--checkpoint-at-steps``,
+    which refuses the same combinations)."""
+    steps = tuple(getattr(args, "rl_sync_checkpoint_at_steps", None) or ())
+    if not steps:
+        return []
+    if not async_rounds:
+        # A sweep checkpoint is the commit record of its broadcast.
+        return ["--rl-sync-checkpoint-at-steps only with --rl-sync-full-parameter-rounds async"]
+    problems = []
+    total = args.total_steps * args.fragments  # the syncer's --total-steps
+    if steps[0] < 1 or any(a >= b for a, b in zip(steps, steps[1:])) or steps[-1] >= total:
+        problems.append(f"--rl-sync-checkpoint-at-steps strictly increasing within 1..{total - 1} "
+                        f"(global steps: --total-steps x --fragments = {total}; the final checkpoint "
+                        "holds the last one)")
+    if checkpoint_every == 1:
+        problems.append("--rl-sync-checkpoint-every above 1 with --rl-sync-checkpoint-at-steps "
+                        "(1 writes every step before its broadcast)")
+    if int(getattr(args, "syncer_shards", None) or 1) > 1:
+        problems.append("no --syncer-shards above 1 with --rl-sync-checkpoint-at-steps (no shard "
+                        "holds the whole model at one step)")
+    return problems
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
@@ -297,6 +324,8 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
             problems.append("no --rl-sync-overlap (sweep only)")
     elif checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
         problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
+    problems += _eval_checkpoint_problems(args, async_rounds=async_rounds,
+                                          checkpoint_every=checkpoint_every)
     fragment_max_bytes = getattr(args, "rl_sync_fragment_max_bytes", 2 << 30)
     if type(fragment_max_bytes) is not int or not 4 <= fragment_max_bytes <= 2 << 30 or fragment_max_bytes % 4:
         problems.append("--rl-sync-fragment-max-bytes a multiple of 4 between 4 and 2147483648")
