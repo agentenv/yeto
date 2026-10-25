@@ -263,6 +263,8 @@ _NON_RL_LITERALS = frozenset({
     "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
     "--max-base-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
+    # syncer: S27 G-EA spot rollout (subscribers, sample relay)
+    "--max-subscribers", "--sample-relay",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
     "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--object-store-memory",
     "--output-dir",

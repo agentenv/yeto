@@ -10,11 +10,14 @@ mod recovery;
 mod merge;
 mod dispense;
 mod dispense_service;
+mod members;
 mod downlink;
 mod eval_checkpoint;
 mod protocol;
+mod sample_relay;
 mod server;
 mod state;
+mod subscriber;
 
 use clap::Parser;
 
@@ -259,8 +262,9 @@ struct Args {
     /// dispenser"). Off by default.
     #[arg(long)]
     dispense: bool,
-    /// Dispenser lease: an island process silent this long loses its
-    /// unreported rows to the other islands.
+    /// Lease of the island member table (dispenser, spot subscribers, sample
+    /// relay producers): an island process silent this long on all of them
+    /// is retired and loses its unreported rows to the other islands.
     #[arg(long, default_value_t = 300.0)]
     dispense_lease_s: f64,
     /// Passes over the rows before the data ends; unset = unlimited (every
@@ -283,6 +287,26 @@ struct Args {
     shard_index: u32,
     #[arg(long, default_value_t = 1)]
     shard_count: u32,
+    /// S27 G-EA: admit up to N receive-only subscribers at once (sampler
+    /// islands on any cloud that follow the global weights as bf16
+    /// broadcasts; never in quorum, roster or final cut; their ids are
+    /// 2^31 + 31 bits of their sampler id's SHA-256, as the task dispenser's
+    /// sampler holders). 0 = off: SUBSCRIBE is refused.
+    #[arg(long, default_value_t = 0)]
+    max_subscribers: u32,
+    /// S27 G-EA: serve the sample relay (sampler islands PUT rollout
+    /// samples, a training island TAKEs them) on this port. Off by default.
+    #[arg(long)]
+    sample_relay: bool,
+    /// Sample relay: most items held per channel.
+    #[arg(long, default_value_t = 4096)]
+    sample_relay_max_items: usize,
+    /// Sample relay: most bytes held per channel, in MiB.
+    #[arg(long, default_value_t = 2048)]
+    sample_relay_max_mib: u64,
+    /// Sample relay: largest item, in MiB.
+    #[arg(long, default_value_t = 64)]
+    sample_relay_max_item_mib: u64,
 }
 
 /// Membership options of the fragment-round server; every unset flag keeps
@@ -339,6 +363,7 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     let dispense = dispense_config(&args)?;
+    let member_lease = member_lease(&args)?;
     let shard = args.shard_plan()?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
@@ -450,11 +475,30 @@ fn main() -> anyhow::Result<()> {
         final_cut_manifest_only: args.final_cut_payload == "manifest",
         dispense,
         dispense_log: args.dispense_log.clone(),
+        member_lease,
+        max_subscribers: args.max_subscribers,
+        sample_relay: args.sample_relay.then_some(sample_relay::RelayConfig {
+            max_items: args.sample_relay_max_items,
+            max_bytes: args.sample_relay_max_mib << 20,
+            max_item_bytes: args.sample_relay_max_item_mib << 20,
+        }),
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+/// The island member table's lease (`--dispense-lease-s`), checked when a
+/// service that uses the table is on.
+fn member_lease(args: &Args) -> anyhow::Result<std::time::Duration> {
+    if args.dispense_lease_s.is_finite() && args.dispense_lease_s > 0.0 {
+        return Ok(std::time::Duration::from_secs_f64(args.dispense_lease_s));
+    }
+    if args.dispense || args.max_subscribers > 0 || args.sample_relay {
+        anyhow::bail!("--dispense-lease-s must be positive");
+    }
+    Ok(std::time::Duration::from_secs(300))
 }
 
 fn dispense_config(args: &Args) -> anyhow::Result<Option<dispense::DispenseConfig>> {

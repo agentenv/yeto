@@ -754,6 +754,27 @@ _RESUME = (
     shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
                 help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
                 "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
+    # S27 G-EA: spot rollout islands on any cloud (yeto.rl.spot_rollout)
+    shared_flag("--rl-spot-subscribers", type=int, default=0, metavar="N",
+                help="the actor syncer admits N receive-only subscribers (spot sampler islands "
+                "on any cloud that follow the merged weights as bf16 broadcasts; never in "
+                "quorum, roster or final cut) and island 0 publishes its fragment layout on the "
+                "head's relay board. 0 (default): off, commands unchanged"),
+    shared_flag("--rl-sample-relay", action="store_true", default=False,
+                help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
+                "reads the spot samplers' groups from it (a local buffer filled by the relay "
+                "pump) and makes no policy releases. Off by default"),
+    shared_flag("--rl-spot-syncer", default=None, metavar="HOST:PORT",
+                help="--rl-sample-role sampler: follow the weights as a receive-only subscriber of "
+                "this actor syncer (no policy releases from the store) and write the groups to "
+                "its sample relay (channel --rl-spot-channel); for a sampler on another cloud. "
+                "Default off"),
+    shared_flag("--rl-spot-channel", type=int, default=0, metavar="N",
+                help="--rl-spot-syncer: the relay channel (the training island's learner id) "
+                "this sampler feeds; default 0"),
+    shared_flag("--rl-sample-relay-prefetch", type=int, default=None, metavar="GROUPS",
+                help="--rl-sample-relay trainer: groups the relay pump keeps unread in the local "
+                "buffer (default 2 rounds); the samplers' backlog is what is left in the relay"),
 )
 
 _SCHEDULING = (
@@ -942,6 +963,27 @@ _SCHEDULING = (
     shared_flag("--rl-dispense-prefetch-blocks", type=int, default=2, metavar="N",
                 help="--rl-data-split dispense: blocks (rounds of rows) an island keeps ready "
                 "ahead, so it trains on through a short head outage (default 2)"),
+    # S27 P3: the dispenser's streams (--data-mix sources, task labels)
+    cli_flag("--rl-island-task-labels", default=None, metavar="SPEC",
+             help="--rl-data-split dispense: island M takes only the rows whose task_label "
+             "(top level or metadata) is one of its labels: 'l0=web;l1=pwn,crypto' ('-' "
+             "matches rows without a label; an island not listed takes every row). The "
+             "launch fails when a row label is taken by no island or a listed label is on "
+             "no row. The rows are dispensed per (source, label) stream"),
+    shared_flag("--rl-dispense-mix", default=None, metavar="W,W,...",
+                help="the weight of each --data-mix source, in order (set by the launcher from "
+                "--data-mix; not a launch option)"),
+    shared_flag("--rl-dispense-by-label", action="store_true", default=False,
+                help="the dispenser's streams split the rows by task_label (set by the launcher "
+                "from --rl-island-task-labels; not a launch option)"),
+    shared_flag("--rl-dispense-labels", default=None, metavar="L,L,...",
+                help="this island takes only the rows with these task labels (set by the "
+                "launcher from --rl-island-task-labels; not a launch option)"),
+    # S27 P4: a sampler island claims its rows from a dispenser
+    shared_flag("--rl-dispense-addr", default=None, metavar="HOST:PORT",
+                help="the dispenser this sampler island claims its rows from (set by the "
+                "launcher for a synced group's samplers: the actor syncer; a sampler launch "
+                "that joins a running group gives the group's actor syncer address)"),
     shared_flag("--rl-data-slot", default=None, metavar="I/N",
                 help="this training island reads only the rows i of --data with i %% N == I "
                 "(set by the launcher from --rl-data-split; not a launch option)"),

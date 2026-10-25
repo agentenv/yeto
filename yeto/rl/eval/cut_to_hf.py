@@ -95,6 +95,22 @@ def _base_weight_names(base: Path) -> set[str] | None:
     return None
 
 
+def check_base_names(tensors: dict[str, Any], base: Path, config: Mapping[str, Any], what: str) -> None:
+    """The converted HF names must equal the base model's weight names (a tied
+    ``lm_head.weight`` is dropped from both); no check when the base directory
+    names no weights. Raises :class:`MaterializeError` on a difference."""
+    expected = _base_weight_names(base)
+    if expected is None:
+        return
+    if config.get("tie_word_embeddings"):
+        expected.discard("lm_head.weight")
+        tensors.pop("lm_head.weight", None)
+    missing, extra = sorted(expected - set(tensors)), sorted(set(tensors) - expected)
+    if missing or extra:
+        raise MaterializeError(f"{what}: HF names differ from the base model "
+                               f"(missing {missing[:5]}, extra {extra[:5]})")
+
+
 def _coord(f: Any) -> tuple[int, int, int, int]:
     c = f.coord
     return int(c.get("pp", 0)), int(c.get("tp", 0)), int(c.get("ep", 0)), int(c.get("dp", 0))
@@ -184,15 +200,7 @@ def materialize_cut(cut_path: str | os.PathLike[str], *, base_model: str | os.Pa
         dtype = getattr(torch, str(name), None) if name else None
     tensors = convert_model(merged_model(shards), megatron_args(config), convert, dtype=dtype)
     del shards
-    expected = _base_weight_names(base)
-    if expected is not None:
-        if config.get("tie_word_embeddings"):
-            expected.discard("lm_head.weight")
-            tensors.pop("lm_head.weight", None)
-        missing, extra = sorted(expected - set(tensors)), sorted(set(tensors) - expected)
-        if missing or extra:
-            raise MaterializeError(f"cut {cut_path.name}: HF names differ from the base model "
-                                   f"(missing {missing[:5]}, extra {extra[:5]})")
+    check_base_names(tensors, base, config, f"cut {cut_path.name}")
 
     staging = target.with_name(f".{target.name}.tmp")
     shutil.rmtree(staging, ignore_errors=True)

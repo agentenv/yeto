@@ -92,7 +92,9 @@ INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
-               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV)
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
+               # S27 G-EA: the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
+               "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH")
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -196,6 +198,13 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
     from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index
 
     env = os.environ if environ is None else environ
+    if sampler:
+        # S27 G-EA: a spot sampler writes its groups to the head's relay (env unset: no change)
+        from yeto.rl.spot_rollout.relay_buffer import relay_sampler_buffer
+
+        relay = relay_sampler_buffer(env)
+        if relay is not None:
+            return relay
     root = env.get(BUFFER_ROOT_ENV)
     if not root:
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")
@@ -339,10 +348,12 @@ class SamplerRoundWriter:
         return cursor
 
     def write_round(self, rollout_id: int, groups: Sequence[tuple[str, list[dict[str, Any]]]],
-                    data_cursor: Mapping[str, int] | None) -> int:
+                    data_cursor: Mapping[str, int] | None,
+                    positions: Sequence[int | None] | None = None) -> int:
         """Write ``groups`` (``(group key, samples)``, aborted groups already left
         out) of round ``rollout_id``, with one store commit at the end; returns the
-        groups written."""
+        groups written (the first ones, in order). ``positions`` (S27 P4): each
+        group's task-dispenser position, kept in its round record."""
         from yeto.rl.engine.sampler_resume import SamplerRound
 
         if self.guard is not None:
@@ -357,7 +368,8 @@ class SamplerRoundWriter:
                     self.dropped_groups += len(groups) - i
                     break
                 record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
-                                      data_cursor=data_cursor, last=i == len(groups) - 1)
+                                      data_cursor=data_cursor, last=i == len(groups) - 1,
+                                      dispense_position=None if positions is None else positions[i])
                 self._writer.write(samples, group_key=key, sampler_round=record.record())
                 written += 1
         if written and self.guard is not None:
@@ -382,6 +394,8 @@ class TakeReport:
     read_s: float = 0.0
     decode_s: float = 0.0
     prefetched: int = 0
+    # S27 P4: task-dispenser positions of the stale groups (their sampler had a dispenser)
+    stale_positions: list[int] = field(default_factory=list)
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -470,6 +484,7 @@ class BatchReader:
         chosen: list[tuple[int, Future, bool]] = []  # (position, read, read ahead)
         versions: dict[int, int] = {}
         stale = 0
+        stale_positions: list[int] = []
         select_s = read_s = 0.0
         current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else int(current_version) - self.max_policy_age
@@ -482,6 +497,9 @@ class BatchReader:
             for item in selected:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
+                    position = (item.entry.sampler_round or {}).get("dispense_position")
+                    if isinstance(position, int) and not isinstance(position, bool):
+                        stale_positions.append(position)
                     continue
                 ref = item.entry.payload_ref
                 read = ahead.pop(ref, None)
@@ -515,7 +533,8 @@ class BatchReader:
                                start=start, end=end, behavior_versions=dict(sorted(versions.items())),
                                wait_s=round(self.clock() - started, 3), select_s=round(select_s, 3),
                                read_s=round(read_s, 3), decode_s=round(decode_s, 3),
-                               prefetched=sum(1 for _, _, early in chosen if early))
+                               prefetched=sum(1 for _, _, early in chosen if early),
+                               stale_positions=stale_positions)
 
     def _settle(self, reads: list[Future]) -> float:
         """Wait for ``reads`` (their errors surface at ``result()``); the seconds waited."""

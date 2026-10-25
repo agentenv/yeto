@@ -29,20 +29,62 @@
 //! once (an island reports a position when its group enters a training
 //! batch). Islands without a dispenser never see any of this.
 //!
+//! Streams (S27 P3, `--data-mix` and `--rl-island-task-labels`): the rows
+//! may be split into *streams* (one per source data set and task label). A
+//! position then carries its stream in its high bits ([`STREAM_SHIFT`]):
+//! position `(s << 40) | k` is the `k`-th position of stream `s`, i.e. row
+//! `order_s(k / rows_s)[k % rows_s]` of that stream's rows. Fresh positions
+//! are interleaved across the streams by their integer weights with
+//! Tijdeman's earliest-deadline rule: when every claiming holder accepts
+//! every stream, after any number `n` of fresh positions stream `s` has
+//! given out within one position of `n * w_s / sum(w)` (a bound of
+//! `1 - 1 / (2k - 2)` for `k` streams). A holder may accept only some
+//! streams (task label affinity); it then gets only their positions, and the
+//! mix of the positions given out follows the claims. One stream with
+//! weight 1 and no name is exactly the P2 dispenser (positions are row
+//! sequence numbers).
+//!
 //! Pure state machine like `membership.rs`: no sockets, no files; every
 //! clock reading is passed in. Events for the `task-dispense.jsonl` log are
 //! collected in `take_events`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 
-/// Magic and version of the persisted dispenser record.
-const PERSIST_MAGIC: &[u8; 4] = b"YDS1";
-/// Retired incarnations remembered (fencing). Incarnations are random
-/// 64-bit values; this only has to cover realistic restart storms.
-const RETIRED_LIMIT: usize = 4096;
+pub use crate::members::Holder;
+use crate::members::{Retired, SharedMembers, RETIRED_LIMIT};
+
+/// Magic and version of the persisted dispenser record (YDS1: the P2 record,
+/// one stream; still restored).
+const PERSIST_MAGIC_V1: &[u8; 4] = b"YDS1";
+const PERSIST_MAGIC: &[u8; 4] = b"YDS2";
+/// A position's stream is its bits from here up (module doc).
+pub const STREAM_SHIFT: u32 = 40;
+/// Positions per stream (the local part of a position).
+pub const STREAM_POSITIONS: u64 = 1 << STREAM_SHIFT;
+/// Streams one run may declare.
+pub const MAX_STREAMS: usize = 256;
+/// Bytes of one stream name (UTF-8, no control characters).
+pub const MAX_STREAM_NAME: usize = 64;
+/// Largest stream weight (keeps the interleave arithmetic inside i128).
+pub const MAX_STREAM_WEIGHT: u64 = 1 << 62;
+
+/// The stream of a position.
+pub fn stream_of(position: u64) -> usize {
+    (position >> STREAM_SHIFT) as usize
+}
+
+/// The position number inside its stream.
+pub fn local_of(position: u64) -> u64 {
+    position & (STREAM_POSITIONS - 1)
+}
+
+/// The position `local` of stream `stream`.
+pub fn position_of(stream: usize, local: u64) -> u64 {
+    ((stream as u64) << STREAM_SHIFT) | local
+}
 /// Live holders admitted at once (one per island process).
 const LIVE_LIMIT: usize = 4096;
 /// Hint for a WAIT answer: when to claim again.
@@ -88,11 +130,52 @@ impl DispenseConfig {
     }
 }
 
-/// One island process.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Holder {
-    pub learner_id: u32,
-    pub incarnation: u64,
+/// One stream of the run's rows (module doc): its row count, its integer
+/// weight in the interleave of fresh positions, and its name (the source
+/// data set and task label, for the log; "" for the single P2 stream).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamDecl {
+    pub rows: u64,
+    pub weight: u64,
+    pub name: String,
+}
+
+/// What an island declares about its data: every island of a run must
+/// declare the same streams and fingerprint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataDecl {
+    pub streams: Vec<StreamDecl>,
+    pub fingerprint: [u8; 32],
+}
+
+impl DataDecl {
+    /// The P2 data: one stream of `rows` rows.
+    pub fn single(rows: u64, fingerprint: [u8; 32]) -> Self {
+        Self { streams: vec![StreamDecl { rows, weight: 1, name: String::new() }], fingerprint }
+    }
+
+
+    pub fn total_rows(&self) -> u64 {
+        self.streams.iter().map(|s| s.rows).sum()
+    }
+
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.streams.is_empty() || self.streams.len() > MAX_STREAMS {
+            return Err(format!("{} streams (1..={MAX_STREAMS} allowed)", self.streams.len()));
+        }
+        for (i, s) in self.streams.iter().enumerate() {
+            if s.rows == 0 || s.rows >= STREAM_POSITIONS {
+                return Err(format!("stream {i} declares {} rows", s.rows));
+            }
+            if s.weight == 0 || s.weight > MAX_STREAM_WEIGHT {
+                return Err(format!("stream {i} has weight {} (1..=2^62 allowed)", s.weight));
+            }
+            if s.name.len() > MAX_STREAM_NAME || s.name.chars().any(char::is_control) {
+                return Err(format!("stream {i} has a bad name ({} bytes)", s.name.len()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Positions `[start, end)`, each requeued `redo` times so far.
@@ -219,9 +302,11 @@ impl ReclaimReason {
 /// One line of `task-dispense.jsonl` (without time and syncer epoch).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DispenseEvent {
-    Open { holder: Holder, superseded: Option<u64>, reconnect: bool, rows: u64 },
+    Open { holder: Holder, superseded: Option<u64>, reconnect: bool, rows: u64, accept: Option<Vec<usize>> },
+    /// The run's streams, once (the first island fixed them, or a restore).
+    Streams { streams: Vec<StreamDecl>, fingerprint: [u8; 32] },
     Grant { holder: Holder, block: u64, ranges: Vec<(u64, u64)>, first_pass: u64, last_pass: u64 },
-    PassStart { pass: u64 },
+    PassStart { stream: usize, pass: u64 },
     Wait { holder: Holder },
     End { holder: Holder },
     Report { holder: Holder, block: u64, kind: ReportKind, ranges: Vec<(u64, u64)>, exhausted: Vec<(u64, u64)> },
@@ -242,23 +327,59 @@ fn count(ranges: &[(u64, u64)]) -> u64 {
     ranges.iter().map(|(a, b)| b - a).sum()
 }
 
+/// A JSON string literal (names are UTF-8 without control characters).
+fn json_str(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 impl DispenseEvent {
     /// The JSON fields of this event (no braces), `"kind"` first.
     pub fn json_fields(&self) -> String {
         let h = |h: &Holder| format!("\"island_id\":{},\"incarnation\":\"{:016x}\"", h.learner_id, h.incarnation);
         match self {
-            Self::Open { holder, superseded, reconnect, rows } => format!(
-                "\"kind\":\"dispense_open\",{},\"rows\":{rows},\"reconnect\":{reconnect},\"superseded\":{}",
+            Self::Open { holder, superseded, reconnect, rows, accept } => format!(
+                "\"kind\":\"dispense_open\",{},\"rows\":{rows},\"reconnect\":{reconnect},\"superseded\":{},\"accept\":{}",
                 h(holder),
-                superseded.map_or("null".to_string(), |s| format!("\"{s:016x}\""))
+                superseded.map_or("null".to_string(), |s| format!("\"{s:016x}\"")),
+                accept.as_ref().map_or("null".to_string(), |a| format!(
+                    "[{}]",
+                    a.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")
+                ))
             ),
+            Self::Streams { streams, fingerprint } => {
+                let items: Vec<String> = streams
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        format!("{{\"stream\":{i},\"name\":{},\"rows\":{},\"weight\":{}}}", json_str(&s.name), s.rows, s.weight)
+                    })
+                    .collect();
+                format!(
+                    "\"kind\":\"dispense_streams\",\"stream_shift\":{STREAM_SHIFT},\"fingerprint\":\"{}\",\"streams\":[{}]",
+                    hex8(fingerprint),
+                    items.join(",")
+                )
+            }
             Self::Grant { holder, block, ranges, first_pass, last_pass } => format!(
                 "\"kind\":\"dispense_grant\",{},\"block\":{block},\"positions\":{},\"ranges\":{},\"first_pass\":{first_pass},\"last_pass\":{last_pass}",
                 h(holder),
                 count(ranges),
                 ranges_json(ranges)
             ),
-            Self::PassStart { pass } => format!("\"kind\":\"dispense_pass_start\",\"pass\":{pass}"),
+            Self::PassStart { stream, pass } => {
+                format!("\"kind\":\"dispense_pass_start\",\"stream\":{stream},\"pass\":{pass}")
+            }
             Self::Wait { holder } => format!("\"kind\":\"dispense_wait\",{}", h(holder)),
             Self::End { holder } => format!("\"kind\":\"dispense_end\",{}", h(holder)),
             Self::Report { holder, block, kind, ranges, exhausted } => format!(
@@ -308,14 +429,17 @@ enum Answer {
     Report(ReportTotals),
 }
 
+/// The dispenser's state of a live holder (its lease is in [`Members`]).
 #[derive(Debug)]
 struct Live {
-    last_seen: Instant,
     blocks: BTreeSet<u64>,
     /// A WAIT was logged since the last grant (one log line per wait period).
     waiting: bool,
     /// Sequence number and answer of the latest CLAIM / REPORT.
     last: Option<(u64, Answer)>,
+    /// The streams this holder takes positions of, ascending (every stream
+    /// unless the island declared its task labels).
+    accept: Vec<usize>,
 }
 
 /// Cumulative counters (positions).
@@ -330,41 +454,53 @@ pub struct Totals {
     pub reclaimed: u64,
 }
 
+/// The give-out state of one stream.
+#[derive(Debug, Default)]
+struct StreamState {
+    /// Next never-given local position.
+    next: u64,
+    /// Positions of this stream to give out before fresh ones, front first.
+    queue: VecDeque<Span>,
+    /// Passes of this stream whose first fresh position was given out.
+    passes_started: u64,
+}
+
 #[derive(Debug)]
 pub struct Dispenser {
     cfg: DispenseConfig,
-    /// Row count and data fingerprint, fixed by the first island (or the
+    /// Streams and data fingerprint, fixed by the first island (or the
     /// restored record); every later island must declare the same.
-    data: Option<(u64, [u8; 32])>,
-    /// Next never-given position.
-    next: u64,
-    /// Positions to give out before fresh ones, front first.
-    queue: VecDeque<Span>,
+    data: Option<DataDecl>,
+    /// One per declared stream (empty until the data is fixed).
+    streams: Vec<StreamState>,
     blocks: BTreeMap<u64, Block>,
     next_block: u64,
     live: BTreeMap<Holder, Live>,
-    /// Live incarnation per island.
-    current: HashMap<u32, u64>,
-    retired: (VecDeque<Holder>, std::collections::HashSet<Holder>),
-    /// Passes whose first fresh position was given out.
-    passes_started: u64,
+    /// Leases, current incarnations and fencing (`members.rs`): the syncer
+    /// process's one table, shared with the spot rollout subscribers and
+    /// sample relay; a member they retire loses its rows here too.
+    members: SharedMembers,
     pub totals: Totals,
     events: Vec<DispenseEvent>,
 }
 
 impl Dispenser {
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools; the syncer shares its table
     pub fn new(cfg: DispenseConfig) -> Self {
+        let members = crate::members::shared(cfg.lease);
+        Self::with_members(cfg, members)
+    }
+
+    /// A dispenser on the syncer's shared member table (its lease is the table's).
+    pub fn with_members(cfg: DispenseConfig, members: SharedMembers) -> Self {
         Self {
             cfg,
             data: None,
-            next: 0,
-            queue: VecDeque::new(),
+            streams: Vec::new(),
             blocks: BTreeMap::new(),
             next_block: 1,
             live: BTreeMap::new(),
-            current: HashMap::new(),
-            retired: (VecDeque::new(), Default::default()),
-            passes_started: 0,
+            members,
             totals: Totals::default(),
             events: Vec::new(),
         }
@@ -374,12 +510,15 @@ impl Dispenser {
         &self.cfg
     }
 
+    /// Rows of all streams (None until the data is fixed).
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn rows(&self) -> Option<u64> {
-        self.data.map(|(rows, _)| rows)
+        self.data.as_ref().map(DataDecl::total_rows)
     }
 
+    /// Fresh positions given out so far (all streams).
     pub fn next_position(&self) -> u64 {
-        self.next
+        self.streams.iter().map(|s| s.next).sum()
     }
 
     pub fn take_events(&mut self) -> Vec<DispenseEvent> {
@@ -391,13 +530,20 @@ impl Dispenser {
         self.live.contains_key(&holder)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn is_retired(&self, holder: Holder) -> bool {
-        self.retired.1.contains(&holder)
+        self.members.lock().unwrap().is_retired(holder)
     }
 
-    /// Positions waiting in the queue (returned, requeued, released).
+    /// The shared member table.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
+    pub fn members(&self) -> &SharedMembers {
+        &self.members
+    }
+
+    /// Positions waiting in the queues (returned, requeued, released).
     pub fn queued(&self) -> u64 {
-        self.queue.iter().map(Span::len).sum()
+        self.streams.iter().flat_map(|s| s.queue.iter()).map(Span::len).sum()
     }
 
     /// Positions held by live holders and not reported yet.
@@ -411,39 +557,42 @@ impl Dispenser {
         self.blocks.len()
     }
 
-    /// Exclusive end of the fresh positions (None: unlimited).
-    fn limit(&self) -> Option<u64> {
-        let rows = self.rows()?;
-        self.cfg.passes.map(|p| rows.saturating_mul(p))
+    fn stream_rows(&self, stream: usize) -> u64 {
+        self.data.as_ref().expect("an open holder fixed the data").streams[stream].rows
     }
 
-    fn retire(&mut self, holder: Holder) {
-        let (order, set) = &mut self.retired;
-        if set.insert(holder) {
-            order.push_back(holder);
-            while order.len() > RETIRED_LIMIT {
-                if let Some(old) = order.pop_front() {
-                    set.remove(&old);
-                }
-            }
+    /// Exclusive end of the fresh local positions of `stream`.
+    fn limit(&self, stream: usize) -> u64 {
+        let cap = STREAM_POSITIONS;
+        match self.cfg.passes {
+            Some(p) => self.stream_rows(stream).saturating_mul(p).min(cap),
+            None => cap,
         }
     }
 
-    /// Put spans back at the front of the queue, ascending.
+    fn exhausted(&self, stream: usize) -> bool {
+        self.streams[stream].next >= self.limit(stream)
+    }
+
+    fn retire(&mut self, holder: Holder, reason: Retired) {
+        self.members.lock().unwrap().retire(holder, reason);
+    }
+
+    /// Put spans back at the front of their streams' queues, ascending.
     fn push_front(&mut self, mut spans: Vec<Span>) {
         spans.sort_by_key(|s| s.start);
         for span in spans.into_iter().rev() {
-            self.queue.push_front(span);
+            self.streams[stream_of(span.start)].queue.push_front(span);
         }
     }
 
     /// Retire `holder` and return its unreported positions to the queue front.
     fn reclaim(&mut self, holder: Holder, reason: ReclaimReason) -> u64 {
         let Some(live) = self.live.remove(&holder) else { return 0 };
-        if self.current.get(&holder.learner_id) == Some(&holder.incarnation) {
-            self.current.remove(&holder.learner_id);
-        }
-        self.retire(holder);
+        self.retire(holder, match reason {
+            ReclaimReason::Expired => Retired::Expired,
+            ReclaimReason::Superseded => Retired::Superseded,
+        });
         let mut spans = Vec::new();
         for id in live.blocks {
             if let Some(block) = self.blocks.remove(&id) {
@@ -459,61 +608,130 @@ impl Dispenser {
         positions
     }
 
-    /// Admit an island process. `rows`/`fingerprint` describe its data.
+    /// Fix the run's data (the first island, or a restore).
+    fn fix_data(&mut self, data: DataDecl) {
+        self.streams = data.streams.iter().map(|_| StreamState::default()).collect();
+        self.events.push(DispenseEvent::Streams { streams: data.streams.clone(), fingerprint: data.fingerprint });
+        self.data = Some(data);
+    }
+
+    /// Admit an island process whose data is one stream of `rows` rows (P2).
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn open(&mut self, holder: Holder, rows: u64, fingerprint: [u8; 32], now: Instant) -> DResult<OpenOutcome> {
-        if self.is_retired(holder) {
+        self.open_with(holder, &DataDecl::single(rows, fingerprint), None, now)
+    }
+
+    /// Admit an island process. `data` describes its data; `accept` the
+    /// streams it takes positions of (None: every stream).
+    pub fn open_with(
+        &mut self,
+        holder: Holder,
+        data: &DataDecl,
+        accept: Option<&[u16]>,
+        now: Instant,
+    ) -> DResult<OpenOutcome> {
+        let retired = {
+            let members = self.members.lock().unwrap();
+            members.is_retired(holder).then(|| members.fenced_text(holder))
+        };
+        if let Some(text) = retired {
             self.events.push(DispenseEvent::Fenced { holder, request: "open" });
-            return Err(DispenseError::Fenced(format!(
-                "incarnation {:016x} of island {} is retired (expired, superseded or from before a restart)",
-                holder.incarnation, holder.learner_id
-            )));
+            return Err(DispenseError::Fenced(text));
         }
-        if rows == 0 {
+        if data.total_rows() == 0 {
             return Err(DispenseError::Refused("the island declares 0 rows".into()));
         }
-        match self.data {
-            Some((r, fp)) if r != rows || fp != fingerprint => {
+        data.validate().map_err(|m| DispenseError::Refused(format!("the island declares {m}")))?;
+        match &self.data {
+            Some(run) if run != data => {
                 return Err(DispenseError::Mismatch(format!(
-                    "island {} declares {rows} rows with fingerprint {}, the run has {r} rows with {}",
+                    "island {} declares {} rows in {} stream(s) with fingerprint {}, the run has {} rows in {} stream(s) with {}{}",
                     holder.learner_id,
-                    hex8(&fingerprint),
-                    hex8(&fp)
+                    data.total_rows(),
+                    data.streams.len(),
+                    hex8(&data.fingerprint),
+                    run.total_rows(),
+                    run.streams.len(),
+                    hex8(&run.fingerprint),
+                    if run.fingerprint == data.fingerprint { " (same rows, other streams or weights)" } else { "" }
                 )));
             }
             Some(_) => {}
-            None => self.data = Some((rows, fingerprint)),
+            None => self.fix_data(data.clone()),
         }
+        let streams = self.streams.len();
+        let accept_list: Vec<usize> = match accept {
+            None => (0..streams).collect(),
+            Some(ids) => {
+                let mut list: Vec<usize> = ids.iter().map(|&s| usize::from(s)).collect();
+                list.sort_unstable();
+                list.dedup();
+                if list.is_empty() {
+                    return Err(DispenseError::Refused("the island accepts no stream".into()));
+                }
+                if let Some(bad) = list.iter().find(|&&s| s >= streams) {
+                    return Err(DispenseError::Refused(format!("the island accepts stream {bad}; the run has {streams}")));
+                }
+                list
+            }
+        };
+        let logged_accept = (accept_list.len() < streams).then(|| accept_list.clone());
         if let Some(live) = self.live.get_mut(&holder) {
-            live.last_seen = now;
-            self.events.push(DispenseEvent::Open { holder, superseded: None, reconnect: true, rows });
+            self.members.lock().unwrap().touch(holder, now);
+            live.accept = accept_list;
+            self.events.push(DispenseEvent::Open {
+                holder,
+                superseded: None,
+                reconnect: true,
+                rows: data.total_rows(),
+                accept: logged_accept,
+            });
             return Ok(OpenOutcome::Reconnected);
         }
         if self.live.len() >= LIVE_LIMIT {
             return Err(DispenseError::Refused(format!("more than {LIVE_LIMIT} live islands")));
         }
-        let previous = self.current.get(&holder.learner_id).copied();
+        // Join the shared table: a new incarnation retires the id's current one,
+        // which may have joined here or on another channel; the same
+        // incarnation may already be a member through a subscriber or relay
+        // connection of this process (then nothing is superseded here).
+        self.members.lock().unwrap().join(holder, now);
+        let older: Vec<Holder> =
+            self.live.keys().copied().filter(|h| h.learner_id == holder.learner_id && *h != holder).collect();
+        let mut previous = None;
         let mut reclaimed = 0;
-        if let Some(incarnation) = previous {
-            reclaimed = self.reclaim(Holder { learner_id: holder.learner_id, incarnation }, ReclaimReason::Superseded);
+        for old in older {
+            reclaimed += self.reclaim(old, ReclaimReason::Superseded);
+            previous = Some(old.incarnation);
         }
-        self.current.insert(holder.learner_id, holder.incarnation);
-        self.live.insert(holder, Live { last_seen: now, blocks: BTreeSet::new(), waiting: false, last: None });
-        self.events.push(DispenseEvent::Open { holder, superseded: previous, reconnect: false, rows });
+        self.live.insert(holder, Live { blocks: BTreeSet::new(), waiting: false, last: None, accept: accept_list });
+        self.events.push(DispenseEvent::Open {
+            holder,
+            superseded: previous,
+            reconnect: false,
+            rows: data.total_rows(),
+            accept: logged_accept,
+        });
         Ok(OpenOutcome::Joined { superseded: previous, reclaimed })
     }
 
     fn require_live(&mut self, holder: Holder, request: &'static str, now: Instant) -> DResult<()> {
-        match self.live.get_mut(&holder) {
-            Some(live) => {
-                live.last_seen = now;
-                Ok(())
-            }
-            None => {
-                self.events.push(DispenseEvent::Fenced { holder, request });
-                Err(DispenseError::Fenced(format!(
+        let retired = {
+            let mut members = self.members.lock().unwrap();
+            match self.live.contains_key(&holder) && members.touch(holder, now) {
+                true => None,
+                false if members.is_retired(holder) => Some(members.fenced_text(holder)),
+                false => Some(format!(
                     "incarnation {:016x} of island {} holds no lease",
                     holder.incarnation, holder.learner_id
-                )))
+                )),
+            }
+        };
+        match retired {
+            None => Ok(()),
+            Some(text) => {
+                self.events.push(DispenseEvent::Fenced { holder, request });
+                Err(DispenseError::Fenced(text))
             }
         }
     }
@@ -559,6 +777,63 @@ impl Dispenser {
         Ok(claim)
     }
 
+    /// How many fresh positions of each accepted stream the next `need`
+    /// fresh positions take (module doc: Tijdeman's earliest-deadline rule
+    /// over every stream's weight; among the accepted streams that are not
+    /// exhausted; when none of them is due, the one furthest behind).
+    fn pick_fresh(&self, accept: &[usize], need: u64) -> Vec<(usize, u64)> {
+        let open: Vec<usize> = accept.iter().copied().filter(|&s| !self.exhausted(s)).collect();
+        if open.is_empty() || need == 0 {
+            return Vec::new();
+        }
+        let data = self.data.as_ref().expect("an open holder fixed the data");
+        if self.streams.len() == 1 {
+            let s = open[0];
+            return vec![(s, need.min(self.limit(s) - self.streams[s].next))];
+        }
+        let weights: Vec<i128> = data.streams.iter().map(|s| i128::from(s.weight)).collect();
+        let total: i128 = weights.iter().sum();
+        let m = 2 * (self.streams.len() as i128 - 1);
+        let limits: Vec<u64> = (0..self.streams.len()).map(|s| self.limit(s)).collect();
+        let mut counts: Vec<u64> = self.streams.iter().map(|s| s.next).collect();
+        let mut given: i128 = counts.iter().map(|&c| i128::from(c)).sum();
+        let mut taken = vec![0u64; self.streams.len()];
+        for _ in 0..need {
+            let n = given + 1;
+            let mut due: Option<(usize, i128)> = None; // (stream, deadline numerator)
+            let mut behind: Option<(usize, i128)> = None; // (stream, deficit)
+            for &s in &open {
+                if counts[s] >= limits[s] {
+                    continue;
+                }
+                let c = i128::from(counts[s]);
+                let deficit = weights[s] * n - c * total; // (n * w_s / total - c_s) * total
+                if m * deficit >= total {
+                    // eligible: deadline (c + 1 - 1/m) / w_s, compared as a / w_a < b / w_b
+                    let a = m * (c + 1) - 1;
+                    if due.map_or(true, |(b, bn)| a * weights[b] < bn * weights[s]) {
+                        due = Some((s, a));
+                    }
+                }
+                if behind.map_or(true, |(_, d)| deficit > d) {
+                    behind = Some((s, deficit));
+                }
+            }
+            let Some((s, _)) = due.or(behind) else { break };
+            counts[s] += 1;
+            taken[s] += 1;
+            given += 1;
+        }
+        taken.into_iter().enumerate().filter(|&(_, n)| n > 0).collect()
+    }
+
+    /// Whether a live holder holds an unreported position of one of `streams`.
+    fn holds_any(&self, streams: &[usize]) -> bool {
+        self.blocks
+            .values()
+            .any(|b| b.open.keys().any(|&start| streams.contains(&stream_of(start))))
+    }
+
     fn claim_new(&mut self, holder: Holder, wanted: u32) -> DResult<Claim> {
         if wanted == 0 || wanted > self.cfg.max_block {
             return Err(DispenseError::Refused(format!(
@@ -566,63 +841,65 @@ impl Dispenser {
                 self.cfg.max_block
             )));
         }
-        let rows = self.rows().expect("an open holder fixed the rows");
+        let accept = self.live.get(&holder).expect("checked live").accept.clone();
         let mut need = u64::from(wanted);
         let mut spans: Vec<Span> = Vec::new();
-        while need > 0 {
-            let Some(front) = self.queue.front_mut() else { break };
-            if front.len() <= need {
-                need -= front.len();
-                spans.push(self.queue.pop_front().unwrap());
-            } else {
-                spans.push(Span { start: front.start, end: front.start + need, redo: front.redo });
-                front.start += need;
-                need = 0;
-            }
-        }
-        if need > 0 {
-            let end = match self.limit() {
-                Some(limit) => self.next.saturating_add(need).min(limit),
-                None => self.next.saturating_add(need),
-            };
-            if end > self.next {
-                let first_new_pass = self.next / rows;
-                let last_pass = (end - 1) / rows;
-                for pass in first_new_pass..=last_pass {
-                    if pass >= self.passes_started {
-                        self.passes_started = pass + 1;
-                        self.events.push(DispenseEvent::PassStart { pass });
-                    }
+        for &s in &accept {
+            let queue = &mut self.streams[s].queue;
+            while need > 0 {
+                let Some(front) = queue.front_mut() else { break };
+                if front.len() <= need {
+                    need -= front.len();
+                    spans.push(queue.pop_front().unwrap());
+                } else {
+                    spans.push(Span { start: front.start, end: front.start + need, redo: front.redo });
+                    front.start += need;
+                    need = 0;
                 }
-                spans.push(Span { start: self.next, end, redo: 0 });
-                self.next = end;
+            }
+            if need == 0 {
+                break;
             }
         }
-        let exhausted = self.limit().is_some_and(|limit| self.next >= limit);
-        let nothing_held = self.blocks.is_empty();
-        let live = self.live.get_mut(&holder).expect("checked live");
+        for (s, n) in self.pick_fresh(&accept, need) {
+            let rows = self.stream_rows(s);
+            let state = &mut self.streams[s];
+            let (start, end) = (state.next, state.next + n);
+            for pass in start / rows..=(end - 1) / rows {
+                if pass >= state.passes_started {
+                    state.passes_started = pass + 1;
+                    self.events.push(DispenseEvent::PassStart { stream: s, pass });
+                }
+            }
+            state.next = end;
+            spans.push(Span { start: position_of(s, start), end: position_of(s, end), redo: 0 });
+        }
         if spans.is_empty() {
-            if exhausted && nothing_held {
+            let ended = accept.iter().all(|&s| self.exhausted(s)) && !self.holds_any(&accept);
+            if ended {
                 self.events.push(DispenseEvent::End { holder });
                 return Ok(Claim::End);
             }
+            let live = self.live.get_mut(&holder).expect("checked live");
             if !live.waiting {
                 live.waiting = true;
                 self.events.push(DispenseEvent::Wait { holder });
             }
             return Ok(Claim::Wait);
         }
-        live.waiting = false;
         let id = self.next_block;
         self.next_block += 1;
-        live.blocks.insert(id);
         let mut open = BTreeMap::new();
         for span in &spans {
             open.insert(span.start, (span.end, span.redo));
         }
         let ranges: Vec<(u64, u64)> = spans.iter().map(|s| (s.start, s.end)).collect();
-        let first_pass = ranges.iter().map(|(a, _)| a / rows).min().unwrap_or(0);
-        let last_pass = ranges.iter().map(|(_, b)| (b - 1) / rows).max().unwrap_or(0);
+        let pass = |p: u64| local_of(p) / self.stream_rows(stream_of(p));
+        let first_pass = ranges.iter().map(|&(a, _)| pass(a)).min().unwrap_or(0);
+        let last_pass = ranges.iter().map(|&(_, b)| pass(b - 1)).max().unwrap_or(0);
+        let live = self.live.get_mut(&holder).expect("checked live");
+        live.waiting = false;
+        live.blocks.insert(id);
         self.totals.granted += count(&ranges);
         self.blocks.insert(id, Block { holder, open });
         self.events.push(DispenseEvent::Grant { holder, block: id, ranges: ranges.clone(), first_pass, last_pass });
@@ -720,59 +997,80 @@ impl Dispenser {
         Ok(totals)
     }
 
-    /// Expire every holder silent for the lease; returns them in order.
+    /// Expire every member silent for the lease, then reclaim the rows of
+    /// every holder the shared table retired (here or on another channel:
+    /// a subscriber or relay connection of a newer incarnation supersedes
+    /// it); returns the holders whose lease expired, in order.
     pub fn expire(&mut self, now: Instant) -> Vec<Holder> {
-        let lease = self.cfg.lease;
-        let gone: Vec<Holder> = self
-            .live
-            .iter()
-            .filter(|(_, live)| now.saturating_duration_since(live.last_seen) >= lease)
-            .map(|(&holder, _)| holder)
-            .collect();
-        for &holder in &gone {
-            self.reclaim(holder, ReclaimReason::Expired);
+        let (retired, reasons): (Vec<Holder>, Vec<Option<Retired>>) = {
+            let mut members = self.members.lock().unwrap();
+            members.expire(now);
+            self.live
+                .keys()
+                .copied()
+                .filter(|&h| members.is_retired(h))
+                .map(|h| (h, members.retired_reason(h)))
+                .unzip()
+        };
+        let mut gone = Vec::new();
+        for (holder, reason) in retired.into_iter().zip(reasons) {
+            match reason {
+                Some(Retired::Superseded) => {
+                    self.reclaim(holder, ReclaimReason::Superseded);
+                }
+                _ => {
+                    self.reclaim(holder, ReclaimReason::Expired);
+                    gone.push(holder);
+                }
+            }
         }
         gone
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn next_expiry(&self) -> Option<Instant> {
-        self.live.values().map(|live| live.last_seen + self.cfg.lease).min()
+        self.members.lock().unwrap().next_expiry()
     }
 
     /// Persisted record: the state as if every live holder were reclaimed
     /// (a restart retires them all). Layout, little-endian:
-    /// magic | has_data u8 | rows u64 | fingerprint [32] | next u64 |
-    /// next_block u64 | passes_started u64 | 7 x u64 totals |
-    /// queue count u32 | (start u64, end u64, redo u32) x count |
+    /// magic `YDS2` | has_data u8 | fingerprint [32] | stream count u16 |
+    /// per stream (rows u64, weight u64, name len u16, name, next u64,
+    /// passes_started u64) | next_block u64 | 7 x u64 totals |
+    /// queue count u32 | (start u64, end u64, redo u32) x count (each
+    /// stream's held positions, then its queue, in stream order) |
     /// retired count u32 | (learner u32, incarnation u64) x count.
     pub fn encode_persisted(&self) -> Vec<u8> {
-        let mut queue: Vec<Span> = Vec::new();
-        let mut reclaimed = 0u64;
-        let mut outstanding: Vec<Span> = Vec::new();
+        let mut held: Vec<Span> = Vec::new();
         for block in self.blocks.values() {
             for (&start, &(end, redo)) in &block.open {
-                outstanding.push(Span { start, end, redo });
-                reclaimed += end - start;
+                held.push(Span { start, end, redo });
             }
         }
-        outstanding.sort_by_key(|s| s.start);
-        queue.extend(outstanding);
-        queue.extend(self.queue.iter().copied());
-        let mut retired: Vec<Holder> = self.retired.0.iter().copied().collect();
-        retired.extend(self.live.keys().copied().filter(|h| !self.retired.1.contains(h)));
-        if retired.len() > RETIRED_LIMIT {
-            retired.drain(..retired.len() - RETIRED_LIMIT);
+        held.sort_by_key(|s| s.start);
+        let reclaimed: u64 = held.iter().map(Span::len).sum();
+        let mut queue: Vec<Span> = Vec::new();
+        for (s, state) in self.streams.iter().enumerate() {
+            queue.extend(held.iter().copied().filter(|span| stream_of(span.start) == s));
+            queue.extend(state.queue.iter().copied());
         }
+        let retired: Vec<Holder> = self.members.lock().unwrap().fence_list();
         let mut out = Vec::new();
         out.extend_from_slice(PERSIST_MAGIC);
-        let (rows, fp) = self.data.unwrap_or((0, [0; 32]));
         out.push(u8::from(self.data.is_some()));
-        out.extend_from_slice(&rows.to_le_bytes());
-        out.extend_from_slice(&fp);
-        out.extend_from_slice(&self.next.to_le_bytes());
+        let empty = DataDecl { streams: Vec::new(), fingerprint: [0; 32] };
+        let data = self.data.as_ref().unwrap_or(&empty);
+        out.extend_from_slice(&data.fingerprint);
+        out.extend_from_slice(&(data.streams.len() as u16).to_le_bytes());
+        for (decl, state) in data.streams.iter().zip(&self.streams) {
+            out.extend_from_slice(&decl.rows.to_le_bytes());
+            out.extend_from_slice(&decl.weight.to_le_bytes());
+            out.extend_from_slice(&(decl.name.len() as u16).to_le_bytes());
+            out.extend_from_slice(decl.name.as_bytes());
+            out.extend_from_slice(&state.next.to_le_bytes());
+            out.extend_from_slice(&state.passes_started.to_le_bytes());
+        }
         out.extend_from_slice(&self.next_block.to_le_bytes());
-        out.extend_from_slice(&self.passes_started.to_le_bytes());
         let t = self.totals;
         for value in [t.granted, t.trained, t.dropped, t.requeued, t.exhausted, t.released, t.reclaimed + reclaimed] {
             out.extend_from_slice(&value.to_le_bytes());
@@ -794,46 +1092,84 @@ impl Dispenser {
     /// `encode_persisted` for a checkpoint cut, logged as such.
     pub fn checkpoint_record(&mut self) -> Vec<u8> {
         let bytes = self.encode_persisted();
-        self.events.push(DispenseEvent::Checkpoint { next: self.next, queued: self.queued(), outstanding: self.outstanding() });
+        self.events.push(DispenseEvent::Checkpoint {
+            next: self.next_position(),
+            queued: self.queued(),
+            outstanding: self.outstanding(),
+        });
         bytes
     }
 
-    /// Restore a record of `encode_persisted` into a fresh dispenser. Parsed
-    /// fully before any state changes.
+    /// Restore a record of `encode_persisted` (or a P2 `YDS1` record) into a
+    /// fresh dispenser. Parsed fully before any state changes.
     pub fn restore_persisted(&mut self, bytes: &[u8]) -> Result<()> {
-        ensure!(self.data.is_none() && self.live.is_empty() && self.next == 0, "restore needs a fresh dispenser");
+        ensure!(self.data.is_none() && self.live.is_empty(), "restore needs a fresh dispenser");
         let mut r = Reader(bytes);
-        ensure!(r.take(4)? == PERSIST_MAGIC, "dispense record has a bad magic");
-        let has_data = r.u8()? != 0;
-        let rows = r.u64()?;
-        let fp: [u8; 32] = r.take(32)?.try_into()?;
-        let next = r.u64()?;
-        let next_block = r.u64()?;
-        let passes_started = r.u64()?;
-        let mut t = [0u64; 7];
-        for value in &mut t {
-            *value = r.u64()?;
-        }
-        let queued = r.u32()? as usize;
-        ensure!(queued <= r.0.len() / 20, "dispense record queue is truncated");
-        let mut queue = VecDeque::with_capacity(queued);
-        for _ in 0..queued {
-            let span = Span { start: r.u64()?, end: r.u64()?, redo: r.u32()? };
-            ensure!(span.start < span.end && span.end <= next, "dispense record has a bad span {span:?}");
-            queue.push_back(span);
-        }
-        let retired = r.u32()? as usize;
-        ensure!(retired <= RETIRED_LIMIT, "dispense record retires {retired} incarnations");
-        let mut holders = Vec::with_capacity(retired);
-        for _ in 0..retired {
-            holders.push(Holder { learner_id: r.u32()?, incarnation: r.u64()? });
-        }
+        let magic = r.take(4)?;
+        let (data, states, next_block, t, queue, holders) = if magic == PERSIST_MAGIC_V1 {
+            let has_data = r.u8()? != 0;
+            let rows = r.u64()?;
+            let fp: [u8; 32] = r.take(32)?.try_into()?;
+            let next = r.u64()?;
+            let next_block = r.u64()?;
+            let passes_started = r.u64()?;
+            let t = r.totals()?;
+            let queue = r.spans()?;
+            let holders = r.holders()?;
+            ensure!(has_data || (next == 0 && queue.is_empty()), "dispense record has positions but no rows");
+            ensure!(next < STREAM_POSITIONS, "dispense record has {next} positions");
+            let data = has_data.then(|| DataDecl::single(rows, fp));
+            let states = vec![(next, passes_started)];
+            (data, states, next_block, t, queue, holders)
+        } else {
+            ensure!(magic == PERSIST_MAGIC, "dispense record has a bad magic");
+            let has_data = r.u8()? != 0;
+            let fp: [u8; 32] = r.take(32)?.try_into()?;
+            let n = usize::from(r.u16()?);
+            ensure!(n <= MAX_STREAMS, "dispense record has {n} streams");
+            let mut streams = Vec::with_capacity(n);
+            let mut states = Vec::with_capacity(n);
+            for _ in 0..n {
+                let rows = r.u64()?;
+                let weight = r.u64()?;
+                let len = usize::from(r.u16()?);
+                let name = String::from_utf8(r.take(len)?.to_vec())?;
+                streams.push(StreamDecl { rows, weight, name });
+                let next = r.u64()?;
+                ensure!(next <= STREAM_POSITIONS, "dispense record stream has {next} positions");
+                states.push((next, r.u64()?));
+            }
+            let next_block = r.u64()?;
+            let t = r.totals()?;
+            let queue = r.spans()?;
+            let holders = r.holders()?;
+            ensure!(has_data == !streams.is_empty(), "dispense record has streams without data or data without streams");
+            let data = has_data.then_some(DataDecl { streams, fingerprint: fp });
+            if let Some(data) = &data {
+                data.validate().map_err(|m| anyhow::anyhow!("dispense record: {m}"))?;
+            }
+            (data, states, next_block, t, queue, holders)
+        };
         ensure!(r.0.is_empty(), "dispense record has {} trailing bytes", r.0.len());
-        ensure!(has_data || (next == 0 && queue.is_empty()), "dispense record has positions but no rows");
-        self.data = has_data.then_some((rows, fp));
-        self.next = next;
+        let streams = data.as_ref().map_or(0, |d| d.streams.len());
+        for span in &queue {
+            let s = stream_of(span.start);
+            ensure!(
+                span.start < span.end
+                    && s < streams
+                    && stream_of(span.end - 1) == s
+                    && local_of(span.end - 1) < states[s].0,
+                "dispense record has a bad span {span:?}"
+            );
+        }
+        if let Some(data) = data {
+            self.fix_data(data);
+        }
+        for (state, (next, passes_started)) in self.streams.iter_mut().zip(states) {
+            state.next = next;
+            state.passes_started = passes_started;
+        }
         self.next_block = next_block.max(1);
-        self.passes_started = passes_started;
         self.totals = Totals {
             granted: t[0],
             trained: t[1],
@@ -843,19 +1179,24 @@ impl Dispenser {
             released: t[5],
             reclaimed: t[6],
         };
-        self.queue = queue;
-        for holder in holders {
-            self.retire(holder);
+        for span in queue {
+            self.streams[stream_of(span.start)].queue.push_back(span);
         }
-        self.events.push(DispenseEvent::Restore { next, queued: self.queued(), retired });
+        let retired = holders.len();
+        for holder in holders {
+            self.retire(holder, Retired::Restart);
+        }
+        self.events.push(DispenseEvent::Restore { next: self.next_position(), queued: self.queued(), retired });
         Ok(())
     }
 
-    /// Accounting invariant: every position below `next` is reported
-    /// (trained, dropped, redo exhausted), queued, or outstanding exactly once.
+    /// Accounting invariant: every position given out is reported (trained,
+    /// dropped, redo exhausted), queued, or outstanding exactly once, and
+    /// every queued or held position lies below its stream's next position.
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn check_invariants(&self) -> Result<()> {
-        let mut covered: Vec<(u64, u64)> = self.queue.iter().map(|s| (s.start, s.end)).collect();
+        let mut covered: Vec<(u64, u64)> =
+            self.streams.iter().flat_map(|s| s.queue.iter()).map(|s| (s.start, s.end)).collect();
         for block in self.blocks.values() {
             ensure!(self.live.get(&block.holder).is_some(), "a block of a dead holder is in flight");
             covered.extend(block.open.iter().map(|(&s, &(e, _))| (s, e)));
@@ -864,13 +1205,20 @@ impl Dispenser {
         for pair in covered.windows(2) {
             ensure!(pair[0].1 <= pair[1].0, "positions {pair:?} are queued or held twice");
         }
+        for &(a, b) in &covered {
+            let s = stream_of(a);
+            ensure!(
+                s < self.streams.len() && stream_of(b - 1) == s && local_of(b - 1) < self.streams[s].next,
+                "positions [{a}, {b}) are not given-out positions of one stream"
+            );
+        }
         let held: u64 = covered.iter().map(|(a, b)| b - a).sum();
         let t = self.totals;
         let settled = t.trained + t.dropped + t.exhausted;
         ensure!(
-            settled + held == self.next,
+            settled + held == self.next_position(),
             "settled {settled} + queued/held {held} != given out {}",
-            self.next
+            self.next_position()
         );
         Ok(())
     }
@@ -934,11 +1282,40 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into()?))
     }
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
+    }
+    fn totals(&mut self) -> Result<[u64; 7]> {
+        let mut t = [0u64; 7];
+        for value in &mut t {
+            *value = self.u64()?;
+        }
+        Ok(t)
+    }
+    fn spans(&mut self) -> Result<Vec<Span>> {
+        let n = self.u32()? as usize;
+        ensure!(n <= self.0.len() / 20, "dispense record queue is truncated");
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(Span { start: self.u64()?, end: self.u64()?, redo: self.u32()? });
+        }
+        Ok(out)
+    }
+    fn holders(&mut self) -> Result<Vec<Holder>> {
+        let n = self.u32()? as usize;
+        ensure!(n <= RETIRED_LIMIT, "dispense record retires {n} incarnations");
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(Holder { learner_id: self.u32()?, incarnation: self.u64()? });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     const FP: [u8; 32] = [7; 32];
 
@@ -969,6 +1346,50 @@ mod tests {
     }
 
     #[test]
+    fn a_member_superseded_on_another_channel_loses_its_rows_and_is_fenced() {
+        // S27: the syncer's one member table; a spot rollout subscriber (or
+        // relay producer) of a newer incarnation of the sampler joins it.
+        let t = Instant::now();
+        let table = crate::members::shared(Duration::from_secs(10));
+        let mut d = Dispenser::with_members(cfg(None), table.clone());
+        let sampler = crate::members::SAMPLER_MEMBER_BIT | 3;
+        d.open(h(sampler, 1), 100, FP, t).unwrap();
+        d.open(h(0, 9), 100, FP, t).unwrap();
+        let (_, held) = grant(&mut d, h(sampler, 1), 6, t);
+        assert_eq!(held, vec![(0, 6)]);
+        table.lock().unwrap().join(h(sampler, 2), t);
+        // The service expires before every request (DispenseService::with): the
+        // next request of any island finds the old incarnation's rows returned.
+        assert_eq!(d.expire(t), vec![]);
+        assert_eq!(grant(&mut d, h(0, 9), 4, t).1, vec![(0, 4)]);
+        let reclaims: Vec<_> = d
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                DispenseEvent::Reclaim { holder, reason, ranges } => Some((holder, reason, ranges)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reclaims, vec![(h(sampler, 1), ReclaimReason::Superseded, vec![(0, 6)])]);
+        let error = d.claim(h(sampler, 1), seq(), 1, t).unwrap_err().to_string();
+        assert!(error.starts_with(FENCED_PREFIX) && error.ends_with("(superseded)"), "{error}");
+        // The new incarnation is already a member (its subscriber joined): it opens
+        // without superseding anything and takes the rest of the returned rows.
+        assert_eq!(
+            d.open(h(sampler, 2), 100, FP, t).unwrap(),
+            OpenOutcome::Joined { superseded: None, reclaimed: 0 }
+        );
+        assert_eq!(grant(&mut d, h(sampler, 2), 4, t).1, vec![(4, 6), (6, 8)]);
+        // A member silent on every channel expires, whoever expires it.
+        let later = t + Duration::from_secs(10);
+        assert!(table.lock().unwrap().touch(h(0, 9), later));
+        table.lock().unwrap().expire(later);
+        assert_eq!(d.expire(later), vec![h(sampler, 2)]);
+        assert!(d.claim(h(sampler, 2), seq(), 1, later).unwrap_err().to_string().ends_with("(lease expired)"));
+        d.check_invariants().unwrap();
+    }
+
+    #[test]
     fn fresh_positions_follow_one_global_sequence_whatever_the_island() {
         let t = Instant::now();
         let mut d = Dispenser::new(cfg(None));
@@ -982,7 +1403,7 @@ mod tests {
             .take_events()
             .into_iter()
             .filter_map(|e| match e {
-                DispenseEvent::PassStart { pass } => Some(pass),
+                DispenseEvent::PassStart { pass, .. } => Some(pass),
                 _ => None,
             })
             .collect();
@@ -1366,6 +1787,318 @@ mod tests {
                 assert_eq!(d.claim(h(0, incarnation[0]), seq(), 1, now).unwrap(), Claim::End, "seed {seed}");
                 assert_eq!(d.next_position(), rows * passes);
                 d.check_invariants().unwrap();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- streams (S27 P3)
+
+    fn decl(streams: &[(u64, u64, &str)]) -> DataDecl {
+        DataDecl {
+            streams: streams.iter().map(|&(rows, weight, name)| StreamDecl { rows, weight, name: name.into() }).collect(),
+            fingerprint: FP,
+        }
+    }
+
+    fn per_stream(ranges: &[(u64, u64)], streams: usize) -> Vec<u64> {
+        let mut out = vec![0u64; streams];
+        for &(a, b) in ranges {
+            assert_eq!(stream_of(a), stream_of(b - 1), "a range never crosses streams");
+            out[stream_of(a)] += b - a;
+        }
+        out
+    }
+
+    /// The mix of fresh positions: after every claim, every stream is within
+    /// one position of its share (the P3 check "mix error within one block",
+    /// here exact to one position), for any claim sizes and weights.
+    #[test]
+    fn streams_interleave_within_one_position_of_their_weights() {
+        for seed in 0..300u64 {
+            let mut rng = Lcg(seed * 104729 + 3);
+            let k = 2 + rng.below(6) as usize;
+            let streams: Vec<(u64, u64, &str)> = (0..k)
+                .map(|_| {
+                    let w = match rng.below(3) {
+                        0 => 1 + rng.below(5),
+                        1 => 1 + rng.below(1_000_000),
+                        _ => 1 << (30 + rng.below(20)),
+                    };
+                    (1 + rng.below(50), w, "")
+                })
+                .collect();
+            let data = decl(&streams);
+            let total: u128 = streams.iter().map(|s| u128::from(s.1)).sum();
+            let t = Instant::now();
+            let mut d = Dispenser::new(cfg(None));
+            for island in 0..3 {
+                d.open_with(h(island, 1), &data, None, t).unwrap();
+            }
+            let mut given = vec![0u64; k];
+            let mut n = 0u64;
+            for _ in 0..60 {
+                let island = rng.below(3) as u32;
+                let (_, ranges) = grant(&mut d, h(island, 1), 1 + rng.below(40) as u32, t);
+                for (s, c) in per_stream(&ranges, k).into_iter().enumerate() {
+                    given[s] += c;
+                    n += c;
+                }
+                for s in 0..k {
+                    // |given_s - n w_s / total| < 1, in integers
+                    let lhs = (u128::from(given[s]) * total).abs_diff(u128::from(n) * u128::from(streams[s].1));
+                    assert!(lhs < total, "seed {seed}: stream {s} has {} of {n} (weights {streams:?})", given[s]);
+                }
+            }
+            d.check_invariants().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_holder_that_accepts_some_streams_gets_only_their_positions() {
+        let t = Instant::now();
+        let data = decl(&[(10, 10, "a/web"), (10, 10, "a/pwn"), (5, 5, "b")]);
+        let mut d = Dispenser::new(cfg(Some(1)));
+        d.open_with(h(0, 1), &data, Some(&[1]), t).unwrap();
+        d.open_with(h(1, 2), &data, None, t).unwrap();
+        let (b0, r0) = grant(&mut d, h(0, 1), 16, t);
+        assert_eq!(per_stream(&r0, 3), vec![0, 10, 0], "island 0 takes only stream 1 (all 10 rows of one pass)");
+        // island 0 holds the rest of stream 1: it waits, then ends once it reports them
+        assert_eq!(d.claim(h(0, 1), seq(), 4, t).unwrap(), Claim::Wait);
+        let (b1, r1) = grant(&mut d, h(1, 2), 64, t);
+        assert_eq!(per_stream(&r1, 3), vec![10, 0, 5]);
+        report(&mut d, h(0, 1), b0, ReportKind::Trained, &r0, t);
+        assert_eq!(d.claim(h(0, 1), seq(), 4, t).unwrap(), Claim::End, "stream 1 is exhausted and settled");
+        // island 1 still holds streams 0 and 2: an island taking every stream waits
+        d.open_with(h(2, 3), &data, None, t).unwrap();
+        assert_eq!(d.claim(h(2, 3), seq(), 4, t).unwrap(), Claim::Wait);
+        report(&mut d, h(1, 2), b1, ReportKind::Trained, &r1, t);
+        assert_eq!(d.claim(h(2, 3), seq(), 4, t).unwrap(), Claim::End);
+        d.check_invariants().unwrap();
+        // refusals: no stream, a stream the run does not have
+        assert!(matches!(d.open_with(h(3, 4), &data, Some(&[]), t), Err(DispenseError::Refused(_))));
+        assert!(matches!(d.open_with(h(3, 4), &data, Some(&[3]), t), Err(DispenseError::Refused(_))));
+        // another stream table (same fingerprint) is a mismatch
+        let other = decl(&[(10, 10, "a/web"), (10, 11, "a/pwn"), (5, 5, "b")]);
+        let error = d.open_with(h(3, 4), &other, None, t).unwrap_err();
+        assert!(matches!(&error, DispenseError::Mismatch(m) if m.contains("other streams or weights")), "{error}");
+    }
+
+    #[test]
+    fn reclaimed_positions_go_back_to_their_own_stream() {
+        let t = Instant::now();
+        let data = decl(&[(100, 1, "web"), (100, 1, "pwn")]);
+        let mut d = Dispenser::new(cfg(None));
+        d.open_with(h(0, 1), &data, Some(&[0]), t).unwrap();
+        d.open_with(h(1, 1), &data, Some(&[1]), t).unwrap();
+        let (_, r0) = grant(&mut d, h(0, 1), 8, t);
+        assert_eq!(r0, vec![(position_of(0, 0), position_of(0, 8))]);
+        // island 0 restarts: its stream-0 positions wait for a stream-0 holder
+        d.open_with(h(0, 2), &data, Some(&[0]), t).unwrap();
+        let (_, r1) = grant(&mut d, h(1, 1), 4, t);
+        assert_eq!(r1, vec![(position_of(1, 0), position_of(1, 4))], "a pwn island never gets web positions");
+        let (_, r2) = grant(&mut d, h(0, 2), 8, t);
+        assert_eq!(r2, vec![(position_of(0, 0), position_of(0, 8))], "the new incarnation takes them first");
+        d.check_invariants().unwrap();
+        let passes: Vec<(usize, u64)> = d
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                DispenseEvent::PassStart { stream, pass } => Some((stream, pass)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(passes, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn limited_passes_count_per_stream() {
+        let t = Instant::now();
+        let data = decl(&[(3, 7, "a"), (5, 3, "b")]);
+        let mut d = Dispenser::new(cfg(Some(2)));
+        d.open_with(h(0, 1), &data, None, t).unwrap();
+        let mut got = vec![0u64; 2];
+        loop {
+            match d.claim(h(0, 1), seq(), 4, t).unwrap() {
+                Claim::Grant { block, ranges } => {
+                    for (s, c) in per_stream(&ranges, 2).into_iter().enumerate() {
+                        got[s] += c;
+                    }
+                    report(&mut d, h(0, 1), block, ReportKind::Trained, &ranges, t);
+                }
+                Claim::End => break,
+                Claim::Wait => panic!("one holder that reports everything never waits"),
+            }
+        }
+        assert_eq!(got, vec![6, 10], "two passes of every stream, whatever the weights");
+        d.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn the_stream_record_round_trips_and_a_p2_record_still_restores() {
+        let t = Instant::now();
+        let data = decl(&[(10, 3, "web"), (20, 1, "pwn \"x\"")]);
+        let mut d = Dispenser::new(cfg(Some(3)));
+        d.open_with(h(0, 1), &data, None, t).unwrap();
+        let (b, r) = grant(&mut d, h(0, 1), 12, t);
+        report(&mut d, h(0, 1), b, ReportKind::Trained, &r[..1], t);
+        let _ = grant(&mut d, h(0, 1), 5, t);
+        let bytes = d.encode_persisted();
+        let mut e = Dispenser::new(cfg(Some(3)));
+        e.restore_persisted(&bytes).unwrap();
+        assert_eq!(e.next_position(), d.next_position());
+        assert_eq!(e.queued(), d.outstanding() + d.queued());
+        assert!(e.is_retired(h(0, 1)));
+        e.check_invariants().unwrap();
+        assert_eq!(e.encode_persisted(), bytes, "restore then encode is the identity");
+        assert!(matches!(e.open_with(h(0, 2), &decl(&[(10, 3, "web")]), None, t), Err(DispenseError::Mismatch(_))));
+        e.open_with(h(0, 2), &data, None, t).unwrap();
+        let events: Vec<String> = e.take_events().iter().map(DispenseEvent::json_fields).collect();
+        assert!(events[0].starts_with("\"kind\":\"dispense_streams\""), "{events:?}");
+        assert!(events[0].contains("\"name\":\"pwn \\\"x\\\"\""), "{}", events[0]);
+        // a P2 record (YDS1, one stream) restores as the single plain stream
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(b"YDS1");
+        v1.push(1);
+        v1.extend_from_slice(&40u64.to_le_bytes());
+        v1.extend_from_slice(&FP);
+        for value in [12u64, 5, 1] {
+            v1.extend_from_slice(&value.to_le_bytes()); // next, next_block, passes_started
+        }
+        for value in [12u64, 8, 0, 0, 0, 0, 0] {
+            v1.extend_from_slice(&value.to_le_bytes());
+        }
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        for value in [8u64, 12] {
+            v1.extend_from_slice(&value.to_le_bytes());
+        }
+        v1.extend_from_slice(&0u32.to_le_bytes());
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&0u32.to_le_bytes());
+        v1.extend_from_slice(&9u64.to_le_bytes());
+        let mut f = Dispenser::new(cfg(None));
+        f.restore_persisted(&v1).unwrap();
+        f.check_invariants().unwrap();
+        assert!(f.is_retired(h(0, 9)));
+        f.open(h(1, 1), 40, FP, t).unwrap();
+        assert_eq!(grant(&mut f, h(1, 1), 6, t).1, vec![(8, 12), (12, 14)]);
+    }
+
+    #[test]
+    fn stream_events_render_as_json_fields() {
+        let e = DispenseEvent::Open { holder: h(1, 0xab), superseded: None, reconnect: false, rows: 30, accept: Some(vec![0, 2]) };
+        assert_eq!(
+            e.json_fields(),
+            "\"kind\":\"dispense_open\",\"island_id\":1,\"incarnation\":\"00000000000000ab\",\"rows\":30,\"reconnect\":false,\"superseded\":null,\"accept\":[0,2]"
+        );
+        let e = DispenseEvent::Streams { streams: decl(&[(10, 3, "a.jsonl/web"), (20, 1, "")]).streams, fingerprint: FP };
+        assert_eq!(
+            e.json_fields(),
+            "\"kind\":\"dispense_streams\",\"stream_shift\":40,\"fingerprint\":\"0707070707070707\",\"streams\":[{\"stream\":0,\"name\":\"a.jsonl/web\",\"rows\":10,\"weight\":3},{\"stream\":1,\"name\":\"\",\"rows\":20,\"weight\":1}]"
+        );
+        assert_eq!(DispenseEvent::PassStart { stream: 1, pass: 2 }.json_fields(), "\"kind\":\"dispense_pass_start\",\"stream\":1,\"pass\":2");
+    }
+
+    /// The random sequences of `random_sequences_keep_the_invariants` with
+    /// several streams and islands that accept only some of them.
+    #[test]
+    fn random_stream_sequences_keep_the_invariants() {
+        for seed in 0..150u64 {
+            let mut rng = Lcg(seed * 31337 + 11);
+            let k = 1 + rng.below(4) as usize;
+            let streams: Vec<(u64, u64, &str)> = (0..k).map(|_| (1 + rng.below(20), 1 + rng.below(9), "s")).collect();
+            let data = decl(&streams);
+            let passes = if seed % 2 == 0 { Some(1 + rng.below(2)) } else { None };
+            let config = DispenseConfig { lease: Duration::from_secs(5), passes, max_redo: 1, max_block: 16 };
+            // island 0 takes every stream (so every stream has a taker); the others a random subset
+            let accepts: Vec<Option<Vec<u16>>> = (0..4)
+                .map(|i| {
+                    if i == 0 || rng.below(2) == 0 {
+                        None
+                    } else {
+                        let picked: Vec<u16> = (0..k as u16).filter(|_| rng.below(2) == 0).collect();
+                        if picked.is_empty() { Some(vec![0]) } else { Some(picked) }
+                    }
+                })
+                .collect();
+            let mut d = Dispenser::new(config.clone());
+            let mut now = Instant::now();
+            let mut incarnation = [1u64; 4];
+            let mut held: [Vec<(u64, Vec<u64>)>; 4] = Default::default();
+            let mut trained: HashMap<u64, u32> = HashMap::new();
+            let open = |d: &mut Dispenser, i: usize, inc: u64, now| {
+                d.open_with(h(i as u32, inc), &data, accepts[i].as_deref(), now).unwrap();
+            };
+            for i in 0..4 {
+                open(&mut d, i, 1, now);
+            }
+            for _ in 0..300 {
+                now += Duration::from_millis(rng.below(1500));
+                let i = rng.below(4) as usize;
+                let me = h(i as u32, incarnation[i]);
+                match rng.below(9) {
+                    0..=3 => match d.claim(me, seq(), 1 + rng.below(16) as u32, now) {
+                        Ok(Claim::Grant { block, ranges }) => {
+                            if let Some(a) = &accepts[i] {
+                                for &(p, _) in &ranges {
+                                    assert!(a.contains(&(stream_of(p) as u16)), "seed {seed}: island {i} got stream {}", stream_of(p));
+                                }
+                            }
+                            held[i].push((block, ranges.iter().flat_map(|&(a, b)| a..b).collect()));
+                        }
+                        Ok(_) => {}
+                        Err(DispenseError::Fenced(_)) => {
+                            held[i].clear();
+                            incarnation[i] += 1;
+                            open(&mut d, i, incarnation[i], now);
+                        }
+                        Err(e) => panic!("{e}"),
+                    },
+                    4..=6 if !held[i].is_empty() => {
+                        let j = rng.below(held[i].len() as u64) as usize;
+                        let (block, positions) = &mut held[i][j];
+                        let block = *block;
+                        let n = 1 + rng.below(positions.len() as u64) as usize;
+                        let taken: Vec<u64> = positions.drain(..n).collect();
+                        let kind = ReportKind::from_u8(1 + rng.below(4) as u8).unwrap();
+                        let ranges: Vec<(u64, u64)> = taken.iter().map(|&p| (p, p + 1)).collect();
+                        match d.report(me, seq(), &[ReportEntry { block, kind, ranges }], now) {
+                            Ok(_) if kind == ReportKind::Trained => {
+                                for p in &taken {
+                                    *trained.entry(*p).or_default() += 1;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(DispenseError::Fenced(_)) => held[i].clear(),
+                            Err(e) => panic!("seed {seed}: {e}"),
+                        }
+                        held[i].retain(|(_, p)| !p.is_empty());
+                    }
+                    7 => {
+                        held[i].clear();
+                        incarnation[i] += 1;
+                        open(&mut d, i, incarnation[i], now);
+                    }
+                    _ if rng.below(6) == 0 => {
+                        let bytes = d.encode_persisted();
+                        d = Dispenser::new(config.clone());
+                        d.restore_persisted(&bytes).unwrap();
+                        for (j, inc) in incarnation.iter_mut().enumerate() {
+                            held[j].clear();
+                            *inc += 1;
+                            open(&mut d, j, *inc, now);
+                        }
+                    }
+                    _ => {
+                        let _ = d.heartbeat(me, now);
+                    }
+                }
+                for gone in d.expire(now) {
+                    held[gone.learner_id as usize].clear();
+                }
+                d.check_invariants().unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+            }
+            for (&p, &n) in &trained {
+                assert!(n <= 1, "seed {seed}: position {p} trained {n} times");
             }
         }
     }
