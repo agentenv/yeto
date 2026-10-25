@@ -407,7 +407,10 @@ class BatchReader:
     the bytes read ahead (``TakeReport.prefetched``). The read cursor only moves in
     :meth:`take`: prefetching selects nothing. No store refresh (a Modal Volume
     reload) runs while a payload read of this reader is open: the reload of a
-    Volume with open files fails."""
+    Volume with open files fails. Each payload read holds the store's reader
+    guard (``CheckpointStore.hold_reader``), so a reload by another process of
+    the container (the driver reading its policy releases) is skipped while a
+    read is open."""
 
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,

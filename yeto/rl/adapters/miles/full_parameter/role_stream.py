@@ -21,10 +21,12 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
+    StoredFragmentVerifier,
     defer_capture_supported,
     lazy_capture_supported,
     optimizer_proof_without_model_check_supported,
     timed_group,
+    verified_apply_supported,
 )
 from yeto.rl.adapters.miles.routing_plugin import (
     DRAIN_ROUTED_TOKEN_COUNTS,
@@ -51,6 +53,7 @@ from yeto.rl.engine.full_parameter_stream import (  # noqa: F401 - the stream's 
     require_sha256,
     session_contract_hash,
 )
+from yeto.rl.engine.shape_free_layout import LAYOUT_SHAPE_FREE
 from yeto.rl.host_info import print_host_report, report_rank_hosts
 from yeto.rl.local_learner import layout_stream_role
 from yeto.rl.moe_layout import RoutedTokens, check_expert_partition
@@ -85,6 +88,11 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
             max_fragment_bytes=self.config.max_fragment_bytes,
             max_chunk_bytes=self.config.max_chunk_bytes,
             matrix_merge=self.config.matrix_merge,
+            **(
+                {}
+                if self.config.shape_free is None
+                else {"layout_mode": LAYOUT_SHAPE_FREE, "granularity": self.config.shape_free}
+            ),
         )
 
     def _inbound_chunk_sink(self, sink) -> MilesRayInboundChunkSink:
@@ -111,6 +119,14 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
 
     def _supports_proof_without_model_check(self) -> bool:
         return optimizer_proof_without_model_check_supported(self.group)
+
+    def _stored_fragment_verifier(self, group) -> StoredFragmentVerifier | None:
+        # S27 G-CG verify-ahead: Miles' own prepare check
+        # (verify_stored_fragment_chunks) on a background thread; the apply
+        # names the checked fragments (Miles transport feature verified_apply).
+        if not verified_apply_supported(group):
+            return None
+        return StoredFragmentVerifier(ray_module=self.ray_module)
 
     async def _optimizer_states(self) -> tuple[Any, ...]:
         return tuple(await self.group.full_parameter_optimizer_states(**self._proof_kwargs()))

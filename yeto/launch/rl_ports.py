@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
-from ..rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pairs
+from ..rl.engine.run_flags import CLI, check_verify_every, rl_forward_pairs, rl_option, rl_option_pairs
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
 from .topology import rl_island_count, rl_island_placement_args
@@ -268,8 +268,10 @@ def data_positions_kept(args) -> bool:
     relaunched island continues at its next row. Its round counter restarts at 0
     in every process, so nothing else tells it where it was."""
     from ..rl.engine import sample_roles
+    from .island_tasks import data_split_plan
 
     return (bool(getattr(args, "rl_checkpoint_store", None))
+            and not data_split_plan(args).dispense  # the dispenser keeps the position
             and rl_dense_sweep(args)
             and not getattr(args, "rl_elastic", False)
             and not getattr(args, "rl_single_island_no_sync", False)
@@ -354,13 +356,42 @@ def hf_export_flags(args) -> str:
     return f" --rl-export-hf-rounds {rounds} --rl-export-hf-store {shlex.quote(store)}"
 
 
+def store_export_only(args) -> bool:
+    """``--rl-checkpoint-store-export-only``: the store of a ``--rl-single-island-no-sync``
+    launch holds only the HF exports (no ``--rl-resume-store``: no ledger, no cuts)."""
+    return bool(getattr(args, "rl_checkpoint_store_export_only", False))
+
+
+def _check_export_only_store(args) -> None:
+    """``--rl-checkpoint-store-export-only`` (S27 G-CO): only a single-island store with
+    HF exports, and none of the flags that need the resume store."""
+    flag = "--rl-checkpoint-store-export-only"
+    if not getattr(args, "rl_checkpoint_store", None):
+        raise ValueError(f"{flag} needs --rl-checkpoint-store")
+    if getattr(args, "rl_elastic", False) or not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError(f"{flag} needs --rl-single-island-no-sync without --rl-elastic (a synced "
+                         "launch never resumes from its store: HF exports alone already use it)")
+    if not hf_exports_requested(args):
+        raise ValueError(f"{flag} needs --rl-export-hf-rounds (the exports are the only use of the store)")
+    given = [f for name, f in _CUT_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    if getattr(args, "rl_resume_allow_config_change", False):
+        given.append("--rl-resume-allow-config-change")
+    if given:
+        raise ValueError(f"{flag}: no resume store, so no {', '.join(given)}")
+
+
 def _check_resume_launch_flags(args) -> bool:
     """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
-    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
+    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags.
+    ``--rl-checkpoint-store-export-only``: False (the store holds only HF exports)."""
     from ..rl.engine.cut_interval import cut_interval_for
 
     store = getattr(args, "rl_checkpoint_store", None)
     elastic = bool(getattr(args, "rl_elastic", False))
+    if store_export_only(args):
+        _check_export_only_store(args)
+        rl_checkpoint_store_plan(args)  # validates the form (single island, no sync)
+        return False
     for name, flag in _CUT_LAUNCH_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -510,6 +541,7 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-megatron-ref-load needs an absolute path without whitespace")
     if getattr(args, "rl_boot_only", False) and not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
+    check_verify_every(args)
     from ..rl.engine import sample_roles
 
     if sample_roles.is_convertible_pool(args):  # L7.5: every island convertible
@@ -668,6 +700,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-profile-trainer"
     if getattr(args, "rl_verify_every_round", False):
         flags += " --rl-verify-every-round"
+    if getattr(args, "rl_verify_every", None) is not None:
+        flags += f" --rl-verify-every {int(args.rl_verify_every)}"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
@@ -721,6 +755,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)
+    if resume_store is not None and store_export_only(args):
+        resume_store = None  # S27 G-CO: the store holds only the HF exports (below)
     if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
         flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):

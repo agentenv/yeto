@@ -162,6 +162,17 @@ pub struct GlobalState {
     /// Unowned fragments are never allocated, initialized or checkpointed.
     shard: ShardPlan,
     schedule: ShardSchedule,
+    /// Small records written next to every checkpoint at the same cut
+    /// (the task dispenser, S27 P2). Empty: none.
+    pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
+}
+
+/// A small record captured at every checkpoint cut and written next to the
+/// checkpoint as `<checkpoint><suffix>`, before the checkpoint itself (a
+/// crash between the two leaves the newer record with the older checkpoint).
+pub trait CheckpointSidecar: Send + Sync {
+    fn suffix(&self) -> &'static str;
+    fn snapshot(&self) -> Vec<u8>;
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -357,6 +368,7 @@ impl GlobalState {
             versions,
             global_step: 0,
             ledger: Default::default(),
+            checkpoint_sidecars: Vec::new(),
             outer_lr,
             outer_momentum,
             wire_dtype,
@@ -946,31 +958,53 @@ pub struct CheckpointSnapshot {
     trailer: CheckpointTrailer,
     /// Delayed Nesterov period and per-fragment state, shared like params.
     delayed_nesterov: Option<(u32, Vec<merge::DelayedNesterovState>)>,
+    /// (suffix, bytes) of every checkpoint sidecar at this cut.
+    sidecars: Vec<(&'static str, Vec<u8>)>,
 }
 
 impl CheckpointSnapshot {
     /// Stream the V3 checkpoint encoding, one fragment at a time.
-    fn write_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
+    ///
+    /// The snapshot drops its share of each fragment's buffers as soon as
+    /// they are written, so a later commit to a written fragment no longer
+    /// copies it. Returns how many fragments the live state had already
+    /// copied (committed to while this snapshot still held them).
+    fn write_to<W: std::io::Write>(self, f: &mut W) -> Result<usize> {
+        let CheckpointSnapshot {
+            iso_backend,
+            layout_fingerprint,
+            global_step,
+            fragments,
+            ledger,
+            trailer,
+            delayed_nesterov,
+            // `save` writes the sidecars before the checkpoint itself.
+            sidecars: _,
+        } = self;
+        let mut copied = vec![false; fragments.len()];
         f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
-        f.write_all(&[self.iso_backend])?;
-        f.write_all(&self.layout_fingerprint)?;
-        f.write_all(&self.global_step.to_le_bytes())?;
-        f.write_all(&(self.fragments.len() as u32).to_le_bytes())?;
-        for (version, params, momentum) in &self.fragments {
+        f.write_all(&[iso_backend])?;
+        f.write_all(&layout_fingerprint)?;
+        f.write_all(&global_step.to_le_bytes())?;
+        f.write_all(&(fragments.len() as u32).to_le_bytes())?;
+        for (fid, (version, params, momentum)) in fragments.into_iter().enumerate() {
             f.write_all(&version.to_le_bytes())?;
             f.write_all(&(params.len() as u64).to_le_bytes())?;
-            write_f32s(f, params)?;
-            write_f32s(f, momentum)?;
+            write_f32s(f, &params)?;
+            write_f32s(f, &momentum)?;
+            // Both buffers are released; either may be the copied one.
+            let params_copied = release_shared(params);
+            copied[fid] = release_shared(momentum) || params_copied;
         }
-        f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
-        for (id, l) in &self.ledger {
+        f.write_all(&(ledger.len() as u32).to_le_bytes())?;
+        for (id, l) in &ledger {
             f.write_all(&id.to_le_bytes())?;
             f.write_all(&l.merges.to_le_bytes())?;
             f.write_all(&l.steps.to_le_bytes())?;
             f.write_all(&l.tokens.to_le_bytes())?;
         }
-        f.write_all(&self.layout_fingerprint)?;
-        match &self.trailer {
+        f.write_all(&layout_fingerprint)?;
+        match &trailer {
             CheckpointTrailer::LayoutOnly => {}
             CheckpointTrailer::SessionContract(contract_hash) => {
                 f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
@@ -987,33 +1021,82 @@ impl CheckpointSnapshot {
         }
         // Appended after every other trailer, only when the period is set,
         // so plain-Nesterov checkpoints keep their exact bytes.
-        if let Some((period, states)) = &self.delayed_nesterov {
-            for state in states {
+        if let Some((period, states)) = delayed_nesterov {
+            for (fid, state) in states.into_iter().enumerate() {
                 f.write_all(&state.step.to_le_bytes())?;
                 write_f32s(f, &state.accum)?;
+                if release_shared(state.accum) {
+                    if let Some(copied) = copied.get_mut(fid) {
+                        *copied = true;
+                    }
+                }
             }
             f.write_all(&period.to_le_bytes())?;
             f.write_all(&DELAYED_NESTEROV_CKPT_MAGIC.to_le_bytes())?;
         }
-        Ok(())
+        Ok(copied.into_iter().filter(|&copied| copied).count())
     }
 
-    /// Atomically persist the snapshot: stream it into a sibling temporary
-    /// file, fsync, rename over `path`, fsync the directory.  A failure at
-    /// any point leaves the previous checkpoint intact.
-    pub fn save(&self, path: &std::path::Path) -> Result<()> {
-        let tmp = path.with_extension("tmp");
-        {
-            let file = std::fs::File::create(&tmp)
+    /// Atomically persist the snapshot at `path` through the sibling
+    /// temporary `<path without extension>.tmp`; see `persist`.  Every
+    /// checkpoint sidecar (the task dispenser, S27 P2) is written first as
+    /// `<path><suffix>` (temporary file, rename), so a crash between the two
+    /// leaves the newer record with the older checkpoint.  Evaluation
+    /// checkpoints (`persist` only) carry no sidecars.
+    pub fn save(mut self, path: &std::path::Path) -> Result<()> {
+        for (suffix, bytes) in std::mem::take(&mut self.sidecars) {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            let sidecar = std::path::PathBuf::from(name);
+            let mut partial = sidecar.as_os_str().to_owned();
+            partial.push(".tmp");
+            let partial = std::path::PathBuf::from(partial);
+            std::fs::write(&partial, &bytes).with_context(|| format!("write {}", partial.display()))?;
+            std::fs::rename(&partial, &sidecar).with_context(|| format!("write {}", sidecar.display()))?;
+        }
+        self.persist(path, &path.with_extension("tmp")).map(drop)
+    }
+
+    /// Atomically persist the snapshot: stream it into the temporary `tmp`
+    /// (same directory as `path`), fsync, rename over `path`, fsync the
+    /// directory.  A failure at any point leaves the previous file at `path`
+    /// intact; `tmp` may remain.
+    pub fn persist(self, path: &std::path::Path, tmp: &std::path::Path) -> Result<PersistedSnapshot> {
+        let persisted = {
+            let file = std::fs::File::create(tmp)
                 .with_context(|| format!("create checkpoint temporary {}", tmp.display()))?;
             let mut f = std::io::BufWriter::with_capacity(1 << 20, file);
-            self.write_to(&mut f)?;
+            let copied_fragments = self.write_to(&mut f)?;
             std::io::Write::flush(&mut f)?;
-            f.get_ref().sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
-        sync_parent_directory(path)
+            let file = f.get_ref();
+            file.sync_all()?;
+            PersistedSnapshot {
+                bytes: file.metadata()?.len(),
+                copied_fragments,
+            }
+        };
+        std::fs::rename(tmp, path)?;
+        sync_parent_directory(path)?;
+        Ok(persisted)
     }
+}
+
+/// What `CheckpointSnapshot::persist` wrote.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistedSnapshot {
+    /// Size of the written file.
+    pub bytes: u64,
+    /// Fragments the live state copied (copy-on-write) because a commit
+    /// reached them before the writer did.
+    pub copied_fragments: usize,
+}
+
+/// Drop a snapshot's share of a fragment buffer.  True when the snapshot
+/// held the last reference: the live state had already replaced the buffer
+/// with its own copy (`Arc::make_mut` in a commit).  `Arc::into_inner` is
+/// atomic, so a commit that races this drop is counted on exactly one side.
+fn release_shared(buffer: Arc<Vec<f32>>) -> bool {
+    Arc::into_inner(buffer).is_some()
 }
 
 fn sync_parent_directory(path: &std::path::Path) -> Result<()> {
@@ -1118,11 +1201,11 @@ impl GlobalState {
         Ok(bytes)
     }
 
-    /// A consistent cut that the asynchronous checkpoint writer persists
+    /// A consistent cut that a background checkpoint writer persists
     /// fragment by fragment while later commits mutate `self`.  It shares
     /// the fragment buffers instead of encoding them: taking it copies no
-    /// model data, and a later commit clones only the fragments it touches
-    /// before the write finishes (bounded by the merge pipeline depth).
+    /// model data, and a later commit clones only a fragment the writer has
+    /// not written yet (the writer releases each fragment once written).
     pub fn checkpoint_snapshot(&self) -> Result<CheckpointSnapshot> {
         let trailer = if let Some(fragments) = self.policy_sweep_fragments {
             CheckpointTrailer::PolicySweep {
@@ -1154,11 +1237,12 @@ impl GlobalState {
             delayed_nesterov: self
                 .delayed_nesterov_period
                 .map(|period| (period, self.delayed_nesterov.clone())),
+            sidecars: self.checkpoint_sidecars.iter().map(|s| (s.suffix(), s.snapshot())).collect(),
         })
     }
 
     fn write_checkpoint_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
-        self.checkpoint_snapshot()?.write_to(f)
+        self.checkpoint_snapshot()?.write_to(f).map(drop)
     }
 
     /// Restore params/momentum/versions/step/ledger from a snapshot.
@@ -1675,6 +1759,35 @@ mod tests {
         snapshot.save(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), cut);
         assert_ne!(st.encode_checkpoint().unwrap(), cut);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_write_counts_copied_fragments_and_releases_every_buffer() {
+        let dir = std::env::temp_dir().join(format!("yeto-ckpt-persist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt.step-1");
+        let tmp = dir.join("state.ckpt.step-1.tmp");
+        let mut st = state_with_fingerprint(layout2(), 0x23);
+        st.init_fragment(0, vec![1.5; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        let cut = st.encode_checkpoint().unwrap();
+        let size = cut.len() as u64;
+        // Nothing commits during this write: nothing is copied.
+        let quiet = st.checkpoint_snapshot().unwrap().persist(&path, &tmp).unwrap();
+        assert_eq!(quiet, PersistedSnapshot { bytes: size, copied_fragments: 0 });
+        // A commit while the snapshot holds fragment 1 copies that fragment only.
+        let snapshot = st.checkpoint_snapshot().unwrap();
+        st.merge_and_step(1, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        let persisted = snapshot.persist(&path, &tmp).unwrap();
+        assert_eq!(persisted, PersistedSnapshot { bytes: size, copied_fragments: 1 });
+        assert_eq!(std::fs::read(&path).unwrap(), cut);
+        assert!(!tmp.exists());
+        // The written snapshot holds no buffer, so later commits copy nothing.
+        for fid in 0..2 {
+            assert_eq!(Arc::strong_count(&st.params[fid]), 1);
+            assert_eq!(Arc::strong_count(&st.momentum[fid]), 1);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

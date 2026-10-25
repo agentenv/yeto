@@ -15,6 +15,12 @@ from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
 from ..rl.engine.run_flags import CLI, rl_option
+from .data_split_plan import (  # noqa: F401 - re-exported
+    _data_split_islands,
+    _plan_data_split,
+    data_split_plan,
+    dispense_syncer_flags,
+)
 
 
 ISLAND_TASKS_DIR = "island-tasks"
@@ -93,20 +99,6 @@ def overlap_warning(task_lists, *, flag: str) -> str | None:
             "those tasks are trained by each of these islands")
 
 
-def _data_split_islands(args) -> tuple[list[int], bool]:
-    """``(learner ids of the same-card training islands, whether the launch has
-    sample roles)``. With sample roles (samplers, buffer trainers, convertible
-    nodes) no island of the launch both generates and trains on ``--data``."""
-
-    from ..rl.engine import sample_roles
-
-    count = len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1  # rl_island_count
-    roles = sample_roles.island_roles(args, count)
-    if roles or sample_roles.sample_role(args) != sample_roles.BOTH:
-        return [], True
-    return list(range(count)), False
-
-
 def _check_data_split(args) -> None:
     """``--rl-data-split``: plan which rows each training island reads, refuse a
     request the launch cannot honour, print the plan and cache it on ``args``.
@@ -116,11 +108,12 @@ def _check_data_split(args) -> None:
 
     from ..rl.engine.data_split import DATA_SPLIT_FLAG
 
-    for name in ("rl_data_slot", "rl_data_position_store"):
+    for name in ("rl_data_slot", "rl_data_position_store", "rl_data_dispense"):
         if getattr(args, name, None):
             raise ValueError(f"{rl_option(name, CLI)} is set by the launcher, not a launch "
                              f"option; use {DATA_SPLIT_FLAG}")
     plan = args._data_split_plan = _plan_data_split(args)
+    _check_dispense(args, plan)
     print(f"[launcher] data split ({plan.mode}): {plan.describe()}", file=sys.stderr, flush=True)
     warning = plan.warning()
     if warning:
@@ -128,6 +121,68 @@ def _check_data_split(args) -> None:
     warning = _relaunch_position_warning(args, plan)
     if warning:
         print(f"[launcher] WARNING {warning}", file=sys.stderr, flush=True)
+
+
+def _check_dispense(args, plan) -> None:
+    """S27 P2: refuse what the dispenser does not cover yet (fail closed)."""
+
+    from ..rl.engine.data_split import DATA_SPLIT_FLAG
+    from .syncer import syncer_shard_count
+
+    dispense_only = {"rl_data_passes": None, "rl_dispense_max_redo": 1,
+                     "rl_dispense_lease_s": 300.0, "rl_dispense_prefetch_blocks": 2}
+    if not plan.dispense:
+        named = [name for name, default in dispense_only.items()
+                 if getattr(args, name, default) not in (default, None)]
+        if named:
+            raise ValueError(f"{', '.join(rl_option(n, CLI) for n in named)} need "
+                             f"{DATA_SPLIT_FLAG} dispense")
+        return
+    passes = getattr(args, "rl_data_passes", None)
+    if passes is not None and int(passes) < 1:
+        raise ValueError("--rl-data-passes must be >= 1")
+    if passes is not None and _strict_roster(args):
+        raise ValueError("--rl-data-passes needs islands that may end on their own when the data "
+                         "ends (asynchronous rounds or an island pool); a strict roster trains "
+                         "every island in every round")
+    if int(getattr(args, "rl_dispense_max_redo", 1)) < 0:
+        raise ValueError("--rl-dispense-max-redo must be >= 0")
+    if not float(getattr(args, "rl_dispense_lease_s", 300.0)) > 0:
+        raise ValueError("--rl-dispense-lease-s must be positive")
+    if int(getattr(args, "rl_dispense_prefetch_blocks", 2)) < 1:
+        raise ValueError("--rl-dispense-prefetch-blocks must be >= 1")
+    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense needs a synced launch (the dispenser runs "
+                         "in the actor syncer); not --rl-single-island-no-sync / --rl-elastic")
+    if syncer_shard_count(args) > 1:
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense with --syncer-shards > 1 is not supported yet")
+    if (int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1
+            and not int(getattr(args, "rl_rollout_ahead", 0) or 0)):
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover Miles fully_async rollouts "
+                         "(--rl-max-policy-age without --rl-rollout-ahead) yet")
+    for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"):
+        if getattr(args, name, None) is not None:
+            raise ValueError(f"{DATA_SPLIT_FLAG} dispense and island round cuts "
+                             f"({rl_option(name, CLI)}) exclude each other: the dispenser, not the "
+                             "island cut, keeps the data position")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError(f"{DATA_SPLIT_FLAG} dispense is wired for the Miles backend only (verl: later)")
+
+
+def _strict_roster(args) -> bool:
+    """Whether every island must train every round (the island bridge's
+    ``ends_on_data_end`` is False): a full-parameter strict sweep, or
+    strict-avg without an island pool (also with a critic)."""
+
+    from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS
+    from .syncer import island_pool
+
+    preset = str(getattr(args, "rl_sync_preset", "strict-avg"))
+    if preset in FULL_PARAMETER_SYNC_PRESETS:
+        return str(getattr(args, "rl_sync_full_parameter_rounds", "sweep")) != "async"
+    if preset == "strict-avg":
+        return not island_pool(args)
+    return False
 
 
 def _relaunch_position_warning(args, plan) -> str | None:
@@ -142,24 +197,6 @@ def _relaunch_position_warning(args, plan) -> str | None:
         return None
     return ("a full-parameter island that is relaunched into the running pool starts again "
             "at the first of its rows (it keeps no data position without --rl-checkpoint-store)")
-
-
-def data_split_plan(args):
-    """The launch's :class:`~yeto.rl.engine.data_split.DataSplitPlan` (cached by
-    :func:`_check_data_split`; computed here for a caller that skipped the launch
-    checks, e.g. a dry run or a unit test that builds one island task)."""
-
-    plan = getattr(args, "_data_split_plan", None)
-    return _plan_data_split(args) if plan is None else plan
-
-
-def _plan_data_split(args):
-    from ..rl.engine.data_split import plan_data_split
-
-    islands, roles = _data_split_islands(args)
-    return plan_data_split(getattr(args, "rl_data_split", None), islands=islands,
-                           tasks=bool(getattr(args, "rl_island_tasks", None)), sample_roles=roles,
-                           external_learners=int(getattr(args, "external_learners", 0) or 0))
 
 
 def _refuse_island_tasks(args, path: str) -> None:
@@ -186,9 +223,15 @@ def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
 
     plan = island_task_plan(args)
     if plan is None:
-        slot = (data_split_plan(args).slot(learner_id)
-                if sample_roles.sample_role(args) == sample_roles.BOTH else None)
+        split = data_split_plan(args)
+        both = sample_roles.sample_role(args) == sample_roles.BOTH
+        slot = split.slot(learner_id) if both else None
         flags = f" {rl_option('rl_data_slot')} {slot.env()}" if slot is not None else ""
+        if both and split.dispense:
+            flags += f" {rl_option('rl_data_dispense')}"
+            prefetch = int(getattr(args, "rl_dispense_prefetch_blocks", 2))
+            if prefetch != 2:
+                flags += f" {rl_option('rl_dispense_prefetch_blocks')} {prefetch}"
         return learner_data_arg(args.data), flags, learner_file_mounts(args.data)
     if learner_id not in plan:
         raise ValueError(f"{rl_option('rl_island_tasks', CLI)} has no task list for learner "

@@ -48,15 +48,31 @@ def is_buffer_exhausted(error: BaseException | None) -> bool:
     The reader raises it in the rollout process; it reaches the driver wrapped
     (a Ray task error keeps it as ``cause`` or as a dual subclass), so the cause
     chain is followed and the class is matched by name as well."""
+    return data_end_kind(error) == "buffer_exhausted"
+
+
+# class name -> data end kind; matched by name (the error comes from another process)
+_DATA_END_KINDS = {
+    SampleBufferExhausted.__name__: "buffer_exhausted",
+    # yeto.rl.engine.task_dispense.DispenseEnded (S27 P2: --rl-data-passes used up)
+    "DispenseEnded": "dispense_ended",
+}
+
+
+def data_end_kind(error: BaseException | None) -> str | None:
+    """``"buffer_exhausted"`` / ``"dispense_ended"`` when ``error`` is (or wraps)
+    the rollout side's end of the data, else None. Follows the cause chain as
+    :func:`is_buffer_exhausted` does."""
     seen: set[int] = set()
     while error is not None and id(error) not in seen:
         seen.add(id(error))
-        if isinstance(error, SampleBufferExhausted) or any(
-                c.__name__ == SampleBufferExhausted.__name__ for c in type(error).__mro__):
-            return True
+        for cls in type(error).__mro__:
+            kind = _DATA_END_KINDS.get(cls.__name__)
+            if kind is not None:
+                return kind
         cause = getattr(error, "cause", None)
         error = cause if isinstance(cause, BaseException) else (error.__cause__ or error.__context__)
-    return False
+    return None
 
 
 _CAST = "cast"  # the dtype the reader returns when the stored one is narrower

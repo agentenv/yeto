@@ -58,6 +58,29 @@ _EXPERT_TOKEN_WEIGHTS_DOMAIN = b"yeto-syncer-expert-token-weights-v1\0"
 # the domain that server.rs::semantic_profile_hash appends.
 _FINAL_CUT_MANIFEST_ONLY_FIELD = "final_cut_manifest_only"
 _FINAL_CUT_MANIFEST_ONLY_DOMAIN = b"yeto-syncer-final-cut-manifest-only-v1\0"
+# Optional. Absent or zero = the adaptive grace window alone (byte-identical
+# hash); a floor (syncer --grace-min-ms / --grace-arrival-quantile) appends
+# the block that server.rs::semantic_profile_hash appends.
+_GRACE_MIN_MS_FIELD = "grace_min_ms"
+_GRACE_ARRIVAL_QUANTILE_FIELD = "grace_arrival_quantile"
+_GRACE_FLOOR_DOMAIN = b"yeto-syncer-grace-floor-v1\0"
+# Optional. Absent or zero = no terminal grace (byte-identical hash); a
+# positive value (syncer --terminal-grace-ms) appends its block.
+_TERMINAL_GRACE_MS_FIELD = "terminal_grace_ms"
+_TERMINAL_GRACE_DOMAIN = b"yeto-syncer-terminal-grace-v1\0"
+# Optional. Absent or empty = no evaluation checkpoints (byte-identical hash);
+# the listed global steps (syncer --checkpoint-at-steps) append their block.
+_CHECKPOINT_AT_STEPS_FIELD = "checkpoint_at_steps"
+_EVAL_CHECKPOINTS_DOMAIN = b"yeto-syncer-eval-checkpoints-v1\0"
+_OPTIONAL_FIELDS = {
+    _DELAYED_NESTEROV_FIELD,
+    _EXPERT_TOKEN_WEIGHTS_FIELD,
+    _FINAL_CUT_MANIFEST_ONLY_FIELD,
+    _GRACE_MIN_MS_FIELD,
+    _GRACE_ARRIVAL_QUANTILE_FIELD,
+    _TERMINAL_GRACE_MS_FIELD,
+    _CHECKPOINT_AT_STEPS_FIELD,
+}
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -77,6 +100,12 @@ def _optional_integer(
     if value is None:
         return None
     return _integer(name, value, bits=bits, minimum=minimum)
+
+
+def _steps(name: str, value: object) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"syncer profile {name} must be a list of steps")
+    return tuple(_integer(name, step, bits=64, minimum=1) for step in value)
 
 
 def _number(name: str, value: object) -> float:
@@ -141,12 +170,15 @@ class SyncerSemanticProfile:
     outer_delayed_nesterov_period: int | None = None
     expert_token_weights: bool = False
     final_cut_manifest_only: bool = False
+    grace_min_ms: int = 0
+    grace_arrival_quantile: float = 0.0
+    terminal_grace_ms: int = 0
+    checkpoint_at_steps: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
-            _FIELDS <= set(raw)
-            <= _FIELDS | {_DELAYED_NESTEROV_FIELD, _EXPERT_TOKEN_WEIGHTS_FIELD, _FINAL_CUT_MANIFEST_ONLY_FIELD}
+            _FIELDS <= set(raw) <= _FIELDS | _OPTIONAL_FIELDS
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
@@ -223,6 +255,16 @@ class SyncerSemanticProfile:
             final_cut_manifest_only=_boolean(
                 _FINAL_CUT_MANIFEST_ONLY_FIELD, raw.get(_FINAL_CUT_MANIFEST_ONLY_FIELD, False)
             ),
+            grace_min_ms=_integer(_GRACE_MIN_MS_FIELD, raw.get(_GRACE_MIN_MS_FIELD, 0), bits=64),
+            grace_arrival_quantile=_number(
+                _GRACE_ARRIVAL_QUANTILE_FIELD, raw.get(_GRACE_ARRIVAL_QUANTILE_FIELD, 0.0)
+            ),
+            terminal_grace_ms=_integer(
+                _TERMINAL_GRACE_MS_FIELD, raw.get(_TERMINAL_GRACE_MS_FIELD, 0), bits=64
+            ),
+            checkpoint_at_steps=_steps(
+                _CHECKPOINT_AT_STEPS_FIELD, raw.get(_CHECKPOINT_AT_STEPS_FIELD, ())
+            ),
         )
         profile._validate_general()
         return profile
@@ -232,6 +274,8 @@ class SyncerSemanticProfile:
             raise ValueError("syncer profile quorum exceeds learners")
         if not 0.0 <= self.grace_gamma < 1.0 or self.grace_tau < 0.0:
             raise ValueError("syncer profile adaptive grace values are invalid")
+        if not 0.0 <= self.grace_arrival_quantile <= 1.0:
+            raise ValueError("syncer profile grace_arrival_quantile must be in [0, 1]")
         if self.sync_interval_steps < 0.0:
             raise ValueError("syncer profile sync_interval_steps is negative")
         if self.outer_lr <= 0.0 or not 0.0 <= self.outer_momentum < 1.0:
@@ -248,6 +292,17 @@ class SyncerSemanticProfile:
                     self.checkpoint_every < 1 or self.checkpoint_every % fragments):
                 raise ValueError("syncer profile policy sweep checkpoint interval must be "
                                  "1 or a multiple of the fragment count")
+        steps = self.checkpoint_at_steps
+        if steps:
+            # Mirrors the syncer's validate_eval_checkpoints.
+            if not self.checkpoint_enabled:
+                raise ValueError("syncer profile checkpoint_at_steps requires checkpointing")
+            if any(a >= b for a, b in zip(steps, steps[1:])) or steps[-1] >= self.total_steps:
+                raise ValueError("syncer profile checkpoint_at_steps must be strictly increasing "
+                                 "and below total_steps")
+            if self.policy_sweep_fragments is not None or self.checkpoint_every == 1:
+                raise ValueError("syncer profile checkpoint_at_steps needs fragment rounds "
+                                 "with checkpoint_every != 1")
 
     def validate_sao(self) -> None:
         """Enforce the paired actor/critic fail-closed server profile."""
@@ -308,6 +363,16 @@ class SyncerSemanticProfile:
             encoded.extend(_EXPERT_TOKEN_WEIGHTS_DOMAIN)
         if self.final_cut_manifest_only:
             encoded.extend(_FINAL_CUT_MANIFEST_ONLY_DOMAIN)
+        if self.grace_min_ms or self.grace_arrival_quantile:
+            encoded.extend(_GRACE_FLOOR_DOMAIN)
+            encoded.extend(struct.pack("<Qd", self.grace_min_ms, self.grace_arrival_quantile))
+        if self.terminal_grace_ms:
+            encoded.extend(_TERMINAL_GRACE_DOMAIN)
+            encoded.extend(struct.pack("<Q", self.terminal_grace_ms))
+        if self.checkpoint_at_steps:
+            encoded.extend(_EVAL_CHECKPOINTS_DOMAIN)
+            encoded.extend(struct.pack("<Q", len(self.checkpoint_at_steps)))
+            encoded.extend(struct.pack(f"<{len(self.checkpoint_at_steps)}Q", *self.checkpoint_at_steps))
         return bytes(encoded)
 
     @property

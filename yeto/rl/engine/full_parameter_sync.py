@@ -1285,6 +1285,8 @@ class FullParameterSync(RoundCutHooks):
         self.terminal = False
         self.finished = False
         self.closed = False
+        # S27 P2: the island ended because its data ended (``end_on_data``)
+        self.data_ended = False
         self._driver: IslandDriver | None = None
         self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
         # Overlap: fragment versions before the sweep still in flight.
@@ -1299,11 +1301,25 @@ class FullParameterSync(RoundCutHooks):
         # push counters at the previous boundary.
         self._phase_seconds: dict[str, float] = {}
         self._push_jobs_before: dict[str, float] = {}
+        self._verify_ahead_before: dict[str, int] = {}
         # S27 task assignment: this process joined a pool that was already running
         # (fragments newer than version 0, or a peer recovery), so the island ran
         # before; the driver then continues at its recorded data position
         # (``data_position`` module doc). Set by ``start``.
         self.joined_running_pool = False
+
+    @property
+    def ends_on_data_end(self) -> bool:
+        """S27 P2 / S26 E9.3: whether this island may end on its own when its
+        data ends. Asynchronous rounds (partial quorum): yes, it leaves without
+        the final cut, the other islands go on and the syncer keeps the merged
+        state. A strict sweep needs every island in every round: no."""
+        return bool(self.pairing.profile.partial_quorum)
+
+    def end_on_data(self, driver: IslandDriver) -> None:
+        """The driver ends this island because its data ended (no final cut)."""
+        self.data_ended = True
+        driver.emit("rl_full_parameter_data_end", outer_version=self.outer_version)
 
     @property
     def outer_version(self) -> int | None:
@@ -1404,6 +1420,13 @@ class FullParameterSync(RoundCutHooks):
         # hash of that round is a label, not a content hash).
         if getattr(self.actor, "last_capture_lazy", False) is True:
             fields["sync/capture_lazy"] = True
+        # S27 G-CG: replaced fragments this boundary's applies named as checked
+        # off the trainer, and those whose check was still running.
+        verify = getattr(self.actor, "verify_ahead_counters", None)
+        if isinstance(verify, dict):
+            before, self._verify_ahead_before = self._verify_ahead_before, dict(verify)
+            fields["sync/apply_verified_ahead"] = int(verify["applied"] - before.get("applied", 0))
+            fields["sync/apply_verify_pending"] = int(verify["pending"] - before.get("pending", 0))
         counters = self.pairing.push_job_counters()
         fields["sync/push_background"] = bool(counters)
         if counters:
@@ -1631,7 +1654,7 @@ class FullParameterSync(RoundCutHooks):
 
     def finish(self, driver: IslandDriver) -> None:
         del driver
-        if not self.finished:
+        if not self.finished and not self.data_ended:
             raise RuntimeError("full-parameter sync stopped before every role acknowledged its final cut")
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:

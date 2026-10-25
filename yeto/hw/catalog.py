@@ -142,6 +142,21 @@ def compat_group(card: str, hbm_gib: float | None = None) -> str:
     return f"{group}-{nominal_hbm_gib(name, float(hbm_gib))}g"
 
 
+def launch_compat_group(card: str, explicit: str | None = None) -> str:
+    """The group the launcher exports to an island on ``card``.
+
+    ``explicit`` (``yeto launch --rl-compat-group``) replaces the card group on
+    every island of the run: islands on different cards then declare one group
+    and the syncer admits them together.  Their numeric tolerance is not
+    calibrated (``CARD_PAIR_TOLERANCE`` is empty), so this is an operator
+    decision, recorded on the launcher log and on each island's hardware event.
+    The card must still be in the catalog: an unknown card fails here as before."""
+    derived = compat_group(card)
+    if not explicit:
+        return derived
+    return validate_compat_group(explicit)
+
+
 def compat_group_family(group: str) -> str:
     """The launcher device family (``cuda``/``npu``/``ppu``) of a compat group."""
     vendor = validate_compat_group(group).split("-", 1)[0]

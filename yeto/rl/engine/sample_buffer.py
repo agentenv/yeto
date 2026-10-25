@@ -96,8 +96,23 @@ def payload_name(sample_id: str) -> str:
     return _SAFE_NAME.sub("_", sample_id) + ".bin"
 
 
+def _hold_reader(store: Any) -> Any:
+    """``store.hold_reader()``; a store object without it holds nothing."""
+    hold = getattr(store, "hold_reader", None)
+    if callable(hold):
+        return hold()
+    from .resume import StoreWriterGuard
+
+    return StoreWriterGuard()
+
+
 class JsonlIndex:
-    """The index as ``index.jsonl`` in a shared directory (see the module doc)."""
+    """The index as ``index.jsonl`` in a shared directory (see the module doc).
+
+    Reads of the index and of a payload hold the store's reader guard
+    (``CheckpointStore.hold_reader``) while the file is open: a reload by
+    another process of the container (the driver reading its policy releases)
+    is then skipped instead of failing on the open file."""
 
     def __init__(self, store: CheckpointStore, *, index: str = INDEX, create_index: bool = True,
                  reload: bool = True) -> None:
@@ -130,7 +145,11 @@ class JsonlIndex:
         return f"{PAYLOADS}/{name}"
 
     def read_payload(self, ref: str) -> bytes:
-        return (self.root / ref).read_bytes()
+        guard = _hold_reader(self.store)  # no reload of the store while the file is open
+        try:
+            return (self.root / ref).read_bytes()
+        finally:
+            guard.release()
 
     def has_payload(self, ref: str) -> bool:
         return (self.root / ref).is_file()
@@ -140,8 +159,12 @@ class JsonlIndex:
             self.store.reload()
         if not self.path.exists():  # a reader before the first merge (or a shard not created yet)
             return []
-        with open(self.path, "rb") as fh:
-            return list(self._lines(fh))
+        guard = _hold_reader(self.store)
+        try:
+            with open(self.path, "rb") as fh:
+                return list(self._lines(fh))
+        finally:
+            guard.release()
 
     def append(self, absorb: Callable[[list[dict[str, Any]]], None],
                make: Callable[[], dict[str, Any]]) -> None:

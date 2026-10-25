@@ -66,6 +66,7 @@ from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 from yeto.syncer_shards import ShardedSyncerClient
 
 from .policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
+from .shape_free_layout import Granularity
 from .trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 
 # Seconds between progress lines while an island waits for its initial cut.
@@ -222,6 +223,9 @@ class RoleStreamConfig:
     # Merge mode of every non-vocabulary fragment ("avg" or "rda"); the
     # vocabulary tables always average. Bound through the layout hash.
     matrix_merge: str = "avg"
+    # A shape-free layout's granularity (yeto.rl.engine.shape_free_layout);
+    # None: the shape-bound layout of the island's own ranks.
+    shape_free: Granularity | None = None
     # Fragment-sharded syncer head: every shard's address in shard order
     # (the first is ``syncer_addr``); empty for one syncer process. Not part
     # of the session contract: shards run the unsharded step schedule, so
@@ -256,6 +260,14 @@ class RoleStreamConfig:
     # final parameters stay with the syncer (syncer --final-cut-payload
     # manifest). Must match the syncer, whose profile hash binds it.
     final_cut: str = "download"
+    # S27 G-CG verify-ahead: check each stored broadcast's chunks on a
+    # background thread when it arrives, so the apply at the next boundary
+    # names it and the trainer's prepare reads none of its chunks (the
+    # engine's ``_stored_fragment_verifier``; Miles ``verified_apply``; the
+    # same check, off the training path). False keeps the check in the
+    # trainer's prepare. Not part of the session contract: the applied values
+    # are the same either way.
+    verify_ahead: bool = True
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -539,6 +551,11 @@ class FullParameterRoleStream:
         # S27 G-AG: summed push time split (_note_push_timing), read by the
         # session's round event.
         self.push_timing_totals: dict[str, float] = {}
+        # Verify-ahead (S27 G-CG): replaced fragments an apply named as checked
+        # off the trainer ("applied") or whose check was still running, so the
+        # trainer checked them itself ("pending").
+        self.verify_ahead_counters: dict[str, int] = {"applied": 0, "pending": 0}
+        self._verifier: Any = None
         self.heartbeat: LeaseHeartbeat | None = None
         self.sink = None
         self.current: Any = None
@@ -665,6 +682,14 @@ class FullParameterRoleStream:
     def _recovery_island(self, group, adapter, *, recovering: bool):
         raise ValueError(f"{self.config.role}: peer recovery needs an engine recovery island")
 
+    def _stored_fragment_verifier(self, group) -> Any:
+        """Verify-ahead (S27 G-CG): a verifier the fragment sink hands every
+        stored broadcast to (``sink.verifier``; it sets the stored fragment's
+        ``verification`` future and has ``close()``), or None when the engine
+        cannot check stored chunks off the trainer or its apply cannot skip
+        them (``verified_fragments``)."""
+        return None
+
     @property
     def fragment_versions(self) -> tuple[int, ...]:
         if not self._fragment_versions or any(
@@ -751,6 +776,10 @@ class FullParameterRoleStream:
             if self.config.island_lease_s is not None else None
         )
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
+        if self.config.verify_ahead:
+            self._verifier = self._stored_fragment_verifier(group)
+            if self._verifier is not None:
+                sink.verifier = self._verifier
         client.install_inbound_chunk_sink(self._inbound_chunk_sink(sink))
         if self._recovering:
             await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
@@ -1464,11 +1493,13 @@ class FullParameterRoleStream:
             target_policy_version=target_version,
             authoritative_fragments=tuple(selected.values()),
         )
+        verified = self._verified_ahead(selected)
         before = await self._optimizer_states() if optimizer_proof else None
         await self.adapter.apply(
             self.group,
             target,
             commit_token=self._apply_token(target_version, selected),
+            **({"verified_fragments": verified} if verified else {}),
         )
         await self._report_rank_stats("apply")
         if before is not None:
@@ -1497,6 +1528,31 @@ class FullParameterRoleStream:
             self._clear_first_push_phase(fragment_id)
             self._tokens_at_anchor[fragment_id] = tokens
             self._routed_at_anchor[fragment_id] = routed
+
+    def _verified_ahead(self, selected: Mapping[int, Any]) -> dict[int, str]:
+        """``{fragment: payload hash}`` of the fragments in ``selected`` whose
+        stored chunks the verifier already checked; a fragment whose check is
+        still running (or that has none) is checked by the trainer as before.
+        A failed check fails this apply before the trainer changes, as its
+        prepare would."""
+
+        verified: dict[int, str] = {}
+        for fragment_id, stored in selected.items():
+            if getattr(stored, "verification", None) is None:
+                continue
+            try:
+                payload_hash = stored.verified_payload_hash()
+            except Exception as error:
+                raise RuntimeError(
+                    f"{self.config.role} broadcast of fragment {fragment_id} v{stored.version} "
+                    "failed its off-trainer chunk check"
+                ) from error
+            if payload_hash is not None:
+                verified[fragment_id] = payload_hash
+            else:
+                self.verify_ahead_counters["pending"] += 1
+        self.verify_ahead_counters["applied"] += len(verified)
+        return verified
 
     def _apply_token(
         self,
@@ -2033,6 +2089,8 @@ class FullParameterRoleStream:
             self.heartbeat.stop()
         if self.client is not None:
             self.client.close()
+        if self._verifier is not None:
+            self._verifier.close()
         if self.sink is not None:
             self.sink.release_all()
         retained_cuts = tuple(value for value, _count in self._pinned_cuts.values())

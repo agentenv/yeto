@@ -446,4 +446,6 @@ def test_a_store_root_outside_the_mount_writes_through_the_mount(tmp_path):
     assert (tmp_path / "elsewhere" / "policy-releases" / "r1-v1" / "a.bin").read_bytes() == b"abc"
     assert commits == [1]
     built = store_from_env("/root/yeto-checkpoint-store/run", environ={"YETO_RL_STORE_MODAL_VOLUME": "v"})
-    assert built.mount == MODAL_CHECKPOINT_STORE_MOUNT and built.puts_bypass_mount
+    assert built.mount == MODAL_CHECKPOINT_STORE_MOUNT and built.put_mode == "mount"
+    # S27 G-DR: without a Modal client here the puts go through the mount (as before)
+    assert not built.puts_bypass_mount
