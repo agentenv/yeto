@@ -81,6 +81,16 @@ class VerlRunConfig:
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
+    # S27 G-EQ2 (npu1): keep the parameters and the optimizer state in host
+    # memory, the card holding only what a step computes with. Both default off,
+    # as before. param_offload is what lets a card smaller than the NVIDIA
+    # reference hold a large full-parameter island at all: without it verl puts
+    # the whole model on the card before FSDP2 shards it, and an 8x64 GiB
+    # Ascend node dies inside fully_shard for a 30B model (the sharded copy no
+    # longer fits next to the unsharded one). The parameters stay FP32, so the
+    # full-parameter boundary still reads masters (full_parameter.MASTER_DTYPE).
+    param_offload: bool = False
+    optimizer_offload: bool = False
     # S27 G-EQ2: activation recomputation, when the model's implementation
     # supports it (``island_entry.gradient_checkpointing_for``). The HF
     # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
@@ -197,8 +207,8 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384",
         "actor_rollout_ref.actor.use_kl_loss=False",
         "actor_rollout_ref.actor.entropy_coeff=0",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=False",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload={cfg.param_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={cfg.optimizer_offload}",
         f"actor_rollout_ref.actor.data_loader_seed={cfg.seed}",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",

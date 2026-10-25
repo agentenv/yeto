@@ -506,3 +506,30 @@ def test_gradient_checkpointing_reaches_the_overrides():
     assert "actor_rollout_ref.model.enable_gradient_checkpointing=True" in overrides()
     assert "actor_rollout_ref.model.enable_gradient_checkpointing=False" in overrides(
         gradient_checkpointing=False)
+
+
+def test_fsdp_offload_is_selectable(monkeypatch):
+    """S27 G-EQ2: without param offload verl puts the whole model on the card
+    before FSDP2 shards it, which a 64 GiB Ascend card cannot hold for 30B."""
+    from yeto.rl.adapters.verl import config as vconf, island_entry
+
+    def overrides(**kw):
+        return vconf.build_overrides(vconf.VerlRunConfig(
+            model_path="/m", train_file="/t", val_file="/v", out_dir="/o", **kw))
+
+    off = overrides()
+    assert "actor_rollout_ref.actor.fsdp_config.param_offload=False" in off
+    assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False" in off
+    both = overrides(param_offload=True, optimizer_offload=True)
+    assert "actor_rollout_ref.actor.fsdp_config.param_offload=True" in both
+    assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True" in both
+    # the island flag maps the four spellings
+    base = ["--model", "m", "--model-revision", "r", "--data", "d", "--learner-id", "0",
+            "--reward-function", "gsm8k_reward:score", "--global-rounds", "1",
+            "--groups-per-round", "1", "--samples-per-group", "1",
+            "--rollout-max-response-len", "8", "--event-tape", "t", "--inner-lr", "1e-6",
+            "--seq-len", "16", "--seed", "1"]
+    assert island_entry.parse_args(base)[0].rl_fsdp_offload == "none"
+    for value in ("param", "optimizer", "both"):
+        args, _ = island_entry.parse_args([*base, "--rl-fsdp-offload", value])
+        assert args.rl_fsdp_offload == value

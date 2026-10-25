@@ -72,6 +72,9 @@ def parse_args(argv):
     # S27 G-EQ2: the launcher passes this to every island; the verl island used to
     # ignore it, so a model whose HF support ships with the checkpoint could not load
     p.add_argument("--trust-remote-code", action="store_true")
+    # S27 G-EQ2: FSDP2 host-memory offload (npu1: 64 GiB cards, 30B full parameters)
+    p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
+                   default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
@@ -673,6 +676,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
     except that a spec clip range is refused: only the Megatron island maps it).
     ``pools`` (:func:`fsdp_separate_pools`, S27 G-EK): the trainer trains on its own
     cards and the rollout runs on standalone vLLM servers (``separate.with_separate_pools``)."""
+    offload = getattr(args, "rl_fsdp_offload", "none") or "none"
     clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
     if clips:
         raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
@@ -694,6 +698,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
         trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
         gradient_checkpointing=gradient_checkpointing_for(args, model_path),
+        param_offload=offload in ("param", "both"), optimizer_offload=offload in ("optimizer", "both"),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)
