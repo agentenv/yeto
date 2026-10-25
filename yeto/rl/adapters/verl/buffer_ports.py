@@ -35,6 +35,18 @@ merge (elastic: several local rounds per merge) releases nothing: its weights
 are not a merged policy. The driver is bound after it is built
 (:meth:`BufferReleasePublisher.bind`).
 
+Delta releases (S27 G-EQ3, ``--rl-release-delta-full-every N`` on a
+full-parameter trainer): the release is written into a staging directory on the
+island's local disk and published with
+:meth:`~yeto.rl.engine.policy_release.PolicyReleaseStore.release_staged`, which
+uploads the bf16 delta against the previous release (:class:`DeltaChain`)
+instead of the weights. The first release of the process is a delta against the
+release the store already holds when its files are readable there -- for a
+cross-cloud run that is the base checkpoint both sides have, so the first
+update sends only the words one optimizer step moved instead of the whole
+checkpoint (Nemotron Nano: 63 GB). It needs the export to write the base's own
+file names and sizes, which :mod:`.hf_export` does.
+
 The publication is complete when the release record and ``LATEST.json`` are in
 the store. Whether a sampler has loaded it is the sampler's report
 (``rl_sampler_policy_loaded`` on its tape) and the behavior versions of the
@@ -104,6 +116,35 @@ def lora_release_weights(base_dir: str | Path, merge: Callable[..., dict[str, An
     return weights
 
 
+def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Callable[..., None] | None = None):
+    """A :class:`DeltaChain` for this trainer, started from the release the store
+    already holds when that release's files are readable in the store (module
+    doc, delta releases); None when ``full_every`` is 0 (deltas off)."""
+    from yeto.rl.engine.policy_release import DeltaChain
+
+    if int(full_every) < 1:
+        return None
+    chain = DeltaChain(int(full_every))
+    latest = releases.latest()
+    if latest is not None and latest.delta is None:
+        try:
+            directory = releases.resolve(latest)
+        except Exception as error:  # noqa: BLE001 -- no local base: the first release goes out whole
+            directory = None
+            if emit is not None:
+                emit("rl_policy_release_delta_base", adopted=False,
+                     reason=f"{type(error).__name__}: {error}"[:200])
+        if directory is not None and Path(directory).is_dir():
+            chain.adopt(latest, directory)
+            if emit is not None:
+                emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
+                     base_version=latest.version, base_path=str(directory))
+    elif emit is not None:
+        emit("rl_policy_release_delta_base", adopted=False,
+             reason="the store holds no full release" if latest is None else "the latest is a delta")
+    return chain
+
+
 def full_release_weights(writer: Callable[[int, Path], None]):
     """A full-parameter trainer's releases (S27 G-EK): ``writer`` is the island's HF
     writer (``hf_export.VerlHfWriter`` over the trainer workers); version 0 is the
@@ -146,7 +187,16 @@ class BufferReleasePublisher:
                  *, base_dir: str | Path, clock: Callable[[], float] = time.monotonic,
                  merge: Callable[..., dict[str, Any]] = write_merged_checkpoint,
                  lane: BufferLane | None = None,
-                 weights: Callable[[Any], ReleaseWeights] | None = None) -> None:
+                 weights: Callable[[Any], ReleaseWeights] | None = None,
+                 staging: str | Path | None = None, delta: Any = None) -> None:
+        """``staging``: publish each release from a directory under it instead of
+        writing it into the store (module doc, delta releases); ``delta``: the
+        :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
+        follow (:func:`delta_chain_for`), which needs ``staging``."""
+        if delta is not None and staging is None:
+            raise ValueError("delta releases need a staging directory")
+        self.staging = None if staging is None else Path(staging)
+        self.delta = delta
         self.island = island
         self.releases = releases
         self.feed = feed
@@ -189,6 +239,37 @@ class BufferReleasePublisher:
             return None
         return merged
 
+    def _release_from_staging(self, version: int, digest: str, write: Callable[[Path], None],
+                              position: int | None, shards: dict[str, int] | None, state: Any):
+        """Write the release into a staging directory and publish it from there,
+        as the delta against the chain's base when it has one (module doc).
+        The staged directory stays only while it is the next delta's base."""
+        import shutil
+        import tempfile
+
+        self.staging.mkdir(parents=True, exist_ok=True)
+        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+        base = None if self.delta is None else self.delta.base()
+        kept = False
+        try:
+            write(staged)
+            release = self.releases.release_staged(
+                version, digest, staged, position=lambda: (position, shards),
+                weights=FULL, origin=self._origin(state), delta_base=base,
+                digest_full=self.delta is not None)
+            kept = self.delta is not None and self.delta.advance(release, staged)
+        finally:
+            if not kept:
+                shutil.rmtree(staged, ignore_errors=True)
+        delta = None if release is None else release.delta
+        self.island.emit("rl_policy_release_delta", policy_version=int(version),
+                         base_seq=None if delta is None else delta["base_seq"],
+                         base_version=None if delta is None else delta["base_version"],
+                         ratio=None if delta is None else delta["ratio"],
+                         bytes=None if release is None else sum(int(v) for v in (release.files or {}).values()),
+                         timings=self.releases.last_timings)
+        return release
+
     def _origin(self, state: Any) -> dict[str, Any] | None:
         if self.lane is None:
             return None
@@ -212,8 +293,12 @@ class BufferReleasePublisher:
             def write(directory: Path) -> None:
                 merge.update(weights.write(directory))
 
-            release = self.releases.release(released, digest, write, buffer_selected=position,
-                                            buffer_shards=shards, weights=FULL, origin=self._origin(state))
+            if self.staging is not None:
+                release = self._release_from_staging(released, digest, write, position, shards, state)
+            else:
+                release = self.releases.release(released, digest, write, buffer_selected=position,
+                                                buffer_shards=shards, weights=FULL,
+                                                origin=self._origin(state))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
                   "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
@@ -257,13 +342,17 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          tokenize: Callable[[str], Sequence[int]] | None = None,
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
                          weights: Callable[[Any], ReleaseWeights] | None = None,
+                         staging: str | Path | None = None, delta_full_every: int = 0,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
     port, the publisher and the placement of a buffer trainer (module doc); the
     feed is ``publisher.feed``. A lane reader ``buffer`` (``buffer.lane``) makes
     a synced trainer: ``cursor_log`` is its lane cursor log
-    (``merged_release.lane_cursor_log``)."""
+    (``merged_release.lane_cursor_log``).
+
+    ``delta_full_every`` > 0 (``--rl-release-delta-full-every``) publishes the
+    releases from ``staging`` as bf16 deltas (module doc, delta releases)."""
     lane = getattr(buffer, "lane", None)
     if (lane is None) != (cursor_log is None):
         raise ValueError("a synced buffer trainer needs both a lane reader and its cursor log")
@@ -279,5 +368,12 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
-    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane, weights=weights)
+    if int(delta_full_every) > 0 and staging is None:
+        raise ValueError("--rl-release-delta-full-every needs a staging directory")
+    delta = (delta_chain_for(releases, int(delta_full_every), emit=island.emit)
+             if int(delta_full_every) > 0 else None)
+    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane,
+                                       weights=weights,
+                                       staging=staging if int(delta_full_every) > 0 else None,
+                                       delta=delta)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

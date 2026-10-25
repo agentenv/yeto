@@ -646,8 +646,12 @@ def check_launch(args: Any) -> None:
 
 
 def _check_release_delta(args: Any, role: str) -> None:
-    """``--rl-release-delta-full-every N``: 0 (off) or N >= 2, on a Miles trainer
-    whose full-weight releases are staged (``policy_release`` module doc)."""
+    """``--rl-release-delta-full-every N``: 0 (off) or N >= 2, on a trainer whose
+    full-weight releases are staged (``policy_release`` module doc).
+
+    Backends: Miles (S27 G-BG), and since S27 G-EQ3 a verl full-parameter buffer
+    trainer, whose export writes the base checkpoint's own files
+    (``adapters/verl/hf_export``) so the delta against the base stays small."""
     every = int(getattr(args, "rl_release_delta_full_every", 0) or 0)
     if every == 0:
         return
@@ -658,8 +662,11 @@ def _check_release_delta(args: Any, role: str) -> None:
         problems.append("--rl-sample-role trainer")
     if getattr(args, "rl_release_inline", False):
         problems.append("staged releases (no --rl-release-inline)")
-    if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        problems.append("--rl-backend miles")
+    backend = getattr(args, "rl_backend", None) or "miles"
+    if backend not in ("miles", "verl"):
+        problems.append("--rl-backend miles or verl")
+    if backend == "verl" and getattr(args, "parameter_mode", "lora") != "full":
+        problems.append("--parameter-mode full on a verl island (a LoRA release is one adapter)")
     if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
         problems.append("no --rl-rollout-quant-tier (its re-quantizer reads whole releases)")
     if not _full_weights(args):

@@ -602,3 +602,21 @@ def test_ascend_island_turns_torch_compile_off(monkeypatch):
     assert all(f"{key}=False" in ascend for key in keys)
     nvidia = run_for("nvidia")
     assert not [o for o in nvidia if o.split("=")[0] in keys]  # NVIDIA unchanged
+
+
+def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
+    """S27 G-EQ3: the fp32 unsharded gradient of a stacked MoE expert tensor and
+    the entropy of a 131072-wide log-prob head do not fit next to the rest."""
+    from yeto.rl.adapters.verl.island_entry import ascend_memory_overrides
+
+    without = ascend_memory_overrides(False)
+    # one "+" addition: fsdp_config.mixed_precision is absent from the generated config
+    precision = [o for o in without if "mixed_precision" in o]
+    assert precision == ["+actor_rollout_ref.actor.fsdp_config.mixed_precision="
+                         "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
+    # the FP32 masters stay FP32: the full-parameter boundary reads them
+    assert not [o for o in without if "model_dtype" in o]
+    assert "actor_rollout_ref.actor.entropy_checkpointing=True" in without
+    assert "actor_rollout_ref.actor.entropy_from_logits_with_chunking=True" in without
+    # a model that can recompute activations bounds the head itself
+    assert not [o for o in ascend_memory_overrides(True) if "entropy" in o]

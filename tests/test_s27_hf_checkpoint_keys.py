@@ -30,11 +30,13 @@ from yeto.rl.adapters.verl.hf_checkpoint_keys import (  # noqa: E402
 )
 from yeto.rl.adapters.verl.hf_export import VerlHfWriter, write_like  # noqa: E402
 
-TINY = dict(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=4,
-            hybrid_override_pattern="M*E-", num_attention_heads=4, num_key_value_heads=2, head_dim=4,
-            mamba_num_heads=4, mamba_head_dim=4, ssm_state_size=8, n_groups=1, conv_kernel=4,
-            n_routed_experts=4, n_shared_experts=1, moe_intermediate_size=8,
-            moe_shared_expert_intermediate_size=8, num_experts_per_tok=2, tie_word_embeddings=False,
+# Big enough that one shard is over release_delta.MIN_DELTA_BYTES (1 MiB), so a
+# delta release of this checkpoint encodes words instead of copying files whole.
+TINY = dict(vocab_size=4096, hidden_size=256, intermediate_size=256, num_hidden_layers=4,
+            hybrid_override_pattern="M*E-", num_attention_heads=8, num_key_value_heads=4, head_dim=32,
+            mamba_num_heads=8, mamba_head_dim=32, ssm_state_size=16, n_groups=1, conv_kernel=4,
+            n_routed_experts=4, n_shared_experts=1, moe_intermediate_size=128,
+            moe_shared_expert_intermediate_size=128, num_experts_per_tok=2, tie_word_embeddings=False,
             torch_dtype="bfloat16")
 
 
@@ -287,3 +289,71 @@ def test_model_key_map_names_the_stacked_sources_in_loading_order():
     assert key_map.targets()[target] == tuple(sorted(checkpoint))  # natural order, not the input's
     assert [key_map.keys[name].index for name in sorted(checkpoint)] == [0, 1, 2, 3]
     assert key_map.unexpected == ()
+
+
+# ----------------------------------------------------------------- delta releases of a verl trainer
+def test_a_buffer_trainers_first_release_is_a_delta_against_the_stores_base(tmp_path):
+    """S27 G-EQ3: the base checkpoint both sides hold is already a release in the
+    store, so the first cross-cloud update sends the changed words, not 63 GB."""
+    from yeto.rl.engine.policy_release import PolicyReleaseStore
+    from yeto.rl.engine.resume import CheckpointStore
+
+    from yeto.rl.adapters.verl.buffer_ports import delta_chain_for
+    from yeto.rl.adapters.verl.merged_release import write_full_checkpoint
+
+    base = tmp_path / "base"
+    parameters, buffers = _base_checkpoint(base, files=2)
+    store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+
+    def write_v0(directory: Path) -> None:
+        for path in sorted(base.iterdir()):
+            if path.is_file():
+                (directory / path.name).write_bytes(path.read_bytes())
+
+    v0 = store.release(0, "base-hash", write_v0, buffer_selected=0, buffer_shards={"modal-0": 0})
+    assert v0 is not None and v0.path == "r1-v0"
+    events: list[dict] = []
+    chain = delta_chain_for(store, 2, emit=lambda name, **fields: events.append({"event": name, **fields}))
+    assert events and events[-1]["adopted"] is True and events[-1]["base_version"] == 0
+    assert chain.base() is not None and chain.base().release.path == "r1-v0"
+
+    # a step moved part of one tensor: at lr 1e-6 a real step moves about 1 % of
+    # the bf16 words (release_delta module doc), so most of the file is unchanged
+    name = "model.embeddings.weight"
+    moved = parameters[name].clone()
+    moved[:64] += 0.5
+    parameters[name] = moved
+    staged = tmp_path / "staging" / "v1"
+    staged.parent.mkdir(parents=True)
+    # the publisher's own writer path: it leaves no .complete marker in the release
+    write_full_checkpoint(VerlHfWriter(_Group(parameters, buffers), base, run=_run), staged)
+    release = store.release_staged(1, "v1-hash", staged, position=lambda: (1, {"modal-0": 1}),
+                                   delta_base=chain.base(), digest_full=True)
+    assert release is not None and release.delta is not None
+    assert release.delta["base_path"] == "r1-v0" and 0.0 < release.delta["ratio"] < 1.0
+    # the delta is smaller than the weights it stands for
+    assert sum(release.files.values()) < sum(v0.files.values())
+    # and a sampler rebuilds the release from its own copy of the base
+    from yeto.rl.engine.release_delta import FileEntry, apply_directory
+
+    entries = {n: FileEntry(**e) for n, e in release.delta["files"].items()}
+    rebuilt = tmp_path / "rebuilt"
+    apply_directory(tmp_path / "store" / "policy-releases" / "r1-v0",
+                    [(tmp_path / "store" / "policy-releases" / release.path, entries)], rebuilt)
+    for file_name in sorted(p.name for p in staged.iterdir() if p.name.endswith(".safetensors")):
+        assert _bytes(rebuilt / file_name) == _bytes(staged / file_name), file_name
+
+
+def test_delta_releases_need_a_base_whose_files_are_readable(tmp_path):
+    from yeto.rl.engine.policy_release import PolicyReleaseStore
+    from yeto.rl.engine.resume import CheckpointStore
+
+    from yeto.rl.adapters.verl.buffer_ports import delta_chain_for
+
+    store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+    events: list[dict] = []
+    emit = lambda name, **fields: events.append(fields)  # noqa: E731
+    assert delta_chain_for(store, 0, emit=emit) is None  # the flag is off
+    chain = delta_chain_for(store, 2, emit=emit)  # an empty store: the first release is full
+    assert chain is not None and chain.base() is None
+    assert events[-1]["adopted"] is False and "no full release" in events[-1]["reason"]

@@ -728,7 +728,42 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         overrides += ["actor_rollout_ref.actor.use_torch_compile=False",
                       "actor_rollout_ref.actor.fsdp_config.use_torch_compile=False",
                       "actor_rollout_ref.ref.fsdp_config.use_torch_compile=False"]
+        overrides += ascend_memory_overrides(run.gradient_checkpointing)
     return run, overrides
+
+
+def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
+    """What an Ascend FSDP2 island changes to fit a step into a 64 GiB card
+    (S27 G-EQ3, npu1; the NVIDIA reference card has 141 GiB).
+
+    The first backward of Nemotron Nano 30B-A3B died with "NPU out of memory.
+    Tried to allocate 5.04 GiB (60.96 GiB total capacity; 50.30 GiB already
+    allocated)". Two costs dominate, and both are optional:
+
+    * the **gradient of a stacked MoE expert tensor**. One Nano MoE layer holds
+      ``mixer.experts.up_proj`` as a single (128, 3712, 2688) parameter, 1.28e9
+      values; FSDP2's default ``reduce_dtype=fp32`` upcasts the whole unsharded
+      gradient before the reduce-scatter, which is 4.8 GiB of transient device
+      memory per layer. Reducing in bf16 halves it. The FP32 master parameters
+      are untouched (``model_dtype=fp32``), so the full-parameter export and the
+      sync boundary still read FP32 masters.
+    * the **entropy of the log-prob head**: Nano's vocabulary is 131072, so a
+      2560-token micro-batch has 2560x131072 logits; entropy over them, kept for
+      the backward, is another 1.3 GiB per copy. Chunking computes it in slices
+      and checkpointing recomputes it in the backward instead of keeping it.
+
+    A model whose implementation supports activation recomputation does not need
+    the entropy knobs (the recompute already bounds the head), so they are only
+    added when it is off.
+    """
+    # the key is absent from the generated config (fsdp_config.mixed_precision defaults
+    # to None in the dataclass), so it is added, not overridden: hydra needs the "+".
+    overrides = ["+actor_rollout_ref.actor.fsdp_config.mixed_precision="
+                 "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
+    if not gradient_checkpointing:
+        overrides += ["actor_rollout_ref.actor.entropy_from_logits_with_chunking=True",
+                      "actor_rollout_ref.actor.entropy_checkpointing=True"]
+    return overrides
 
 
 def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
@@ -869,6 +904,8 @@ def sample_buffer_section(args) -> dict | None:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
+            # S27 G-EQ3: staged bf16 delta releases (0: the release goes into the store whole)
+            "release_delta_full_every": int(config.release_delta_full_every or 0),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 

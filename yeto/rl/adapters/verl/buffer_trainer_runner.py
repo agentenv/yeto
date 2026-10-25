@@ -58,6 +58,20 @@ def rows_to_dataproto(rows: dict):
     return DataProto(batch=batch, non_tensor_batch=non_tensor, meta_info=meta)
 
 
+def release_staging_dir(plan: dict, environ: dict) -> "Path":
+    """Where a buffer trainer stages a release before it publishes it (S27 G-EQ3):
+    ``$YETO_RL_RELEASE_STAGING``, else a directory beside the island's output on
+    local disk (the staged release is a whole checkpoint, and a Modal Volume or
+    a shared mount is not a place to build one)."""
+    from pathlib import Path
+
+    named = environ.get("YETO_RL_RELEASE_STAGING")
+    if named:
+        return Path(named)
+    out_dir = plan.get("out_dir") or environ.get("YETO_RL_WORK_DIR") or "."
+    return Path(out_dir) / "release-staging"
+
+
 class _YetoBufferTrainerMixin(_YetoTrainerMixin):
     def yeto_add_group(self, rows: dict) -> int:
         from verl.experimental.fully_async_policy.detach_utils import RolloutSample
@@ -147,7 +161,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         wait_s=float(section.get("wait_s") or 3600.0),
                                         poll_s=float(section.get("poll_s") or 2.0),
                                         cursor_log=lane_cursor_log(buffer),
-                                        weights=release_weights_for(island, plan))
+                                        weights=release_weights_for(island, plan),
+                                        staging=release_staging_dir(plan, environ),
+                                        delta_full_every=int(section.get("release_delta_full_every") or 0))
 
         return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
                                       buffer_ports=ports)
