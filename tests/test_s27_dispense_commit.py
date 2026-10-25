@@ -316,11 +316,18 @@ def test_tape_rows_of_an_uncommitted_round_are_counted_not_a_problem():
         return {"island_id": island, "event": "rl_dispense_commit", "rollout_id": rollout_id,
                 "rounds": [rollout_id], "trained": 2, "acked": True}
 
-    start = {"island_id": 1, "event": "rl_driver_start"}
-    tapes = [start, rows(0, 0, 2), commit(0), rows(1, 2, 4),  # dies before the commit of round 1
-             start, rows(0, 4, 6), commit(0)]
+    def start():
+        return {"island_id": 1, "event": "rl_driver_start"}
+
+    tapes = [start(), rows(0, 0, 2), commit(0), rows(1, 2, 4),  # dies before the commit of round 1
+             start(), rows(0, 4, 6), commit(0)]
+    for t, record in enumerate(tapes):  # real records differ at least in their time
+        record["time_unix"] = 1000.0 + t
     committed, uncommitted = tape_rows(tapes)
     assert sum(committed[1].values()) == 4 and sorted(uncommitted[1]) == [2, 3]
+    # a relaunched island's tape repeats the earlier records: each counts once
+    committed_twice, _ = tape_rows(tapes + tapes[:3])
+    assert committed_twice[1] == committed[1]
     # a tape from before the commit existed: every round counts as committed
     committed, uncommitted = tape_rows([rows(0, 0, 2, island=0)])
     assert sum(committed[0].values()) == 2 and not uncommitted
