@@ -570,3 +570,19 @@ def test_worker_digest_hashes_the_owned_bf16_bytes(monkeypatch):
     rows = mp.remote_megatron_digest(worker)["tensors"]
     assert [r[0] for r in rows] == ["0:weight@tp0.pp0", "0:bias@tp0.pp0", "0:experts_w@tp0.pp0.ep0"]
     assert mp.remote_megatron_layout(worker) == [r[:3] for r in rows]
+
+
+def test_master_ports_are_drawn_at_random_below_the_ephemeral_range():
+    import random
+    import socket
+
+    from yeto.rl.adapters.verl import ray_ports
+
+    ports = {ray_ports.pick_free_port(rng=random.Random(seed)) for seed in range(20)}
+    assert len(ports) > 15 and all(ray_ports.PORT_RANGE[0] <= p < ray_ports.PORT_RANGE[1] for p in ports)
+    with pytest.raises(RuntimeError, match="no free port"):  # the only port in the range is taken
+        with socket.socket() as busy:
+            busy.bind(("", 0))
+            taken = busy.getsockname()[1]
+            busy.listen()
+            ray_ports.pick_free_port(taken, taken + 1)

@@ -28,6 +28,7 @@ from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
 from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 from .megatron_engine import TRAINER_MODE
+from .ray_ports import spread_master_ports
 
 
 @register_trainer(TRAINER_MODE)
@@ -41,6 +42,7 @@ class YetoSeparateTrainer(PPOTrainerSeparateAsync):
                              f"published policy), got {sync_step}")
         if bool(config.actor_rollout_ref.get("hybrid_engine", True)):
             raise ValueError(f"{TRAINER_MODE} needs actor_rollout_ref.hybrid_engine=False")
+        spread_master_ports()  # the replicas' worker groups start at once (ray_ports)
         super().__init__(config)
 
     def on_init_end(self):  # the first publication is the driver's (policy version 0)
