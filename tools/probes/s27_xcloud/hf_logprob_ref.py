@@ -7,7 +7,11 @@ same samples teacher-forced with the base weights (version 0):
 
 * ``remote``: the checkpoint's own implementation (``trust_remote_code=True``);
 * ``builtin``: transformers' own ``nemotron_h`` implementation, when this
-  transformers has one (else recorded as missing).
+  transformers has one (else recorded as missing);
+* ``builtin_naive``: the same with the Mamba CUDA kernels off (``use_mamba_kernels``
+  False and the module's kernel symbols set to None), i.e. the naive torch path the
+  Ascend trainer runs (no mamba kernels on the NPU); calls of ``torch_forward`` /
+  ``cuda_kernels_forward`` are counted to show which path ran.
 
 Input ids per sample = ``tokenizer.encode(prompt)`` + the response ids from the payload.
 SGLang tokenizes text input with the same HF tokenizer (``encode`` with special tokens;
@@ -79,9 +83,35 @@ def compare(a: list[list[float]], b: list[list[float]]) -> dict:
             "per_sample_mean_abs": [round(sum(abs(d) for d in r) / max(1, len(r)), 4) for r in diffs]}
 
 
+def naive_paths() -> dict:
+    """Turn the built-in nemotron_h Mamba kernels off and count which forward runs."""
+    import transformers.models.nemotron_h.modeling_nemotron_h as nh
+
+    off = {}
+    for name in ("selective_state_update", "mamba_chunk_scan_combined", "mamba_split_conv1d_scan_combined",
+                 "causal_conv1d_fn", "causal_conv1d_update"):
+        if hasattr(nh, name):
+            off[name] = getattr(nh, name) is not None
+            setattr(nh, name, None)
+    if hasattr(nh, "is_fast_path_available"):
+        off["is_fast_path_available"] = bool(nh.is_fast_path_available)
+        nh.is_fast_path_available = False
+    calls = {"torch_forward": 0, "cuda_kernels_forward": 0}
+    mixer = getattr(nh, "NemotronHMamba2Mixer", None)
+    for meth in calls if mixer is not None else ():
+        if hasattr(mixer, meth):
+            orig = getattr(mixer, meth)
+
+            def wrapped(self, *a, _orig=orig, _m=meth, **k):
+                calls[_m] += 1
+                return _orig(self, *a, **k)
+            setattr(mixer, meth, wrapped)
+    return {"symbols_were_set": off, "calls": calls, "mixer": mixer is not None}
+
+
 @app.function(image=image, volumes={"/models": models, STORE_MOUNT: xc, "/data/logs": logs}, gpu="H200:1",
               cpu=8, memory=163840, timeout=2400)
-def ref(tag: str) -> dict:
+def ref(tag: str, variants: str = "remote,builtin") -> dict:
     sys.path.insert(0, WORKDIR)
     out = Path("/data/logs") / tag
     out.mkdir(parents=True, exist_ok=True)
@@ -115,24 +145,31 @@ def ref(tag: str) -> dict:
     result["prompt_tokens"] = [len(tok.encode(s["prompt"])) for s in samples[:4]]
     rollout = [list(s["rollout_log_probs"]) for s in samples]
     scores: dict[str, list[list[float]]] = {"sglang": rollout}
-    for label, remote in (("remote", True), ("builtin", False)):
+    for label in variants.split(","):
+        remote = label == "remote"
         began = time.monotonic()
         try:
+            naive = naive_paths() if label == "builtin_naive" else None
             config = AutoConfig.from_pretrained(BASE_DIR, trust_remote_code=remote)
+            if naive is not None:
+                naive["use_mamba_kernels_was"] = getattr(config, "use_mamba_kernels", "absent")
+                config.use_mamba_kernels = False
             model = AutoModelForCausalLM.from_pretrained(BASE_DIR, config=config, trust_remote_code=remote,
                                                          torch_dtype=torch.bfloat16, device_map="cuda")
             model.eval()
             loaded = time.monotonic() - began
             scores[label] = score(model, samples, tok)
             result[label] = {"class": type(model).__name__, "module": type(model).__module__,
-                             "load_s": round(loaded, 1), "score_s": round(time.monotonic() - began - loaded, 1)}
+                             "load_s": round(loaded, 1), "score_s": round(time.monotonic() - began - loaded, 1),
+                             **({"naive": naive} if naive is not None else {})}
             del model
         except Exception as error:  # noqa: BLE001 - recorded; the other implementation still runs
             result[label] = {"error": f"{type(error).__name__}: {error}"[:600]}
         gc.collect()
         torch.cuda.empty_cache()
         save()
-    for x, y in (("sglang", "remote"), ("sglang", "builtin"), ("remote", "builtin")):
+    for x, y in (("sglang", "remote"), ("sglang", "builtin"), ("remote", "builtin"),
+                 ("sglang", "builtin_naive"), ("builtin", "builtin_naive")):
         if x in scores and y in scores:
             result[f"{x}_vs_{y}"] = compare(scores[x], scores[y])  # diff = x - y
     save()
@@ -145,6 +182,6 @@ def ref(tag: str) -> dict:
 
 
 @app.local_entrypoint()
-def main(tag: str) -> None:
-    call = ref.spawn(tag)
+def main(tag: str, variants: str = "remote,builtin") -> None:
+    call = ref.spawn(tag, variants)
     print(f"spawned ref {call.object_id}")
