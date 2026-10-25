@@ -245,18 +245,20 @@ def _mark_on_signal() -> None:
             print(f"[xc] {name} handler not installed (not the main thread)", flush=True)
 
 
-def _wait_sampler(child: subprocess.Popen, log: Path) -> int:
+def _wait_sampler(child: subprocess.Popen, log: Path, own_stop) -> int:
     """Wait for the sampler. After a reclaim the engine sampler holds the process for
     ``engine_sampler_entry.RECLAIM_HOLD_S`` (300 s) so a spot cloud can stop the
-    container; here the stop is ours (the marker), so once the sampler printed its
-    ``done`` line (its tape, buffer commits and leave record are written by then) the
-    hold is cut short with SIGKILL (a signal only writes the marker)."""
+    container and run the input again. When the stop is this wrapper's own rule
+    (``own_stop()``), once the sampler printed its ``done`` line (its tape, buffer
+    commits and leave record are written by then) the hold is cut short with SIGKILL
+    (a signal only writes the marker). A marker written by a signal (``modal app
+    stop``, a preemption) keeps the hold, as designed for a reclaim."""
     while True:
         try:
             return child.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             pass
-        if Path(RECLAIM_MARKER).exists() and b"[engine-sampler] done:" in log.read_bytes()[-4096:]:
+        if own_stop() and b"[engine-sampler] done:" in log.read_bytes()[-4096:]:
             time.sleep(2.0)
             child.kill()
             print("[xc] sampler done after the stop marker: hold cut short", flush=True)
@@ -308,7 +310,7 @@ def sampler(tag: str, cfg: dict) -> int:
         child = subprocess.Popen([sys.executable, "-m", "yeto.rl.engine.engine_sampler", "--spec",
                                   str(out / "spec.json")], cwd=WORKDIR, env=env, stdout=log,
                                  stderr=subprocess.STDOUT)
-        rc = _wait_sampler(child, out / "sampler.log")
+        rc = _wait_sampler(child, out / "sampler.log", lambda: rules.reason is not None)
     nvml.terminate()
     stop.set()
     watcher.join(timeout=30)
