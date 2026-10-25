@@ -213,3 +213,27 @@ def test_miles_port_restarts_the_declared_cells():
     record = port.restore_engines()
     assert pool.calls == [("abort",), ("add", 2, 4, ["engine:e0", "engine:e1"])]
     assert record["cells"] == ["engine:e0", "engine:e1"]
+
+
+def test_island_accepts_declared_cells_only_with_the_outage_budget(monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles import island_entry
+
+    monkeypatch.setattr(island_entry, "_check_resume_switches", lambda a: None)
+    monkeypatch.setattr(island_entry, "_check_hf_exports", lambda a: None)
+    monkeypatch.setattr(island_entry, "_check_sample_store", lambda a: None)
+    import yeto.rl.adapters.miles.elastic_hook as hook
+    monkeypatch.setattr(hook, "check_recommend_flags", lambda a: None)
+    names = {name for name, _flag in island_entry._ELASTIC_COMPANIONS}
+    base = {name: None for name in names}
+    args = SimpleNamespace(**{**base, "rl_elastic": False, "rl_elastic_declare_cells": True,
+                              "rl_elastic_cells": "e0,e1"})
+    monkeypatch.delenv("YETO_ISLAND_ENGINE_RECOVERY_S", raising=False)
+    with pytest.raises(ValueError, match="needs --rl-elastic"):
+        island_entry._check_ports_infra_switches(args)
+    monkeypatch.setenv("YETO_ISLAND_ENGINE_RECOVERY_S", "3600")
+    island_entry._check_ports_infra_switches(args)  # accepted
+    args.rl_elastic_cells = None
+    with pytest.raises(ValueError, match="needs --rl-elastic-cells"):
+        island_entry._check_ports_infra_switches(args)
