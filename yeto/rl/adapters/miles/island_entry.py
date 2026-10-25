@@ -1308,12 +1308,14 @@ def prepare_prompt_data(
     prompt_column: str | None = None,
     label_column: str | None = None,
     slot: Any = None,
+    number_rows: bool = False,
 ) -> Path:
     """Write ``source`` (local file or Hub dataset) as Miles prompt rows.
 
     ``slot`` (``data_split.DataSlot``, S27 task assignment): keep only the
     slot's rows, in data order; each kept row records its row number in the
-    unsplit data as ``metadata["yeto_data_row"]``."""
+    unsplit data as ``metadata["yeto_data_row"]``. ``number_rows`` (the task
+    dispenser, S27 P2): keep every row and record every row number."""
     from yeto.data import load_rows
     from yeto.rl.engine.data_split import DATA_ROW_KEY
 
@@ -1323,6 +1325,8 @@ def prepare_prompt_data(
     else:
         rows = load_rows(source, split=split, revision=revision)
     split_rows = slot is not None and not slot.whole
+    if split_rows and number_rows:
+        raise ValueError("a data slot and the task dispenser exclude each other")
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
@@ -1340,7 +1344,7 @@ def prepare_prompt_data(
                     if key not in {"messages", "metadata"}
                 }
             )
-            if split_rows:
+            if split_rows or number_rows:
                 metadata[DATA_ROW_KEY] = number
             normalized = {
                 "messages": _messages(row, prompt_column),
@@ -1380,6 +1384,45 @@ def _verify_island_task_data(args) -> dict[str, Any] | None:
     from yeto.rl.island_tasks import verify_island_data
 
     return verify_island_data(args.data, expected)
+
+
+def _island_dispense(args) -> bool:
+    """S27 P2: the island claims its rows from the actor syncer's dispenser
+    (``--rl-data-dispense``). Refused where it does not apply (as the slot)."""
+
+    if not getattr(args, "rl_data_dispense", False):
+        return False
+    from yeto.rl.engine import sample_roles
+
+    if getattr(args, "rl_data_slot", None):
+        raise ValueError("--rl-data-dispense and --rl-data-slot exclude each other")
+    if getattr(args, "data_sha256", None):
+        raise ValueError("--rl-data-dispense and per-island task data (--data-sha256) exclude each other")
+    if sample_roles.sample_role(args) != sample_roles.BOTH or getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-dispense belongs to a training island that generates and trains")
+    if getattr(args, "eval_only", False):
+        raise ValueError("--rl-data-dispense: an eval-only island evaluates every row")
+    return True
+
+
+def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
+    """``miles_args.yeto_rl_data_dispense``: what the rollout executor needs to
+    open its dispenser connection (``adapters.miles.task_dispense.install``)."""
+
+    if not _island_dispense(args):
+        return None
+    if getattr(miles_args, "fully_async", False):
+        raise ValueError("--rl-data-dispense does not cover Miles fully_async rollouts yet")
+    from yeto.rl.engine.task_dispense import file_fingerprint
+
+    rows, digest = file_fingerprint(prompt_path)
+    host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+    block = int(getattr(miles_args, "over_sampling_batch_size", None)
+                or getattr(miles_args, "rollout_batch_size"))
+    return {"address": f"{host}:{port}", "learner_id": int(args.learner_id), "rows": rows,
+            "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
+            "block": block,
+            "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
 
 
 def _island_data_slot(args) -> Any:
@@ -2050,6 +2093,9 @@ def run_miles(
     slot = _island_data_slot(args)
     miles_args.yeto_rl_data_slot = None if slot is None or slot.whole else slot.env()
     miles_args.yeto_rl_data_position_store = getattr(args, "rl_data_position_store", None)
+    miles_args.yeto_rl_data_dispense = _dispense_config(args, miles_args, prompt_path)
+    if miles_args.yeto_rl_data_dispense is not None:
+        miles_args.yeto_rl_data_position_store = None  # the dispenser keeps the position
     if full_parameter and not yeto_policy_sync:
         # A no-sync buffer island (L4.6) trains every parameter without the sync
         # block above: bind the same full-parameter identity for _run_ports.
@@ -2362,6 +2408,7 @@ def main(argv=None) -> None:
         "~/yeto-rl/prompts.jsonl",
         **columns,
         slot=slot,
+        number_rows=_island_dispense(args),
     )
     eval_prompt_path = None
     if eval_source is not None:

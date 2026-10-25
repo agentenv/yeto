@@ -743,3 +743,64 @@ To add an island to a running pool there is no CLI: start another island
 process against the same syncer address with the same `--rl-syncer-epoch`,
 the same HMAC key and a compatible backend identity and compat group (and an
 id below `--max-learners`). It is caught up to the current base.
+
+## Task dispenser (S27 P2, `--dispense`)
+
+The actor syncer can hand out the rows of `--data` that the training islands
+train (`syncer/src/dispense.rs`, launcher `--rl-data-split dispense`). An
+island process opens its own connection for it, like BW_PROBE, never part of
+a learner session; shard 0 of a sharded head only.
+
+Positions: the dispenser gives out positions of one global sequence; position
+`p` is row `pass_order(rows, seed, p // rows)[p % rows]` (island side,
+`yeto.rl.engine.task_dispense.PositionMap`). The first island fixes `rows`
+and the data fingerprint; a later island with other values is refused.
+
+| type | name | direction | payload |
+|---:|---|---|---|
+| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
+| 51 | TASK_WELCOME | syncer → island | version:u16, lease_ms:u64, passes:u64 (0 = unlimited), max_block:u32, reconnect:u8, superseded:u8, superseded_incarnation:u64, reclaimed:u64, next:u64 |
+| 52 | TASK_CLAIM | island → syncer | seq:u64, count:u32 |
+| 53 | TASK_GRANT | syncer → island | status:u8 (0 grant, 1 wait, 2 end), block:u64, retry_ms:u32, n:u32, n × (start:u64, end:u64) |
+| 54 | TASK_REPORT | island → syncer | seq:u64, n:u32, n × (block:u64, kind:u8 (1 trained, 2 dropped, 3 requeue, 4 release), m:u32, m × (start:u64, end:u64)) |
+| 55 | TASK_ACK | syncer → island | settled:u64, requeued:u64, exhausted:u64 |
+| 56 | TASK_HEARTBEAT | island → syncer | empty (answered with TASK_ACK) |
+
+Every request gets exactly one answer, in order. `seq` numbers an island
+process's CLAIM and REPORT requests (strictly increasing); a request resent
+after a lost answer repeats its `seq` and gets the stored answer, so it is
+never applied twice. A refusal is MSG_ERROR and closes the connection:
+`fenced: dispense ...` (the process is retired: the client drops its blocks
+and opens a new incarnation), `dispense mismatch: ...` (other data: fatal),
+`dispense refused: ...` (a malformed or impossible request: fatal).
+
+Semantics:
+
+- A holder is one island process (`learner_id`, random `incarnation`). A new
+  incarnation of an island supersedes the old one at once. A holder silent
+  for `--dispense-lease-s` (default 300) expires. In both cases the holder is
+  retired and every position it did not report goes to the front of the
+  queue; the next claim of any island takes them first. Expiry is checked at
+  every request, so no timer is needed.
+- A claim gets queued positions first, then fresh ones. With
+  `--dispense-passes N` a claim that finds nothing gets WAIT while some island
+  still holds positions, END once everything is reported. Without it the
+  passes never end and a claim never waits.
+- A report settles positions: trained, dropped (consumed, not trained),
+  requeue (given out again, at most `--dispense-max-redo` times, then settled
+  as exhausted), release (given out again, not a redo). A range must lie in
+  the block's unreported positions; a bad entry refuses the whole report. A
+  block whose positions are all reported is retired, so the state grows with
+  the blocks in flight, not with the rows.
+- A position is generated at least once and reported trained at most once.
+- Checkpoint: the dispenser record is written to `<checkpoint>.dispense`
+  at every checkpoint cut, before the checkpoint itself. `--resume` restores
+  the record of that cut: every holder of the record is retired and its
+  unreported positions are queued first; positions settled after the cut are
+  given out again (the model returned to the cut too).
+- Log: `--dispense-log` gets one JSON line per event (`dispense_open`,
+  `_grant` with the first and last pass, `_pass_start`, `_wait`, `_end`,
+  `_report`, `_block_done`, `_reclaim` with the reason `lease_expired` or
+  `superseded`, `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
+  every holder of the record inside `_restore`).
+  `python -m tools.eval.dispense_check` replays it.

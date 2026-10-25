@@ -2232,7 +2232,8 @@ def run_ports_island(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
             eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
-            driver.data_slot = getattr(miles_args, "yeto_rl_data_slot", None)
+            driver.data_slot = ("dispense" if getattr(miles_args, "yeto_rl_data_dispense", None)
+                                else getattr(miles_args, "yeto_rl_data_slot", None))
             driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
             driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)

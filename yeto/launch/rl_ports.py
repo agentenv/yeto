@@ -268,8 +268,10 @@ def data_positions_kept(args) -> bool:
     relaunched island continues at its next row. Its round counter restarts at 0
     in every process, so nothing else tells it where it was."""
     from ..rl.engine import sample_roles
+    from .island_tasks import data_split_plan
 
     return (bool(getattr(args, "rl_checkpoint_store", None))
+            and not data_split_plan(args).dispense  # the dispenser keeps the position
             and rl_dense_sweep(args)
             and not getattr(args, "rl_elastic", False)
             and not getattr(args, "rl_single_island_no_sync", False)

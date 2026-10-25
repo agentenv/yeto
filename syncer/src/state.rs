@@ -162,6 +162,17 @@ pub struct GlobalState {
     /// Unowned fragments are never allocated, initialized or checkpointed.
     shard: ShardPlan,
     schedule: ShardSchedule,
+    /// Small records written next to every checkpoint at the same cut
+    /// (the task dispenser, S27 P2). Empty: none.
+    pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
+}
+
+/// A small record captured at every checkpoint cut and written next to the
+/// checkpoint as `<checkpoint><suffix>`, before the checkpoint itself (a
+/// crash between the two leaves the newer record with the older checkpoint).
+pub trait CheckpointSidecar: Send + Sync {
+    fn suffix(&self) -> &'static str;
+    fn snapshot(&self) -> Vec<u8>;
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -357,6 +368,7 @@ impl GlobalState {
             versions,
             global_step: 0,
             ledger: Default::default(),
+            checkpoint_sidecars: Vec::new(),
             outer_lr,
             outer_momentum,
             wire_dtype,
@@ -946,6 +958,8 @@ pub struct CheckpointSnapshot {
     trailer: CheckpointTrailer,
     /// Delayed Nesterov period and per-fragment state, shared like params.
     delayed_nesterov: Option<(u32, Vec<merge::DelayedNesterovState>)>,
+    /// (suffix, bytes) of every checkpoint sidecar at this cut.
+    sidecars: Vec<(&'static str, Vec<u8>)>,
 }
 
 impl CheckpointSnapshot {
@@ -964,6 +978,8 @@ impl CheckpointSnapshot {
             ledger,
             trailer,
             delayed_nesterov,
+            // `save` writes the sidecars before the checkpoint itself.
+            sidecars: _,
         } = self;
         let mut copied = vec![false; fragments.len()];
         f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
@@ -1022,8 +1038,22 @@ impl CheckpointSnapshot {
     }
 
     /// Atomically persist the snapshot at `path` through the sibling
-    /// temporary `<path without extension>.tmp`; see `persist`.
-    pub fn save(self, path: &std::path::Path) -> Result<()> {
+    /// temporary `<path without extension>.tmp`; see `persist`.  Every
+    /// checkpoint sidecar (the task dispenser, S27 P2) is written first as
+    /// `<path><suffix>` (temporary file, rename), so a crash between the two
+    /// leaves the newer record with the older checkpoint.  Evaluation
+    /// checkpoints (`persist` only) carry no sidecars.
+    pub fn save(mut self, path: &std::path::Path) -> Result<()> {
+        for (suffix, bytes) in std::mem::take(&mut self.sidecars) {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            let sidecar = std::path::PathBuf::from(name);
+            let mut partial = sidecar.as_os_str().to_owned();
+            partial.push(".tmp");
+            let partial = std::path::PathBuf::from(partial);
+            std::fs::write(&partial, &bytes).with_context(|| format!("write {}", partial.display()))?;
+            std::fs::rename(&partial, &sidecar).with_context(|| format!("write {}", sidecar.display()))?;
+        }
         self.persist(path, &path.with_extension("tmp")).map(drop)
     }
 
@@ -1207,6 +1237,7 @@ impl GlobalState {
             delayed_nesterov: self
                 .delayed_nesterov_period
                 .map(|period| (period, self.delayed_nesterov.clone())),
+            sidecars: self.checkpoint_sidecars.iter().map(|s| (s.suffix(), s.snapshot())).collect(),
         })
     }
 

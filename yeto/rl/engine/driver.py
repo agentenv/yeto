@@ -82,7 +82,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec
-from .buffer_payload import is_buffer_exhausted
+from .buffer_payload import data_end_kind
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -561,6 +561,10 @@ class IslandDriver:
         # (full parameter) keeps its data position in the run store
         # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
         self.data_positions: Any = None
+        # S27 P2: the rollout side's end of the data (``data_end_kind``) met while
+        # the batch generated ahead was joined; the run ends after the round
+        # that joined it (``_join_ahead``). None: the data goes on.
+        self._data_end: BaseException | None = None
         # --rl-export-hf-rounds: the model of chosen rounds as HF directories in the
         # store (``hf_export.HfRoundExports``, set by the adapter entry); None: off.
         self.hf_exports: Any = None
@@ -982,6 +986,8 @@ class IslandDriver:
             return
         if isinstance(error, IslandRecoveryRequired):
             return  # already attributed by _probe_nodes/_classify_failure
+        if data_end_kind(error) is not None:
+            return  # the end of the data is no node loss (S26 E9.3, S27 P2)
         check = getattr(self.controller, "check_nodes", None) if self.controller else None
         if not callable(check) or not getattr(self.controller, "topology", None):
             return
@@ -1702,18 +1708,24 @@ class IslandDriver:
                    policy_version=pending.policy_version)
         waited = time.monotonic()
         failure: Exception | None = None
+        data_end = False
         try:
             with pending.sampler:
                 batch = self.rollout.finish_generate(pending.handle)
             if not stop:
                 pending.batch = self._accept_batch(pending.rollout_id, batch)
         except Exception as error:
-            if not stop:
+            data_end = not stop and self._ends_on_data_end(error)
+            if not (stop or data_end):
                 raise
-            failure = error  # nothing trains a discarded batch; only idle engines matter
-        self._emit_ahead(pending, wait_seconds=time.monotonic() - waited, discarded=stop,
-                         failure=failure)
-        if not stop:
+            # nothing trains a discarded batch; only idle engines matter. S27 P2: a
+            # batch that met the end of the data ends the run after this round
+            failure = error
+            if data_end:
+                self._data_end = error
+        self._emit_ahead(pending, wait_seconds=time.monotonic() - waited,
+                         discarded=stop or data_end, failure=failure)
+        if not (stop or data_end):
             self._ahead = pending
 
     def _emit_ahead(self, pending: PendingBatch, *, wait_seconds: float, discarded: bool,
@@ -1872,6 +1884,7 @@ class IslandDriver:
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._record_data_position(rollout_id)
+        self._commit_round_data(rollout_id)
         self._export_hf_round(rollout_id, boundary)
         self._join_eval()
         self._join_ahead(stop=boundary.stop)
@@ -2296,20 +2309,25 @@ class IslandDriver:
                     try:
                         boundary = self.run_round(rollout_id)
                     except BaseException as error:
-                        if not (is_buffer_exhausted(error)
-                                and getattr(self.sync, "ends_on_data_end", True)):
+                        if not self._ends_on_data_end(error):
                             raise
                         # S26 E9.3: the samplers ended and nothing trainable is left;
-                        # the rounds so far are trained and published: end FINISHED
-                        self.emit("rl_buffer_exhausted", rollout_id=rollout_id,
-                                  error=f"{type(error).__name__}: {error}")
+                        # S27 P2: the task dispenser has no rows left for this island.
+                        # The rounds so far are trained and published: end FINISHED
+                        self._emit_data_end(rollout_id, error)
                         break
                     state = boundary.state
                     rollout_id += 1
+                    if self._data_end is not None and not boundary.stop:
+                        # the batch generated ahead met the end of the data: the
+                        # round just trained is the last one (``_join_ahead``)
+                        self._emit_data_end(rollout_id, self._data_end)
+                        break
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.refuse_reconfiguration_for_finalization(rollout_id)
                 self._drain_releases()
+                self._close_rollout_data(rollout_id)
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)
@@ -2331,6 +2349,58 @@ class IslandDriver:
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self._close_sync(failure)
+
+    def _ends_on_data_end(self, error: BaseException) -> bool:
+        """Whether ``error`` is the rollout side's end of the data and this island
+        may end on its own on it (a strict roster may not, S26 E9.3)."""
+        return (data_end_kind(error) is not None
+                and bool(getattr(self.sync, "ends_on_data_end", True)))
+
+    def _emit_data_end(self, rollout_id: int, error: BaseException) -> None:
+        kind = data_end_kind(error)
+        text = f"{type(error).__name__}: {error}"
+        if kind == "buffer_exhausted":
+            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text)
+        else:
+            self.emit("rl_data_ended", rollout_id=rollout_id, source=kind, error=text)
+        end = getattr(self.sync, "end_on_data", None)
+        if callable(end):  # e.g. full parameter: the island leaves without a final cut
+            end(self)
+
+    def _commit_round_data(self, rollout_id: int) -> None:
+        """S27 P2: the rows of ``rollout_id`` trained and passed the sync boundary;
+        the rollout side reports them trained to the task dispenser now (a pool
+        without a dispenser has no ``commit_dispensed``). An island that dies
+        before this point leaves the round's rows unreported, and the dispenser
+        hands them out again (``adapters.miles.task_dispense`` module doc)."""
+        commit = getattr(self.rollout, "commit_dispensed", None)
+        if not callable(commit):
+            return
+        try:
+            result = commit(rollout_id)
+        except Exception as error:  # noqa: BLE001 - bookkeeping must not fail a trained round
+            # the rows stay held; the next commit includes them (rounds <= its id)
+            self.emit("rl_dispense_commit", rollout_id=rollout_id, acked=False,
+                      error=f"{type(error).__name__}: {error}")
+            return
+        if result is not None:
+            # acked False: the report stays queued and is sent when the head answers again
+            self.emit("rl_dispense_commit", rollout_id=rollout_id, **dict(result))
+
+    def _close_rollout_data(self, rollout_id: int) -> None:
+        """S27 P2: a finished island gives its untrained dispensed rows back (a
+        batch generated ahead and discarded, prefetched blocks) before it ends."""
+        close = getattr(self.rollout, "close_dispensed", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+        except Exception as error:  # noqa: BLE001 - the lease returns them anyway
+            self.emit("rl_dispense_close", rollout_id=rollout_id,
+                      error=f"{type(error).__name__}: {error}")
+            return
+        if result is not None:
+            self.emit("rl_dispense_close", rollout_id=rollout_id, **dict(result))
 
     def _drain_releases(self) -> None:
         """A policy release still uploading in the background (a trainer island's

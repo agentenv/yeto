@@ -1285,6 +1285,8 @@ class FullParameterSync(RoundCutHooks):
         self.terminal = False
         self.finished = False
         self.closed = False
+        # S27 P2: the island ended because its data ended (``end_on_data``)
+        self.data_ended = False
         self._driver: IslandDriver | None = None
         self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
         # Overlap: fragment versions before the sweep still in flight.
@@ -1305,6 +1307,19 @@ class FullParameterSync(RoundCutHooks):
         # before; the driver then continues at its recorded data position
         # (``data_position`` module doc). Set by ``start``.
         self.joined_running_pool = False
+
+    @property
+    def ends_on_data_end(self) -> bool:
+        """S27 P2 / S26 E9.3: whether this island may end on its own when its
+        data ends. Asynchronous rounds (partial quorum): yes, it leaves without
+        the final cut, the other islands go on and the syncer keeps the merged
+        state. A strict sweep needs every island in every round: no."""
+        return bool(self.pairing.profile.partial_quorum)
+
+    def end_on_data(self, driver: IslandDriver) -> None:
+        """The driver ends this island because its data ended (no final cut)."""
+        self.data_ended = True
+        driver.emit("rl_full_parameter_data_end", outer_version=self.outer_version)
 
     @property
     def outer_version(self) -> int | None:
@@ -1639,7 +1654,7 @@ class FullParameterSync(RoundCutHooks):
 
     def finish(self, driver: IslandDriver) -> None:
         del driver
-        if not self.finished:
+        if not self.finished and not self.data_ended:
             raise RuntimeError("full-parameter sync stopped before every role acknowledged its final cut")
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
