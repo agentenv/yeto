@@ -431,31 +431,42 @@ def test_a_resumed_syncer_returns_to_the_checkpoint_cut(syncer_binary, tmp_path)
     rounds (each writes a checkpoint), the syncer dies, and the resumed
     syncer restores the record of the last checkpoint: every process of the
     record is fenced, its unreported rows come first, trained rows stay
-    trained."""
-    torch = pytest.importorskip("torch")
-    from tests.test_integration import ToyLearner, DIM
-    from yeto.fragments import build_layout
+    trained. The learner runs in its own process (killed at the end)."""
+    pytest.importorskip("torch")
+    import sys
+    import textwrap
 
     port = free_port()
     ckpt = tmp_path / "state.ckpt"
     common = ("--checkpoint-path", str(ckpt), "--checkpoint-every", "1", "--grace-ms", "50")
     syncer = Syncer(syncer_binary, tmp_path, *common, port=port, key=None, learners=1, lease_s=60)
+    runner = tmp_path / "learner.py"
+    runner.write_text(textwrap.dedent(f"""
+        import sys
+        sys.path[:0] = [{str(ROOT / "tests")!r}, {str(ROOT)!r}]
+        import torch
+        from test_integration import DIM, ToyLearner
+        from yeto.fragments import build_layout
+        layout = build_layout([("model.embed.weight", DIM // 4), ("model.body.weight", DIM)], 2)
+        ToyLearner(0, {port}, torch.randn(DIM + DIM // 4), layout).run()
+    """))
+    learner = None
     try:
         src = source(port, 0, block=4, rows=50, key=None, prefetch=1)
         positions = src.take(4)
         src.report(trained=positions[:2], dropped=positions[2:3])  # position 3 stays held
         assert src.flush(5)
-        layout = build_layout([("model.embed.weight", DIM // 4), ("model.body.weight", DIM)], 2)
-        learner = ToyLearner(0, port, torch.randn(DIM + DIM // 4), layout)
-        learner.start()
-        deadline = time.monotonic() + 30
+        learner = subprocess.Popen([sys.executable, str(runner)], stdout=subprocess.DEVNULL,
+                                   stderr=open(tmp_path / "learner.err", "w"), env=_cargo_env())
+        deadline = time.monotonic() + 60
         while not (Path(str(ckpt) + ".dispense").exists() and any(
                 r["kind"] == "dispense_checkpoint" for r in syncer.records())):
-            assert time.monotonic() < deadline, "no checkpoint with a dispenser record"
+            assert time.monotonic() < deadline, (tmp_path / "learner.err").read_text()[-2000:]
             time.sleep(0.05)
         cut = [r for r in syncer.records() if r["kind"] == "dispense_checkpoint"][-1]
         syncer.stop()  # SIGKILL
-        learner.join(timeout=10)
+        learner.kill()
+        learner.wait(timeout=10)
         before = syncer.records()
         resumed = Syncer(syncer_binary, tmp_path, *common, "--resume", port=free_port(), key=None,
                          learners=1, lease_s=60, name="resumed")
@@ -479,6 +490,8 @@ def test_a_resumed_syncer_returns_to_the_checkpoint_cut(syncer_binary, tmp_path)
         finally:
             resumed.stop()
     finally:
+        if learner is not None and learner.poll() is None:
+            learner.kill()
         syncer.stop()
 
 
