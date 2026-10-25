@@ -645,6 +645,69 @@ class _ReadRate:
         time.sleep(delay)
 
 
+# Test-only (S27 G-FE): a slow downlink while a learner runs normally (it is
+# not recovering). Value "LEARNER:BPS:FROM_STEP:SECONDS": the client of
+# learner LEARNER reads its data streams at most BPS bytes per second (all
+# streams together) for SECONDS seconds, from the first PULL it gets for a
+# syncer step >= FROM_STEP. Other learners read at full speed. The control
+# stream (PULLs) is never limited. Unset or empty: no limit.
+DOWNLINK_READ_LIMIT_ENV = "YETO_SYNC_TEST_DOWNLINK_READ_LIMIT"
+
+
+class _DownlinkWindow:
+    """The time window of the test-only downlink limit (DOWNLINK_READ_LIMIT_ENV)."""
+
+    def __init__(self, learner_id: int, bps: float, from_step: int, seconds: float) -> None:
+        if not (bps > 0 and seconds > 0 and from_step >= 0):
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV}: BPS and SECONDS must be positive, FROM_STEP >= 0")
+        self.learner_id = learner_id
+        self.bps = bps
+        self.from_step = from_step
+        self.seconds = seconds
+        self._lock = threading.Lock()
+        self._started: float | None = None
+        self._ended = False
+
+    def see_pull(self, step: int) -> None:
+        """Start the window at the first PULL for a step >= FROM_STEP."""
+        if self._started is not None or step < self.from_step:
+            return
+        with self._lock:
+            if self._started is not None:
+                return
+            self._started = time.monotonic()
+        _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:.0f}s, "
+                     f"PULL step {step} (learner {self.learner_id})")
+
+    def active(self) -> bool:
+        started = self._started
+        if started is None or self._ended:
+            return False
+        if time.monotonic() - started < self.seconds:
+            return True
+        with self._lock:
+            if self._ended:
+                return False
+            self._ended = True
+        _connect_log(f"test downlink limit off after {self.seconds:.0f}s (learner {self.learner_id})")
+        return False
+
+
+def downlink_read_limit_from_env(learner_id: int, environ=None) -> _DownlinkWindow | None:
+    """The test-only downlink window of ``learner_id``, or None (no limit)."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(DOWNLINK_READ_LIMIT_ENV, "").strip()
+    if not value:
+        return None
+    parts = value.split(":")
+    if len(parts) != 4:
+        raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} must be LEARNER:BPS:FROM_STEP:SECONDS, got {value!r}")
+    if int(parts[0]) != learner_id:
+        return None
+    return _DownlinkWindow(learner_id, float(parts[1]), int(parts[2]), float(parts[3]))
+
+
 class _RateLimitedSocket:
     """A data socket read through a :class:`_ReadRate` while it is active."""
 
@@ -1162,6 +1225,13 @@ class SyncerClient:
         bps = recovery_read_bps_from_env() if recover else None
         self._recovery_read_rate = (
             None if bps is None else _ReadRate(bps, lambda: not self._initial_cut_received.is_set())
+        )
+        # Test-only (S27 G-FE, DOWNLINK_READ_LIMIT_ENV): a slow downlink in
+        # normal running. A recovery limit of this client takes precedence.
+        self._downlink_window = downlink_read_limit_from_env(learner_id)
+        self._downlink_read_rate = (
+            None if self._downlink_window is None
+            else _ReadRate(self._downlink_window.bps, self._downlink_window.active)
         )
         self._init_generation: int | None = None
         # Local init: the INIT_DIGEST frame sent after every HELLO until the
@@ -2395,8 +2465,9 @@ class SyncerClient:
                 _close_socket(sock)
 
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
-        if self._recovery_read_rate is not None and self._socks and sock is not self._socks[0]:
-            sock = _RateLimitedSocket(sock, self._recovery_read_rate)
+        test_rate = self._recovery_read_rate or self._downlink_read_rate
+        if test_rate is not None and self._socks and sock is not self._socks[0]:
+            sock = _RateLimitedSocket(sock, test_rate)
         try:
             while True:
                 msg_type, payload = read_frame(sock, self._incoming_frame_limit)
@@ -2843,6 +2914,8 @@ class SyncerClient:
             fid, step, round_attempt = struct.unpack("<IQI", payload)
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"PULL_REQ for unknown fragment {fid}")
+            if self._downlink_window is not None:
+                self._downlink_window.see_pull(step)
             self._pulls.put(PullRequest(fid, step, round_attempt))
         elif msg_type == MSG_BCAST_FRAGMENT:
             if len(payload) < 12:

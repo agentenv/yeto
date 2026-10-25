@@ -210,3 +210,108 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
     behind = [p for p in range(FRAGMENTS) if b.versions[p] < final_versions[p]]
     assert len(behind) <= 1, behind
     print("\n".join(line for line in syncer_log.splitlines() if "slow downlink" in line))
+
+
+def test_env_downlink_limit_names_one_learner_and_opens_at_its_pull_step(monkeypatch):
+    """S27 G-FE: the test-only downlink limit for GPU runs (``--modal-env``)
+    applies to the named learner only, starts at its first PULL for a step
+    >= FROM_STEP and ends SECONDS later. Unset: no limit."""
+    import struct
+
+    from tests.test_bulk_resend import make_layout
+    from yeto.protocol import (
+        DOWNLINK_READ_LIMIT_ENV,
+        MSG_PULL_REQ,
+        downlink_read_limit_from_env,
+    )
+
+    assert downlink_read_limit_from_env(1, {}) is None
+    assert downlink_read_limit_from_env(0, {DOWNLINK_READ_LIMIT_ENV: "1:1e6:5:2"}) is None
+    window = downlink_read_limit_from_env(1, {DOWNLINK_READ_LIMIT_ENV: "1:1.5e6:5:2"})
+    assert (window.bps, window.from_step, window.seconds) == (1.5e6, 5, 2.0)
+    for bad in ("1:1e6:5", "1:0:5:2", "1:1e6:5:0", "x:1e6:5:2"):
+        with pytest.raises(ValueError):
+            downlink_read_limit_from_env(1, {DOWNLINK_READ_LIMIT_ENV: bad})
+
+    monkeypatch.setenv(DOWNLINK_READ_LIMIT_ENV, "1:1000000:5:0.3")
+    layout = make_layout()
+    other = SyncerClient(("127.0.0.1", 9), 0, layout, DTYPE_F32, syncer_epoch=0)
+    assert other._downlink_window is None and other._downlink_read_rate is None
+    client = SyncerClient(("127.0.0.1", 9), 1, layout, DTYPE_F32, syncer_epoch=0)
+    rate = client._downlink_read_rate
+    assert rate is not None and not rate.active()
+    client._dispatch_live(client._gen, MSG_PULL_REQ, struct.pack("<IQI", 0, 4, 0))
+    assert not rate.active(), "a PULL before FROM_STEP opened the window"
+    client._dispatch_live(client._gen, MSG_PULL_REQ, struct.pack("<IQI", 1, 5, 0))
+    assert rate.active()
+    time.sleep(0.35)
+    assert not rate.active()
+    client._dispatch_live(client._gen, MSG_PULL_REQ, struct.pack("<IQI", 2, 9, 0))
+    assert not rate.active(), "the window opens only once"
+    assert len(client.drain_pulls()) == 3
+
+
+ENV_FROM_STEP = 400
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("inline", [False, True], ids=["forwarder", "inline-old-behavior"])
+def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, inline):
+    """S27 G-FE: the env limit (the GPU run's mechanism) on a plain client
+    reproduces the slow downlink of the test above: the syncer sends island
+    1's broadcasts through its forwarder, island 0 keeps merging, and island
+    1 is merged again after the window. With ``--inline-broadcast`` (the old
+    behavior) the same window stalls the merges."""
+    from yeto.protocol import DOWNLINK_READ_LIMIT_ENV
+
+    monkeypatch.setenv(DOWNLINK_READ_LIMIT_ENV, f"1:{SLOW_BPS}:{ENV_FROM_STEP}:{SLOW_S}")
+    port = free_port()
+    proc, tape, log = start_syncer(tmp_path, port, *(["--inline-broadcast"] if inline else []))
+    store = tmp_path / "store"
+    a = CountingIsland(0, port, store, dtype=DTYPE_F32)
+    b = CountingIsland(1, port, store, dtype=DTYPE_F32)
+    assert a.client._downlink_window is None and b.client._downlink_window is not None
+    try:
+        a.start()
+        b.start()
+        wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
+        window = b.client._downlink_window
+        assert window._started is None, "the limit started before both islands merged steadily"
+        wait_until(lambda: window._started is not None, 60, "no PULL reached the window's step")
+        slow_from = time.time() - (time.monotonic() - window._started)
+        slow_until = slow_from + SLOW_S
+        time.sleep(max(0.0, slow_until - time.time()) + 0.5)
+        filled = slow_from + FILLED_S
+        during = merges_with(tape_records(tape), 0, filled, slow_until)
+        pulls_to_slow = sum(1 for t in b.pull_times if filled <= t <= slow_until)
+        print(f"env limit inline={inline}: merges with island 0 in the last {SLOW_S - FILLED_S:.0f} s of the "
+              f"window: {during}; PULLs read by the slow island meanwhile: {pulls_to_slow}")
+        if inline:
+            assert during <= 10, f"{during} merges while the scheduler waited on the slow downlink"
+            return
+        for island in (a, b):
+            island.join(timeout=180)
+            assert not island.is_alive(), f"island {island.learner_id} did not finish"
+            if island.exc:
+                raise island.exc
+        assert proc.wait(timeout=60) == 0, "syncer exited nonzero"
+    except BaseException:
+        log.flush()
+        print((tmp_path / "syncer.log").read_text()[-6000:])
+        raise
+    finally:
+        for island in (a, b):
+            island.killed.set()
+        if proc.poll() is None:
+            proc.kill()
+        log.close()
+    records = tape_records(tape)
+    syncer_log = (tmp_path / "syncer.log").read_text()
+    assert during >= 60, during
+    assert pulls_to_slow >= 10, pulls_to_slow
+    assert "slow downlink: the learner's send queues are full" in syncer_log
+    assert "slow downlink drained; broadcasts go inline again" in syncer_log
+    assert b.out_of_order == []
+    assert any(w[0] == 1 for r in records if r.get("kind") == "outer_step" and r["time_unix"] > slow_until + 2
+               for w in r.get("weights", [])), "no merge with island 1 after the window"
+    assert a.final_manifest is not None and a.final_manifest == b.final_manifest
