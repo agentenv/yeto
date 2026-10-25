@@ -3,7 +3,11 @@ Modal run scripts, run offline on made-up ``modal container list --json`` output
 
 s27-ch-d0a (2026-10-25): two extra containers of the island function appeared at
 00:56:15Z while the two original containers trained (step 66 at 00:56:11Z); the old
-shell rule ("more distinct containers than NODES") stopped the healthy run."""
+shell rule ("more distinct containers than NODES") stopped the healthy run.
+
+s27-ex-1 (2026-10-25): Modal built the image in the app first (two build containers, 12 min);
+the guard took them for the island containers and stopped the app when the islands'
+containers came (18:06:21Z). The islands' own container lines now name the island containers."""
 
 from __future__ import annotations
 
@@ -28,6 +32,11 @@ def _row(cid: str, start: str, app: str = APP) -> dict:
     return {"app_id": "ap-test", "app_name": app, "container_id": cid, "start_time": start}
 
 
+def _island_lines(*slots: tuple[int, int, str]) -> str:
+    """The launch log lines of islands that name their containers: (island, rank, container id)."""
+    return "".join(f"[s27-test-l{i}-modal] [modal-island {i}] rank {r} container {cid}\n" for i, r, cid in slots)
+
+
 def _guard(**kw) -> ContainerGuard:
     config = dict(nodes=2, rate=48.9, extra_max_s=600.0, extra_stall_s=300.0)
     config.update(kw)
@@ -35,6 +44,7 @@ def _guard(**kw) -> ContainerGuard:
 
 
 ORIGINALS = [_row(A, T_ORIG), _row(B, T_ORIG)]
+ORIG_LOG = _island_lines((0, 0, A), (1, 0, B))  # the log of an s27-ch-d0a style run with two 1-container islands
 WITH_EXTRAS = ORIGINALS + [_row(C, T_EXTRA), _row(D, T_EXTRA)]
 
 
@@ -276,9 +286,11 @@ FAKE_LIST = textwrap.dedent("""
     counter.write_text(str(n + 1))
     plan = json.loads(steps.read_text())
     step = plan[min(n, len(plan) - 1)]
-    if step.get("progress"):
+    if step.get("progress") or step.get("log"):
         with open(progress_log, "a") as fh:
-            fh.write("'train/step': %d\\n" % n)
+            fh.write(step.get("log", ""))
+            if step.get("progress"):
+                fh.write("'train/step': %d\\n" % n)
     if step.get("fail"):
         sys.exit(1)
     print(json.dumps(step["rows"]))
@@ -301,6 +313,8 @@ def _cli(tmp_path: Path, steps: list[dict], *extra: str) -> tuple[int, Path]:
 
 
 def test_cli_keeps_the_run_with_extras_and_records_them(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "launch.stream.log").write_text(ORIG_LOG)
     other = _row("ta-OTHER", T_ORIG, app="another-app")
     steps = [{"rows": ORIGINALS + [other], "progress": True},
              {"rows": WITH_EXTRAS + [other], "progress": True},
@@ -323,6 +337,8 @@ def test_cli_keeps_the_run_with_extras_and_records_them(tmp_path):
 
 
 def test_cli_stops_once_when_an_original_is_replaced(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "launch.stream.log").write_text(ORIG_LOG)
     steps = [{"rows": ORIGINALS, "progress": True},
              {"rows": [_row(B, T_ORIG), _row(C, T_EXTRA)], "progress": True},
              {"rows": ORIGINALS, "progress": True}]
@@ -406,3 +422,229 @@ def test_older_cli_column_names_are_read(tmp_path):
     assert why == "" and found == [{"container_id": A, "app_name": APP, "start_time": T_ORIG}]
     failed, why = list_containers([sys.executable, "-c", "import sys; sys.exit(2)"], APP)
     assert failed is None and why.startswith("rc=2")
+
+
+# -- the island containers are the ones the islands name (s27-ex-1) ---------------------------------
+
+# s27-ex-1 (2 islands x 1 container, new image): "Built image ... in 723.62s" (12 min) and a second
+# image "in 10.40s" ran in containers of the app. The guard listed B1 from 18:03:46Z, B2 from
+# 18:05:50Z, the island containers I0, I1 (function calls at 18:05:58Z) at 18:06:21Z and stopped the
+# app there: "original container(s) [B1, B2] gone while extra container(s) [I0, I1]". The ids and
+# times are the run's (the start times of the build containers are the ULID creation times).
+EX_B1, EX_B2 = "ta-01M5T34A3M3TMN7CN0JKWT9T3B", "ta-01M5T3TVWM8ZN4PH5FF13MY1AB"
+EX_I0, EX_I1 = "ta-01M5T3V8D52Y7T6SCS9F1H6TYR", "ta-01M5T3V8HP9WWE4VS7JC3A4YRR"
+EX_X = "ta-01M5T3XEXTRAIDLE0000000000"  # an idle extra container of island 0's function (made up)
+EX_TB1, EX_TB2 = "2026-10-25 17:53:27+00:00", "2026-10-25 18:05:46+00:00"
+EX_T0, EX_T1 = "2026-10-25 18:06:09+00:00", "2026-10-25 18:06:11+00:00"
+EX_BUILD1, EX_BUILD2 = [_row(EX_B1, EX_TB1)], [_row(EX_B2, EX_TB2)]
+EX_ISLANDS = [_row(EX_I0, EX_T0), _row(EX_I1, EX_T1)]
+EX_LINES = _island_lines((0, 0, EX_I0), (1, 0, EX_I1))
+
+
+def _names(owners=(), others=()):
+    from tools.modal_container_guard import IslandNames
+
+    return IslandNames(owners=tuple(owners), others=frozenset(others))
+
+
+def test_build_containers_before_the_islands_do_not_stop_the_run():
+    """s27-ex-1 on the guard's data: the build containers come and go, the islands' containers
+    come, their lines reach the log one poll later."""
+    guard = _guard(rate=11.5)
+    events = []
+    for t, rows, owners in ((0.0, EX_BUILD1, []), (30.0, EX_BUILD1, []), (60.0, EX_BUILD1, []),
+                            (90.0, EX_BUILD2, []),  # B1 left, B2 came (the second image)
+                            (120.0, EX_ISLANDS, []),  # B2 left, the islands' lines are not in the log yet
+                            (150.0, EX_ISLANDS, [EX_I0, EX_I1]), (10_000.0, EX_ISLANDS, [EX_I0, EX_I1])):
+        decision = guard.observe(t, rows, progress=0, names=_names(owners))
+        assert decision.stop is None, (t, decision.stop)
+        events += [(e["event"], e["container_id"]) for e in decision.events]
+        if t == 120.0:
+            assert guard.originals == [] and not guard.extras and sorted(guard.unnamed) == sorted([EX_I0, EX_I1])
+    assert guard.originals == [EX_I0, EX_I1] and not guard.unnamed and not guard.extras
+    assert not guard.originals_gone
+    # the build containers are recorded and none of them is an extra container or a gone original
+    assert events == [("unnamed_seen", EX_B1), ("unnamed_seen", EX_B2), ("unnamed_gone", EX_B1),
+                      ("unnamed_seen", EX_I0), ("unnamed_seen", EX_I1), ("unnamed_gone", EX_B2),
+                      ("unnamed_claimed", EX_I0), ("unnamed_claimed", EX_I1)]
+
+
+def test_the_old_rule_without_names_stops_on_the_same_poll_sequence():
+    """The positional rule (no names) still takes B1, B2 for the originals: what s27-ex-1 did."""
+    guard = _guard(rate=11.5)
+    for t, rows in ((0.0, EX_BUILD1), (30.0, EX_BUILD1), (60.0, EX_BUILD2)):
+        assert guard.observe(t, rows, progress=0).stop is None
+    stop = guard.observe(90.0, EX_ISLANDS, progress=0).stop
+    assert stop is not None and stop[0] == RESCHED and EX_B1 in stop[1] and EX_I0 in stop[1]
+    assert guard.originals == [EX_B1, EX_B2]
+
+
+def test_a_container_left_unnamed_after_all_islands_are_named_is_an_extra_from_that_poll():
+    guard = _guard(extra_max_s=600.0, extra_stall_s=10_000.0)
+    owners = [EX_I0, EX_I1]
+    # a build container (or an idle extra) is listed beside the islands for a long time while one
+    # island has not printed its line (e.g. it waits for its GPU)
+    both = [_row(EX_B2, EX_TB2)] + EX_ISLANDS
+    assert guard.observe(0.0, both, progress=1, names=_names([EX_I0])).stop is None
+    assert guard.observe(2_000.0, both, progress=2, names=_names([EX_I0])).stop is None  # no rule counts it
+    assert sorted(guard.unnamed) == sorted([EX_B2, EX_I1]) and not guard.extras
+    # all named at t=2000 s: the container is an extra from now on (the clock starts here, not at t=0)
+    promoted = guard.observe(2_030.0, both, progress=3, names=_names(owners))
+    assert promoted.stop is None and sorted(guard.extras) == [EX_B2] and guard.unnamed == {}
+    seen = next(e for e in promoted.events if e["event"] == "extra_seen")
+    assert seen["unnamed_s"] == 2_030.0 and seen["originals_present"] == owners
+    assert guard.observe(2_630.0, both, progress=4, names=_names(owners)).stop is None  # 600 s: at the limit
+    stop = guard.observe(2_631.0, both, progress=5, names=_names(owners)).stop
+    assert stop is not None and stop[0] == RESCHED and "601 s" in stop[1]
+
+
+def test_after_all_islands_are_named_the_rules_are_the_old_ones():
+    guard = _guard(extra_max_s=600.0)
+    owners = [EX_I0, EX_I1]
+    guard.observe(0.0, EX_ISLANDS, progress=1, names=_names(owners))
+    # an idle extra container beside the islands (G-EO): only a warning, then the 600 s limit
+    extra = [_row(EX_X, "2026-10-25 18:30:00+00:00")]
+    seen = guard.observe(60.0, EX_ISLANDS + extra, progress=2, names=_names(owners))
+    assert seen.stop is None and [e["event"] for e in seen.events] == ["extra_seen"]
+    assert guard.observe(660.0, EX_ISLANDS + extra, progress=3, names=_names(owners)).stop is None
+    assert guard.observe(661.0, EX_ISLANDS + extra, progress=4, names=_names(owners)).stop is not None
+    # an island that finished and left beside an extra container (s27-ek-b): not a replacement
+    done = _guard()
+    done.observe(0.0, EX_ISLANDS, progress=1, names=_names(owners))
+    done.observe(30.0, EX_ISLANDS + extra, progress=2, names=_names(owners), finished={EX_I1})
+    assert done.observe(60.0, [EX_ISLANDS[0]] + extra, progress=3, names=_names(owners),
+                        finished={EX_I1}).stop is None
+    # an island that left without finishing beside an extra container: a replacement island
+    lost = _guard()
+    lost.observe(0.0, EX_ISLANDS, progress=1, names=_names(owners))
+    lost.observe(30.0, EX_ISLANDS + extra, progress=2, names=_names(owners))
+    stop = lost.observe(60.0, [EX_ISLANDS[0]] + extra, progress=3, names=_names(owners)).stop
+    assert stop is not None and stop[0] == RESCHED and EX_I1 in stop[1]
+
+
+def test_a_container_that_runs_the_island_script_again_is_an_extra_at_once():
+    """The log names a second container for a slot that has one: Modal ran the island again in a
+    new container (s27-gr-h). That is a proof, so it counts before the other island is named."""
+    guard = _guard()
+    guard.observe(0.0, [EX_ISLANDS[0]], progress=1, names=_names([EX_I0]))
+    replaced = guard.observe(30.0, [_row(EX_X, "2026-10-25 18:30:00+00:00")], progress=2,
+                             names=_names([EX_I0], others=[EX_X]))
+    assert replaced.stop is not None and replaced.stop[0] == RESCHED
+    assert EX_I0 in replaced.stop[1] and EX_X in replaced.stop[1]
+    assert [e["event"] for e in replaced.events] == ["extra_seen", "original_gone"]
+    # a pending container that prints a taken slot's line later becomes an extra
+    late = _guard()
+    late.observe(0.0, [EX_ISLANDS[0], _row(EX_X, "2026-10-25 18:30:00+00:00")], progress=1,
+                 names=_names([EX_I0]))
+    assert late.unnamed.keys() == {EX_X}
+    late.observe(30.0, [EX_ISLANDS[0], _row(EX_X, "2026-10-25 18:30:00+00:00")], progress=2,
+                 names=_names([EX_I0], others=[EX_X]))
+    assert late.extras.keys() == {EX_X} and not late.unnamed
+
+
+def test_a_named_container_the_list_does_not_show_yet_is_not_gone():
+    guard = _guard()
+    # the line is in the log, the container is not in the list yet (the list was read first)
+    assert guard.observe(0.0, [EX_ISLANDS[0]], progress=1, names=_names([EX_I0, EX_I1])).stop is None
+    assert guard.originals == [EX_I0, EX_I1] and not guard.originals_gone
+    shown = guard.observe(30.0, EX_ISLANDS, progress=2, names=_names([EX_I0, EX_I1]))
+    assert shown.stop is None and not shown.events and not guard.unnamed
+    gone = guard.observe(60.0, [EX_ISLANDS[0]], progress=3, names=_names([EX_I0, EX_I1]))
+    assert [e["event"] for e in gone.events] == ["original_gone"] and gone.stop is None  # no extra: no stop
+
+
+def test_pending_containers_do_not_count_for_the_double_billing_limit_of_relaunches():
+    guard = _guard(nodes=4, replacements=2, extra_max_s=600.0)
+    ids = [f"ta-island-{n}" for n in range(4)]
+    four = [_row(cid, T_ORIG) for cid in ids]
+    five = four + [_row("ta-build", T_EXTRA)]
+    # 5 started containers, but the build container and the fourth island's container are pending
+    guard.observe(0.0, five, progress=1, names=_names(ids[:3]))
+    assert guard.over_since is None and sorted(guard.unnamed) == ["ta-build", "ta-island-3"]
+    # all four islands are named: the build container is an extra container from this poll on
+    guard.observe(30.0, five, progress=2, names=_names(ids))
+    assert guard.over_since == 30.0 and list(guard.extras) == ["ta-build"]
+    assert guard.observe(601.0, five, progress=3, names=_names(ids)).stop is None  # 571 s since t=30
+    stop = guard.observe(631.0, five, progress=4, names=_names(ids)).stop
+    assert stop is not None and "for 601 s" in stop[1] and "beside old ones" in stop[1]
+
+
+def test_a_pending_container_gets_one_warning_after_the_limit():
+    from tools.modal_container_guard import unnamed_to_warn
+
+    guard, warned = _guard(), set()
+    guard.observe(0.0, EX_BUILD1 + [EX_ISLANDS[0]], names=_names())
+    assert unnamed_to_warn(guard, 100.0, warned, 120.0) == []  # an island container waits for its line
+    guard.observe(110.0, EX_BUILD1, names=_names())
+    assert sorted(unnamed_to_warn(guard, 121.0, warned, 120.0)) == [EX_B1]  # the island container left meanwhile
+    assert unnamed_to_warn(guard, 500.0, warned, 120.0) == []  # once
+
+
+def test_island_ends_names_the_first_container_of_each_slot(tmp_path):
+    log = tmp_path / "launch.stream.log"
+    ends = IslandEnds(log)
+    assert ends.names().owners == () and ends.names().others == frozenset()
+    log.write_text(_island_lines((0, 0, "ta-a"), (0, 1, "ta-b"), (1, 0, "ta-c")) + "[x] [modal-island 1] rank 1 con")
+    ends.read()
+    assert ends.names().owners == ("ta-a", "ta-b", "ta-c") and not ends.names().others
+    with open(log, "a") as fh:  # the rest of the half line, a second container for slot (0, 1), a repeat
+        fh.write("tainer ta-d\n" + _island_lines((0, 1, "ta-e"), (0, 0, "ta-a")))
+    ends.read()
+    names = ends.names()
+    assert names.owners == ("ta-a", "ta-b", "ta-c", "ta-d") and names.others == frozenset({"ta-e"})
+
+
+def test_cli_build_containers_before_the_islands_do_not_stop_the_run(tmp_path):
+    """The s27-ex-1 poll sequence through the command line. With the positional rule of
+    0024e104 this run ends with exit 3 and RESCHED_FIRED."""
+    steps = ([{"rows": EX_BUILD1}] * 4 + [{"rows": EX_BUILD2}, {"rows": EX_ISLANDS},  # lines not in the log yet
+              {"rows": EX_ISLANDS, "log": EX_LINES, "progress": True}] + [{"rows": EX_ISLANDS, "progress": True}] * 2)
+    rc, run = _cli(tmp_path, steps, "--max-polls", str(len(steps)), "--unnamed-warn-s", "-1")
+    assert rc == 0 and not (tmp_path / "stops.txt").exists() and not (run / "RESCHED_FIRED").exists()
+    events = [json.loads(line) for line in (run / "poll/extra-containers.jsonl").read_text().splitlines()]
+    assert [(e["event"], e["container_id"]) for e in events] == [
+        ("unnamed_seen", EX_B1), ("unnamed_seen", EX_B2), ("unnamed_gone", EX_B1),
+        ("unnamed_seen", EX_I0), ("unnamed_seen", EX_I1), ("unnamed_gone", EX_B2),
+        ("unnamed_claimed", EX_I0), ("unnamed_claimed", EX_I1)]
+    guard_log = (run / "poll/guard.log").read_text()
+    assert f"WARNING: container {EX_B1} is not named" in guard_log and "originals=by name" in guard_log
+    assert guard_log.count("WARNING: container") == 4  # each pending container once (the islands' too, at -1 s)
+    state = json.loads((run / "poll/guard-state.json").read_text())
+    assert state["originals"] == [EX_I0, EX_I1] and state["unnamed_present"] == {} and state["by_name"] is True
+    assert [g["container_id"] for g in state["unnamed_gone"]] == [EX_B1, EX_B2]
+    assert (run / "poll/seen.txt").read_text().split() == [EX_B1, EX_B2, EX_I0, EX_I1]
+
+
+def test_cli_saves_the_log_of_a_container_that_left_unnamed(tmp_path, monkeypatch):
+    import tools.modal_container_guard as guard_mod
+
+    calls = []
+    monkeypatch.setattr(guard_mod, "_diagnose_extra",
+                        lambda args, files, app_id, cid, start_time=None, now=None: calls.append((app_id, cid)))
+    steps = [{"rows": EX_BUILD1}, {"rows": EX_BUILD2}, {"rows": EX_ISLANDS},
+             {"rows": EX_ISLANDS, "log": EX_LINES, "progress": True}]
+    run = tmp_path / "run"
+    run.mkdir()
+    (tmp_path / "steps.json").write_text(json.dumps(steps))
+    fake = tmp_path / "fake_list.py"
+    fake.write_text(FAKE_LIST)
+    log = run / "launch.stream.log"
+    rc = main(["--run-dir", str(run), "--app", APP, "--nodes", "2", "--rate", "36", "--max-polls", "4",
+               "--list-cmd", f"{sys.executable} {fake} {tmp_path / 'steps.json'} {tmp_path / 'counter'} {log}",
+               "--list-cwd", str(tmp_path), "--interval-s", "0", "--progress-log", str(log),
+               "--progress-re", "'train/step'"])
+    # the build containers (left unnamed) are captured; an island container is not (it was unnamed for one poll)
+    assert rc == 0 and calls == [("ap-test", EX_B1), ("ap-test", EX_B2)]
+
+
+def test_cli_positional_originals_keeps_the_old_rule_for_a_log_without_island_lines(tmp_path):
+    steps = [{"rows": ORIGINALS, "progress": True},
+             {"rows": [_row(B, T_ORIG), _row(C, T_EXTRA)], "progress": True}]
+    rc, run = _cli(tmp_path, steps, "--max-polls", "10", "--positional-originals")
+    assert rc == EXIT_STOPPED and "gone while extra container(s)" in (run / "RESCHED_FIRED").read_text()
+    assert "originals=first started" in (run / "poll/guard.log").read_text()
+    # the same polls with names expected but none in the log: nothing is an island container, nothing stops
+    other = tmp_path / "other"
+    other.mkdir()
+    rc, run = _cli(other, steps, "--max-polls", "3")
+    assert rc == 0 and not (run / "RESCHED_FIRED").exists()
