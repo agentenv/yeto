@@ -11,7 +11,15 @@ key                       run-wide flag (args dest)        values
 ``placement``             ``--rl-placement``               colocated | fixed-partition
 ``standby-gpus``          ``--rl-standby-gpus``            integer >= 0
 ``use-gpus-per-node``     ``--rl-island-use-gpus-per-node``  integer >= 1
+``tensor-parallel``       ``--tensor-parallel``            integer >= 1
+``expert-parallel``       ``--expert-parallel``            integer >= 1
+``pipeline-parallel``     ``--pipeline-parallel``          integer >= 1
+``max-tokens-per-gpu``    ``--rl-max-tokens-per-gpu``      integer >= 1
 ========================  ===============================  =================
+
+The four parallel-shape keys need ``--rl-sync-layout shape-free``: only a
+shape-free full-parameter layout lets islands of different TP/EP/PP shapes
+share one syncer session (``yeto.rl.engine.shape_free_layout``).
 
 Mixed placement (islands with different placements) is allowed only in an
 island pool (any island pool option, e.g. ``--rl-sync-island-lease-s``): a fixed
@@ -65,7 +73,13 @@ KEYS = {
     "placement": ("rl_placement", _placement),
     "standby-gpus": ("rl_standby_gpus", _count(0)),
     "use-gpus-per-node": ("rl_island_use_gpus_per_node", _count(1)),
+    "tensor-parallel": ("tensor_parallel", _count(1)),
+    "expert-parallel": ("expert_parallel", _count(1)),
+    "pipeline-parallel": ("pipeline_parallel", _count(1)),
+    "max-tokens-per-gpu": ("rl_max_tokens_per_gpu", _count(1)),
 }
+# Parallel-shape keys: the island trains with its own split (shape-free layout only).
+PARALLEL_DESTS = ("tensor_parallel", "expert_parallel", "pipeline_parallel", "rl_max_tokens_per_gpu")
 
 
 @dataclass(frozen=True)
@@ -76,11 +90,16 @@ class IslandPlacement:
     placement: str
     standby_gpus: int
     use_gpus_per_node: int | None
+    # ``(args dest, value)`` of this island's own parallel shape (empty: run-wide).
+    parallel: tuple[tuple[str, int], ...] = ()
 
     def record(self) -> dict[str, Any]:
-        return {"island": self.island, "placement": self.placement,
-                "standby_gpus": self.standby_gpus,
-                "use_gpus_per_node": self.use_gpus_per_node}
+        record = {"island": self.island, "placement": self.placement,
+                  "standby_gpus": self.standby_gpus,
+                  "use_gpus_per_node": self.use_gpus_per_node}
+        if self.parallel:  # a run without per-island shapes keeps its records
+            record["parallel"] = dict(self.parallel)
+        return record
 
 
 def parse_overrides(items: Iterable[str] | None, num_islands: int) -> dict[int, dict[str, Any]]:
@@ -125,7 +144,8 @@ def _resolved(args: Any, island: int, overrides: dict[int, dict[str, Any]]) -> I
     use = value("rl_island_use_gpus_per_node", None)
     return IslandPlacement(island=island, placement=value("rl_placement", COLOCATED),
                            standby_gpus=int(value("rl_standby_gpus", 0)),
-                           use_gpus_per_node=None if use is None else int(use))
+                           use_gpus_per_node=None if use is None else int(use),
+                           parallel=tuple((dest, own[dest]) for dest in PARALLEL_DESTS if dest in own))
 
 
 def _overrides_and_placements(args: Any, num_islands: int):
@@ -155,6 +175,8 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     out.rl_placement = own.placement
     out.rl_standby_gpus = own.standby_gpus
     out.rl_island_use_gpus_per_node = own.use_gpus_per_node
+    for dest, value in own.parallel:
+        setattr(out, dest, value)
     if own.placement == COLOCATED and is_mixed(placements):
         # A colocated island has no dedicated rollout or standby GPUs.
         out.rollout_num_gpus = None
@@ -172,6 +194,12 @@ def check(args: Any, num_islands: int, *, island_scheduling: str) -> tuple[Islan
     """
 
     overrides, placements = _overrides_and_placements(args, num_islands)
+    shaped = [p.island for p in placements if p.parallel]
+    if shaped and getattr(args, "rl_sync_layout", "shape-bound") != "shape-free":
+        raise ValueError(
+            f"--rl-island-placement gives island(s) {shaped} their own parallel shape; islands of "
+            "different shapes share a syncer session only with --rl-sync-layout shape-free"
+        )
     colocated = [p.island for p in placements if p.placement == COLOCATED]
     if is_mixed(placements) and island_scheduling != "elastic":
         kinds = ", ".join(f"island {p.island} {p.placement}" for p in placements)

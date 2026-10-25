@@ -16,6 +16,15 @@ from yeto.rl.local_learner import (
     ParameterSpec,
     fit_owner_affine_layout,
 )
+from yeto.rl.engine.shape_free_layout import (
+    LAYOUT_SHAPE_BOUND,
+    LAYOUT_SHAPE_FREE,
+    Granularity,
+    LocalParameter,
+    RankParameters,
+    ShapeFreePlan,
+    plan_shape_free_layout,
+)
 from yeto.rl.moe_layout import check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
@@ -325,23 +334,49 @@ class MilesChunkedFullParameterAdapter:
         max_chunk_bytes: int = 256 << 20,
         stream_role: str | None = None,
         matrix_merge: str = "avg",
+        layout_mode: str = LAYOUT_SHAPE_BOUND,
+        granularity: Granularity | None = None,
     ) -> tuple[MilesChunkedFullParameterAdapter, ReferencedPolicyCut]:
-        manifests = tuple(
-            sorted(
-                await group.full_parameter_shard_manifests(),
-                key=lambda value: value.topology,
+        """``layout_mode`` ``shape-free`` (``yeto.rl.engine.shape_free_layout``):
+        the layout comes from global tensors, so islands of different TP/EP/DP
+        shapes share one session; ``granularity`` is its session constants."""
+
+        if layout_mode == LAYOUT_SHAPE_FREE:
+            manifests, plan = await cls.shape_free_plan(
+                group,
+                algorithm=algorithm,
+                components=components,
+                minimum_fragments=minimum_fragments,
+                max_fragment_bytes=max_fragment_bytes,
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+                granularity=granularity or Granularity(),
             )
-        )
-        adapter = cls.create(
-            manifests,
-            algorithm=algorithm,
-            components=components,
-            minimum_fragments=minimum_fragments,
-            max_fragment_bytes=max_fragment_bytes,
-            max_chunk_bytes=max_chunk_bytes,
-            stream_role=stream_role,
-            matrix_merge=matrix_merge,
-        )
+            adapter = cls.create_shape_free(
+                plan,
+                manifests,
+                max_fragment_bytes=max_fragment_bytes,
+                max_chunk_bytes=max_chunk_bytes,
+            )
+        elif layout_mode == LAYOUT_SHAPE_BOUND:
+            manifests = tuple(
+                sorted(
+                    await group.full_parameter_shard_manifests(),
+                    key=lambda value: value.topology,
+                )
+            )
+            adapter = cls.create(
+                manifests,
+                algorithm=algorithm,
+                components=components,
+                minimum_fragments=minimum_fragments,
+                max_fragment_bytes=max_fragment_bytes,
+                max_chunk_bytes=max_chunk_bytes,
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+            )
+        else:
+            raise ValueError(f"unknown full-parameter layout mode {layout_mode!r}")
         actual_fragments = adapter.layout.fragments.num_fragments
         if (
             expected_fragments is not None and actual_fragments != expected_fragments
@@ -502,6 +537,115 @@ class MilesChunkedFullParameterAdapter:
             plans=tuple(plans),
             expected_parameter_tensor_count=len(specs),
             expected_parameter_scalar_count=sum(spec.numel for spec in specs),
+            max_chunk_bytes=max_chunk_bytes,
+            max_fragment_bytes=max_fragment_bytes,
+        )
+
+    @classmethod
+    async def shape_free_plan(
+        cls,
+        group: Any,
+        *,
+        algorithm: str,
+        components: Sequence[ComponentIdentity],
+        minimum_fragments: int,
+        max_fragment_bytes: int,
+        stream_role: str | None,
+        matrix_merge: str,
+        granularity: Granularity,
+    ) -> tuple[tuple[Any, ...], ShapeFreePlan]:
+        """Plan the shape-free layout from the ranks' partition reports, install
+        the owners it gives on every rank, and return the manifests that result."""
+
+        if "shape_free_layout" not in _local_transport_features() or not hasattr(
+            group, "full_parameter_partition_reports"
+        ):
+            raise RuntimeError(
+                "a shape-free full-parameter layout needs a Miles with the "
+                "shape_free_layout transport feature (yeto/s27-shape-free-layout)"
+            )
+        reports = tuple(sorted(await group.full_parameter_partition_reports(), key=lambda value: value.topology))
+        plan = plan_shape_free_layout(
+            tuple(rank_parameters(report) for report in reports),
+            algorithm=algorithm,
+            components=components,
+            role=_single_role(report.role for report in reports),
+            granularity=granularity,
+            minimum_fragments=minimum_fragments,
+            max_fragment_bytes=max_fragment_bytes,
+            stream_role=stream_role,
+            matrix_merge=matrix_merge,
+        )
+        await group.install_full_parameter_owner_maps(
+            {report.topology: plan.owner_maps[report.global_rank] for report in reports}
+        )
+        manifests = tuple(sorted(await group.full_parameter_shard_manifests(), key=lambda value: value.topology))
+        return manifests, plan
+
+    @classmethod
+    def create_shape_free(
+        cls,
+        plan: ShapeFreePlan,
+        manifests: Sequence[Any],
+        *,
+        max_fragment_bytes: int,
+        max_chunk_bytes: int,
+    ) -> MilesChunkedFullParameterAdapter:
+        """Owner plans of a shape-free layout: each fragment is read by its owner
+        as flat segments of its local masters (``free_member_order``)."""
+
+        from miles.backends.megatron_utils.full_parameter_state import (
+            FullParameterFragmentPlan,
+            FullParameterOwnerFragmentPlan,
+        )
+
+        ordered = tuple(sorted(manifests, key=lambda value: value.topology))
+        if not ordered or len({value.topology for value in ordered}) != len(ordered):
+            raise ValueError("Miles full-parameter manifests are incomplete")
+        by_rank = {manifest.global_rank: manifest for manifest in ordered}
+        if set(by_rank) != set(plan.ranks):
+            raise RuntimeError("Miles manifests and the shape-free plan name different ranks")
+        for rank, manifest in by_rank.items():
+            if manifest.topology != plan.ranks[rank].key:
+                raise RuntimeError(f"Miles rank {rank} changed its topology after the partition report")
+            owned = {name for name, (owner, _writers) in plan.owner_maps[rank].items() if owner == rank}
+            if {spec.name for spec in manifest.specs} != owned:
+                raise RuntimeError(f"Miles rank {rank} does not own what the shape-free owner map says")
+        plans = []
+        for rank, manifest in sorted(by_rank.items(), key=lambda item: item[1].topology):
+            wire = {spec.name: spec.wire_name for spec in manifest.specs}
+            fragments = tuple(
+                FullParameterFragmentPlan(
+                    fragment_id=fragment.fragment_id,
+                    wire_names=tuple(wire[name] for name, _start, _stop in fragment.members),
+                    numel=fragment.numel,
+                    flat_ranges=tuple((start, stop) for _name, start, stop in fragment.members),
+                )
+                for fragment in plan.owned_fragments(rank)
+            )
+            plans.append(
+                FullParameterOwnerFragmentPlan(
+                    topology=manifest.topology,
+                    parameter_layout_hash=plan.layout.layout_hash,
+                    fragments=fragments,
+                    free_member_order=True,
+                )
+            )
+        if sum(len(owner.fragments) for owner in plans) != plan.layout.fragments.num_fragments:
+            raise RuntimeError("owner fragment plans do not cover the layout")
+        # The same checks as the shape-bound layout, on the global units.
+        check_expert_partition(plan.layout.specs)
+        check_frozen_excluded(unit.parameter.name for unit in plan.units.values())
+        native = [spec for manifest in ordered for spec in manifest.specs]
+        if sum(spec.numel for spec in native) != sum(spec.numel for spec in plan.layout.specs):
+            raise RuntimeError("the owned Miles masters and the shape-free units hold different scalar counts")
+        return cls(
+            layout=plan.layout,
+            manifests=ordered,
+            plans=tuple(plans),
+            # Miles counts the local parameters each owner applies.
+            expected_parameter_tensor_count=len(native),
+            expected_parameter_scalar_count=sum(spec.numel for spec in native),
             max_chunk_bytes=max_chunk_bytes,
             max_fragment_bytes=max_fragment_bytes,
         )
@@ -1151,6 +1295,40 @@ SKIP_RESIDENT_ENV = "YETO_FULL_PARAMETER_SKIP_RESIDENT"
 
 
 _SKIP_RESIDENT_REPORTED: set[str] = set()
+
+
+def rank_parameters(report: Any) -> RankParameters:
+    """A Miles ``FullParameterPartitionReport`` as the engine-neutral rank description."""
+
+    if report.expert_tensor_parallel_size != 1:
+        raise RuntimeError("a shape-free full-parameter layout needs expert tensor parallelism 1")
+    return RankParameters(
+        key=report.topology,
+        shard_id=report.topology.shard_id,
+        rank=report.global_rank,
+        tp_rank=report.topology.tp_rank,
+        tp_size=report.topology.tp_size,
+        dense_ranks=tuple(report.dense_ranks),
+        expert_ranks=None if report.expert_ranks is None else tuple(report.expert_ranks),
+        tensor_parallel_ranks=tuple(report.tensor_parallel_ranks),
+        parameters=tuple(
+            LocalParameter(
+                name=item.name,
+                shape=tuple(item.shape),
+                expert=item.expert,
+                partition_dim=item.partition_dim,
+                partition_sizes=tuple(item.partition_sizes),
+            )
+            for item in report.parameters
+        ),
+    )
+
+
+def _single_role(roles) -> str:
+    values = set(roles)
+    if len(values) != 1:
+        raise RuntimeError(f"Miles ranks report different roles: {sorted(values)}")
+    return next(iter(values))
 
 
 def _takes_skip_resident(function: Any) -> bool | None:

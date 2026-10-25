@@ -967,17 +967,22 @@ def _prepare_rl_args(
     specs = [rl_island_spec(iargs, spec) for iargs, spec in zip(per_island, parse_gpu_spec(args.gpu))]
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
-    if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
-        raise ValueError("RL tensor and pipeline parallelism must be positive")
     if int(getattr(args, "context_parallel", 1) or 1) <= 0:
         raise ValueError("RL context parallelism must be positive")
-    model_parallel = args.tensor_parallel * args.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
-    if args.expert_parallel is not None:
-        if args.expert_parallel <= 0:
-            raise ValueError("RL expert parallelism must be positive")
-        if any(spec.total_gpus % args.expert_parallel for spec in specs):
-            raise ValueError("RL expert parallelism must divide every island")
+    # Each island's own parallel shape (--rl-island-placement with
+    # --rl-sync-layout shape-free), else the run-wide flags.
     for iargs, spec in zip(per_island, specs):
+        if iargs.tensor_parallel <= 0 or iargs.pipeline_parallel <= 0:
+            raise ValueError("RL tensor and pipeline parallelism must be positive")
+        if iargs.expert_parallel is not None:
+            if iargs.expert_parallel <= 0:
+                raise ValueError("RL expert parallelism must be positive")
+            if spec.total_gpus % iargs.expert_parallel:
+                raise ValueError("RL expert parallelism must divide every island")
+    for iargs, spec in zip(per_island, specs):
+        model_parallel = (
+            iargs.tensor_parallel * iargs.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
+        )
         if getattr(iargs, "rl_placement", "colocated") == "fixed-partition":
             # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
@@ -992,7 +997,7 @@ def _prepare_rl_args(
 
             require_min_nodes(spec, rl_min_nodes(iargs, spec))
             actor_nodes, actor = rl_trainer_shape(iargs, spec)
-            node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
+            node_parallel = iargs.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
             cross_tp, cross_engine = rl_cross_node_switches(args)
             if spec.num_nodes > 1 and not cross_tp and (node_parallel > spec.gpus_per_node
                                                         or spec.gpus_per_node % node_parallel):

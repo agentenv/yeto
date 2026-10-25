@@ -58,6 +58,7 @@ from yeto.rl.engine.policy_digest import (
     TrainerResidentState,
     WeightsChanged,
 )
+from yeto.rl.engine.shape_free_layout import LAYOUT_SHAPE_FREE, Granularity
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 from yeto.rl.adapters.miles.routing_plugin import (
     DRAIN_ROUTED_TOKEN_COUNTS,
@@ -211,6 +212,9 @@ class RoleStreamConfig:
     # Merge mode of every non-vocabulary fragment ("avg" or "rda"); the
     # vocabulary tables always average. Bound through the layout hash.
     matrix_merge: str = "avg"
+    # A shape-free layout's granularity (yeto.rl.engine.shape_free_layout);
+    # None: the shape-bound layout of the island's own ranks.
+    shape_free: Granularity | None = None
     # Fragment-sharded syncer head: every shard's address in shard order
     # (the first is ``syncer_addr``); empty for one syncer process. Not part
     # of the session contract: shards run the unsharded step schedule, so
@@ -677,6 +681,11 @@ class MilesFullParameterRoleStream:
             max_fragment_bytes=self.config.max_fragment_bytes,
             max_chunk_bytes=self.config.max_chunk_bytes,
             matrix_merge=self.config.matrix_merge,
+            **(
+                {}
+                if self.config.shape_free is None
+                else {"layout_mode": LAYOUT_SHAPE_FREE, "granularity": self.config.shape_free}
+            ),
         )
         if self.config.expert_token_weights:
             await self._install_routed_token_counter(group, adapter)
