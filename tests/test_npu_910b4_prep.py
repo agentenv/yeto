@@ -620,6 +620,80 @@ def test_verl_meta_init_patch_builds_non_zero_ranks_without_weights():
     assert text.count("from_pretrained(") == 1 and "from_config(" in text and anchor not in text
 
 
+def test_verl_rank0_source_patch_loads_the_checkpoint_dtype_once(monkeypatch):
+    """S27 G-EZ2: after the eighth patch rank 0 still read a whole FP32 model
+    (npu1 n2: 864 GiB in one process for the 120B text model). Opt-in: rank 0
+    reads the checkpoint's own dtype as the broadcast source only, and every
+    rank's training module is built on meta in the training dtype."""
+    import os
+
+    import torch
+
+    from yeto.rl.adapters.verl import patch_verl as pv
+
+    assert all(part in pv.PROFILES["fsdp"] for part in pv.RANK0_SOURCE)
+    assert not any(part in pv.PROFILES["megatron"] for part in pv.RANK0_SOURCE)
+    # the ninth patch edits the eighth's output, so the two apply in order
+    text = pv._patched("x\n" + pv.META_INIT_ANCHOR + "y\n", *pv.META_INIT[1:])
+    assert text.count(pv.RANK0_SOURCE_ANCHOR) == 1
+    text = pv._patched(text, pv.RANK0_SOURCE_ANCHOR, pv.RANK0_SOURCE_HOOK, "replace")
+    body = "\n".join(line[16:] for line in text.splitlines()[1:-1])
+    calls = []
+
+    class Source:
+        def state_dict(self):
+            return {"w": torch.zeros(2, dtype=torch.bfloat16)}
+
+        def named_buffers(self):
+            return iter([])
+
+    class Auto:
+        @staticmethod
+        def from_config(config, **kwargs):
+            calls.append(("from_config", torch.empty(1).device.type, kwargs["torch_dtype"]))
+            return "meta-model"
+
+        @staticmethod
+        def from_pretrained(**kwargs):
+            calls.append(("from_pretrained", None, kwargs["torch_dtype"]))
+            return Source()
+
+    def run(tied=False):
+        engine = SimpleNamespace(model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(tie_word_embeddings=tied), local_path="/m", trust_remote_code=False))
+        ns = {"torch": torch, "os": os, "auto_class": Auto, "init_context": lambda: torch.device("cpu"),
+              "torch_dtype": torch.float32, "self": engine}
+        exec(body, ns)  # noqa: S102 - the patch body under test
+        return ns["module"], engine
+
+    monkeypatch.delenv("YETO_VERL_RANK0_CHECKPOINT_DTYPE", raising=False)
+    assert run()[0].__class__ is Source and calls[-1] == ("from_pretrained", None, torch.float32)
+    monkeypatch.setenv("YETO_VERL_RANK0_CHECKPOINT_DTYPE", "1")
+    calls.clear()
+    module, engine = run()
+    assert module == "meta-model"
+    assert calls == [("from_pretrained", None, "auto"), ("from_config", "meta", torch.float32)]
+    assert engine._yeto_full_state["w"].dtype == torch.bfloat16
+    calls.clear()
+    assert run(tied=True)[0].__class__ is Source  # tied embeddings keep verl's own path
+    # the broadcast source replaces module.state_dict() once, then is dropped
+    state_ns = {"self": SimpleNamespace(_yeto_full_state={"w": 1}), "module": SimpleNamespace(state_dict=dict)}
+    exec("\n".join(line[12:] for line in pv.RANK0_STATE_HOOK.splitlines()), state_ns)  # noqa: S102
+    assert state_ns["full_state"] == {"w": 1} and state_ns["self"]._yeto_full_state is None
+    # a rank 0 on meta is materialized with to_empty, like the other ranks
+    assert "is_meta" in pv.RANK0_LOAD_HOOK and pv.RANK0_LOAD_ANCHOR.splitlines()[1] in pv.RANK0_LOAD_HOOK
+    # pinned offload stays the default; =0 turns it off
+    pin = {}
+    for value, want in ((None, True), ("0", False), ("1", True)):
+        if value is None:
+            monkeypatch.delenv("YETO_VERL_OFFLOAD_PIN_MEMORY", raising=False)
+        else:
+            monkeypatch.setenv("YETO_VERL_OFFLOAD_PIN_MEMORY", value)
+        ns = {"os": os, "CPUOffloadPolicy": lambda pin_memory: pin.setdefault(value, pin_memory)}
+        exec("\n".join(line[16:] for line in pv.PIN_HOOK.splitlines()), ns)  # noqa: S102
+        assert pin[value] is want
+
+
 def test_ascend_island_turns_torch_compile_off(monkeypatch):
     """S27 G-EQ2: triton-ascend has no inductor backend, so verl's default
     torch.compile of the entropy/log-prob helpers kills the first training step."""

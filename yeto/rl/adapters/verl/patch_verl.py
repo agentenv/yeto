@@ -218,6 +218,86 @@ META_INIT_HOOK = (
 )
 META_INIT = (META_INIT_TARGET, META_INIT_ANCHOR, META_INIT_HOOK, "replace")
 
+# Ninth patch (S27 G-EZ2, local, not pushed; fsdp profile; opt-in by environment): rank 0
+# reads the weights in the checkpoint's own dtype, and the FSDP2 CPU offload can keep the
+# offloaded state pageable. After the eighth patch only rank 0 reads weights, but it reads
+# them as a whole FP32 model (``model_dtype=fp32``): on npu1 n2 its process held 864 GiB
+# after loading the 120B text model, and with the eight ranks' shards the node fell to
+# 13 % available memory. With ``YETO_VERL_RANK0_CHECKPOINT_DTYPE=1`` rank 0 loads with
+# ``torch_dtype="auto"`` (the checkpoint's bf16; ``_keep_in_fp32_modules_strict`` tensors
+# such as the router bias stay f32) only as the broadcast source, builds its training
+# module on the meta device like every other rank, and ``fsdp2_load_full_state_dict``
+# materializes rank 0 with ``to_empty`` when its module is on meta. torch's
+# ``_broadcast_state_dict`` sends the source dtype and ``load_state_dict`` copies it into
+# the FP32 shards, so the masters are the bf16 values exactly. Exact only when every
+# checkpoint tensor is stored in the config dtype or kept f32 by the model (the 120B
+# text checkpoint: 41603 BF16 + 40 F32 router biases, preflight); a model with
+# non-persistent buffers is refused (rank 0's would be uninitialized).
+# ``YETO_VERL_OFFLOAD_PIN_MEMORY=0`` builds ``CPUOffloadPolicy(pin_memory=False)``.
+RANK0_SOURCE_TARGET = META_INIT_TARGET
+RANK0_SOURCE_ANCHOR = (
+    "                else:\n"
+    "                    module = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=torch_dtype,\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+)
+RANK0_SOURCE_HOOK = (
+    "                elif (os.environ.get(\"YETO_VERL_RANK0_CHECKPOINT_DTYPE\") == \"1\"\n"
+    "                      and not self.model_config.hf_config.tie_word_embeddings):\n"
+    "                    # yeto S27 G-EZ2: rank 0 reads the checkpoint dtype as the broadcast source only\n"
+    "                    _yeto_source = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=\"auto\",\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+    "                    self._yeto_full_state = _yeto_source.state_dict()\n"
+    "                    _yeto_persistent = set(self._yeto_full_state)\n"
+    "                    _yeto_transient = [n for n, _b in _yeto_source.named_buffers() if n not in _yeto_persistent]\n"
+    "                    if _yeto_transient:\n"
+    "                        raise RuntimeError(\"YETO_VERL_RANK0_CHECKPOINT_DTYPE: non-persistent buffers \"\n"
+    "                                           f\"{_yeto_transient[:3]} would be uninitialized on rank 0\")\n"
+    "                    del _yeto_source\n"
+    "                    with torch.device(\"meta\"):\n"
+    "                        module = auto_class.from_config(\n"
+    "                            self.model_config.hf_config,\n"
+    "                            torch_dtype=torch_dtype,\n"
+    "                            trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                        )\n"
+    + RANK0_SOURCE_ANCHOR
+)
+RANK0_STATE_ANCHOR = "            full_state = module.state_dict()\n"
+RANK0_STATE_HOOK = (
+    "            # yeto S27 G-EZ2: rank 0's broadcast source in the checkpoint dtype (ninth patch)\n"
+    "            full_state = getattr(self, \"_yeto_full_state\", None)\n"
+    "            self._yeto_full_state = None\n"
+    "            if full_state is None:\n"
+    "                full_state = module.state_dict()\n"
+)
+RANK0_LOAD_TARGET = "verl/utils/fsdp_utils.py"
+RANK0_LOAD_ANCHOR = (
+    "    if dist.get_rank() == 0:\n"
+    "        model = model.to(device=get_device_id(), non_blocking=True)\n"
+)
+RANK0_LOAD_HOOK = (
+    "    # yeto S27 G-EZ2: a rank 0 built on meta (ninth patch) is materialized like the others\n"
+    "    if dist.get_rank() == 0 and not any(t.is_meta for t in [*model.parameters(), *model.buffers()]):\n"
+    "        model = model.to(device=get_device_id(), non_blocking=True)\n"
+)
+PIN_ANCHOR = "                offload_policy = CPUOffloadPolicy(pin_memory=True)\n"
+PIN_HOOK = (
+    "                # yeto S27 G-EZ2: YETO_VERL_OFFLOAD_PIN_MEMORY=0 keeps the offloaded state pageable\n"
+    "                offload_policy = CPUOffloadPolicy(\n"
+    "                    pin_memory=os.environ.get(\"YETO_VERL_OFFLOAD_PIN_MEMORY\", \"1\") != \"0\")\n"
+)
+RANK0_SOURCE = ((RANK0_SOURCE_TARGET, RANK0_SOURCE_ANCHOR, RANK0_SOURCE_HOOK, "replace"),
+                (RANK0_SOURCE_TARGET, RANK0_STATE_ANCHOR, RANK0_STATE_HOOK, "replace"),
+                (RANK0_LOAD_TARGET, RANK0_LOAD_ANCHOR, RANK0_LOAD_HOOK, "replace"),
+                (RANK0_SOURCE_TARGET, PIN_ANCHOR, PIN_HOOK, "replace"))
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
 # "before" in front of it, "replace" substitutes it.
 READBACK = (TARGET, ANCHOR, HOOK, "after")
@@ -231,7 +311,7 @@ PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT),
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, *RANK0_SOURCE),
             "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 
