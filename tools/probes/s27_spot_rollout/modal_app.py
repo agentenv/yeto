@@ -190,6 +190,19 @@ def run(tag: str, syncer: str, channel: int, sampler_id: str, groups_per_round: 
     return rc
 
 
+@app.function(image=image, cpu=2, memory=4096, timeout=1800)
+def prebuild() -> dict:
+    """CPU only: build and cache the image before a run (a cold image pull would delay
+    the sampler's first round) and check the imports the sampler needs."""
+    import sglang
+    from miles.backends.megatron_utils.megatron_to_hf import _convert_to_hf_core  # noqa: F401
+
+    sys.path.insert(0, WORKDIR)
+    from yeto.rl.spot_rollout import sampler  # noqa: F401
+
+    return {"sglang": sglang.__version__, "python": sys.version.split()[0]}
+
+
 @app.local_entrypoint()
 def main(tag: str, syncer: str, channel: int = 0, sampler_id: str = "spot-0", groups_per_round: int = 16,
          samples_per_group: int = 8, max_backlog_groups: int = 32) -> None:
