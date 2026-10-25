@@ -672,6 +672,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_bcast_delta(args)}"
         f"{_syncer_outer_optimizer(args)}"
         f"{peer_recovery_syncer_flags(args)}"
+        f"{' --inline-resend' if getattr(args, 'rl_sync_inline_resend', False) else ''}"
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
         f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"

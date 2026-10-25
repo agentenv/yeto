@@ -7,6 +7,7 @@ mod local_init;
 mod iso_worker;
 mod membership;
 mod recovery;
+mod resend;
 mod merge;
 mod dispense;
 mod dispense_service;
@@ -231,6 +232,12 @@ struct Args {
     /// Fragment rounds: wait for one donor snapshot before asking the next.
     #[arg(long, default_value_t = 600)]
     recovery_donor_timeout_s: u64,
+    /// Send a rejoin catch-up and a recovery replay from the scheduler
+    /// itself, waiting for each fragment on the learner's link (the behavior
+    /// before S27 G-EL). Default: a forwarder task per learner sends them
+    /// while rounds, heartbeats and leases are served.
+    #[arg(long, default_value_t = false)]
+    inline_resend: bool,
     /// Dynamic membership: after total_steps wait this many seconds for the
     /// islands still connected to acknowledge the final cut, then finish
     /// without the missing ones. Unset = every island at the final cut must
@@ -444,6 +451,7 @@ fn main() -> anyhow::Result<()> {
         syncer_epoch: args.syncer_epoch,
         membership,
         recovery,
+        inline_resend: args.inline_resend,
         weighted_fold: args.weighted_fold.parse()?,
         shard,
         expert_token_weights: args.expert_token_weights,
