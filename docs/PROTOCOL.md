@@ -723,3 +723,69 @@ To add an island to a running pool there is no CLI: start another island
 process against the same syncer address with the same `--rl-syncer-epoch`,
 the same HMAC key and a compatible backend identity and compat group (and an
 id below `--max-learners`). It is caught up to the current base.
+
+## Receive-only subscribers (S27 G-EA, `--max-subscribers N`)
+
+A sampler island on any cloud can follow the global weights without being a
+learner. It opens the usual connection group, but its control socket's first
+frame is SUBSCRIBE (type 67) instead of HELLO:
+
+- body: exactly a HELLO body with `learner_id = 2^31 | 31 bits` (the
+  SHA-256 of `yeto-sampler:<sampler id>`, the task dispenser's sampler
+  holder id) and dtype 2 (bf16); with a key it ends in
+  HMAC-SHA256(key, `b"yeto-subscribe-mac-v1\0"` | body);
+- data streams attach with the ordinary DATA_HELLO under the same id;
+- the syncer waits until a learner has established the session, then
+  compares the layout and its fingerprint (and the profile hash when sent)
+  with the session; the session contract and the compat group are not
+  compared (a subscriber never merges, so it may run another card type);
+- at most `--max-subscribers` are connected at once (a reconnect of the same
+  id replaces its old connection); 0 (default) refuses every SUBSCRIBE.
+
+The syncer sends a subscriber BCAST_FRAGMENT in the bf16 session format
+(`fragment_id:u32 | version:u64 | bf16 values`), whatever the learners'
+session dtype: at the first merge after it connected every fragment at its
+current version, then every merged version (the terminal step is not
+broadcast). The scheduler only puts the newest version of each fragment in
+the subscriber's pending set (it never awaits a subscriber); a forwarder
+task per subscriber sends at the link's pace, oldest version first, so a
+slow link skips versions instead of slowing merges. A subscriber is never in
+the roster or the membership: no PULL, no quorum or K, no lease, no final
+cut, no SHUTDOWN, no event-tape or status record. It may send HEARTBEAT and
+LEAVE (ignored). When the run ends every subscriber gets ERROR
+`subscriber: run finished`. Refusals are ERRORs that start with
+`subscriber refused:`. Unsharded syncers only.
+
+## Sample relay (S27 G-EA, `--sample-relay`)
+
+A small in-memory store-and-forward queue for rollout groups, on the syncer
+port, so a sampler on another cloud needs no shared volume or store
+credentials. Each relay connection starts with RELAY_HELLO; it never joins a
+learner session and never touches merge state (not in the profile hash).
+
+| type | name | payload |
+|---:|---|---|
+| 60 | RELAY_HELLO | version:u16 (=1), role:u8 (1 producer, 2 consumer, 3 board), channel:u32, client:u32, incarnation:u64; then HMAC-SHA256(key, `b"yeto-relay-hello-mac-v1\0"` \| body) with a key |
+| 61 | RELAY_WELCOME | version:u16, relay_epoch:u64, max_item_bytes:u64, max_items:u32, max_bytes:u64, depth |
+| 62 | RELAY_PUT | seq:u64, item bytes |
+| 63 | RELAY_PUT_ACK | seq:u64, status:u8 (0 stored, 1 duplicate, 2 full), item_id:u64, depth |
+| 64 | RELAY_TAKE | after:u64, ack_through:u64, max_items:u32, max_bytes:u64, wait_ms:u32 |
+| 65 | RELAY_ITEMS | n:u32, depth, n × (item_id:u64, producer:u32, len:u64, bytes) |
+| 66 | RELAY_STATUS | request: empty; answer: depth |
+
+`depth` = items:u32, bytes:u64, acked_through:u64, next_id:u64.
+
+- Channels: one per consuming training island; any number of producers; one
+  consumer (a newer consumer connection supersedes the older one, whose next
+  TAKE gets ERROR `relay superseded:`).
+- Producer: sequence numbers start at 1 per (client, incarnation); a resend
+  of the last number gets the same answer; FULL (`--sample-relay-max-items`,
+  `--sample-relay-max-mib`) stores nothing and the producer retries.
+- Consumer: TAKE returns items with id > `after` and deletes items with id
+  <= `ack_through`; unacknowledged items are delivered again to a new
+  connection. TAKE waits up to `wait_ms` (at most 60 s) for an item.
+- Board (role 3): PUT replaces the board value of `channel` (up to 64 MiB),
+  TAKE returns it when its id is newer than `after`. Training island 0
+  publishes its fragment layout on board 1 for the subscribers.
+- Items live only in head memory; a head restart gives a new `relay_epoch`
+  and the clients reset their cursors. Refusals: ERROR `relay refused:`.
