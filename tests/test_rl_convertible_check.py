@@ -644,3 +644,91 @@ def test_pool_nodes_draw_disjoint_data_slots(_no_modal_listing, _fake_sky):
     rows = list(range(10))
     drawn = [set(slot.rows(rows)) for slot in slots]
     assert not drawn[0] & drawn[1] and drawn[0] | drawn[1] == set(rows)
+
+
+# ---------------------------------------------------------------- parked trainer sees its commands
+class _Volume:
+    """What an island sees of a Modal Volume: reads come from its mount as of the
+    last reload; a reload is skipped while a writer guard is held in the container
+    (``ModalVolumeStore.reload``)."""
+
+    def __init__(self):
+        self.remote: dict[str, bytes] = {}
+        self.mount: dict[str, bytes] = {}
+        self.guards = 0
+
+    def hold_writer(self):
+        self.guards += 1
+        volume = self
+
+        class Guard:
+            def release(self):
+                volume.guards -= 1
+
+        return Guard()
+
+    def read(self, rel):
+        if self.guards == 0:
+            self.mount = dict(self.remote)
+        return self.mount.get(rel)
+
+
+class _CutSession:
+    """The driver's sync session with the E1 cut preparation: a prepared cut holds
+    the writer guard until its safe point."""
+
+    def __init__(self, volume):
+        self.volume = volume
+        self.prepared = None
+
+    def prepare_cut(self, driver, *, rollout_id, state):
+        self.prepared = (int(rollout_id), self.volume.hold_writer())
+
+    def published(self, driver, *, rollout_id, policy_hash):
+        pass
+
+
+class _Driver:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event, **fields):
+        self.events.append((event, fields))
+
+
+def test_a_trainer_parked_after_its_publication_holds_no_store_writer_guard():
+    """GPU run s27-eg-a1: the convertible node's trainer trained its round, prepared
+    the next cut (E1: before the colocated trainer offloads) and parked after the
+    publication, waiting for the head's next ``run``. The prepared cut held the
+    Volume writer guard, so every reload was skipped and the command never became
+    visible: both sides waited. The lifecycle now skips the preparation when the
+    driver will park; when it trains on, the preparation runs as before."""
+    from yeto.rl.engine.trainer_lifecycle import StartPlan, TrainerHandle, _LifecycleSync
+
+    volume, driver = _Volume(), _Driver()
+    command = "trainer-control/inc-000000.jsonl"
+
+    # before: the inner session alone keeps the guard through the park
+    inner = _CutSession(volume)
+    inner.prepare_cut(driver, rollout_id=1, state=None)
+    volume.remote[command] = b'{"seq": 2, "verb": "run"}\n'
+    assert volume.read(command) is None  # the parked trainer cannot see its command
+    inner.prepared[1].release()
+
+    # the lifecycle: the round reached its target, the driver will park -> no preparation
+    volume.remote.clear()
+    volume.mount.clear()
+    inner = _CutSession(volume)
+    handle = TrainerHandle(StartPlan(0), resume_from=None, clock=lambda: 0.0)
+    handle._target_rounds, handle.rounds = 1, 1
+    sync = _LifecycleSync(inner, handle, membership=None)
+    sync.prepare_cut(driver, rollout_id=1, state=None)
+    assert inner.prepared is None and volume.guards == 0
+    assert driver.events == [("rl_cut_prepare_skipped", {"rollout_id": 1, "reason": "park"})]
+    volume.remote[command] = b'{"seq": 2, "verb": "run"}\n'
+    assert volume.read(command) == b'{"seq": 2, "verb": "run"}\n'
+
+    # more rounds commanded: the driver trains on without a park, so it prepares
+    handle._target_rounds = 3
+    sync.prepare_cut(driver, rollout_id=2, state=None)
+    assert inner.prepared is not None and inner.prepared[0] == 2
