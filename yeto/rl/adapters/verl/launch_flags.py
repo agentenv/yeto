@@ -47,3 +47,53 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
     if allow_cross_node_tp or allow_cross_node_engine_tp:
         raise ValueError("verl 岛只在一个节点内：不支持跨节点 TP")
     return ""
+
+
+# ----------------------------------------------------------------------------- full-parameter preset
+# S27 G-DN: the shape of ``--rl-sync-preset full-parameter`` on verl islands
+# (launch.rl_args._prepare_dense_full_sweep asks for it; the Miles backend
+# provides none and keeps its fixed-partition shape).  A verl full-parameter
+# island is one colocated node: verl's hybrid engine trains and rolls out on
+# the same cards, so there is no dedicated rollout partition.  The layout hash
+# and fragment count come from ``python -m yeto.rl.adapters.verl.full_parameter_plan``
+# (the model's HF config on the meta device), not from the Miles layout probe.
+FULL_PARAMETER_PLACEMENT = "colocated"
+# The stream refuses peer recovery (full_parameter_stream.refuse_unsupported),
+# so the async mode must not turn it on by default (rl_args._peer_recovery_applies).
+FULL_PARAMETER_PEER_RECOVERY = False
+FULL_PARAMETER_PLAN_COMMAND = (
+    "python -m yeto.rl.adapters.verl.full_parameter_plan --model <M> --model-revision <R> "
+    "--fragments <P> --matrix-merge <avg|rda>")
+
+
+def full_parameter_problems(args) -> list[str]:
+    """What a verl full-parameter launch must change (empty: the shape is right).
+
+    Replaces the Miles placement rule of the preset (fixed-partition engines);
+    every other rule of the preset (layout hash, fragments, pipeline, push
+    options) stays the launcher's.  Each refused option is one the verl island
+    does not run; the island refuses the same options again before any GPU work."""
+    from yeto.rl.engine.sample_roles import is_synced_trainer
+
+    problems = []
+    if getattr(args, "rl_placement", "colocated") != FULL_PARAMETER_PLACEMENT:
+        problems.append("--rl-placement colocated (a verl island trains and rolls out on the same "
+                        "cards; no fixed-partition)")
+    if is_synced_trainer(args):
+        problems.append("no --rl-sample-role trainer (a verl full-parameter island generates its own samples)")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0):
+        problems.append("--rl-max-policy-age 0 (the verl full-parameter island runs the synchronous trainer)")
+    if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
+        problems.append("no --rl-rollout-quant-tier")
+    if int(getattr(args, "expert_full_count", 0) or 0):
+        problems.append("no --expert-full-count (DeepSeek V4 expert-full is a Miles recipe)")
+    for dest, option in (("rl_sync_overlap", "--rl-sync-overlap"),
+                         ("rl_sync_expert_token_weights", "--rl-sync-expert-token-weights"),
+                         ("rl_peer_recovery", "--rl-peer-recovery")):
+        if getattr(args, dest, False):
+            problems.append(f"no {option} (not offered by the verl stream)")
+    if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0):
+        problems.append("no --rl-sync-bcast-delta-full-every (the verl island takes f32 broadcasts only)")
+    if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
+        problems.append(f"the verl layout hash and fragment count from `{FULL_PARAMETER_PLAN_COMMAND}`")
+    return problems

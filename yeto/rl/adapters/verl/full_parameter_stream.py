@@ -718,7 +718,14 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
         algorithm_spec_sha256=section["algorithm_spec_sha256"],
         wait_timeout=float(section["wait_timeout_s"]),
         wan_streams=int(section["wan_streams"]),
+        wan_stream_schedule=section.get("wan_stream_schedule", "rr"),
+        wan_stall_timeout=float(section.get("wan_stall_timeout", 0.0)),
         push_dtype=section["push_dtype"],
+        push_int8_block=int(section.get("push_int8_block", 128)),
+        push_int4_block=int(section.get("push_int4_block", 128)),
+        push_int4_stochastic=bool(section.get("push_int4_stochastic", False)),
+        push_int4_error_feedback=section.get("push_int4_error_feedback", "off"),
+        push_tensor_blocks=bool(section.get("push_tensor_blocks", True)),
         max_fragment_bytes=int(section["max_fragment_bytes"]),
         final_cut=section["final_cut"],
         partial_quorum=async_rounds,
@@ -751,7 +758,8 @@ def build_full_parameter_sync(island: Any, plan: Mapping[str, Any], *, backend_i
                                 model_revision=plan["model_revision"])
     stream = VerlFullParameterRoleStream(config, backend_identity_sha256=backend_identity_sha256)
     group = island.full_group
-    profile = FullParameterSyncProfile.from_configs({"actor": config}, sweep=not section["async_rounds"])
+    profile = FullParameterSyncProfile.from_configs({"actor": config}, sweep=not section["async_rounds"],
+                                                    max_local_rounds_ahead=section.get("max_local_rounds_ahead"))
     sync = FullParameterSync(RolePairing({"actor": stream}, profile), groups={"actor": group},
                              run=_LoopRunner().run, trajectories=group.round_evidence)
     return sync, FullParameterPolicyState(sync), stream
@@ -827,6 +835,21 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
     parser.add_argument("--rl-sync-matrix-merge", choices=("avg", "rda"), default="avg")
+    # S27 G-DN: the rest of the launcher's full-parameter island flags
+    # (launch.rl_island_task._rl_trainable_island_flags), so none is ignored:
+    # engine-neutral push and transport options go to the stream config; the
+    # options the verl stream does not offer are parsed only to be refused.
+    parser.add_argument("--sweep-push-int8-block", type=int, default=128)
+    parser.add_argument("--sweep-push-int4-block", type=int, default=128)
+    parser.add_argument("--sweep-push-int4-stochastic", action="store_true")
+    parser.add_argument("--sweep-push-int4-error-feedback", choices=("off", "bf16", "f32"), default="off")
+    parser.add_argument("--sweep-push-no-tensor-blocks", action="store_true")
+    parser.add_argument("--sweep-max-local-rounds-ahead", type=int, default=None)
+    parser.add_argument("--wan-stream-schedule", default="rr")
+    parser.add_argument("--wan-stall-timeout", type=float, default=0.0)
+    parser.add_argument("--sweep-overlap", action="store_true")
+    parser.add_argument("--sweep-expert-token-weights", action="store_true")
+    parser.add_argument("--rl-peer-recovery-store", default=None)
 
 
 def _sha256_hex(value: Any) -> bool:
@@ -867,6 +890,17 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
                          "--syncer-profile-sha256 (64 lowercase hex)")
     if not 0 <= args.learner_id < args.num_learners:
         raise ValueError("--learner-id must be below --num-learners")
+    refused = [flag for flag, on in (
+        ("--sweep-overlap", getattr(args, "sweep_overlap", False)),
+        ("--sweep-expert-token-weights", getattr(args, "sweep_expert_token_weights", False)),
+        ("--rl-peer-recovery-store", getattr(args, "rl_peer_recovery_store", None) is not None),
+        ("--bcast-delta", getattr(args, "bcast_delta", False)),
+    ) if on]
+    if refused:
+        raise ValueError("verl 全参数岛不支持: " + ", ".join(refused))
+    lead = getattr(args, "sweep_max_local_rounds_ahead", None)
+    if lead is not None and not async_rounds:
+        raise ValueError("--sweep-max-local-rounds-ahead needs --full-parameter-rounds async")
     reward_sha256 = _canonical_sha256({
         "reward_function": args.reward_function, "verl_reward_name": function_for(args.reward_function),
         "reward_fn_py": file_sha256(Path(__file__).with_name("reward_fn.py"))})
@@ -891,6 +925,14 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         "wait_timeout_s": float(args.sweep_wait_timeout_s),
         "wan_streams": int(args.wan_streams),
         "push_dtype": args.sweep_push_dtype,
+        "push_int8_block": int(getattr(args, "sweep_push_int8_block", 128)),
+        "push_int4_block": int(getattr(args, "sweep_push_int4_block", 128)),
+        "push_int4_stochastic": bool(getattr(args, "sweep_push_int4_stochastic", False)),
+        "push_int4_error_feedback": getattr(args, "sweep_push_int4_error_feedback", "off"),
+        "push_tensor_blocks": not getattr(args, "sweep_push_no_tensor_blocks", False),
+        "max_local_rounds_ahead": lead,
+        "wan_stream_schedule": getattr(args, "wan_stream_schedule", "rr"),
+        "wan_stall_timeout": float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
         "max_fragment_bytes": int(args.sweep_fragment_max_bytes),
         "final_cut": args.sweep_final_cut,
         "local_init": args.init_mode == "local" or (args.init_mode == "auto" and async_rounds),
