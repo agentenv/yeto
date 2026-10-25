@@ -37,7 +37,7 @@ backend adapters and the pre-step correctness check share this one definition.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -201,6 +201,8 @@ def check_loaded(
     *,
     expected_params: int | None = None,
     shapes: Mapping[str, Any] | None = None,
+    key_map: Mapping[str, str] | None = None,
+    non_trainable: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check a built model's parameters against the plan. Raise on any mismatch.
 
@@ -209,11 +211,30 @@ def check_loaded(
     fails: this is the check that a rename-only workaround would pass and a
     correct selection must not.
 
-    ``shapes`` (optional) maps the model's names to the shape the source
-    checkpoint recorded, so a silently reshaped parameter also fails.
+    ``shapes`` (optional) maps the checkpoint's text names to the shape the
+    source checkpoint recorded, so a silently reshaped parameter also fails.
+
+    ``key_map`` (S27 G-EZ2, optional) maps each checkpoint text name to the
+    model state name it loads into, as the backend's loader renames and stacks
+    them (``adapters/verl/hf_checkpoint_keys``); several names may load into one
+    stacked tensor, whose element count must then be their sum. Without it the
+    names must be equal.
+
+    ``non_trainable`` (S27 G-EZ2, optional) are the model's persistent buffers
+    (name -> shape): state the loader fills from the checkpoint and no
+    optimizer updates. They count toward the name check, not toward the
+    trainable total; ``expected_params`` is the checkpoint's text total, and the
+    check wants it minus the checkpoint elements that load into these buffers.
     """
-    want = set(subset.renames.values())
-    have = set(loaded)
+    planned = set(subset.renames.values())
+    if key_map is not None and set(key_map) != planned:
+        unmapped = sorted(planned - set(key_map))
+        raise TextSubsetError(
+            f"key map does not cover the plan: {len(unmapped)} unmapped, first {unmapped[:3]}")
+    target_of = dict(key_map) if key_map is not None else {name: name for name in planned}
+    want = set(target_of.values())
+    buffers = dict(non_trainable or {})
+    have = set(loaded) | set(buffers)
     # An excluded module present in the model is reported before the generic
     # set difference: it is the specific failure this check exists for.
     for prefix in list(subset.rule.exclude_prefixes) + [
@@ -221,7 +242,7 @@ def check_loaded(
     ]:
         bare = prefix[len(subset.rule.text_prefix):] if prefix.startswith(
             subset.rule.text_prefix) else prefix
-        present = sorted(n for n in have if n.startswith(bare) or n.startswith(prefix))
+        present = sorted(n for n in have if _has_module(n, bare) or _has_module(n, prefix))
         if present:
             raise TextSubsetError(
                 f"excluded module {prefix!r} is present in the model as {present[:3]}: "
@@ -232,23 +253,53 @@ def check_loaded(
         raise TextSubsetError(
             f"parameter set does not match the plan: {len(missing)} missing, {len(extra)} extra; "
             f"first missing {missing[:3]}, first extra {extra[:3]}")
+    sources: dict[str, list[str]] = {}
+    for name, target in target_of.items():
+        sources.setdefault(target, []).append(name)
     total = 0
     bad_shapes: list[str] = []
-    for name, value in loaded.items():
-        shape = tuple(getattr(value, "shape", value) or ())
-        count = 1
-        for dim in shape:
-            count *= int(dim)
-        total += count
-        if shapes is not None and name in shapes:
-            if tuple(int(d) for d in shapes[name]) != tuple(int(d) for d in shape):
+    for name, value in [*loaded.items(), *buffers.items()]:
+        shape = _shape(value)
+        count = _count(shape)
+        if name in loaded:
+            total += count
+        if shapes is None:
+            continue
+        from_ckpt = [s for s in sources.get(name, []) if s in shapes]
+        if len(from_ckpt) == 1 and from_ckpt[0] == name:  # no key map: equal names, equal shapes
+            if _shape(shapes[name]) != shape:
                 bad_shapes.append(name)
+        elif from_ckpt and sum(_count(_shape(shapes[s])) for s in from_ckpt) != count:
+            bad_shapes.append(name)
+        elif len(from_ckpt) == 1 and _shape(shapes[from_ckpt[0]]) != shape:
+            bad_shapes.append(name)
     if bad_shapes:
         raise TextSubsetError(
             f"{len(bad_shapes)} parameter(s) have a shape the checkpoint does not record: "
             f"{bad_shapes[:3]}")
-    if expected_params is not None and total != expected_params:
+    into_buffers = sorted(s for b in buffers for s in sources.get(b, []))
+    buffer_params = sum(_count(_shape(shapes[s])) for s in into_buffers) if shapes is not None else sum(
+        _count(_shape(v)) for v in buffers.values())
+    if expected_params is not None and total != expected_params - buffer_params:
         raise TextSubsetError(
-            f"trainable parameters {total} != expected {expected_params} "
-            f"(difference {total - expected_params})")
-    return {"tensors": len(have), "params": total, **subset.summary()}
+            f"trainable parameters {total} != expected {expected_params} - {buffer_params} in "
+            f"{len(buffers)} buffer(s) (difference {total - (expected_params - buffer_params)})")
+    return {"tensors": len(planned), "model_tensors": len(have), "params": total,
+            "buffers": len(buffers), "buffer_params": buffer_params,
+            "checkpoint_tensors_into_buffers": len(into_buffers), **subset.summary()}
+
+
+def _has_module(name: str, prefix: str) -> bool:
+    return name.startswith(prefix)
+
+
+def _shape(value: Any) -> tuple[int, ...]:
+    shape = getattr(value, "shape", value)
+    return tuple(int(d) for d in (shape or ()))
+
+
+def _count(shape: Sequence[int]) -> int:
+    count = 1
+    for dim in shape:
+        count *= int(dim)
+    return count

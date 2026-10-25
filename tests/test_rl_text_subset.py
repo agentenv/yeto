@@ -280,6 +280,70 @@ def test_check_loaded_fails_on_a_reshaped_parameter(vl_checkpoint):
         check_loaded(loaded, subset, shapes={"lm_head.weight": (8, 4)})
 
 
+# ------------------- the loader's key map and buffers (S27 G-EZ2, check_loaded)
+def _mapped(vl_checkpoint):
+    """The fixture as an HF loader sees it: ``backbone.`` -> ``model.``, the
+    embeddings and lm_head kept, and the f32 ``A_log`` loading into a buffer
+    (as ``e_score_correction_bias`` does in the 120B model)."""
+    weight_map = json.loads((vl_checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
+    subset = plan_subset(weight_map.keys(), NEMOTRON_H_OMNI)
+    key_map = {name: name.replace("backbone.", "model.") for name in subset.renames.values()}
+    shapes = {"backbone.embeddings.weight": (8, 4), "backbone.layers.0.mixer.in_proj.weight": (4, 4),
+              "backbone.layers.0.mixer.A_log": (4,), "backbone.norm_f.weight": (4,), "lm_head.weight": (8, 4)}
+    buffers = {"model.layers.0.mixer.A_log": (4,)}
+    loaded = {key_map[n]: shape for n, shape in shapes.items() if key_map[n] not in buffers}
+    return subset, key_map, shapes, buffers, loaded
+
+
+def test_check_loaded_maps_names_and_counts_buffers_apart(vl_checkpoint):
+    subset, key_map, shapes, buffers, loaded = _mapped(vl_checkpoint)
+    report = check_loaded(loaded, subset, expected_params=88, shapes=shapes, key_map=key_map,
+                          non_trainable=buffers)
+    assert report["params"] == 84  # 88 checkpoint text elements - 4 in the buffer
+    assert (report["buffers"], report["buffer_params"], report["checkpoint_tensors_into_buffers"]) == (1, 4, 1)
+    with pytest.raises(TextSubsetError, match="!= expected 84 - 4"):
+        check_loaded(loaded, subset, expected_params=84, shapes=shapes, key_map=key_map, non_trainable=buffers)
+
+
+def test_check_loaded_without_the_key_map_reports_the_rename_as_missing(vl_checkpoint):
+    """EZ-7.5: comparing raw checkpoint names with the model's names fails a correct checkpoint."""
+    subset, _key_map, _shapes, buffers, loaded = _mapped(vl_checkpoint)
+    with pytest.raises(TextSubsetError, match="4 missing, 4 extra"):
+        check_loaded(loaded, subset, non_trainable=buffers)
+
+
+def test_check_loaded_accepts_a_stacked_tensor_by_element_count(vl_checkpoint):
+    subset, key_map, shapes, buffers, loaded = _mapped(vl_checkpoint)
+    # embeddings and lm_head stacked into one (2, 8, 4) tensor, as per-expert tensors are
+    key_map = {**key_map, "backbone.embeddings.weight": "model.stacked", "lm_head.weight": "model.stacked"}
+    loaded = {n: s for n, s in loaded.items() if n not in ("model.embeddings.weight", "lm_head.weight")}
+    report = check_loaded({**loaded, "model.stacked": (2, 8, 4)}, subset, expected_params=88, shapes=shapes,
+                          key_map=key_map, non_trainable=buffers)
+    assert report["params"] == 84
+    with pytest.raises(TextSubsetError, match="shape the checkpoint does not record"):
+        check_loaded({**loaded, "model.stacked": (2, 8, 3)}, subset, shapes=shapes, key_map=key_map,
+                     non_trainable=buffers)
+
+
+def test_check_loaded_refuses_a_key_map_that_skips_a_planned_tensor(vl_checkpoint):
+    subset, key_map, shapes, buffers, loaded = _mapped(vl_checkpoint)
+    key_map.pop("lm_head.weight")
+    with pytest.raises(TextSubsetError, match="1 unmapped"):
+        check_loaded(loaded, subset, key_map=key_map, non_trainable=buffers)
+
+
+def test_check_loaded_counts_an_unplanned_buffer_as_extra(vl_checkpoint):
+    subset, key_map, shapes, buffers, loaded = _mapped(vl_checkpoint)
+    with pytest.raises(TextSubsetError, match="1 extra"):
+        check_loaded(loaded, subset, key_map=key_map, non_trainable={**buffers, "model.rotary.inv_freq": (2,)})
+
+
+def test_check_loaded_finds_an_mtp_block_hidden_in_a_buffer(vl_checkpoint):
+    subset, key_map, shapes, buffers, loaded = _mapped(vl_checkpoint)
+    with pytest.raises(TextSubsetError, match="would train and be published"):
+        check_loaded(loaded, subset, key_map=key_map, non_trainable={**buffers, "mtp.layers.0.bias": (2,)})
+
+
 # ------------------------- the FSDP2 CPU offload knob (G-EQ2 1b0219ac, reused)
 
 
