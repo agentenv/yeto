@@ -243,7 +243,7 @@ def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = Non
     stopping = lambda: reclaimed() or (stop is not None and stop())  # noqa: E731
     sampler: SpotSampler
     writer = RelayGroupWriter(producer, sampler_id, fragment_versions=lambda: sampler.fragment_versions(),
-                              should_stop=stopping)
+                              should_stop=lambda: stopping() or client.run_finished())
     prompts, reward = build_prompts(spec), build_reward(spec)
     engine_round = EngineRound(engine, writer, prompts=prompts, reward=reward, sampling=sampling,
                                provenance=provenance, emit=emit, incarnation=incarnation,
