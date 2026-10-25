@@ -122,6 +122,17 @@ def first_push_phase(fragment_id: int, fragments: int, horizon: int) -> int:
 
 
 # Lazy capture: every N-th local round still captures with content hashes
+# Switches of the deferred and lazy capture (S27 G-AA / G-AY), the same for
+# every engine that offers them: "0" keeps the whole capture.
+DEFER_CAPTURE_ENV = "YETO_FULL_PARAMETER_DEFER_CAPTURE"
+LAZY_CAPTURE_ENV = "YETO_FULL_PARAMETER_LAZY_CAPTURE"
+
+
+def capture_switch_on(env: str) -> bool:
+    """Whether the capture option behind ``env`` is on (default on)."""
+    return os.environ.get(env, "1") != "0"
+
+
 # and the whole-model model/master check (0: never).
 FULL_CHECK_EVERY_ENV = "YETO_FULL_PARAMETER_FULL_CHECK_EVERY"
 DEFAULT_FULL_CHECK_EVERY = 16

@@ -20,19 +20,24 @@ broadcasts and keeps the anchors.  This module gives it a verl FSDP2 trainer:
 
 Differences from the Miles binding, all deliberate:
 
-* the cut lives in the island driver's process, not in a Ray object store:
-  every capture gathers each parameter whole (``DTensor.full_tensor``) on the
-  workers and copies it to the driver.  Simple and exact; it costs one model
-  copy per capture over Ray (fine for the small models of S27 P4, a known cost
-  for large ones);
+* the cut lives in the island driver's process, not in a Ray object store: a
+  read gathers each parameter whole (``DTensor.full_tensor``) on the workers,
+  rank 0 builds the fragment's flat payload, checks it finite and hashes it,
+  and the payload reaches the driver as a numpy array (Ray stores numpy out of
+  band; torch tensors would go through ``torch.save`` pickling).  A local
+  round's capture is lazy (S27 G-EC, the engine's lazy capture): it reads
+  nothing, and only the fragments a push needs are read, at materialize time,
+  while the trainer still holds them; every
+  ``YETO_FULL_PARAMETER_FULL_CHECK_EVERY``-th round and the version-0 cut read
+  and hash every fragment;
 * the layout carries no shard identity (``full_parameter`` module doc), so
   islands with different card counts share one session;
-* an apply writes only the fragments it replaces, then exports them again and
-  compares their hashes with the target (the proof that the trainer holds the
-  target); verl offers no optimizer-state receipts, so the stream's optimizer
-  proof is off (``_optimizer_states`` returns None);
-* not offered: sync/train overlap, deferred or lazy capture, MoE expert token
-  weights and peer recovery (refused at configuration);
+* an apply writes only the fragments it replaces, then hashes them again on
+  the workers and compares with the target (the proof that the trainer holds
+  the target); verl offers no optimizer-state receipts, so the stream's
+  optimizer proof is off (``_optimizer_states`` returns None);
+* not offered: sync/train overlap, MoE expert token weights and peer recovery
+  (refused at configuration);
 * bf16 broadcast deltas (``--bcast-delta``, S27 G-DS) need nothing here: the
   ``SyncerClient`` decodes them into the f32 fragment before the inbound sink
   sees a byte (``yeto.downlink`` module doc), so the sink stays f32-only.
@@ -43,7 +48,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import sys
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,8 +61,11 @@ import torch
 from yeto.protocol import MSG_BCAST_FRAGMENT, MSG_FINAL_FRAGMENT, StreamedInboundPayload
 from yeto.rl.contracts import LocalStepReceipt
 from yeto.rl.engine.full_parameter_stream import (
+    DEFER_CAPTURE_ENV,
+    LAZY_CAPTURE_ENV,
     FullParameterRoleStream,
     RoleStreamConfig,
+    capture_switch_on,
     session_contract_hash,
 )
 from yeto.rl.local_learner import ParameterLayout
@@ -63,8 +74,24 @@ from . import full_parameter as fp
 from .full_parameter import DEFAULT_MAX_FRAGMENT_BYTES  # noqa: F401 - the island's default bound
 
 LAYOUT_PROBE_LOG_PREFIX = "[yeto-verl-layout-probe] "
+# The Miles island's switch of the per-operation time split lines
+# (adapters/miles/full_parameter/rank_stats.py), shared so one flag works on both.
+RANK_STATS_ENV = "YETO_FULL_PARAMETER_RANK_STATS"
+_FEATURES_REPORTED: set[str] = set()
+
+
+def _report_feature(name: str, enabled: bool, switch: str) -> bool:
+    """Print once per process whether a capture option is on (the Miles line)."""
+
+    key = f"{name}:{enabled}"
+    if key not in _FEATURES_REPORTED:
+        _FEATURES_REPORTED.add(key)
+        print(f"[yeto-full-parameter] {name}: {'enabled' if enabled else 'disabled'} "
+              f"(verl; {switch}={'1' if enabled else '0'})", file=sys.stderr, flush=True)
+    return enabled
 _CUT_DOMAIN = b"yeto-verl-full-parameter-cut-v1\0"
 _CONTENT_DOMAIN = b"yeto-verl-full-parameter-content-v1\0"
+_LAZY_DOMAIN = b"yeto-verl-full-parameter-lazy-fragment-v1\0"
 
 
 def refuse_unsupported(config: RoleStreamConfig) -> None:
@@ -108,25 +135,74 @@ def _cut_hashes(layout_hash: str, policy_version: int, local_step_generation: in
 class VerlFullParameterCut:
     """One complete cut of the island's parameters: one flat FP32 tensor per
     fragment, held in the island driver.  The tensors are never written after
-    the cut is made (cuts and stored fragments share them)."""
+    the cut is made (cuts and stored fragments share them).
+
+    A lazy cut (S27 G-EC, :meth:`VerlChunkedFullParameterAdapter.capture`)
+    reads nothing: every fragment's entry in ``fragments`` is ``None`` and its
+    hash in ``fragment_hashes`` is a label, unique to this capture
+    (``lazy_ids``).  :meth:`VerlChunkedFullParameterAdapter.materialize` reads
+    a fragment from the trainer while the trainer still holds it, stores it
+    in ``fragments`` and its content hash in ``contents``.  The cut identity
+    (``policy_hash``, ``content_hash``) never changes."""
 
     policy_version: int
     local_step_generation: int
     layout_hash: str
     policy_hash: str
     content_hash: str
-    fragments: tuple[torch.Tensor, ...] = field(repr=False, compare=False)
+    fragments: list = field(repr=False, compare=False)
     fragment_hashes: tuple[str, ...]
+    lazy_ids: frozenset[int] = frozenset()
+    contents: dict = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def create(cls, layout_hash: str, *, policy_version: int, local_step_generation: int,
-               fragments: Sequence[torch.Tensor],
-               fragment_hashes: Sequence[str] | None = None) -> VerlFullParameterCut:
+               fragments: Sequence[torch.Tensor | None],
+               fragment_hashes: Sequence[str] | None = None,
+               lazy_ids: frozenset[int] = frozenset(),
+               contents: Mapping[int, str] | None = None) -> VerlFullParameterCut:
         hashes = tuple(fragment_hashes) if fragment_hashes is not None else tuple(
             fragment_hash(flat) for flat in fragments)
         policy, content = _cut_hashes(layout_hash, policy_version, local_step_generation, hashes)
         return cls(int(policy_version), int(local_step_generation), layout_hash, policy, content,
-                   tuple(fragments), hashes)
+                   list(fragments), hashes, frozenset(lazy_ids), dict(contents or {}))
+
+    def content_of(self, fragment_id: int) -> str | None:
+        """The content hash of one fragment's bytes, or None while a lazy
+        fragment is not materialized."""
+
+        if fragment_id in self.lazy_ids:
+            return self.contents.get(fragment_id)
+        return self.fragment_hashes[fragment_id]
+
+
+@dataclass(frozen=True)
+class VerlFragmentContent:
+    """The content descriptor of one materialized fragment of a lazy cut (the
+    stream's ``local_descriptor``): a push of that fragment checks it against
+    the bytes it reads."""
+
+    fragment_id: int
+    numel: int
+    payload_hash: str
+
+
+def _lazy_labels(layout_hash: str, fragments: int, *, policy_version: int,
+                 local_step_generation: int, nonce: bytes) -> tuple[str, ...]:
+    """Per-fragment labels of one lazy capture: SHA256 over their own domain,
+    the cut's identity fields and a fresh ``nonce``, so a label names one
+    capture and never equals a content hash (the rule of Miles' lazy export)."""
+
+    labels = []
+    for fragment_id in range(fragments):
+        digest = hashlib.sha256(_LAZY_DOMAIN)
+        digest.update(layout_hash.encode("ascii"))
+        digest.update(int(policy_version).to_bytes(8, "little"))
+        digest.update(int(local_step_generation).to_bytes(8, "little"))
+        digest.update(int(fragment_id).to_bytes(8, "little"))
+        digest.update(nonce)
+        labels.append(digest.hexdigest())
+    return tuple(labels)
 
 
 @dataclass
@@ -297,6 +373,20 @@ class VerlInboundChunkSink:
 
 
 # ----------------------------------------------------------------------------- the trainer group
+def _owned(array) -> torch.Tensor:
+    """A CPU FP32 tensor over ``array`` that this process owns: a read-only
+    array (a zero-copy view of Ray's object store) is copied once, a
+    writable one (an in-process call) is wrapped."""
+
+    import numpy as np
+
+    if isinstance(array, torch.Tensor):
+        return array
+    if not array.flags.writeable:
+        array = np.array(array, copy=True)
+    return torch.from_numpy(array)
+
+
 @dataclass(frozen=True)
 class VerlRoundEvidence:
     """What the stream binds a local round to (the verl counterpart of Miles'
@@ -321,10 +411,15 @@ class VerlFullParameterGroup:
         self.island = island
         self.receipts: dict[int, LocalStepReceipt] = {}
         self.evidence: dict[int, VerlRoundEvidence] = {}
+        # Local rounds trained so far (one per record_round, which the trainer
+        # port calls right after each optimizer step): a lazy cut is read from
+        # the trainer only while this count has not moved since its capture.
+        self.trained_rounds = 0
 
     def record_round(self, receipt: LocalStepReceipt, evidence: VerlRoundEvidence) -> None:
         self.receipts[evidence.rollout_id] = receipt
         self.evidence[evidence.rollout_id] = evidence
+        self.trained_rounds += 1
 
     def round_evidence(self, rollout_id: int) -> VerlRoundEvidence:
         evidence = self.evidence.get(rollout_id)
@@ -338,17 +433,45 @@ class VerlFullParameterGroup:
     async def export_parameters(self, names: Sequence[str]) -> dict[str, torch.Tensor]:
         """Whole FP32 CPU tensors of ``names`` (collective on the workers; rank 0 reads)."""
 
-        results = await asyncio.to_thread(self.island.call_workers, fp.remote_export_for_reader, list(names))
-        readers = [result for result in results if "tensors" in result]
+        results = await asyncio.to_thread(self.island.call_workers, fp.remote_export_arrays_for_reader,
+                                          list(names))
+        readers = [result for result in results if "arrays" in result]
         if len(readers) != 1:
             raise RuntimeError(f"verl export returned {len(readers)} reader results, expected 1")
-        return readers[0]["tensors"]
+        return {name: _owned(array) for name, array in readers[0]["arrays"].items()}
+
+    async def export_fragment(self, units: Sequence[tuple[str, int, int]], numel: int, *,
+                              payload: bool, sha256: bool) -> dict[str, Any]:
+        """One fragment read on the workers (:func:`.full_parameter.remote_export_flat`):
+        ``{"finite", "flat" (with payload: a CPU FP32 tensor this process owns),
+        "sha256" (with sha256), "timings"}``; ``timings`` adds this call's
+        wall seconds (``call_s``) and the copy out of Ray's store (``own_s``)."""
+
+        started = time.perf_counter()
+        results = await asyncio.to_thread(self.island.call_workers, fp.remote_export_flat,
+                                          [tuple(unit) for unit in units], int(numel), bool(payload), bool(sha256))
+        call_s = time.perf_counter() - started
+        readers = [result for result in results if "finite" in result]
+        if len(readers) != 1:
+            raise RuntimeError(f"verl fragment export returned {len(readers)} reader results, expected 1")
+        reader = dict(readers[0])
+        timings = {f"worker_{key}": value for key, value in dict(reader.get("timings") or {}).items()}
+        timings["call_s"] = call_s
+        if payload:
+            mark = time.perf_counter()
+            reader["flat"] = _owned(reader["flat"])
+            timings["own_s"] = time.perf_counter() - mark
+            if reader["flat"].numel() != int(numel):
+                raise RuntimeError("verl fragment export returned the wrong element count")
+        reader["timings"] = timings
+        return reader
 
     async def apply_parameters(self, tensors: Mapping[str, torch.Tensor]) -> list[dict]:
-        """Write whole tensors into every worker's shards (collective)."""
+        """Write whole tensors into every worker's shards (collective; sent as
+        numpy arrays, which Ray stores without torch pickling)."""
 
-        return await asyncio.to_thread(self.island.call_workers_shared, fp.remote_apply_fragment,
-                                       dict(tensors), False)
+        arrays = {name: tensor.contiguous().numpy() for name, tensor in tensors.items()}
+        return await asyncio.to_thread(self.island.call_workers_shared, fp.remote_apply_fragment, arrays, False)
 
     async def receipt(self, rollout_id: int) -> LocalStepReceipt:
         receipt = self.receipts.get(rollout_id)
@@ -358,6 +481,29 @@ class VerlFullParameterGroup:
 
 
 # ----------------------------------------------------------------------------- the adapter
+class _Stats:
+    """The time split of one adapter operation: summed seconds per step
+    (driver and worker side), fragments read and their bytes."""
+
+    def __init__(self, operation: str, **flags: Any) -> None:
+        self.operation = operation
+        self.started = time.perf_counter()
+        self.values: dict[str, Any] = {"fragments": 0, "bytes": 0, **flags}
+
+    def add(self, timings: Mapping[str, float], *, fragments: int = 0, nbytes: int = 0,
+            written: int = 0) -> None:
+        for key, value in timings.items():
+            self.values[key] = self.values.get(key, 0.0) + float(value)
+        self.values["fragments"] += fragments
+        self.values["bytes"] += nbytes
+        if written:
+            self.values["parameters_written"] = self.values.get("parameters_written", 0) + written
+
+    def done(self) -> dict[str, Any]:
+        self.values["seconds"] = time.perf_counter() - self.started
+        return {key: round(value, 4) if isinstance(value, float) else value for key, value in self.values.items()}
+
+
 class VerlChunkedFullParameterAdapter:
     """The chunked full-parameter cut protocol over one verl island."""
 
@@ -368,11 +514,19 @@ class VerlChunkedFullParameterAdapter:
         self.expected_parameter_scalar_count = sum(spec.numel for spec in layout.specs)
         self._names = tuple(fp.fragment_tensor_names(layout, fragment_id)
                             for fragment_id in range(layout.fragments.num_fragments))
+        self._units = tuple(fp.fragment_units(layout, fragment_id)
+                            for fragment_id in range(layout.fragments.num_fragments))
         # The cut the trainer holds: the last capture or apply.  The stream
         # captures right after every local round and builds every apply target
         # from its current cut, so between two of these calls the trainer's
         # weights do not move; an apply then writes only what differs.
         self.resident: VerlFullParameterCut | None = None
+        # The group's trained-round count when ``resident`` was established: a
+        # lazy fragment is read from the trainer only while it is unchanged.
+        self.resident_rounds: int | None = None
+        # S27 G-EC: the time split of the last export, materialize and apply
+        # (the stream prints it as a rank-stats line).
+        self.last_stats: dict[str, dict[str, Any]] = {}
 
     # -- construction ----------------------------------------------------
     @classmethod
@@ -436,26 +590,112 @@ class VerlChunkedFullParameterAdapter:
             offset = 0
             for unit in self.layout.fragment_slices(fragment_id):
                 if unit.spec.name in wanted:
+                    if cut.fragments[fragment_id] is None:
+                        raise ValueError(f"{unit.spec.name!r} spans fragment {fragment_id}, which the cut never read")
                     start, stop = unit.flat_range
                     out[unit.spec.name].reshape(-1)[start:stop].copy_(
                         cut.fragments[fragment_id][offset:offset + unit.numel])
                 offset += unit.numel
         return out
 
+    def _sharing_fragments(self, fragment_ids: Sequence[int]) -> set[int]:
+        """Other fragments holding a slice of a parameter that ``fragment_ids``
+        hold (a split parameter is written whole)."""
+
+        names = {name for fragment_id in fragment_ids for name in self._names[fragment_id]}
+        return {other for other in range(self.layout.fragments.num_fragments)
+                if other not in fragment_ids and names.intersection(self._names[other])}
+
     async def capture(self, group: VerlFullParameterGroup, *, policy_version: int,
                       local_step_generation: int, defer_payload: bool = False,
                       lazy: bool = False) -> VerlFullParameterCut:
-        if defer_payload or lazy:
-            raise ValueError("verl cuts are always captured whole (no deferred or lazy capture)")
-        fragments = []
-        for fragment_id, names in enumerate(self._names):
-            values = await group.export_parameters(names)
-            fragments.append(self.flatten(fragment_id, values))
-            del values
-        cut = VerlFullParameterCut.create(self.layout.layout_hash, policy_version=policy_version,
-                                          local_step_generation=local_step_generation, fragments=fragments)
+        """Cut the trainer's current parameters.
+
+        ``lazy`` (with ``defer_payload``; S27 G-EC, the engine's lazy capture):
+        read nothing; every fragment carries a fresh label instead of a content
+        hash, and :meth:`materialize` reads the fragments a push needs.
+        Otherwise read and hash every fragment on the workers.  A deferred
+        capture that is not lazy is a whole capture here: hashing a fragment
+        needs its bytes, and reading them is the cost a deferral would save."""
+
+        if lazy and not defer_payload:
+            raise ValueError("a lazy capture must defer its payload")
+        fragments = self.layout.fragments.num_fragments
+        stats = _Stats("export", lazy=bool(lazy))
+        if lazy:
+            labels = _lazy_labels(self.layout.layout_hash, fragments, policy_version=policy_version,
+                                  local_step_generation=local_step_generation, nonce=os.urandom(32))
+            cut = VerlFullParameterCut.create(
+                self.layout.layout_hash, policy_version=policy_version,
+                local_step_generation=local_step_generation, fragments=[None] * fragments,
+                fragment_hashes=labels, lazy_ids=frozenset(range(fragments)))
+        else:
+            flats, hashes = [], []
+            for fragment_id in range(fragments):
+                flat, digest = await self._read(group, fragment_id, stats)
+                flats.append(flat)
+                hashes.append(digest)
+            cut = VerlFullParameterCut.create(self.layout.layout_hash, policy_version=policy_version,
+                                              local_step_generation=local_step_generation, fragments=flats,
+                                              fragment_hashes=hashes)
         self.resident = cut
+        self.resident_rounds = getattr(group, "trained_rounds", None)
+        self.last_stats["export"] = stats.done()
         return cut
+
+    async def _read(self, group: VerlFullParameterGroup, fragment_id: int,
+                    stats: _Stats) -> tuple[torch.Tensor, str]:
+        """``(flat FP32 payload, content hash)`` of one fragment, read on the workers."""
+
+        numel = self.fragment_numel(fragment_id)
+        result = await group.export_fragment(self._units[fragment_id], numel, payload=True, sha256=True)
+        stats.add(result["timings"], fragments=1, nbytes=numel * 4)
+        if not result["finite"]:
+            raise ValueError(f"fragment {fragment_id} has NaN/Inf")
+        return result["flat"], result["sha256"]
+
+    def _require_trainer_holds(self, group: VerlFullParameterGroup, cut: VerlFullParameterCut,
+                               fragment_id: int, *, resident: VerlFullParameterCut | None,
+                               resident_rounds: int | None) -> None:
+        """Refuse to read ``cut``'s fragment from the trainer unless the trainer
+        still holds it: no local round trained since the cut and no apply wrote
+        that fragment (the resident cut still names it)."""
+
+        if (resident is None
+                or resident_rounds != getattr(group, "trained_rounds", None)
+                or resident.fragment_hashes[fragment_id] != cut.fragment_hashes[fragment_id]):
+            raise RuntimeError(f"verl trainer no longer holds fragment {fragment_id} of the cut "
+                               "(a local round or an apply moved it since the capture)")
+
+    def deferred_fragment_ids(self, cut: VerlFullParameterCut) -> frozenset[int]:
+        """Fragments of ``cut`` not read yet (a lazy cut's unmaterialized rows)."""
+
+        return frozenset(fragment_id for fragment_id, flat in enumerate(cut.fragments) if flat is None)
+
+    async def materialize(self, group: VerlFullParameterGroup, cut: VerlFullParameterCut,
+                          fragment_ids: Sequence[int], *, describe: bool = False) -> dict[int, Any]:
+        """Read the unread fragments ``fragment_ids`` of ``cut`` from the trainer
+        (refused unless the trainer still holds them), hash them, check them
+        finite and keep them in ``cut``.  Returns
+        ``{fragment_id: VerlFragmentContent}`` for every fragment asked for
+        (also those already read), which the stream passes back as a push's
+        ``local_descriptor``; ``describe`` does not change it."""
+
+        del describe
+        self._check_cut(cut)
+        stats = _Stats("materialize")
+        out: dict[int, VerlFragmentContent] = {}
+        for fragment_id in sorted(set(int(value) for value in fragment_ids)):
+            if cut.fragments[fragment_id] is None:
+                self._require_trainer_holds(group, cut, fragment_id, resident=self.resident,
+                                            resident_rounds=self.resident_rounds)
+                flat, digest = await self._read(group, fragment_id, stats)
+                cut.fragments[fragment_id] = flat
+                cut.contents[fragment_id] = digest
+            out[fragment_id] = VerlFragmentContent(fragment_id, self.fragment_numel(fragment_id),
+                                                   cut.content_of(fragment_id))
+        self.last_stats["materialize"] = stats.done()
+        return out
 
     def _check_cut(self, cut: VerlFullParameterCut) -> None:
         if cut.layout_hash != self.layout.layout_hash or len(cut.fragments) != self.layout.fragments.num_fragments:
@@ -471,6 +711,8 @@ class VerlChunkedFullParameterAdapter:
         del ray_module
         self._check_cut(cut)
         flat = cut.fragments[fragment_id]
+        if flat is None:
+            raise ValueError(f"verl cut fragment {fragment_id} was never read (lazy capture)")
         return lambda: self._chunks(flat)
 
     def delta_parts_from_authoritative(self, stored: VerlStoredFragment, local: VerlFullParameterCut,
@@ -479,14 +721,21 @@ class VerlChunkedFullParameterAdapter:
         """``local - authoritative`` of one fragment (the push of a local horizon)."""
 
         del ray_module
-        if local_descriptor is not None:
-            raise ValueError("verl cuts carry no lazy descriptors")
         self._check_cut(local)
         if local.local_step_generation < 1:
             raise ValueError("verl local cut has no synchronized local horizon")
         if stored.fragment_id != local_fragment_id or stored.version < 0:
             raise ValueError("authoritative fragment provenance changed")
         anchor, values = stored.values(), local.fragments[local_fragment_id]
+        if values is None:
+            raise ValueError(f"verl local fragment {local_fragment_id} was not materialized (lazy capture)")
+        if local_descriptor is not None:
+            if (not isinstance(local_descriptor, VerlFragmentContent)
+                    or local_descriptor.fragment_id != local_fragment_id
+                    or local_descriptor.payload_hash != local.content_of(local_fragment_id)):
+                raise ValueError(f"verl local fragment {local_fragment_id} differs from its content descriptor")
+        elif local_fragment_id in local.lazy_ids:
+            raise ValueError(f"a push of lazy fragment {local_fragment_id} needs its content descriptor")
         if anchor.numel() != values.numel():
             raise ValueError("authoritative fragment geometry changed")
         step = max(1, self.max_chunk_bytes // 4)
@@ -496,14 +745,6 @@ class VerlChunkedFullParameterAdapter:
                 yield _bytes(values[start:start + step] - anchor[start:start + step])
 
         return parts
-
-    def deferred_fragment_ids(self, cut: VerlFullParameterCut) -> frozenset[int]:
-        del cut
-        return frozenset()
-
-    async def materialize(self, group, cut, fragment_ids, *, describe: bool = False) -> dict:
-        del group, cut, fragment_ids, describe
-        return {}
 
     # -- local rounds ------------------------------------------------------
     async def record_local_round(self, group: VerlFullParameterGroup, *, anchor: VerlFullParameterCut,
@@ -560,7 +801,8 @@ class VerlChunkedFullParameterAdapter:
 
     def assemble_mixed_target(self, current: VerlFullParameterCut, *, target_policy_version: int,
                               authoritative_fragments: Sequence[VerlStoredFragment]) -> VerlFullParameterCut:
-        """``current`` with some fragments replaced by authoritative values (no copies)."""
+        """``current`` with some fragments replaced by authoritative values (no
+        copies); the fragments it keeps keep their lazy labels."""
 
         self._check_cut(current)
         fragments, hashes = list(current.fragments), list(current.fragment_hashes)
@@ -570,35 +812,59 @@ class VerlChunkedFullParameterAdapter:
             if fragment_id in replaced or not 0 <= fragment_id < len(fragments):
                 raise ValueError("authoritative fragment subset is malformed")
             values = stored.values()
-            if values.numel() != fragments[fragment_id].numel():
+            if values.numel() != self.fragment_numel(fragment_id):
                 raise ValueError("authoritative fragment geometry changed")
             fragments[fragment_id], hashes[fragment_id] = values, stored.wire_payload_hash
             replaced.add(fragment_id)
-        return VerlFullParameterCut.create(self.layout.layout_hash, policy_version=target_policy_version,
-                                           local_step_generation=0, fragments=fragments,
-                                           fragment_hashes=hashes)
+        return VerlFullParameterCut.create(
+            self.layout.layout_hash, policy_version=target_policy_version, local_step_generation=0,
+            fragments=fragments, fragment_hashes=hashes, lazy_ids=current.lazy_ids - replaced,
+            contents={key: value for key, value in current.contents.items() if key not in replaced})
 
     async def apply(self, group: VerlFullParameterGroup, target: VerlFullParameterCut, *,
                     commit_token: str | None = None) -> int:
         """Make the trainer hold ``target``: write the fragments that differ from
-        :attr:`resident` (every fragment when none is known), export them again
-        and compare their hashes with the target's.  Returns the parameters written."""
+        :attr:`resident` (every fragment when none is known), hash them again on
+        the workers and compare with the target's hashes.  Returns the
+        parameters written.
+
+        A split parameter is written whole, so its slices in fragments the
+        target keeps come from the target; a lazy target's unread slice is read
+        from the trainer first, which still holds it (the resident cut names
+        it and no round trained since)."""
 
         del commit_token
         self._check_cut(target)
-        resident = self.resident
+        resident, resident_rounds = self.resident, self.resident_rounds
         changed = [fragment_id for fragment_id in range(self.layout.fragments.num_fragments)
                    if resident is None
                    or resident.fragment_hashes[fragment_id] != target.fragment_hashes[fragment_id]]
+        stats = _Stats("apply")
+        for fragment_id in sorted(self._sharing_fragments(changed)):
+            if target.fragments[fragment_id] is None:
+                self._require_trainer_holds(group, target, fragment_id, resident=resident,
+                                            resident_rounds=resident_rounds)
+                target.fragments[fragment_id], _digest = await self._read(group, fragment_id, stats)
         self.resident = None  # unknown until the apply is proven
         names = sorted({name for fragment_id in changed for name in self._names[fragment_id]})
         if names:
-            await group.apply_parameters(self.unflatten(target, names))
+            mark = time.perf_counter()
+            tensors = self.unflatten(target, names)
+            stats.add({"unflatten_s": time.perf_counter() - mark})
+            mark = time.perf_counter()
+            await group.apply_parameters(tensors)
+            stats.add({"write_s": time.perf_counter() - mark}, written=len(names))
+            del tensors
         for fragment_id in changed:
-            values = await group.export_parameters(self._names[fragment_id])
-            if fragment_hash(self.flatten(fragment_id, values)) != target.fragment_hashes[fragment_id]:
+            numel = self.fragment_numel(fragment_id)
+            result = await group.export_fragment(self._units[fragment_id], numel, payload=False, sha256=True)
+            stats.add({f"verify_{key}": value for key, value in result["timings"].items()},
+                      fragments=1, nbytes=numel * 4)
+            if not result["finite"] or result["sha256"] != target.fragment_hashes[fragment_id]:
                 raise RuntimeError(f"verl apply of fragment {fragment_id} did not land (hash differs)")
         self.resident = target
+        self.resident_rounds = getattr(group, "trained_rounds", None)
+        self.last_stats["apply"] = stats.done()
         return len(names)
 
     def release(self, cut: VerlFullParameterCut) -> int:
@@ -635,6 +901,27 @@ class VerlFullParameterRoleStream(FullParameterRoleStream):
     def _session_contract_hash(self, layout_hash: str) -> bytes:
         return session_contract_hash(layout_hash, self.config,
                                      backend_identity_sha256=self.backend_identity_sha256)
+
+    # S27 G-EC: the engine's deferred and lazy capture.  The verl adapter reads
+    # every fragment from the trainer on demand (no store to defer into), so
+    # both follow only their switches.
+    def _supports_deferred_capture(self) -> bool:
+        return _report_feature("deferred capture", capture_switch_on(DEFER_CAPTURE_ENV), DEFER_CAPTURE_ENV)
+
+    def _supports_lazy_capture(self) -> bool:
+        return _report_feature("lazy capture", capture_switch_on(LAZY_CAPTURE_ENV), LAZY_CAPTURE_ENV)
+
+    async def _report_rank_stats(self, phase: str) -> None:
+        """One ``rank stats`` line (the Miles format) with the time split of the
+        adapter's last ``phase``; ``YETO_FULL_PARAMETER_RANK_STATS=0`` (the Miles
+        switch) turns it off."""
+
+        if os.environ.get(RANK_STATS_ENV, "1") == "0" or self.adapter is None:
+            return
+        stats = self.adapter.last_stats.pop(phase, None)
+        if stats and (stats.get("fragments") or stats.get("lazy")):
+            print(f"[yeto-full-parameter] rank stats op={phase} role={self.config.role} rank=0 "
+                  f"{json.dumps({phase: stats}, sort_keys=True)}", file=sys.stderr, flush=True)
 
 
 # ----------------------------------------------------------------------------- island wiring

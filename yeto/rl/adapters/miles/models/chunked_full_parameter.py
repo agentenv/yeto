@@ -1140,7 +1140,8 @@ def transport_supports(group: Any, method: str, parameter: str, feature: str) ->
     return feature in _local_transport_features()
 
 
-DEFER_CAPTURE_ENV = "YETO_FULL_PARAMETER_DEFER_CAPTURE"
+# The switch names live in the engine stream (one switch for every engine).
+from yeto.rl.engine.full_parameter_stream import DEFER_CAPTURE_ENV, LAZY_CAPTURE_ENV, capture_switch_on  # noqa: E402
 
 
 def defer_capture_supported(group: Any) -> bool:
@@ -1148,9 +1149,7 @@ def defer_capture_supported(group: Any) -> bool:
     and the skip-resident apply (a deferred row is only ever skipped).
     ``YETO_FULL_PARAMETER_DEFER_CAPTURE=0`` keeps the full capture."""
 
-    import os
-
-    if os.environ.get(DEFER_CAPTURE_ENV, "1") == "0":
+    if not capture_switch_on(DEFER_CAPTURE_ENV):
         return _report_feature("deferred capture", False, f"{DEFER_CAPTURE_ENV}=0")
     enabled = (
         skip_resident_supported(group)
@@ -1162,9 +1161,6 @@ def defer_capture_supported(group: Any) -> bool:
     return _report_feature("deferred capture", enabled, "group and local Miles transport")
 
 
-LAZY_CAPTURE_ENV = "YETO_FULL_PARAMETER_LAZY_CAPTURE"
-
-
 def lazy_capture_supported(group: Any) -> bool:
     """Lazy capture: a local round's capture reads no master (labels, no
     hash) and its receipt skips the whole-model model/master check; each
@@ -1173,9 +1169,7 @@ def lazy_capture_supported(group: Any) -> bool:
     transport.  ``YETO_FULL_PARAMETER_LAZY_CAPTURE=0`` keeps hashing every
     fragment every round."""
 
-    import os
-
-    if os.environ.get(LAZY_CAPTURE_ENV, "1") == "0":
+    if not capture_switch_on(LAZY_CAPTURE_ENV):
         return _report_feature("lazy capture", False, f"{LAZY_CAPTURE_ENV}=0")
     enabled = (
         defer_capture_supported(group)
