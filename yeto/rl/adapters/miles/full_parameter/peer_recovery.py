@@ -10,7 +10,10 @@ snapshot directory, and the driver adds :data:`RANKS` (every shard's file,
 sha256, size and rank coordinate). The rank shards are written in place on a
 shared snapshot directory, or into a staging directory that every rank of the
 island sees (one node, or a node-shared path); a shard that did not land
-there refuses the snapshot (the syncer then asks another donor).
+there refuses the snapshot (the syncer then asks another donor). Each rank's
+entry also keeps the cut summary digests (state, RNG, LR scheduler position);
+after the restore every rank must re-export exactly those, as the
+single-island cut restore checks, else the restore fails.
 
 Layout tag. The parameter layout hash plus the trainer parallel layout read
 back from the ranks (world, TP, PP, CP, EP, DP). Only a donor with the same
@@ -30,18 +33,28 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from yeto.protocol import BcastFragment
-from yeto.rl.peer_recovery import SnapshotIntegrityError, SnapshotRefused
+from yeto.rl.peer_recovery import (
+    SnapshotIntegrityError,
+    SnapshotRefused,
+    check_restored_digests,
+    digest_fingerprint,
+)
 
 RANKS = "ranks.json"
 RANKS_SCHEMA = "yeto.miles_peer_snapshot/v1"
 SNAPSHOT_CUT_ID = "peer-snapshot"
 _LAYOUT_KEYS = ("world", "tp", "pp", "cp", "ep", "dp")
+# Per-rank digests of the cut summary (cut_plugin): the restored trainer must
+# re-export the donor's state, RNG and LR scheduler position exactly
+# (yeto.rl.peer_recovery.check_restored_digests, shared with other backends).
+DIGEST_KEYS = ("state_digest", "rng_digest", "scheduler_samples")
 
 
 @dataclass(frozen=True)
@@ -123,8 +136,8 @@ class MilesRankShards:
         refused = _refusals(results)
         if refused:
             raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
-        files = [{"path": r["path"], "sha256": r["sha256"], "bytes": int(r["bytes"]), "coord": r["coord"]}
-                 for r in results]
+        files = [{"path": r["path"], "sha256": r["sha256"], "bytes": int(r["bytes"]), "coord": r["coord"],
+                  **{k: r[k] for k in DIGEST_KEYS if k in r}} for r in results]
         missing = [f["path"] for f in files if not (directory / f["path"]).is_file()]
         if missing:
             raise SnapshotRefused(
@@ -132,6 +145,10 @@ class MilesRankShards:
                 "another node needs a node-shared --rl-peer-recovery-staging or snapshot store)")
         ranks = {"schema": RANKS_SCHEMA, "layout_tag": await self.layout_tag(), "files": files}
         (directory / RANKS).write_text(json.dumps(ranks, sort_keys=True), encoding="utf-8")
+        if all(k in f for f in files for k in DIGEST_KEYS):
+            print(f"[yeto-peer-recovery] donor snapshot: {len(files)} rank shard(s), "
+                  f"{sum(f['bytes'] for f in files)} bytes, digests {digest_fingerprint(files, DIGEST_KEYS)}",
+                  file=sys.stderr, flush=True)
 
     async def restore(self, directory: Path) -> None:
         """Load every rank's shard on this fresh trainer."""
@@ -151,6 +168,13 @@ class MilesRankShards:
         if refused:
             # The trainer may be partly written: the caller must not train on it.
             raise RuntimeError("rank refused the peer snapshot restore: " + "; ".join(refused))
+        # Every rank must re-export the donor's digests (as the single-island cut
+        # restore checks); else the trainer is not the donor's and must not train.
+        fingerprint = check_restored_digests(files, results, DIGEST_KEYS)
+        if fingerprint is not None:
+            checked = sum(1 for f in files if all(k in f for k in DIGEST_KEYS))
+            print(f"[yeto-peer-recovery] restored {checked}/{len(files)} rank shard(s): state, RNG and LR "
+                  f"scheduler digests equal the donor's, digests {fingerprint}", file=sys.stderr, flush=True)
 
 
 class MilesPeerRecoveryIsland:

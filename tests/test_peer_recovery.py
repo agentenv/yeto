@@ -55,7 +55,7 @@ class FakeIsland(threading.Thread):
 
     def __init__(self, learner_id: int, port: int, target: np.ndarray, store: DirectorySnapshotStore,
                  *, recover_on_start: bool = False, syncer_epoch: int | None = None,
-                 lease_s: float | None = None) -> None:
+                 lease_s: float | None = None, background_donor: bool = False) -> None:
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.layout = make_layout()
@@ -73,7 +73,7 @@ class FakeIsland(threading.Thread):
         self.anchored = [False] * FRAGMENTS
         self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, num_streams=1,
                                    syncer_epoch=syncer_epoch, recover=recover_on_start)
-        self.donor = DonorService(self.client, self, store)
+        self.donor = DonorService(self.client, self, store, background=background_donor)
         # Island pool member: heartbeats keep its lease (also during a restore).
         self.heartbeat = (None if lease_s is None
                           else LeaseHeartbeat(self.client, lease_s, progress=lambda: self.steps_total))
@@ -83,6 +83,7 @@ class FakeIsland(threading.Thread):
         self.after_recovery: dict[str, np.ndarray] | None = None
         self.final_manifest = None
         self.pushes_after_recovery = 0
+        self.steps_when_served: list[int] = []
         self.exc: BaseException | None = None
 
     # -- RecoverableIsland ------------------------------------------------------
@@ -174,7 +175,8 @@ class FakeIsland(threading.Thread):
             self._adam()
             for update in self.client.drain_updates():
                 self.apply_broadcast(update)
-            self.donor.poll()
+            if self.donor.poll():
+                self.steps_when_served.append(self.steps_total)
             pending.extend(self.client.drain_pulls())
             still = []
             for pull in pending:
@@ -255,6 +257,24 @@ class SlowStore(RecordingStore):
     def fetch(self, locator, sha256, into):
         time.sleep(self.delay)
         return super().fetch(locator, sha256, into)
+
+
+class SlowCommitStore(RecordingStore):
+    """A snapshot commit takes ``delay`` seconds (a Modal Volume commit of a
+    large snapshot); records the donor's steps when each slow commit began."""
+
+    def __init__(self, root, delay: float, puts=None) -> None:
+        super().__init__(root, puts)
+        self.delay = delay
+        self.donor_island = None
+        self.steps_at_commit: list[int] = []
+
+    def commit(self, pending_bytes=None):
+        if pending_bytes:  # a snapshot commit (removals commit without bytes)
+            if self.donor_island is not None:
+                self.steps_at_commit.append(self.donor_island.steps_total)
+            time.sleep(self.delay)
+        super().commit(pending_bytes)
 
 
 @pytest.mark.timeout(240)
@@ -373,6 +393,101 @@ def test_island_pool_slot_filled_by_peer_recovery(tmp_path):
     assert [(r["island_id"], r["generation"]) for r in joined] == [(2, generation)]
     assert back.heartbeat.errors == []
     assert back.pushes_after_recovery > 0
+    assert back.final_manifest is not None and back.final_manifest == islands[0].final_manifest
+
+
+@pytest.mark.timeout(240)
+def test_donor_keeps_training_while_a_slow_snapshot_commit_runs(tmp_path):
+    """S27 G-DU (Nemotron Nano: a ~470 GB snapshot on a Modal Volume): with a
+    background donor only the snapshot write pauses training; the island trains
+    on during the slow commit, and the recovered state is still the donor's,
+    bitwise."""
+    commit_s = 1.5
+    binary = build_syncer()
+    port = free_port()
+    tape = tmp_path / "tape.jsonl"
+    store = SlowCommitStore(tmp_path / "store", commit_s)
+    rng = np.random.default_rng(2)
+    targets = [rng.standard_normal(FRAGMENTS * NUMEL).astype(np.float32) for _ in range(2)]
+    proc = start_syncer(binary, port, 2, 1, tape, "--recovery-donor-timeout-s", "60", total_steps=120)
+    try:
+        donor = FakeIsland(0, port, targets[0], store, background_donor=True)
+        store.donor_island = donor
+        victim = FakeIsland(1, port, targets[1], store)
+        donor.start()
+        victim.start()
+        wait_until(lambda: min(donor.versions) >= 8, 60, "no early rounds")
+        victim.kill()
+        victim.join(timeout=10)
+        back = FakeIsland(1, port, targets[1], store, recover_on_start=True)
+        back.start()
+        wait_until(lambda: back.outcome is not None or back.exc is not None, 60, "recovery did not finish")
+        if back.exc:
+            raise back.exc
+        finish(proc, [donor, back])
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-4000:])
+        raise
+    assert back.outcome.path == "peer" and back.outcome.donor == 0, back.outcome
+    (request, locator), = donor.donor.served
+    timing, = donor.donor.timings
+    assert timing["result"] == "served" and timing["commit_s"] >= commit_s and timing["bytes"] > 0
+    # the donor trained while its snapshot was committed
+    (at_commit,), (at_served,) = store.steps_at_commit, donor.steps_when_served
+    assert at_served > at_commit, (at_commit, at_served)
+    snapshot = store.puts[locator]
+    for key in ("adam_m", "adam_v", "adam_step", "anchors", "params", "steps_at_anchor"):
+        np.testing.assert_array_equal(back.imported[key], snapshot.state[key], err_msg=key)
+    assert back.pushes_after_recovery > 0
+    assert back.final_manifest is not None and back.final_manifest == donor.final_manifest
+
+
+@pytest.mark.timeout(240)
+def test_a_relaunch_without_recover_rejoins_a_recovery_pool_by_catch_up(tmp_path):
+    """S27 G-DU: one run tests both state sources. Peer recovery is on at the
+    syncer (pool, syncer epoch); a relaunched island that skips it (fault
+    injection ``catch_up_incarnations``) joins as a fresh process, gets every
+    fragment at its current version, trains with fresh optimizer state and
+    takes the final cut. No recovery record is written for it."""
+    lease_s = 1.5
+    binary = build_syncer()
+    port = free_port()
+    tape = tmp_path / "tape.jsonl"
+    store = RecordingStore(tmp_path / "store")
+    rng = np.random.default_rng(3)
+    targets = [rng.standard_normal(FRAGMENTS * NUMEL).astype(np.float32) for _ in range(2)]
+    proc = start_syncer(binary, port, 2, 1, tape, "--island-lease-s", str(lease_s), "--syncer-epoch", "5",
+                        "--max-base-lag", "2", total_steps=120)
+    pool = {"syncer_epoch": 5, "lease_s": lease_s}
+    try:
+        islands = [FakeIsland(i, port, targets[i], store, **pool) for i in range(2)]
+        for island in islands:
+            island.start()
+        wait_until(lambda: min(islands[0].versions) >= 8, 60, "no early rounds")
+        islands[1].kill()
+        islands[1].join(timeout=10)
+        kill_versions = list(islands[0].versions)
+        wait_until(lambda: sum(islands[0].versions) > sum(kill_versions) + 8, 60, "rounds stopped without island 1")
+        back = FakeIsland(1, port, targets[1], store, **pool)  # a fresh process, no recover
+        back.start()
+        wait_until(lambda: all(back.anchored) or back.exc is not None, 60, "no catch-up")
+        caught_up = list(back.versions)
+        finish(proc, [islands[0], back])
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-4000:])
+        raise
+    assert min(caught_up) > 0 and sum(caught_up) >= sum(kill_versions), (caught_up, kill_versions)
+    assert back.imported is None and back.outcome is None, "no peer state"
+    assert recovery_records(tape) == []
+    records = [json.loads(line) for line in tape.read_text().splitlines()]
+    generation = back.client.connection_generation
+    joined = [r for r in records if r.get("kind") == "pool_join" and r.get("island_id") == 1
+              and r.get("generation") == generation]
+    assert joined and not any(r.get("recovered") for r in joined), joined
     assert back.final_manifest is not None and back.final_manifest == islands[0].final_manifest
 
 
@@ -587,6 +702,138 @@ def test_donor_waits_for_the_clock_and_refused_snapshot_is_reported(tmp_path):
     with pytest.raises(TimeoutError):
         recover(client, other_layout, store, timeout=0.3)
     assert client.sent[0][0] == "failed" and "layout" in client.sent[0][1]
+
+
+class _GatedCommitStore(DirectorySnapshotStore):
+    """Snapshot commits wait for ``gate`` (or fail with ``error``)."""
+
+    def __init__(self, root, error: Exception | None = None) -> None:
+        super().__init__(root)
+        self.gate = threading.Event()
+        self.error = error
+        self.pending: list[int] = []
+
+    def commit(self, pending_bytes=None):
+        if pending_bytes:
+            self.pending.append(pending_bytes)
+            assert self.gate.wait(10)
+            if self.error is not None:
+                raise self.error
+        super().commit(pending_bytes)
+
+
+def test_background_donor_answers_after_the_commit_and_training_goes_on(tmp_path):
+    store = _GatedCommitStore(tmp_path)
+    request = rp.SnapshotRequest(2, 77, 9, (5, 6))
+    client = _ScriptedClient(requests=[request])
+    donor = DonorService(client, _ArrayIsland([5, 7]), store, background=True)
+    assert donor.poll() == 0, "the snapshot is written; its commit runs on the worker"
+    wait_until(lambda: store.pending, 5, "no commit started")
+    assert donor.busy and client.sent == []
+    later = rp.SnapshotRequest(3, 1, 9, (5, 6))
+    client.requests = [later]
+    assert donor.poll() == 0, "one snapshot in flight: the next request waits"
+    store.gate.set()
+    assert donor.wait(5)
+    assert donor.poll() == 1, "the finished snapshot is reported at the next safe point"
+    assert [s[1] for s in client.sent] == [request]
+    assert store.pending[0] == donor.timings[0]["bytes"] > 0
+    assert donor.timings[0]["result"] == "served"
+    assert donor.wait(5), "the poll above started the waiting request"
+    assert donor.poll() == 1 and [s[1] for s in client.sent] == [request, later]
+    assert len(store.locators()) == 2
+
+
+def test_a_failed_snapshot_commit_is_refused_not_raised(tmp_path):
+    for background in (False, True):
+        store = _GatedCommitStore(tmp_path / str(background), error=RuntimeError("commit timed out"))
+        store.gate.set()
+        request = rp.SnapshotRequest(2, 77, 9, (5, 6))
+        client = _ScriptedClient(requests=[request])
+        donor = DonorService(client, _ArrayIsland([5, 7]), store, background=background)
+        donor.poll()  # never raises into the training loop
+        assert donor.wait(5)
+        assert donor.poll() == 0
+        (refused, reason), = donor.refused
+        assert refused == request and "commit timed out" in reason
+        assert client.sent == [] and store.locators() == [], "the partial snapshot is removed"
+        assert donor.timings[0]["result"] == "refused"
+
+
+class _FileIsland(_ArrayIsland):
+    """A sharded trainer: writes its own snapshot files."""
+
+    def write_recovery_snapshot(self, directory):
+        (directory / "rank0.shard").write_bytes(b"x" * 10)
+
+    def read_recovery_snapshot(self, directory, versions):
+        return versions
+
+
+def test_background_is_the_default_for_file_islands_and_the_service_logs(tmp_path):
+    store = DirectorySnapshotStore(tmp_path)
+    assert DonorService(_ScriptedClient(), _ArrayIsland([0, 0]), store).background is False
+    lines = []
+    request = rp.SnapshotRequest(2, 77, 9, (5, 6))
+    client = _ScriptedClient(requests=[request])
+    donor = DonorService(client, _FileIsland([5, 7]), store, log=lines.append, name="actor")
+    assert donor.background is True
+    assert donor.poll() == 0 and donor.wait(5) and donor.poll() == 1
+    line, = lines
+    assert line.startswith("[yeto-peer-recovery] actor donor snapshot for learner 2: served, 10 bytes, write ")
+
+
+def test_restored_digests_must_equal_the_donors():
+    from yeto.rl.peer_recovery import check_restored_digests, digest_fingerprint
+
+    keys = ("state_digest", "rng_digest")
+    saved = [{"path": f"r{r}", "state_digest": f"s{r}", "rng_digest": "g", "sha256": "x"} for r in range(3)]
+    same = [{"path": f"r{r}", "state_digest": f"s{r}", "rng_digest": "g"} for r in (2, 0, 1)]
+    assert check_restored_digests(saved, same, keys) == digest_fingerprint(saved, keys)
+    assert check_restored_digests([{"path": "r0", "sha256": "x"}], [], keys) is None, "an older donor: nothing to check"
+    with pytest.raises(RuntimeError, match="r1: restored state_digest differs"):
+        check_restored_digests(saved, [*same[:2], {"path": "r1", "state_digest": "other", "rng_digest": "g"}], keys)
+    with pytest.raises(RuntimeError, match="r2: no restore summary"):
+        check_restored_digests(saved, same[1:], keys)
+
+
+def test_snapshot_store_hashes_in_parallel_and_passes_the_commit_budget(tmp_path):
+    from contextlib import contextmanager
+
+    from yeto.rl.peer_recovery import SnapshotStore
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    events = []
+
+    class Guard:
+        def release(self):
+            events.append("release")
+
+    @contextmanager
+    def budget(pending):
+        events.append(("budget", pending))
+        yield
+
+    objects = DirectoryObjectStore(tmp_path)
+    store = SnapshotStore(objects, local_root=objects.root, commit=lambda: events.append("commit"),
+                          commit_budget=budget, hold_writer=lambda: events.append("hold") or Guard(),
+                          hash_workers=4)
+    writer = store.begin()
+    assert events == ["hold"], "the writer guard is taken before any file is written"
+    sizes = {f"rank{r}/shard.pt": 1000 + r for r in range(8)}
+    for rel, size in sizes.items():
+        (writer.directory / rel).parent.mkdir(parents=True, exist_ok=True)
+        (writer.directory / rel).write_bytes(bytes([len(rel)]) * size)
+    locator, sha256 = writer.commit((1, 2), "tag")
+    assert events[1:] == [("budget", sum(sizes.values())), "commit", "release"]
+    manifest, directory = store.fetch(locator, sha256, tmp_path / "unused")
+    assert {rel: meta["bytes"] for rel, meta in manifest.files.items()} == sizes
+    (directory / "rank3/shard.pt").write_bytes(b"x" * sizes["rank3/shard.pt"])
+    from yeto.rl.peer_recovery import SnapshotIntegrityError
+    with pytest.raises(SnapshotIntegrityError, match="rank3/shard.pt"):
+        store.fetch(locator, sha256, tmp_path / "unused")
+    with pytest.raises(ValueError):
+        SnapshotStore(objects, hash_workers=0)
 
 
 def test_snapshot_store_rejects_path_locators(tmp_path):

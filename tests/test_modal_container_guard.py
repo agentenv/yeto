@@ -126,6 +126,60 @@ def test_a_missing_original_without_extras_and_fewer_containers_never_stop():
 # -- cost guard -----------------------------------------------------------------------------------
 
 
+# -- expected island relaunches (fault injection runs) ---------------------------------------------
+
+# a 2-island run of 2 containers each: island 1 (B, C) is killed and relaunched as (E, F),
+# later killed again and relaunched as (G, H)
+C1, E, F, G, H, X = (f"ta-relaunch-{n}" for n in "cefghx")
+FOUR = [_row(A, T_ORIG), _row(B, T_ORIG), _row(C1, T_ORIG), _row(D, T_ORIG)]
+
+
+def _relaunched(*ids: str, keep=(A, D)) -> list[dict]:
+    return [_row(c, T_ORIG) for c in keep] + [_row(c, T_EXTRA) for c in ids]
+
+
+def test_expected_relaunches_keep_the_run_until_more_containers_than_allowed():
+    guard = _guard(nodes=4, replacements=4)
+    assert guard.observe(30.0, FOUR, progress=1).stop is None
+    assert guard.observe(60.0, _relaunched(), progress=2).stop is None  # island 1 gone
+    # the relaunch: originals gone, new containers present (rule 1 is off) ...
+    assert guard.observe(90.0, _relaunched(E, F), progress=3).stop is None
+    # ... and present for longer than extra_max_s (rule 3 is off)
+    assert guard.observe(2_000.0, _relaunched(E, F), progress=4).stop is None
+    # a second relaunch of island 1
+    assert guard.observe(2_030.0, _relaunched(), progress=5).stop is None
+    assert guard.observe(2_060.0, _relaunched(G, H), progress=6).stop is None
+    assert guard.observe(4_000.0, _relaunched(G, H), progress=7).stop is None
+    # a fifth extra container: more than the run expected, the usual rules apply again
+    stop = guard.observe(4_030.0, _relaunched(G, H, X), progress=8).stop
+    assert stop is not None and stop[0] == RESCHED and "gone" in stop[1]
+
+
+def test_expected_relaunches_still_stop_on_no_progress_and_on_double_billing():
+    stalled = _guard(nodes=4, replacements=2)
+    stalled.observe(30.0, FOUR, progress=1)
+    assert stalled.observe(60.0, _relaunched(E, F), progress=1).stop is None
+    stop = stalled.observe(400.0, _relaunched(E, F), progress=1).stop
+    assert stop is not None and "no progress line" in stop[1]
+
+    double = _guard(nodes=4, replacements=2)
+    double.observe(30.0, FOUR, progress=1)
+    # the relaunched island starts before the old island's containers left
+    assert double.observe(60.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=2).stop is None
+    assert double.observe(600.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=3).stop is None
+    stop = double.observe(700.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=4).stop
+    assert stop is not None and stop[0] == RESCHED and "beside old ones" in stop[1]
+
+
+def test_no_expected_relaunch_by_default():
+    guard = _guard(nodes=4)
+    guard.observe(30.0, FOUR, progress=1)
+    stop = guard.observe(60.0, _relaunched(E, F), progress=2).stop
+    assert stop is not None and "replacement island" in stop[1]
+    with pytest.raises(ValueError):
+        _guard(replacements=-1)
+
+
 def test_the_cost_counts_every_container_and_the_head():
     guard = _guard(rate=36.0, head_rate=3.6, cost_cap=1000.0)
     assert guard.observe(100.0, ORIGINALS).cost == pytest.approx(2 * 1.0 + 0.1)

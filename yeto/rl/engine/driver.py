@@ -157,7 +157,14 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     ``round_delay_islands`` (learner ids it applies to; default every island).
     ``exit_at_round`` and ``exit_islands`` (the island process exits with
     code 137 before that rollout, only in its first Modal container, so a
-    re-run of the island is a fresh process that rejoins).
+    re-run of the island is a fresh process that rejoins). With
+    ``exit_rejoined_after_rounds`` n the first re-run (incarnation 1) of those
+    islands exits once more, before the n-th round it runs itself (its round
+    ids depend on where it rejoined). ``catch_up_incarnations``: re-runs of
+    those islands that rejoin by catch-up (every fragment from the syncer,
+    fresh optimizer state) although the launcher asked for peer recovery
+    (:func:`catch_up_incarnation`); together they test both state sources in
+    one run.
     """
     import os
 
@@ -168,7 +175,8 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
     unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
-                              "exit_at_round", "exit_islands"})
+                              "exit_at_round", "exit_islands", "exit_rejoined_after_rounds",
+                              "catch_up_incarnations"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
     out: dict[str, Any] = {}
@@ -194,7 +202,31 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
         out["exit_islands"] = sorted(set(islands))
     elif "exit_islands" in raw:
         raise ValueError("exit_islands needs exit_at_round")
+    if "exit_rejoined_after_rounds" in raw:
+        rounds = raw["exit_rejoined_after_rounds"]
+        if "exit_at_round" not in out:
+            raise ValueError("exit_rejoined_after_rounds needs exit_at_round")
+        if type(rounds) is not int or rounds < 1:
+            raise ValueError("exit_rejoined_after_rounds must be a positive round count")
+        out["exit_rejoined_after_rounds"] = rounds
+    if "catch_up_incarnations" in raw:
+        incarnations = raw["catch_up_incarnations"]
+        if (not isinstance(incarnations, list) or not incarnations
+                or not all(type(i) is int and i >= 1 for i in incarnations)):
+            raise ValueError("catch_up_incarnations must be a list of re-run numbers >= 1")
+        out["catch_up_incarnations"] = sorted(set(incarnations))
     return out
+
+
+def catch_up_incarnation(environ: Mapping[str, str] | None = None) -> int | None:
+    """Test-only: this island process's incarnation when the fault injection
+    makes it rejoin by catch-up instead of peer recovery, else None."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    incarnation = int(environ.get(MODAL_INCARNATION_ENV, "0") or 0)
+    injected = load_fault_injection(environ).get("catch_up_incarnations", ())
+    return incarnation if incarnation in injected else None
 
 
 class DriverError(RuntimeError):
@@ -540,6 +572,7 @@ class IslandDriver:
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
+        self._rounds_in_process = 0  # rounds this process started (fault injection)
         self.controller = controller
         self.ledger = ledger
         # D1/D2 wiring (6.5, d2-wire): optional ``elastic.ElasticHook``; None keeps
@@ -940,14 +973,24 @@ class IslandDriver:
         return dataclasses.replace(batch, groups=groups)
 
     def _inject_exit(self, rollout_id: int) -> None:
-        """Test-only: kill this island process (first Modal container only)."""
+        """Test-only: kill this island process (``exit_at_round`` in the first
+        Modal container; ``exit_rejoined_after_rounds`` in the first re-run)."""
         import os
 
-        if (self.fault_injection.get("exit_at_round") != rollout_id
-                or self.learner_id not in self.fault_injection.get("exit_islands", ())
-                or os.environ.get(MODAL_INCARNATION_ENV, "0") != "0"):
+        self._rounds_in_process += 1
+        if self.learner_id not in self.fault_injection.get("exit_islands", ()):
             return
-        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id)
+        incarnation = os.environ.get(MODAL_INCARNATION_ENV, "0")
+        if incarnation == "0":
+            hit = self.fault_injection.get("exit_at_round") == rollout_id
+        elif incarnation == "1":
+            hit = self.fault_injection.get("exit_rejoined_after_rounds") == self._rounds_in_process
+        else:
+            hit = False
+        if not hit:
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id,
+                  incarnation=int(incarnation), rounds_in_process=self._rounds_in_process)
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(137)
