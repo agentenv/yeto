@@ -41,9 +41,9 @@ import modal
 HERE = Path(__file__).resolve()
 REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")
 WORKDIR = "/root/yeto"
-# the image the training islands run (yeto.rl.adapters.miles.pins.MILES_NEXT_IMAGE, 9708070-2fa8801)
+# the image the training islands run (yeto.rl.adapters.miles.pins.MILES_NEXT_IMAGE, 28bc6cc-2fa8801)
 IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-         "d639e258709b9d4ae4a980c63818562daf62137c9e364f779010bc0b753e867a")
+         "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2")
 MODEL, MODEL_REVISION = "Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca"
 GPU_NAME = "H100"
 TASKS = "e11-tasks.jsonl"  # the training launch's prompt file (the run snapshot root)
