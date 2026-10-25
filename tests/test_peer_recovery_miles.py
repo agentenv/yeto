@@ -246,6 +246,19 @@ def stubs(monkeypatch):
     return SimpleNamespace(clients=clients, kwargs=seen_kwargs)
 
 
+def serve(stream) -> int:
+    """One donor safe point and, once the background hash + commit finished, the
+    next one (where a finished snapshot is reported); returns the snapshots served."""
+    async def run() -> int:
+        served = await stream.serve_peer_snapshots()
+        if stream._donor is not None:
+            assert stream._donor.background and stream._donor.wait(10)
+            served += await stream.serve_peer_snapshots()
+        return served
+
+    return asyncio.run(run())
+
+
 def donor_stream(store_root, group, client):
     """A running donor: initialized normally, then at fragment versions (3, 4)."""
     stream = MilesFullParameterRoleStream(config(store_root, recover=False))
@@ -261,7 +274,7 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
     request = rp.SnapshotRequest(1, 9, 5, (3, 4))
     donor_client = FakeClient(requests=[request])
     donor = donor_stream(store_root, donor_group, donor_client)
-    assert asyncio.run(donor.serve_peer_snapshots()) == 1
+    assert serve(donor) == 1
     (_, versions, sha256, locator), = donor_client.sent
     assert versions == (3, 4)
     assert donor_group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS]
@@ -291,7 +304,7 @@ def test_island_pool_member_recovers_from_a_peer_while_it_heartbeats(tmp_path, s
     store_root = tmp_path / "store"
     donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
     donor = donor_stream(store_root, FakeGroup(adam_step=17), donor_client)
-    assert asyncio.run(donor.serve_peer_snapshots()) == 1
+    assert serve(donor) == 1
     (_, versions, sha256, locator), = donor_client.sent
     client = FakeClient(events=[rp.RecoveryClock(5, (3, 4), 1),
                                 rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator),
@@ -313,7 +326,7 @@ def test_island_pool_member_recovers_from_a_peer_while_it_heartbeats(tmp_path, s
 def test_other_tensor_parallel_layout_is_refused(tmp_path, stubs):
     store_root = tmp_path / "store"
     donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
-    asyncio.run(donor_stream(store_root, FakeGroup(tp=2), donor_client).serve_peer_snapshots())
+    serve(donor_stream(store_root, FakeGroup(tp=2), donor_client))
     (_, versions, sha256, locator), = donor_client.sent
 
     client = FakeClient(events=[rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator)])
@@ -361,7 +374,7 @@ def test_restore_without_scheduler_rebase_fails_the_first_apply(tmp_path, stubs,
     """G-D2 rec-c: restore OK and digests equal, but Miles refused the first apply."""
     store_root = tmp_path / "store"
     donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
-    asyncio.run(donor_stream(store_root, FakeGroup(adam_step=17), donor_client).serve_peer_snapshots())
+    serve(donor_stream(store_root, FakeGroup(adam_step=17), donor_client))
     (_, versions, sha256, locator), = donor_client.sent
     resent = [BcastFragment(0, 5, stored(0, 5, "g0"), stored=True),
               BcastFragment(1, 6, stored(1, 6, "g1"), stored=True)]
