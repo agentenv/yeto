@@ -73,6 +73,8 @@ class _Ray:
         return list(refs), []
 
     def get(self, ref, timeout=None):
+        if isinstance(ref, list):
+            return [self.get(item) for item in ref]
         if isinstance(ref, _Ref):
             if ref.error is not None:
                 raise ref.error
@@ -189,8 +191,9 @@ def _trainer(replicas=1):
                               model_config="model-config", global_load_balancer=balancer,
                               server_handles=[r.server_handle for r in old],
                               server_addresses=[r.server_address for r in old])
+    trainer_workers = [_Actor(f"trainer_worker_{rank}") for rank in range(2)]
     return SimpleNamespace(standalone_server_manager=manager, standalone_checkpoint_manager=_Checkpoints(old),
-                           replay_buffer=_ReplayBuffer())
+                           replay_buffer=_ReplayBuffer(), actor_rollout_wg=SimpleNamespace(workers=trainer_workers))
 
 
 @pytest.fixture(autouse=True)
@@ -250,6 +253,8 @@ def test_a_restore_starts_new_replicas_in_the_old_placement_groups():
     assert manager.server_handles == [r.server_handle for r in new]
     assert checkpoints.replicas == new  # the next update_weights builds its NCCL group with them
     assert record["replicas"] == [0, 1] and record["restore"] == 1 and record["addresses"] == manager.server_addresses
+    # every trainer worker was asked to drop its NCCL checkpoint group (no group in these fakes)
+    assert record["trainer_groups"] == [{"group": None, "dropped": False}] * 2
     assert port.engines_alive()
     assert port.restore_engines()["restore"] == 2 and manager.rollout_replicas[0].name_suffix == "_yeto2"
 
@@ -397,3 +402,46 @@ def test_a_no_sync_separate_mode_publication_passes_the_trainer_holds_check():
     with pytest.raises(WeightsChanged, match="trained 1 round"):
         exported.check_holds()
     state.export(policy_version=1).check_holds()
+
+
+class _Comm:
+    def __init__(self):
+        self.aborted = False
+
+    def abort(self):
+        self.aborted = True
+
+
+def test_the_trainer_side_drops_its_checkpoint_group_with_the_lost_replicas():
+    """s27-ew-o3 (GPU): after the restore the trainer reused its NCCL checkpoint group
+    (verl's rebuild_group is False) and the barrier with the new replica failed. The port
+    now makes every trainer worker forget the group: communicators aborted, rank 0 removes
+    the rendezvous stores, so the next update builds a new group."""
+    import threading
+
+    destroyed = []
+
+    class _Group:
+        rank = 0
+        _dev_comm_map = {"0": [_Comm()]}
+
+        def _generate_group_key(self, key):
+            return f"{key}@default"
+
+        @staticmethod
+        def _destroy_store(key):
+            destroyed.append(key)
+
+    group = _Group()
+    collective = SimpleNamespace(_group_mgr_lock=threading.Lock(),
+                                 _group_mgr=SimpleNamespace(_name_group_map={"default": group}),
+                                 is_group_initialized=lambda name: name in collective._group_mgr._name_group_map)
+    worker = SimpleNamespace(actor=object(), checkpoint_engine=SimpleNamespace(group_name="default"))
+    assert er._drop_checkpoint_group(worker, collective) == {"group": "default", "dropped": True, "aborted": 1,
+                                                              "stores": 1}
+    assert group._dev_comm_map["0"][0].aborted and destroyed == ["0@default"]
+    assert not collective.is_group_initialized("default")  # the next init_process_group builds a new one
+    assert er._drop_checkpoint_group(worker, collective) == {"group": "default", "dropped": False}
+    group.rank = 1
+    collective._group_mgr._name_group_map["default"] = group
+    assert er._drop_checkpoint_group(worker, collective)["stores"] == 0  # only rank 0 owns the stores

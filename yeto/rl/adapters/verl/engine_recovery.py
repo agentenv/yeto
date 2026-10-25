@@ -26,8 +26,9 @@ The port only calls what verl already offers:
   class and rank start in the old replicas' placement groups (``init_standalone``
   with the existing resource pool; a new name suffix avoids Ray name clashes), the
   load balancer swaps the server addresses and the checkpoint manager swaps the
-  replicas. verl builds the NCCL group on every ``update_weights``, so the driver's
-  next publication reaches the new replicas without further work.
+  replicas. The trainer workers keep their NCCL checkpoint group between updates
+  (verl's ``rebuild_group`` default False), so the port drops that group on them;
+  the driver's next publication then builds a new group with the new replicas.
 
 Data: the lost batch's prompts are not read again. The verl data cursor cannot move
 back (``data_cursor``); verl's replay buffer replaces the failed prompts with new
@@ -171,12 +172,22 @@ class VerlEngineRecovery:
                     errors.append(f"{type(exc).__name__}: {exc}"[:200])
         return errors
 
+    def _drop_actor_groups(self) -> list:
+        """The trainer side keeps its NCCL checkpoint group between updates (verl's
+        ``rebuild_group`` default False) and would reuse it with the dead replicas'
+        ranks; drop it on every actor worker, so the next update builds a new group
+        with the new replicas (s27-ew-o3: the reused group failed its barrier)."""
+        workers = self.trainer.actor_rollout_wg.workers
+        refs = [worker.__ray_call__.remote(_drop_checkpoint_group) for worker in workers]
+        return self.ray.get(refs, timeout=180)
+
     def restore_engines(self) -> dict[str, Any]:
         manager = self.manager
         checkpoints = self.trainer.standalone_checkpoint_manager
         old = self._replicas()
         self.restores += 1
         kill_errors = self._kill(old)
+        dropped = self._drop_actor_groups()
         suffix = f"yeto{self.restores}"
         new = [manager.rollout_replica_class(
             replica_rank=replica.replica_rank, config=manager.rollout_config, model_config=manager.model_config,
@@ -202,8 +213,45 @@ class VerlEngineRecovery:
         self.aborted.clear()
         return {"replicas": [replica.replica_rank for replica in new],
                 "addresses": list(manager.server_addresses), "restore": self.restores,
-                "start_s": round(time.monotonic() - started, 1),
+                "start_s": round(time.monotonic() - started, 1), "trainer_groups": dropped,
                 **({"kill_errors": kill_errors} if kill_errors else {})}
+
+
+def _drop_checkpoint_group(worker_dict: Any, collective: Any = None) -> dict[str, Any]:
+    """Runs in a trainer (actor) worker: forget the NCCL checkpoint-engine group (Ray
+    collective) this worker holds with the lost replicas. Its communicators are
+    aborted, not destroyed (a destroy may wait on the dead peers), and rank 0 removes
+    the group's rendezvous stores (Ray named actors holding the old NCCL unique id)."""
+    from .ports_impl import _inner_worker
+
+    engine = getattr(_inner_worker(worker_dict), "checkpoint_engine", None)
+    name = getattr(engine, "group_name", None)
+    if not name:
+        return {"group": None, "dropped": False}
+    if collective is None:
+        from ray.util.collective import collective
+    if not collective.is_group_initialized(name):
+        return {"group": name, "dropped": False}
+    with collective._group_mgr_lock:
+        group = collective._group_mgr._name_group_map.pop(name)
+    comm_map = getattr(group, "_dev_comm_map", None) or {}
+    aborted = 0
+    for comms in comm_map.values():
+        for comm in comms or ():
+            try:
+                comm.abort()
+                aborted += 1
+            except Exception:  # noqa: BLE001 - the communicator is forgotten either way
+                pass
+    stores = 0
+    if getattr(group, "rank", None) == 0:
+        for key in list(comm_map):
+            try:
+                group._destroy_store(group._generate_group_key(key))
+                stores += 1
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+    return {"group": name, "dropped": True, "aborted": aborted, "stores": stores}
 
 
 class TestEngineKill:
