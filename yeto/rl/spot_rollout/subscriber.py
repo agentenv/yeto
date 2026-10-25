@@ -5,8 +5,9 @@ learner. It opens the usual connection group (control socket + striped data
 streams) with SUBSCRIBE instead of HELLO:
 
 * body = the HELLO body (``encode_hello``) with learner id
-  ``SUBSCRIBER_ID_BIT | subscriber_id`` and session dtype bf16 (2), sealed with
-  the subscribe MAC domain;
+  ``SUBSCRIBER_ID_BIT | 31 bits`` (``release_store.subscriber_id_for``: the task
+  dispenser's sampler holder id) and session dtype bf16 (2), sealed with the
+  subscribe MAC domain; the syncer admits at most ``--max-subscribers`` at once;
 * the syncer checks the layout and fingerprint against the running session
   (not the session contract or the compat group: a subscriber never merges,
   so it may run on another card type), and never puts it in the roster:
@@ -52,9 +53,11 @@ class SubscriberClient(SyncerClient):
                  num_streams: int = 4, connect_timeout: float = 900.0,
                  hmac_key: bytes | None = None, syncer_profile_hash: bytes | None = None,
                  **kwargs) -> None:
-        if not 0 <= int(subscriber_id) < SUBSCRIBER_ID_BIT:
-            raise ValueError(f"subscriber_id must be in [0, 2^31), got {subscriber_id}")
-        super().__init__(addr, SUBSCRIBER_ID_BIT | int(subscriber_id), layout, dtype=DTYPE_BF16,
+        """``subscriber_id``: the wire id, ``SUBSCRIBER_ID_BIT`` set
+        (``release_store.subscriber_id_for(sampler_id)``)."""
+        if not SUBSCRIBER_ID_BIT <= int(subscriber_id) <= 0xFFFF_FFFF:
+            raise ValueError(f"subscriber_id must have the subscriber bit 2^31 set, got {subscriber_id}")
+        super().__init__(addr, int(subscriber_id), layout, dtype=DTYPE_BF16,
                          num_streams=num_streams, connect_timeout=connect_timeout,
                          hmac_key=hmac_key, syncer_profile_hash=syncer_profile_hash, **kwargs)
         self.subscriber_id = int(subscriber_id)

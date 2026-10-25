@@ -497,8 +497,18 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         if not lora:  # LoRA: no adapter is served before the first release (require_release)
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
         scheme = release_scheme(_quant_tier(miles_args))
-        follower = PolicyFollower(release_store(config, environ, scheme=scheme,
-                                                mirror=default_mirror(environ)),
+        # S27 G-EA: with YETO_SPOT_SYNCER the releases come from the syncer (a
+        # receive-only subscriber), not the store; the follower and loader are the same.
+        from yeto.rl.spot_rollout.release_store import spot_release_store
+
+        releases = spot_release_store(
+            env, buffer=buffer, base_model=str(miles_args.hf_checkpoint),
+            work_dir=Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"),
+            sampler_id=sampler_id, emit=emit)
+        spot_finished = (lambda: False) if releases is None else releases.finished
+        if releases is None:
+            releases = release_store(config, environ, scheme=scheme, mirror=default_mirror(environ))
+        follower = PolicyFollower(releases,
                                   loader if scheme == BF16 else scope_checked(loader),
                                   version=BASE_POLICY_VERSION, scheme=scheme)
         loop = SamplerLoop(
@@ -507,7 +517,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             num_rollouts=None if until else int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
             min_round_s=config.min_round_s, require_release=lora,
-            should_stop=lambda: reclaimed() or trainers_ended(),
+            should_stop=lambda: reclaimed() or trainers_ended() or spot_finished(),
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
                                    "probe": loader.last_probe,
                                    "load_timings": loader.last_timings,

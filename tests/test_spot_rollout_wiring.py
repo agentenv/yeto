@@ -16,7 +16,8 @@ from yeto import launcher
 from yeto.launcher import _prepare_rl_args
 from yeto.rl.adapters.miles import island_entry as learner
 
-NEW_ATTRS = ("rl_spot_subscribers", "rl_sample_relay", "rl_sample_relay_prefetch")
+NEW_ATTRS = ("rl_spot_subscribers", "rl_sample_relay", "rl_sample_relay_prefetch", "rl_spot_syncer",
+             "rl_spot_channel")
 
 
 def test_default_island_command_is_unchanged(monkeypatch):
@@ -26,6 +27,7 @@ def test_default_island_command_is_unchanged(monkeypatch):
     _prepare_rl_args(args)
     run = _island_task(args, monkeypatch).run
     assert "--rl-spot-subscribers" not in run and "--rl-sample-relay" not in run
+    assert "--rl-spot-syncer" not in run
     legacy = _cli()
     for name in NEW_ATTRS:
         delattr(legacy, name)
@@ -140,3 +142,44 @@ def test_wire_constants_match_the_syncer():
     assert 'b"yeto-relay-hello-mac-v1\\0"' in rust and relay.RELAY_MAC_DOMAIN == b"yeto-relay-hello-mac-v1\0"
     for role in ("ROLE_PRODUCER", "ROLE_CONSUMER", "ROLE_BOARD"):
         assert f"pub const {role}: u8 = {getattr(relay, role)};" in rust
+
+
+def test_spot_sampler_island_gets_the_subscriber_and_relay_env(monkeypatch):
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
+
+    args = SimpleNamespace(rl_spot_syncer="head.example:29400", rl_spot_channel=1)
+    assert learner.spot_sampler_env(args) == {SPOT_SYNCER_ENV: "head.example:29400",
+                                              RELAY_ADDR_ENV: "head.example:29400",
+                                              RELAY_CHANNEL_ENV: "1"}
+    cli = _cli(("--rl-spot-syncer", "head.example:29400", "--rl-spot-channel", "1"))
+    _prepare_rl_args(cli)
+    run = _island_task(cli, monkeypatch).run
+    assert "--rl-spot-syncer head.example:29400 --rl-spot-channel 1" in run
+
+
+def test_a_sampler_buffer_goes_to_the_relay_only_with_the_relay_env(tmp_path):
+    from yeto.rl.adapters.miles.buffer_rollout import BUFFER_ROOT_ENV, SAMPLER_ID_ENV, open_buffer
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+    from yeto.rl.spot_rollout.relay_buffer import RelaySampleBuffer
+    from yeto.rl.spot_rollout.release_store import subscriber_id_for
+
+    env = {BUFFER_ROOT_ENV: str(tmp_path / "store"), SAMPLER_ID_ENV: "spot-a"}
+    assert isinstance(open_buffer(env, sampler=True), FileSampleBuffer)
+    relay = open_buffer({**env, "YETO_SAMPLE_RELAY_ADDR": "127.0.0.1:1", "YETO_SAMPLE_RELAY_CHANNEL": "2"},
+                        sampler=True)
+    assert isinstance(relay, RelaySampleBuffer)
+    assert relay.producer.conn.channel == 2 and relay.producer.conn.client == subscriber_id_for("spot-a")
+    # The trainer side (reader) never gets the relay buffer.
+    reader = open_buffer({**env, "YETO_SAMPLE_RELAY_ADDR": "127.0.0.1:1"}, reader=True)
+    assert isinstance(reader, FileSampleBuffer)
+
+
+def test_subscriber_ids_are_the_dispenser_sampler_holder_ids():
+    import hashlib
+
+    from yeto.rl.spot_rollout.release_store import subscriber_id_for
+
+    sid = subscriber_id_for("spot-a")
+    digest = hashlib.sha256(b"yeto-sampler:spot-a").digest()
+    assert sid == (1 << 31) | (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF)
+    assert sid >> 31 == 1 and subscriber_id_for("spot-b") != sid

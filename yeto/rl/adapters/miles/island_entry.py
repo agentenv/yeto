@@ -346,6 +346,18 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
     if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
         env.update(sample_relay_env(args))
+    if getattr(args, "rl_spot_syncer", None) and config.role == sample_roles.SAMPLER:
+        env.update(spot_sampler_env(args))
+
+
+def spot_sampler_env(args) -> dict[str, str]:
+    """S27 G-EA (--rl-spot-syncer, sampler island): weights from that syncer as a
+    receive-only subscriber, groups to its relay channel --rl-spot-channel."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
+
+    host, port = _syncer_address(args.rl_spot_syncer)
+    return {SPOT_SYNCER_ENV: f"{host}:{port}", RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(getattr(args, "rl_spot_channel", 0) or 0))}
 
 
 def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:

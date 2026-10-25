@@ -254,9 +254,11 @@ struct Args {
     shard_index: u32,
     #[arg(long, default_value_t = 1)]
     shard_count: u32,
-    /// S27 G-EA: admit up to N receive-only subscribers (sampler islands on
-    /// any cloud that follow the global weights as bf16 broadcasts; never in
-    /// quorum, roster or final cut). 0 = off: SUBSCRIBE is refused.
+    /// S27 G-EA: admit up to N receive-only subscribers at once (sampler
+    /// islands on any cloud that follow the global weights as bf16
+    /// broadcasts; never in quorum, roster or final cut; their ids are
+    /// 2^31 + 31 bits of their sampler id's SHA-256, as the task dispenser's
+    /// sampler holders). 0 = off: SUBSCRIBE is refused.
     #[arg(long, default_value_t = 0)]
     max_subscribers: u32,
     /// S27 G-EA: serve the sample relay (sampler islands PUT rollout

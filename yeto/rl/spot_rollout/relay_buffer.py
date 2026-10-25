@@ -1,10 +1,9 @@
 """Rollout groups through the sample relay (S27 G-EA).
 
-Sampler side: :class:`RelayGroupWriter` has the writer surface of
-:class:`~yeto.rl.engine.buffer_payload.GroupWriter` (``sampler_id``,
-``write(samples, group_key=, provenance=, sampler_round=)``), so
-:class:`~yeto.rl.engine.engine_sampler.EngineRound` writes to the relay as it
-writes to a buffer. One relay item per group:
+Sampler side: :class:`RelaySampleBuffer` has the buffer surface of
+:class:`~yeto.rl.engine.sample_buffer.FileSampleBuffer` that the unchanged
+writers use (``GroupWriter``, the Miles buffer writer) and that
+``SamplerLoop`` reads its backlog from. One relay item per group:
 
     b"YRG1" | u32 header length | header JSON | payload
 
@@ -33,10 +32,10 @@ import os
 import struct
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
-from yeto.rl.engine.buffer_payload import encode_group, group_entry_fields
 from yeto.rl.engine.sample_buffer import PAYLOADS, SampleBufferError, SampleIndexEntry, payload_name
 
 from .relay import PUT_FULL, RelayConsumer, RelayProducer
@@ -79,49 +78,82 @@ def parse_addr(text: str) -> tuple[str, int]:
     return host.strip("[]"), int(port)
 
 
-class RelayGroupWriter:
-    """``GroupWriter`` surface over a :class:`RelayProducer` (module doc)."""
+class RelaySampleBuffer:
+    """The sampler's sample buffer over the relay (module doc): the buffer surface
+    that :class:`~yeto.rl.engine.buffer_payload.GroupWriter`,
+    :class:`~yeto.rl.engine.sampler_loop.SamplerLoop`, ``sampler_resume`` and
+    the Miles buffer writer use, with every group sent as one relay item.
 
-    def __init__(self, producer: RelayProducer, sampler_id: str, *,
-                 fragment_versions: Callable[[], Sequence[int]] = lambda: (),
-                 should_stop: Callable[[], bool] = lambda: False,
-                 full_wait_s: float = 2.0, clock: Callable[[], float] = time.time) -> None:
-        if not sampler_id:
-            raise ValueError("sampler_id must be non-empty")
+    ``len()`` is the number of items the channel ever stored, ``read_position()``
+    the number the trainer took (acknowledged), so the loop's backlog is the
+    channel depth. ``entries()`` is empty (a new incarnation starts at round 0;
+    its sample ids carry its incarnation). There is no data end: the run ends at
+    the syncer."""
+
+    shard = None
+
+    def __init__(self, producer: RelayProducer, *, fragment_versions: Callable[[], Sequence[int]] = lambda: (),
+                 should_stop: Callable[[], bool] = lambda: False, full_wait_s: float = 2.0,
+                 clock: Callable[[], float] = time.time) -> None:
         self.producer = producer
-        self.sampler_id = str(sampler_id)
         self.fragment_versions = fragment_versions
         self.should_stop = should_stop
         self.full_wait_s = float(full_wait_s)
         self.clock = clock
+        self._payloads: dict[str, bytes] = {}
+        self._depth = None
         self.written = 0
         self.dropped = 0  # groups not stored because the sampler is stopping
 
-    def write(self, samples: Sequence[Mapping[str, Any]], *, group_key: str,
-              provenance: Mapping[str, str] | None = None,
-              sampler_round: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
-        behavior_version, tokens = group_entry_fields(samples)
+    # writing (GroupWriter: payload first, then the index entry)
+    def write_payload(self, sample_id: str, data: bytes) -> str:
+        ref = f"relay/{sample_id}"
+        self._payloads[ref] = bytes(data)
+        return ref
+
+    def append(self, entry: SampleIndexEntry) -> None:
+        payload = self._payloads.pop(entry.payload_ref)
         header = {
-            "schema": HEADER_SCHEMA, "sample_id": f"{self.sampler_id}-{group_key}",
-            "behavior_version": int(behavior_version), "tokens": int(tokens),
-            "provenance": None if provenance is None else dict(provenance),
-            "sampler_round": None if sampler_round is None else dict(sampler_round),
-            "sampler_id": self.sampler_id,
+            "schema": HEADER_SCHEMA, "sample_id": entry.sample_id,
+            "behavior_version": int(entry.behavior_version), "tokens": int(entry.tokens),
+            "provenance": None if entry.provenance is None else dict(entry.provenance),
+            "sampler_round": None if entry.sampler_round is None else dict(entry.sampler_round),
             "fragment_versions": [int(v) for v in self.fragment_versions()],
             "written_at": float(self.clock()),
         }
-        ack = self.producer.put_blocking(encode_item(header, encode_group(samples)),
-                                         should_stop=self.should_stop, wait_s=self.full_wait_s)
+        ack = self.producer.put_blocking(encode_item(header, payload), should_stop=self.should_stop,
+                                         wait_s=self.full_wait_s)
         if ack is None or ack.status == PUT_FULL:
             self.dropped += 1
-            return None
+            return
         self.written += 1
-        return header
+        self._depth = ack.depth
 
-    def backlog(self) -> int:
-        """Groups in the channel the trainer has not taken (last answer)."""
-        depth = self.producer.last_depth
-        return 0 if depth is None else int(depth.items)
+    @contextmanager
+    def one_commit(self) -> Iterator[None]:
+        yield
+
+    def mark_data_end(self) -> None:
+        """No data end on the relay: the trainers end with the syncer."""
+
+    # reading (the loop's backlog and the resume point)
+    def refresh(self) -> int:
+        self._depth = self.producer.depth()
+        return len(self)
+
+    def __len__(self) -> int:
+        return 0 if self._depth is None else int(self._depth.next_id) - 1
+
+    def read_position(self) -> int:
+        depth = self._depth
+        return 0 if depth is None else int(depth.next_id) - 1 - int(depth.items)
+
+    def entries(self) -> list[SampleIndexEntry]:
+        return []
+
+    @property
+    def data_ended(self) -> bool:
+        return False
 
 
 class RelayPump:
@@ -216,6 +248,25 @@ class RelayPump:
     def stop(self) -> None:
         self._stop.set()
         self.consumer.close()
+
+
+SPOT_SYNCER_ENV = "YETO_SPOT_SYNCER"  # sampler island: subscribe to this syncer (host:port)
+
+
+def relay_sampler_buffer(environ: Mapping[str, str] | None = None) -> "RelaySampleBuffer | None":
+    """A sampler's buffer over the relay when :data:`RELAY_ADDR_ENV` is set (the
+    Miles sampler island's ``open_buffer(sampler=True)``); None otherwise. The
+    producer id is the sampler's subscriber id (``release_store.subscriber_id_for``)."""
+    env = os.environ if environ is None else environ
+    addr = env.get(RELAY_ADDR_ENV)
+    if not addr:
+        return None
+    from .release_store import subscriber_id_for
+
+    sampler_id = env.get("YETO_SAMPLE_BUFFER_SAMPLER_ID") or "sampler"
+    producer = RelayProducer(parse_addr(addr), int(env.get(RELAY_CHANNEL_ENV, "0")),
+                             subscriber_id_for(sampler_id))
+    return RelaySampleBuffer(producer)
 
 
 def maybe_start_relay_pump(reader_buffer: Any, environ: Mapping[str, str] | None = None) -> RelayPump | None:

@@ -2,8 +2,9 @@
 //! follows the global weights without being a learner.
 //!
 //! A subscriber connects with SUBSCRIBE (instead of HELLO): the same body as
-//! HELLO, with `learner_id = SUBSCRIBER_ID_BIT | subscriber_id` and dtype
-//! bf16. Its data streams attach with the ordinary DATA_HELLO under that id.
+//! HELLO, with `learner_id = SUBSCRIBER_ID_BIT | 31 bits` (the sampler id's
+//! SHA-256, the task dispenser's sampler holder id) and dtype bf16; at most
+//! `--max-subscribers` are connected at once. Its data streams attach with the ordinary DATA_HELLO under that id.
 //! The syncer then sends it `BCAST_FRAGMENT` frames in the bf16 session
 //! format (`fragment_id u32 | version u64 | bf16 values`), one per merged
 //! fragment version, and nothing else: no PULL, no final cut, no SHUTDOWN.

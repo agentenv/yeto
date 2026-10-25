@@ -188,9 +188,9 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
-    /// S27 G-EA: receive-only subscriber slots (subscriber ids
-    /// 0..max_subscribers); 0 = off (SUBSCRIBE is refused). Subscribers never
-    /// change a merge, so this is not in the semantic profile hash.
+    /// S27 G-EA: most receive-only subscribers connected at once; 0 = off
+    /// (SUBSCRIBE is refused). Subscribers never change a merge, so this is
+    /// not in the semantic profile hash.
     pub max_subscribers: u32,
     /// S27 G-EA: limits of the sample relay (`sample_relay.rs`); None = off
     /// (RELAY_HELLO is refused). Not in the semantic profile hash.
@@ -576,6 +576,12 @@ impl SubscriberHub {
             .get(&id)
             .filter(|c| c.group.member == member)
             .map(|c| c.group.clone())
+    }
+
+    /// Connected subscribers other than `subscriber_id` (a reconnect of the
+    /// same id replaces its old connection, so it does not count).
+    fn live_others(&self, subscriber_id: u32) -> usize {
+        self.conns.lock().unwrap().keys().filter(|id| **id != subscriber_id).count()
     }
 
     fn live(&self) -> Vec<Arc<SubscriberConn>> {
@@ -2263,8 +2269,8 @@ async fn serve_subscriber(
     let subscriber_id = parsed.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
     let refusal = if !crate::subscriber::is_subscriber_id(parsed.learner_id) {
         Some("subscriber refused: the SUBSCRIBE id lacks the subscriber bit".to_string())
-    } else if subscriber_id >= hub.max {
-        Some(format!("subscriber refused: subscriber id {subscriber_id} is outside 0..{}", hub.max))
+    } else if hub.live_others(subscriber_id) >= hub.max as usize {
+        Some(format!("subscriber refused: {} subscribers are connected (--max-subscribers {})", hub.max, hub.max))
     } else if parsed.dtype != DTYPE_BF16 {
         Some(format!("subscriber refused: SUBSCRIBE dtype {} (subscribers receive bf16, dtype 2)", parsed.dtype))
     } else if matches!(parsed.syncer_profile_hash, Some(offered) if offered != semantic_profile_hash) {

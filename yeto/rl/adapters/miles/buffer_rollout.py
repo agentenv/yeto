@@ -198,6 +198,13 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
     from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index
 
     env = os.environ if environ is None else environ
+    if sampler:
+        # S27 G-EA: a spot sampler writes its groups to the head's relay (env unset: no change)
+        from yeto.rl.spot_rollout.relay_buffer import relay_sampler_buffer
+
+        relay = relay_sampler_buffer(env)
+        if relay is not None:
+            return relay
     root = env.get(BUFFER_ROOT_ENV)
     if not root:
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")

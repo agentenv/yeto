@@ -699,6 +699,14 @@ _RESUME = (
                 help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
                 "reads the spot samplers' groups from it (a local buffer filled by the relay "
                 "pump) and makes no policy releases. Off by default"),
+    shared_flag("--rl-spot-syncer", default=None, metavar="HOST:PORT",
+                help="--rl-sample-role sampler: follow the weights as a receive-only subscriber of "
+                "this actor syncer (no policy releases from the store) and write the groups to "
+                "its sample relay (channel --rl-spot-channel); for a sampler on another cloud. "
+                "Default off"),
+    shared_flag("--rl-spot-channel", type=int, default=0, metavar="N",
+                help="--rl-spot-syncer: the relay channel (the training island's learner id) "
+                "this sampler feeds; default 0"),
     shared_flag("--rl-sample-relay-prefetch", type=int, default=None, metavar="GROUPS",
                 help="--rl-sample-relay trainer: groups the relay pump keeps unread in the local "
                 "buffer (default 2 rounds); the samplers' backlog is what is left in the relay"),

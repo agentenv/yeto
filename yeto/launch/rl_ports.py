@@ -714,6 +714,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-sample-relay"
         if getattr(args, "rl_sample_relay_prefetch", None) is not None:
             flags += f" --rl-sample-relay-prefetch {int(args.rl_sample_relay_prefetch)}"
+    if getattr(args, "rl_spot_syncer", None):  # a sampler launch of its own (any cloud)
+        flags += f" --rl-spot-syncer {shlex.quote(args.rl_spot_syncer)}"
+        if int(getattr(args, "rl_spot_channel", 0) or 0):
+            flags += f" --rl-spot-channel {int(args.rl_spot_channel)}"
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_pool(args):  # a fixed roster adds nothing

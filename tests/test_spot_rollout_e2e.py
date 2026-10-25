@@ -60,7 +60,7 @@ def _spec(tmp_path: Path, port: int) -> Path:
         "prompts": {"path": str(prompts), "input_key": "q", "label_key": "a", "groups_per_round": 2},
         "reward": "tests.test_spot_rollout_e2e:half_reward",
         "event_tape": str(tmp_path / "tape" / "events.jsonl"),
-        "syncer": f"127.0.0.1:{port}", "subscriber_id": 0, "channel": 0,
+        "syncer": f"127.0.0.1:{port}", "channel": 0, "telemetry": False,
         "base_model": str(base), "work_dir": str(tmp_path / "work"),
         "converter": "yeto.rl.spot_rollout.materialize:identity_converter",
         "num_streams": 1, "poll_s": 0.05, "layout_timeout_s": 60, "syncer_lost_s": 60,
@@ -180,12 +180,14 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
     tapes = [[json.loads(line) for line in tape.read_text().splitlines()]
              for tape in (tmp_path / "tape").glob("events.*.jsonl")]
     assert len(tapes) == 2
-    stopped = [t for t in tapes if any(e["event"] == "rl_spot_sampler_stop" for e in t)]
-    assert len(stopped) == 1  # the killed incarnation wrote no stop record
-    [stop] = [e for e in stopped[0] if e["event"] == "rl_spot_sampler_stop"]
-    assert stop["reason"] == "run_finished"
+    left = [t for t in tapes if any(e["event"] == "rl_sampler_leave" for e in t)]
+    assert len(left) == 1  # the killed incarnation left no record; the second one finished
+    [leave] = [e for e in left[0] if e["event"] == "rl_sampler_leave"]
+    assert leave["reason"] == "FINISHED"
     for events in tapes:
-        loads = [e for e in events if e["event"] == "rl_spot_weights_loaded" and e["loaded"]]
+        names = [e["event"] for e in events]
+        assert "rl_spot_sampler_channels" in names and "rl_sampler_join" in names
+        loads = [e for e in events if e["event"] == "rl_sampler_policy_loaded"]
         assert loads and loads[0]["policy_version"] >= 1
         rounds = [e for e in events if e["event"] == "rl_sampler_engine_round"]
         assert rounds and all(r["groups"] >= 1 for r in rounds)

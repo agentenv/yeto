@@ -168,9 +168,10 @@ class Learner:
 
 
 def subscriber(port: int, sub_id: int = 0, *, numel: int = NUMEL, fragments: int = P, lay=None):
+    from yeto.protocol import SUBSCRIBER_ID_BIT
     from yeto.rl.spot_rollout.subscriber import SubscriberClient
 
-    return SubscriberClient(("127.0.0.1", port), sub_id, lay or layout(numel, fragments),
+    return SubscriberClient(("127.0.0.1", port), SUBSCRIBER_ID_BIT | sub_id, lay or layout(numel, fragments),
                             num_streams=2, connect_timeout=20)
 
 
@@ -322,12 +323,24 @@ def test_subscribe_refusals_leave_the_session_running(syncer_binary, tmp_path):
     assert "without --max-subscribers" in refused(subscriber(port))
     finish(process, learner)
 
-    process, port, _log = start_syncer(syncer_binary, tmp_path, total_steps=total,
-                                       extra=("--max-subscribers", "1"))
+    process, port, log = start_syncer(syncer_binary, tmp_path, total_steps=total,
+                                      extra=("--max-subscribers", "1"))
     gate = threading.Event()
     learner = Learner(port, hold=gate).start()
-    assert "outside 0..1" in refused(subscriber(port, sub_id=1))
     assert "layout mismatch" in refused(subscriber(port, numel=NUMEL + 1))
+    first = subscriber(port, sub_id=7)
+    first.start()
+    try:
+        wait_log(log, "subscriber connected")
+        # One slot: another sampler is refused; the same id reconnecting replaces itself.
+        assert "subscribers are connected" in refused(subscriber(port, sub_id=8))
+        again = subscriber(port, sub_id=7)
+        again.start()
+        wait_log(log, "subscriber connected", count=2)
+        assert again._err is None
+        again.close()
+    finally:
+        first.close()
     gate.set()
     finish(process, learner)
 
