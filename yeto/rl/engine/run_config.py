@@ -1301,7 +1301,10 @@ def _resolve_eval(
     eval_interval = getattr(args, "eval_interval", None)
     if eval_interval is None:
         return None
-    if not yeto_policy_sync:
+    if not yeto_policy_sync and not getattr(args, "rl_single_island_no_sync", False):
+        # A single island without outer sync owns its policy versions (it publishes
+        # every round to its own engines), so the driver's training-time eval needs no
+        # syncer (S27 G-DA: held-out agentic eval at round 0 and at the last round).
         raise ValueError("Yeto evaluation requires the external policy boundary")
     if eval_interval <= 0:
         raise ValueError("evaluation interval must be positive")
