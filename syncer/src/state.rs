@@ -162,6 +162,17 @@ pub struct GlobalState {
     /// Unowned fragments are never allocated, initialized or checkpointed.
     shard: ShardPlan,
     schedule: ShardSchedule,
+    /// Small records written next to every checkpoint at the same cut
+    /// (the task dispenser, S27 P2). Empty: none.
+    pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
+}
+
+/// A small record captured at every checkpoint cut and written next to the
+/// checkpoint as `<checkpoint><suffix>`, before the checkpoint itself (a
+/// crash between the two leaves the newer record with the older checkpoint).
+pub trait CheckpointSidecar: Send + Sync {
+    fn suffix(&self) -> &'static str;
+    fn snapshot(&self) -> Vec<u8>;
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -357,6 +368,7 @@ impl GlobalState {
             versions,
             global_step: 0,
             ledger: Default::default(),
+            checkpoint_sidecars: Vec::new(),
             outer_lr,
             outer_momentum,
             wire_dtype,
@@ -946,6 +958,8 @@ pub struct CheckpointSnapshot {
     trailer: CheckpointTrailer,
     /// Delayed Nesterov period and per-fragment state, shared like params.
     delayed_nesterov: Option<(u32, Vec<merge::DelayedNesterovState>)>,
+    /// (suffix, bytes) of every checkpoint sidecar at this cut.
+    sidecars: Vec<(&'static str, Vec<u8>)>,
 }
 
 impl CheckpointSnapshot {
@@ -1002,6 +1016,16 @@ impl CheckpointSnapshot {
     /// file, fsync, rename over `path`, fsync the directory.  A failure at
     /// any point leaves the previous checkpoint intact.
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        for (suffix, bytes) in &self.sidecars {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            let sidecar = std::path::PathBuf::from(name);
+            let mut partial = sidecar.as_os_str().to_owned();
+            partial.push(".tmp");
+            let partial = std::path::PathBuf::from(partial);
+            std::fs::write(&partial, bytes).with_context(|| format!("write {}", partial.display()))?;
+            std::fs::rename(&partial, &sidecar).with_context(|| format!("write {}", sidecar.display()))?;
+        }
         let tmp = path.with_extension("tmp");
         {
             let file = std::fs::File::create(&tmp)
@@ -1154,6 +1178,7 @@ impl GlobalState {
             delayed_nesterov: self
                 .delayed_nesterov_period
                 .map(|period| (period, self.delayed_nesterov.clone())),
+            sidecars: self.checkpoint_sidecars.iter().map(|s| (s.suffix(), s.snapshot())).collect(),
         })
     }
 
