@@ -251,6 +251,21 @@ pulls, a recovery sends RECOVERY_DONE. The learner then joins rounds again;
 its broadcasts stay on the forwarder until nothing is pending and are sent
 inline after that, so one learner never has two senders.
 
+Slow downlinks (S27 G-FD). The scheduler sends a merged fragment inline to a
+learner only if the learner's send queues take the whole frame now (every
+chunk's slot is reserved first); it never waits on a learner's link.
+Otherwise the learner is handed to the same kind of forwarder (no tail: it
+keeps getting PULLs and joining rounds), which sends this and the later
+versions at its link's pace, the newest pending version of a fragment
+replacing an older one. A learner answers a PULL only once it holds the
+round's base (`version == global_step - fragments`), so it skips the rounds
+it cannot reach and catches up with the newest versions. On a bf16-downlink
+session (`--bcast-delta-full-every`) the forwarder sends every version as a
+FULL carrying the shared anchor (digest as in a resend), because the learner
+may have skipped deltas; once inline again, the next delta applies on that
+anchor. `--inline-broadcast` restores the old behavior (each broadcast waits
+for every learner's queue; one slow link stalls every merge and PULL).
+
 With any membership option the fragment-round server starts its first round
 once the launch quorum (K, or `q_min` of a capacity quorum) is connected and
 initialized; without one it waits for all `--learners`.
