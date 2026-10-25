@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -288,18 +287,11 @@ def _check_resume_switches(args) -> None:
 
 
 def _check_island_cut_store(args) -> None:
-    """S27 R-2: island round cuts belong to a synced island (a syncer, no elastic store,
-    no resume store); its cuts are written only, so the resume switches do not apply."""
-    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
-        raise ValueError("--rl-island-cut-store is a synced island's (no --rl-single-island-no-sync, "
-                         "no --rl-elastic)")
-    if getattr(args, "rl_resume_store", None):
-        raise ValueError("--rl-island-cut-store and --rl-resume-store exclude each other")
-    for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
-                       ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
-        if getattr(args, name, None):
-            raise ValueError(f"{flag}: a synced island does not resume from its round cuts "
-                             "(the syncer is authoritative)")
+    """S27 R-2: island round cuts belong to a synced island (engine-neutral check,
+    shared with the verl island since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import check_island_cut_store
+
+    check_island_cut_store(args)
 
 
 def _check_hf_exports(args) -> None:
@@ -357,12 +349,10 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
 
 
 def _cut_auto(args) -> dict[str, float]:
-    """The timed cut interval flags (empty: every N rounds)."""
-    mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)
-    if mtbf is None:
-        return {}
-    cap = getattr(args, "rl_cut_max_interval_s", None)
-    return {"auto_mtbf_s": float(mtbf), **({} if cap is None else {"max_interval_s": float(cap)})}
+    """The timed cut interval flags (empty: every N rounds; engine-neutral since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import cut_auto_options
+
+    return cut_auto_options(args)
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
@@ -440,10 +430,12 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
     island_store = getattr(args, "rl_island_cut_store", None)
     if getattr(args, "rl_resume_store", None) or island_store:
+        from yeto.rl.engine.cut_interval import island_cut_store_for
+
         every = getattr(args, "rl_cut_every", None)
         miles_args.yeto_rl_resume = {
             "store": (str(args.rl_resume_store) if not island_store
-                      else f"{str(island_store).rstrip('/')}/island{int(args.learner_id)}"),
+                      else island_cut_store_for(island_store, args.learner_id)),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
             # None: the default timed interval (cut_interval module doc)
             "every": None if auto or every is None else int(every),
@@ -1044,24 +1036,11 @@ def _island_syncer_epoch(args) -> int | None:
 
 def peer_recovery_options(args, environ=None):
     """S27 E-3: peer recovery of a full-parameter island, or None without
-    ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
-    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`)."""
-    from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
+    ``--rl-peer-recovery-store`` (engine-neutral since S27 G-ED, shared with
+    the verl island: :func:`yeto.rl.engine.stream_recovery.peer_recovery_options`)."""
+    from yeto.rl.engine.stream_recovery import peer_recovery_options as options
 
-    store = getattr(args, "rl_peer_recovery_store", None)
-    env = os.environ if environ is None else environ
-    recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
-    if store is None:
-        if recover or getattr(args, "rl_peer_recovery_staging", None):
-            raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
-        return None
-    ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
-    return PeerRecoveryOptions(
-        store=str(store),
-        recover=recover,
-        ttl_s=3600.0 if ttl is None else float(ttl),
-        staging=getattr(args, "rl_peer_recovery_staging", None),
-    )
+    return options(args, environ)
 
 
 def _island_pool_membership(args) -> dict:
@@ -1519,32 +1498,11 @@ def _verify_eval_dataset_identity(args) -> Path | None:
             raise ValueError("--eval-only requires evaluation configuration")
         return None
     eval_only = getattr(args, "eval_only", False)
-    from yeto.rl.engine.run_config import ports_training_eval
+    from yeto.rl.engine.run_config import ports_training_eval, verify_eval_dataset_file
 
-    train_eval = ports_training_eval(args)
-    if not eval_only and not train_eval:
+    if not eval_only and not ports_training_eval(args):
         raise ValueError("evaluation configuration requires --eval-only or the ports engine")
-    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise ValueError("evaluation dataset requires an immutable SHA256")
-    source_value = args.data if eval_only else getattr(args, "eval_data", None)
-    if not isinstance(source_value, str) or not source_value:
-        raise ValueError("training-time evaluation requires --eval-data")
-    source = Path(source_value).expanduser()
-    if source.is_symlink() or not source.is_file():
-        raise ValueError("evaluation requires one regular local dataset file")
-    if train_eval and (
-        source.resolve() == Path(args.data).expanduser().resolve()
-    ):
-        raise ValueError("training-time evaluation must use a distinct heldout dataset")
-    from yeto.provenance import file_sha256
-
-    actual = file_sha256(source)
-    if actual != expected:
-        raise ValueError(
-            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
-        )
-    return source
+    return verify_eval_dataset_file(args, eval_only=eval_only)
 
 
 def miles_lr_schedule_sha256(miles_args):  # noqa: D103 - see lr_schedule.miles_lr_schedule_sha256

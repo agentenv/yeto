@@ -1,0 +1,133 @@
+"""Miles training and observation options on a verl full-parameter island (S27 G-EC).
+
+The launcher sends these Miles island options to every island.  The verl
+FSDP2 full-parameter island maps the ones verl can express; each mapping
+applies only when its option is given, so the overrides and plans of every
+other run stay unchanged.  The options without a verl mapping stay refused
+before any cloud work (``launch_flags.IGNORED_ON_VERL_FULL_PARAMETER`` and
+``launch_flags.NOT_MAPPED_REASONS``).
+
+Training options (:func:`apply_training_options`, verl hydra overrides):
+
+* ``--rl-lr-schedule constant``: ``actor.optim.lr_scheduler_type=constant``
+  (verl's default; the explicit key is asserted against the resolved config).
+  ``linear`` is refused: verl's FSDP2 optimizer offers ``constant`` and
+  ``cosine`` only (``verl/workers/config/optimizer.py``), so Miles' linear
+  decay has no exact counterpart;
+* ``--rl-max-tokens-per-gpu N``: the two dynamic-batching token bounds the
+  island already sets (16384 otherwise): ``actor.ppo_max_token_len_per_gpu``
+  and ``rollout.log_prob_max_token_len_per_gpu``.  ``N`` must hold one whole
+  sample (``max_prompt_len + max_response_len``), the rule of Miles'
+  ``--max-tokens-per-gpu >= --seq-len``;
+* ``--rl-activation-recompute``: Miles' activation recompute is verl's
+  gradient checkpointing, which the island always turns on
+  (``config.build_overrides``); the option asserts it.
+
+Observation options (:func:`observation_plan`, plan keys the driver reads in
+:mod:`.driver_extras`), the engine driver's own features, as on a Miles
+island (``adapters/miles/island_entry.py``):
+
+* ``--rl-observe-timeline``: ``IslandDriver.observe`` (timeline spans, load
+  samples), with the heartbeat and resource sampler at their defaults;
+* ``--rl-resource-sample-interval S``: the driver's NVML resource sampler
+  period (0: off).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+LR_SCHEDULER_KEY = "actor_rollout_ref.actor.optim.lr_scheduler_type"
+ACTOR_TOKENS_KEY = "actor_rollout_ref.actor.ppo_max_token_len_per_gpu"
+LOG_PROB_TOKENS_KEY = "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu"
+CHECKPOINTING_KEY = "actor_rollout_ref.model.enable_gradient_checkpointing"
+VERL_LR_SCHEDULES = ("constant",)
+
+
+def add_island_flags(parser) -> None:
+    """The options above, in Miles island spellings.  An island parser that
+    already defines one (the verl Megatron island, S27 G-DC) keeps its own."""
+
+    for flag, kwargs in (
+        ("--rl-lr-schedule", {"default": None}),
+        ("--rl-max-tokens-per-gpu", {"type": int, "default": None}),
+        ("--rl-activation-recompute", {"action": "store_true"}),
+        ("--rl-observe-timeline", {"action": "store_true"}),
+        ("--rl-resource-sample-interval", {"type": float, "default": None}),
+    ):
+        if flag not in parser._option_string_actions:
+            parser.add_argument(flag, **kwargs)
+
+
+def _replace(overrides: Sequence[str], key: str, value: Any) -> list[str]:
+    """``overrides`` with ``key`` set to ``value`` (replaced in place, else appended)."""
+
+    item = f"{key}={value}"
+    out, found = [], False
+    for override in overrides:
+        if override.startswith(key + "="):
+            out.append(item)
+            found = True
+        else:
+            out.append(override)
+    return out if found else [*out, item]
+
+
+def apply_training_options(args: Any, overrides: Sequence[str], asserted_keys: Sequence[str], *,
+                           max_prompt_len: int, max_response_len: int) -> tuple[list[str], tuple[str, ...]]:
+    """``(overrides, asserted keys)`` with the training options of ``args``
+    mapped; unchanged when none is given.  Raises ValueError for a value verl
+    cannot run."""
+
+    out, asserted = list(overrides), list(asserted_keys)
+    schedule = getattr(args, "rl_lr_schedule", None)
+    if schedule not in (None, "auto"):
+        if schedule not in VERL_LR_SCHEDULES:
+            raise ValueError(f"verl 全参数岛只接 --rl-lr-schedule constant（得到 {schedule}）："
+                             "verl FSDP2 的学习率调度只有 constant 与 cosine，没有 Miles 的线性衰减")
+        out = _replace(out, LR_SCHEDULER_KEY, schedule)
+        asserted.append(LR_SCHEDULER_KEY)
+    tokens = getattr(args, "rl_max_tokens_per_gpu", None)
+    if tokens is not None:
+        need = int(max_prompt_len) + int(max_response_len)
+        if int(tokens) < need:
+            raise ValueError(f"--rl-max-tokens-per-gpu {tokens} 放不下一条样本"
+                             f"（max_prompt_len + max_response_len = {need}）")
+        for key in (ACTOR_TOKENS_KEY, LOG_PROB_TOKENS_KEY):
+            out = _replace(out, key, int(tokens))
+            asserted.append(key)
+    if getattr(args, "rl_activation_recompute", False):
+        out = _replace(out, CHECKPOINTING_KEY, True)
+        asserted.append(CHECKPOINTING_KEY)
+    return out, tuple(dict.fromkeys(asserted))
+
+
+def observation_plan(args: Any) -> dict[str, Any]:
+    """The plan keys of the observation options (absent when off): ``observe_timeline``
+    and the driver's ``heartbeat_interval_s`` / ``resource_sample_interval_s``,
+    with Miles' defaults (30 s / 60 s) when the timeline is observed."""
+
+    from yeto.rl.engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
+
+    observe = bool(getattr(args, "rl_observe_timeline", False))
+    out: dict[str, Any] = {"observe_timeline": True} if observe else {}
+    sample = getattr(args, "rl_resource_sample_interval", None)
+    if sample is not None and float(sample) < 0:
+        raise ValueError("--rl-resource-sample-interval must be >= 0")
+    resource = (DEFAULT_RESOURCE_INTERVAL_S if observe else None) if sample is None else float(sample)
+    if observe:
+        out["heartbeat_interval_s"] = DEFAULT_HEARTBEAT_INTERVAL_S
+    if resource:
+        out["resource_sample_interval_s"] = resource
+    return out
+
+
+def wire_observation(driver: Any, plan: dict) -> None:
+    """The driver side of :func:`observation_plan` (nothing when the plan has none)."""
+
+    if plan.get("observe_timeline"):
+        driver.observe = True
+    for key in ("heartbeat_interval_s", "resource_sample_interval_s"):
+        if plan.get(key):
+            setattr(driver, key, float(plan[key]))

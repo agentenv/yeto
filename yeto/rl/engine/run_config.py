@@ -1350,16 +1350,26 @@ def _resolve_eval(
         selected = eval_prompt_path
     else:
         raise ValueError("training-time evaluation is restricted to the ports engine")
+    # Eval-only reuses its sole normalized prompt file; training binds a
+    # separately normalized, immutable heldout split.
+    return eval_config_from_args(args, prompt_path=selected)
+
+
+def eval_config_from_args(args, *, prompt_path) -> EvalConfig:
+    """The heldout eval an island's ``--eval-*`` flags name (the launcher sends
+    them from ``--rl-eval-*``, ``launch/rl_ports._ports_infra_flags``).
+
+    One reading of those flags for every backend: the Miles island
+    (:func:`_resolve_eval`) and the verl island (``adapters/verl/eval_port``)."""
+
     eval_name = getattr(args, "eval_dataset_name", None)
     eval_samples = getattr(args, "eval_samples_per_prompt", None)
     if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
         raise ValueError("evaluation requires a dataset name and positive sample count")
-    # Eval-only reuses its sole normalized prompt file; training binds a
-    # separately normalized, immutable heldout split.
     return EvalConfig(
-        interval=eval_interval,
+        interval=getattr(args, "eval_interval", None),
         dataset_name=str(eval_name),
-        prompt_path=str(selected),
+        prompt_path=str(prompt_path),
         samples_per_prompt=eval_samples,
         temperature=getattr(args, "eval_temperature", None),
         top_p=getattr(args, "eval_top_p", None),
@@ -1367,3 +1377,34 @@ def _resolve_eval(
         max_response_len=getattr(args, "eval_max_response_len", None),
         max_context_len=getattr(args, "eval_max_context_len", None),
     )
+
+
+def verify_eval_dataset_file(args, *, eval_only: bool = False) -> Path:
+    """The eval dataset file of an island (``--data`` of an eval-only run, else
+    the heldout ``--eval-data``), checked against the SHA256 the launcher
+    computed (``--eval-data-sha256``); a training-time heldout file must not be
+    the training data.  Shared by the Miles and verl islands."""
+
+    import re
+
+    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("evaluation dataset requires an immutable SHA256")
+    source_value = args.data if eval_only else getattr(args, "eval_data", None)
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("training-time evaluation requires --eval-data")
+    source = Path(source_value).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("evaluation requires one regular local dataset file")
+    if not eval_only and (
+        source.resolve() == Path(args.data).expanduser().resolve()
+    ):
+        raise ValueError("training-time evaluation must use a distinct heldout dataset")
+    from yeto.provenance import file_sha256
+
+    actual = file_sha256(source)
+    if actual != expected:
+        raise ValueError(
+            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
+        )
+    return source

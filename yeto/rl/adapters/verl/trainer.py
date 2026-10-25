@@ -59,29 +59,8 @@ def _fingerprint(cfg: dict) -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-class _TestExitPublisher:
-    """TEST ONLY (V2 leave/rejoin): end this island's process right after it published
-    ``version``.  Armed only on a first incarnation (its first publication is policy
-    version 0); a relaunched island starts from the syncer's committed version > 0 and
-    never exits again."""
-
-    def __init__(self, inner, version: int | None, tape):
-        self.inner, self.version, self.tape = inner, version, tape
-        self.armed: bool | None = None if version is not None else False
-
-    def publish(self, state):
-        result = self.inner.publish(state)
-        published = int(state.policy_version)
-        if self.armed is None:
-            self.armed = published == 0
-            self.tape.append({"event": "rl_test_exit_armed", "armed": self.armed,
-                              "first_published_version": published, "exit_after_version": self.version})
-        if self.armed and published == self.version:
-            self.tape.append({"event": "rl_test_island_exit", "policy_version": self.version,
-                              "time_unix": time.time()})
-            print(f"[yeto-verl] TEST exit after publishing v{self.version}", flush=True)
-            os._exit(17)
-        return result
+# TEST ONLY (V2 leave/rejoin; S27 G-EC moved it to the CPU-testable .driver_extras).
+from .driver_extras import TestExitPublisher as _TestExitPublisher  # noqa: E402
 
 
 def check_asserted(asserted: dict, cfg: dict) -> dict:
@@ -204,8 +183,10 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
     With an outer sync (``plan["full_parameter"]``): the engine-neutral
     ``FullParameterSync`` over the verl role stream.  Without one
     (``--rl-single-island-no-sync``): the local-only sync over a policy state
-    that exports whole cuts.  Round cuts and the LoRA publish self-test do not
-    apply to a full-parameter island and are refused.
+    that exports whole cuts.  Round cuts (``plan["resume"]``, S27 G-ED) are
+    wired by ``run_island`` as on a LoRA island: the FSDP2 rank files hold every
+    parameter shard and its Adam state.  The LoRA publish self-test does not
+    apply to a full-parameter island and is refused.
 
     S27 G-EK: with ``plan["separate"]`` the trainer has its own cards and the
     rollout runs on standalone vLLM servers; the policy state and the stream read
@@ -219,8 +200,6 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
                                         VerlFullParameterLocalState, build_full_parameter_sync)
     from .ports_impl import VerlFullParameterPublisher
 
-    if plan.get("resume"):
-        raise ValueError("round cuts of a full-parameter verl island are not wired (V9)")
     if plan.get("publish_selftest"):
         raise ValueError("the publish self-test checks a LoRA read-back; a full-parameter island has none")
     island.full_group = VerlFullParameterGroup(island)
@@ -250,7 +229,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
-    from . import round_cuts
+    from . import eval_port, round_cuts
     from .identity import backend_identity
     from .ports_impl import (VerlIsland, VerlPlacement, VerlPolicyState, VerlPublisher,
                              VerlRolloutPool, VerlTrainerGroup)
@@ -318,7 +297,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
             else AlgorithmSpec())
     # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
-    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver_options = {"placement": VerlPlacement(), "capabilities": _capabilities(_fingerprint(cfg))}
     if full:  # S27 G-EK: verl's separate mode (trainer and rollout cards apart)
         from .separate import driver_options as separate_driver_options
@@ -327,9 +306,11 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
-        publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
+        publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape,
+                                     rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         algorithm=spec, sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
-        **driver_options)
+        **driver_options,
+        **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
@@ -419,7 +400,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     if buffer_ports is not None and plan.get("resume"):
         raise ValueError("round cuts are not wired for a verl buffer trainer")
     # S26 E9.2: round cuts as on the sync path; restored before the driver is built
-    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
