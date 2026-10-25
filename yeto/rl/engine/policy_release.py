@@ -367,6 +367,7 @@ class DeltaChain:
             raise ValueError("a delta chain needs full_every >= 2")
         self.full_every = int(full_every)
         self._base: DeltaBase | None = None
+        self._adopted: Path | None = None  # an adopted base: not this chain's to delete
         self._since_full = 0  # deltas since the last full release
 
     def base(self) -> DeltaBase | None:
@@ -375,6 +376,21 @@ class DeltaChain:
             return None
         return self._base
 
+    def adopt(self, release: PolicyRelease, directory: str | os.PathLike[str]) -> None:
+        """Start the chain from a release that is already in the store and whose
+        files are readable at ``directory`` (S27 G-EQ3): the trainer's first
+        release of the process is then a delta against it instead of a full
+        upload. The usual case is the base policy (version 0) that both sides
+        hold -- the sampler's own copy of the base checkpoint -- so the first
+        cross-cloud update sends only the words the first optimizer step moved.
+        ``advance`` deletes a base this chain staged itself, never an adopted
+        directory."""
+        if self._base is not None:
+            raise ValueError("the delta chain already has a base")
+        self._base = DeltaBase(release, Path(directory))
+        self._adopted = Path(directory)
+        self._since_full = 0
+
     def advance(self, release: PolicyRelease | None, staged: Path) -> bool:
         """Record the upload of ``staged`` (``release``: what the store now holds;
         None when nothing was released). True: ``staged`` is kept as the next base."""
@@ -382,7 +398,8 @@ class DeltaChain:
             return False
         previous, self._base = self._base, DeltaBase(release, Path(staged))
         self._since_full = 0 if release.delta is None else self._since_full + 1
-        if previous is not None and previous.directory != Path(staged):
+        if (previous is not None and previous.directory != Path(staged)
+                and previous.directory != self._adopted):
             shutil.rmtree(previous.directory, ignore_errors=True)
         return True
 
