@@ -21,6 +21,9 @@ role, the trainer's parallel sizes); it is not part of the fingerprint.
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 import zlib
 from collections.abc import Mapping
 from typing import Any
@@ -95,3 +98,41 @@ def publish(board: Any, layout: FragmentLayout, meta: Mapping[str, Any] | None =
 def fetch(board: Any, *, timeout_s: float, poll_s: float = 5.0) -> tuple[FragmentLayout, dict[str, Any]]:
     """Wait for and decode the layout board (``RelayBoard.wait``)."""
     return decode(board.wait(timeout_s=timeout_s, poll_s=poll_s).data)
+
+
+PUBLISH_ENV = "YETO_SPOT_PUBLISH_LAYOUT"  # "1": training island 0 publishes its layout board
+
+
+def maybe_publish(addr: tuple[str, int], learner_id: int, layout: FragmentLayout,
+                  meta: Mapping[str, Any] | None = None, *, environ: Mapping[str, str] | None = None,
+                  attempts: int = 30, retry_s: float = 10.0) -> threading.Thread | None:
+    """Island 0 of a run with spot subscribers (:data:`PUBLISH_ENV`): set the
+    layout board on a daemon thread (retrying while the relay is not
+    reachable); never blocks or fails the training island. None: nothing to do."""
+    env = os.environ if environ is None else environ
+    if env.get(PUBLISH_ENV) != "1" or int(learner_id) != 0:
+        return None
+    data = encode(layout, meta)
+
+    def run() -> None:
+        from .relay import RelayBoard, RelayError, RelayRefused
+
+        for attempt in range(1, int(attempts) + 1):
+            board = RelayBoard(addr, LAYOUT_BOARD, int(learner_id))
+            try:
+                item = board.set(data)
+                print(f"[yeto-spot] layout board set (id {item}, {layout.num_fragments} fragments, "
+                      f"{len(data)} bytes)", flush=True)
+                return
+            except RelayRefused as error:
+                print(f"[yeto-spot] layout board refused: {error}", flush=True)
+                return
+            except (RelayError, OSError) as error:
+                print(f"[yeto-spot] layout board attempt {attempt} failed: {error}", flush=True)
+                time.sleep(float(retry_s))
+            finally:
+                board.close()
+
+    thread = threading.Thread(target=run, name="yeto-spot-layout", daemon=True)
+    thread.start()
+    return thread

@@ -792,6 +792,22 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         raise SampleBufferRolloutError(f"rollout pool {type(driver.rollout).__name__} cannot "
                                        "run code in the rollout executor")
     lane = getattr(miles_args, "yeto_rl_sample_lane", None)
+    env = os.environ if environ is None else environ
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV
+
+    if env.get(RELAY_ADDR_ENV) and config.role == TRAINER:
+        # S27 G-EA: the samplers subscribe to the syncer and send groups through the
+        # relay; the trainer releases nothing and gates on the merged version (the
+        # version the subscribers stamp on their samples), also on its own lane.
+        from yeto.rl.engine.merged_release import merged_version as merged_policy_version
+
+        driver.publisher = GateVersionPublisher(
+            driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)),
+            lambda state: merged_policy_version(driver, state))
+        driver.emit("rl_policy_release_role", learner_id=None if lane is None else lane.index,
+                    num_learners=None if lane is None else lane.count, publisher=False,
+                    own_lane=None if lane is None else lane.is_own, relay=env.get(RELAY_ADDR_ENV))
+        return None
     synced: dict[str, Any] = {}
     if lane is not None:
         def version_of(state: Any) -> int:
@@ -821,7 +837,6 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
-    env = os.environ if environ is None else environ
     # module doc: a trainer island stages its full releases unless --rl-release-inline
     staged = config.role == TRAINER and not lora and not config.release_inline
     all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"

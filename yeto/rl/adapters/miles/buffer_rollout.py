@@ -92,7 +92,9 @@ INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
-               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV)
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
+               # S27 G-EA: the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
+               "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH")
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
