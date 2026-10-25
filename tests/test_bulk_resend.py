@@ -12,11 +12,19 @@ The slow receiver is a recovering island whose data socket is not read while
 a gate is closed, so the syncer's writer queue and the socket buffers fill.
 The model (256 fragments of 256 KiB) is larger than the 128-frame writer
 queue plus the socket buffers.
+
+S27 G-EY: in run s27-elastic-c the replay then never ended. With one island
+merging, versions were published about as fast as the link to the recovering
+island took them, so the forwarder's pending map almost never emptied, and
+"empty" was the tail condition. The last test reads the recovering island's
+data socket at a fixed rate below the publish rate: the tail must run once the
+versions owed at the start are handed over.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import socket
 import subprocess
 import threading
@@ -76,27 +84,74 @@ class GatedClient(SyncerClient):
         super()._recv_loop(gen, sock)
 
 
+class Link:
+    """Read rate of a learner's data sockets in bytes/s (None: unlimited)."""
+
+    READ_CHUNK = 64 * 1024
+
+    def __init__(self, rate: float | None) -> None:
+        self.rate = rate
+
+
+class _ThrottledSocket:
+    """A data socket read at most at ``link.rate`` bytes/s."""
+
+    def __init__(self, sock: socket.socket, link: Link) -> None:
+        self._sock = sock
+        self._link = link
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        rate = self._link.rate
+        if rate is None:
+            return self._sock.recv_into(buffer, nbytes, flags)
+        got = self._sock.recv_into(buffer, min(nbytes or len(buffer), Link.READ_CHUNK), flags)
+        time.sleep(got / rate)
+        return got
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+class ThrottledClient(SyncerClient):
+    """Reads its data streams at ``link.rate`` (control frames unthrottled):
+    a learner on a slow link that keeps reading."""
+
+    def __init__(self, *args, link: Link, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.link = link
+
+    def _recv_loop(self, gen, sock):
+        if self._socks and sock is not self._socks[0]:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 16)
+            sock = _ThrottledSocket(sock, self.link)
+        super()._recv_loop(gen, sock)
+
+
 class LightIsland(threading.Thread):
     """Answers every PULL with a zero delta (weights stay put; versions are
     what the test follows), heartbeats its lease, finalizes. A
     :class:`~yeto.rl.peer_recovery.RecoverableIsland` for the degraded path."""
 
     def __init__(self, learner_id: int, port: int, store: Path, *, recover_on_start: bool = False,
-                 gate: threading.Event | None = None) -> None:
+                 gate: threading.Event | None = None, link: Link | None = None) -> None:
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.store = DirectorySnapshotStore(store)
         self.layout = make_layout()
         self.recover_on_start = recover_on_start
+        self.recover_timeout = 120.0
         self.versions = [0] * FRAGMENTS
         self.anchored = [False] * FRAGMENTS
         self.steps = 0
         kwargs = dict(syncer_epoch=0, recover=recover_on_start, num_streams=1)
-        if gate is None:
-            self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, **kwargs)
-        else:
+        if gate is not None:
             self.client = GatedClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, gate=gate,
                                       **kwargs)
+        elif link is not None:
+            self.client = ThrottledClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, link=link,
+                                          **kwargs)
+        else:
+            self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, **kwargs)
         self.heartbeat = LeaseHeartbeat(self.client, LEASE_S, progress=lambda: self.steps)
         self.zero = np.zeros(NUMEL, np.float32).tobytes()
         self.killed = threading.Event()
@@ -144,7 +199,7 @@ class LightIsland(threading.Thread):
         self.first_generation = self.client.connection_generation
         self.heartbeat.start()
         if self.recover_on_start:
-            self.outcome = recover(self.client, self, self.store, timeout=120)
+            self.outcome = recover(self.client, self, self.store, timeout=self.recover_timeout)
         elif self.learner_id == 0:
             for p in range(FRAGMENTS):
                 self.client.send_init(p, self.zero)
@@ -362,3 +417,123 @@ def test_slow_receiver_of_a_rejoin_catch_up_does_not_stall_rounds_or_leases(tmp_
     after = [r for r in records if r.get("kind") == "outer_step" and r["time_unix"] > joined[0]["time_unix"]]
     assert any(w[0] == 1 for r in after for w in r.get("weights", [])), "no merge with the caught-up island"
     assert a.final_manifest is not None and a.final_manifest == b.final_manifest
+
+
+# S27 G-EY: island 0 alone merges about 40 fragments of 256 KiB per second
+# here (about 10 MiB/s); the recovering island reads 8 MiB/s.
+SLOW_LINK = 8 * 1024 * 1024
+# The old tail condition ("nothing pending") was not met in 63 s at this rate
+# (the 3000 steps ended first); the new one is met after about 4 s, and the
+# island holds the versions RECOVERY_DONE names after about 16 s (behind a
+# 32 MiB writer queue).
+RECOVERY_WINDOW_S = 90.0
+
+
+def _log_seconds(line: str) -> float:
+    """Unix time of a syncer log line (RFC 3339 UTC prefix)."""
+    from datetime import datetime
+
+    return datetime.fromisoformat(line.split()[0].replace("Z", "+00:00")).timestamp()
+
+
+@pytest.mark.timeout(300)
+def test_replay_tail_runs_when_the_link_is_slower_than_the_merges(tmp_path):
+    """A recovering island on a link slower than island 0's publications gets
+    RECOVERY_DONE while the link is still slow: the tail waits only for the
+    versions owed when the replay started, not for an empty pending map.
+    Rounds keep merging every second meanwhile, and the island's pushes are
+    merged afterwards."""
+    binary = build_syncer()
+    port = free_port()
+    tape = tmp_path / "tape.jsonl"
+    log = (tmp_path / "syncer.log").open("w")
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "2", "--quorum", "1", "--grace-ms", "50",
+         "--total-steps", "3000", "--outer-lr", "0.7", "--outer-momentum", "0.0",
+         "--min-round-interval-ms", "20", "--quorum-timeout-s", "30", "--event-tape", str(tape),
+         "--island-lease-s", str(LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2",
+         "--recovery-max-donor-tries", "1", "--recovery-donor-timeout-s", "1"],
+        stdout=log, stderr=subprocess.STDOUT, text=True)
+    link = Link(SLOW_LINK)
+    islands: list[LightIsland] = []
+    try:
+        store = tmp_path / "store"
+        a = LightIsland(0, port, store)
+        b = LightIsland(1, port, store)
+        islands += [a, b]
+        a.start()
+        b.start()
+        wait_until(lambda: sum(a.versions) >= 40, 60, "no early rounds")
+        phase_from, a_generation = time.time(), a.client.connection_generation
+        b.killed.set()  # trainer state lost
+        b.join(timeout=10)
+        # Island 0 never answers the snapshot request: the donor times out,
+        # the source is degraded and the replay is every fragment.
+        back = LightIsland(1, port, store, recover_on_start=True, link=link)
+        back.recover_timeout = RECOVERY_WINDOW_S + 60
+        islands.append(back)
+        back.start()
+        deadline = time.monotonic() + RECOVERY_WINDOW_S
+        while back.outcome is None and back.exc is None:
+            if time.monotonic() > deadline:
+                pytest.fail(f"no RECOVERY_DONE within {RECOVERY_WINDOW_S:.0f}s on the slow link")
+            time.sleep(0.05)
+        if back.exc:
+            raise back.exc
+        done_at = time.time()
+        # Not the degraded DONE an island gets when the run ends first (the
+        # old tail condition never let the replay end before that).
+        assert back.outcome.replayed == FRAGMENTS, f"RECOVERY_DONE without the replay: {back.outcome}"
+        time.sleep(2.0)  # the island trains on, still on the slow link
+        link.rate = None
+        for island in (a, back):
+            island.join(timeout=180)
+            assert not island.is_alive(), f"island {island.learner_id} did not finish"
+            if island.exc:
+                raise island.exc
+        assert proc.wait(timeout=60) == 0, "syncer exited nonzero"
+    except BaseException:
+        log.flush()
+        print((tmp_path / "syncer.log").read_text()[-6000:])
+        raise
+    finally:
+        for island in islands:
+            island.killed.set()
+        if proc.poll() is None:
+            proc.kill()
+        log.close()
+    records = tape_records(tape)
+    syncer_log = (tmp_path / "syncer.log").read_text().splitlines()
+    # (The 64 MiB start may also lapse a lease once: those re-JOIN catch-ups
+    # are other resends.)
+    started = [line for line in syncer_log if "background resend started" in line and "Recovery" in line]
+    assert len(started) == 1, started
+    replay = re.search(r"learner_id=1 generation=\d+ ", started[0]).group(0)
+    caught_up = [line for line in syncer_log if "background resend caught up" in line and replay in line]
+    assert len(caught_up) == 1, caught_up
+    resend_from, tail_at = _log_seconds(started[0]), _log_seconds(caught_up[0])
+    backlog = int(re.search(r"pending=(\d+)", caught_up[0]).group(1))
+    merges = [r["time_unix"] for r in records if r.get("kind") == "outer_step" and resend_from <= r["time_unix"] <= tail_at]
+    rate = len(merges) / max(tail_at - resend_from, 1e-9)
+    print(f"replay of {FRAGMENTS} x {NUMEL * 4 >> 10} KiB: tail after {tail_at - resend_from:.1f}s with "
+          f"{backlog} newer version(s) still pending; island 0 merged {rate:.1f}/s "
+          f"({rate * NUMEL * 4 / SLOW_LINK:.2f}x the link); RECOVERY_DONE applied after "
+          f"{done_at - resend_from:.1f}s")
+    # The tail did not wait for an empty pending map.
+    assert backlog > 0
+    # Rounds merged in every whole second of the replay, and island 0 kept its lease.
+    seconds = range(int(resend_from) + 1, int(tail_at))
+    assert all(any(int(t) == second for t in merges) for second in seconds), "a second without a merge"
+    assert not [r for r in records if r.get("kind") == "pool_leave" and r.get("island_id") == 0
+                and r["time_unix"] > phase_from]
+    assert a.client.connection_generation == a_generation and a.heartbeat.errors == []
+    # The recovering island kept its lease, got every fragment, rejoined the
+    # pool and its pushes were merged.
+    gen = back.client.connection_generation
+    assert not [r for r in records if r.get("kind") == "pool_leave" and r.get("generation") == gen]
+    assert back.outcome.path == "degraded" and back.outcome.replayed == FRAGMENTS, back.outcome
+    joined = [r for r in records if r.get("kind") == "pool_join" and r.get("recovered")]
+    assert [(r["island_id"], r["generation"]) for r in joined] == [(1, gen)]
+    after = [r for r in records if r.get("kind") == "outer_step" and r["time_unix"] > joined[0]["time_unix"]]
+    assert any(w[0] == 1 for r in after for w in r.get("weights", [])), "no merge with the recovered island"
+    assert a.final_manifest is not None and a.final_manifest == back.final_manifest
