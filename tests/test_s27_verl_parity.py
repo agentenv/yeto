@@ -139,6 +139,35 @@ def test_two_verl_islands_take_bf16_broadcast_deltas_from_the_real_syncer(syncer
         assert acks == [{"acknowledged": True}]
 
 
+@needs_cargo
+def test_bf16_broadcast_deltas_with_async_rounds_and_local_init(syncer_binary, tmp_path, monkeypatch):
+    """The async defaults (quorum 1, two rounds in flight, RDA, local INIT) with
+    deltas: no island uploads INIT, the first broadcast of each fragment sets the
+    decoder's anchor, both islands ACK the same downloaded final cut."""
+    from yeto import downlink
+
+    kinds: list[int] = []
+    begin = downlink.DownlinkAnchors.begin
+
+    def counted(self, fragment_id, version, header, numel):
+        kinds.append(downlink.HEADER.unpack(header)[0])
+        return begin(self, fragment_id, version, header, numel)
+
+    monkeypatch.setattr(downlink.DownlinkAnchors, "begin", counted)
+    rounds, fragments = 4, len(_layout(matrix_merge="rda").fragments.fragments)
+    results, log = _run_islands(syncer_binary, tmp_path, monkeypatch, rounds=rounds, fragments=fragments,
+                                async_rounds=True, plan_extra={"bcast_delta": True}, matrix_merge="rda",
+                                pipeline=2, extra=("--rl-sync-full-parameter-rounds", "async",
+                                                   "--rl-sync-final-cut", "download",
+                                                   "--rl-sync-bcast-delta-full-every", "2"))
+    assert downlink.KIND_DELTA in kinds and downlink.KIND_FULL in kinds, kinds
+    for learner_id in range(2):
+        acks = [f for e, f in results[learner_id]["events"] if e == "rl_full_parameter_final_ack"]
+        assert acks == [{"acknowledged": True}], (learner_id, log[-2000:])
+    for name in SHAPES:
+        assert torch.equal(results[0]["values"][name], results[1]["values"][name]), name
+
+
 # ----------------------------------------------------------------------------- data positions and HF exports
 def _parsed(extra: list[str], *, parameter_mode="full", sync_flag=()):
     argv = ["--model", "m", "--model-revision", "a" * 40, "--data", "d", "--learner-id", "1",
