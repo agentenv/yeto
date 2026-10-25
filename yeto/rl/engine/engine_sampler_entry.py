@@ -310,14 +310,17 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
 def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         resource_sampler: Callable[[Callable[..., None]], Any] | None = None,
         incarnation: str | None = None, stop: Callable[[], bool] | None = None,
-        on_event: Callable[..., None] | None = None) -> int:
+        on_event: Callable[..., None] | None = None,
+        stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None = None) -> int:
     """Build every part of the island from ``spec``, run it from the resume
     point, stop the engine; returns the rounds this incarnation ran.
     ``resource_sampler(emit)`` returns a started telemetry thread (default:
     ``telemetry.ResourceSampler`` of the island's device family; None from the
     factory = no telemetry). ``stop()``: the caller's own end condition (no new
     round starts; the island leaves FINISHED, not PREEMPTED). ``on_event(event,
-    **fields)`` sees every tape record after it is written."""
+    **fields)`` sees every tape record after it is written. ``stores(incarnation,
+    emit)``: the (release store, sample buffer) pair instead of :func:`build_stores`
+    (S27 G-EA: a spot sampler follows the syncer and writes to the relay)."""
     import os  # noqa: PLC0415
 
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
@@ -345,7 +348,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         if on_event is not None:
             on_event(event, **fields)
 
-    releases, buffer = build_stores(spec, environ)
+    releases, buffer = build_stores(spec, environ) if stores is None else stores(incarnation, emit)
     prompts, reward = build_prompts(spec), build_reward(spec)
     checks = PostLoadChecks(**dict(spec.get("checks") or {}))
     reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp

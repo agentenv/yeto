@@ -92,7 +92,9 @@ INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
-               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV)
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
+               # S27 G-EA: the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
+               "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH")
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -196,6 +198,13 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
     from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index
 
     env = os.environ if environ is None else environ
+    if sampler:
+        # S27 G-EA: a spot sampler writes its groups to the head's relay (env unset: no change)
+        from yeto.rl.spot_rollout.relay_buffer import relay_sampler_buffer
+
+        relay = relay_sampler_buffer(env)
+        if relay is not None:
+            return relay
     root = env.get(BUFFER_ROOT_ENV)
     if not root:
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")

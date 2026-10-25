@@ -100,6 +100,10 @@ pub fn leave_reason_name(reason: u8) -> String {
 /// (never part of a learner session): the island uploads N bytes, the syncer
 /// acknowledges with the u64 byte count, then streams M bytes back.
 pub const MSG_BW_PROBE: u8 = 26;
+/// S27 G-EA: first frame of a receive-only subscriber (`subscriber.rs`):
+/// a HELLO body sealed in the subscribe MAC domain. 60-66 are the sample
+/// relay (`sample_relay.rs`).
+pub const MSG_SUBSCRIBE: u8 = 67;
 
 /// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
 /// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with

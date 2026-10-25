@@ -742,6 +742,12 @@ class FullParameterRoleStream:
         adapter, initial = await self._initialize_adapter(group)
         if self.config.expert_token_weights:
             await self._install_routed_token_counter(group, adapter)
+        # S27 G-EA: with spot subscribers, island 0 publishes the layout they
+        # decode with (a no-op unless the launcher set the publish variable).
+        from yeto.rl.spot_rollout.layout_manifest import maybe_publish
+
+        maybe_publish(self.config.syncer_addr, self.config.learner_id, adapter.layout.fragments,
+                      {"role": self.config.role, "algorithm": self.config.algorithm})
         client = self._new_client(
             adapter.layout.fragments,
             dtype=self.config.session_dtype,

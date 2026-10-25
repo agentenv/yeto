@@ -129,6 +129,11 @@ class _BufferRound:
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
+        # S27 G-EA: with YETO_SAMPLE_RELAY_ADDR the spot samplers' groups arrive through
+        # the head's relay; the pump appends them to this (local) buffer. Unset: no pump.
+        from yeto.rl.spot_rollout.relay_buffer import maybe_start_relay_pump
+
+        self.relay_pump = maybe_start_relay_pump(buffer)
         self.reader = BatchReader(
             buffer, cursor_log=open_lane_log(buffer),
             max_policy_age=int(age),

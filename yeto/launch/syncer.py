@@ -685,6 +685,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_weighted_fold(args)}"
         f"{_syncer_dispense(args, syncer, shard_plan)}"
         f"{shard_flags}"
+        f"{_syncer_spot_rollout(args, syncer)}"
     )
 
 
@@ -695,6 +696,24 @@ def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | Non
     from .data_split_plan import dispense_syncer_flags
 
     return dispense_syncer_flags(args)
+
+
+def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
+    """S27 G-EA: receive-only subscribers and the sample relay on the actor
+    syncer; "" when off, so the command is unchanged."""
+    subscribers = int(getattr(args, "rl_spot_subscribers", 0) or 0)
+    relay = bool(getattr(args, "rl_sample_relay", False))
+    if not subscribers and not relay:
+        return ""
+    if subscribers < 0:
+        raise ValueError("--rl-spot-subscribers must be >= 0")
+    if syncer_shard_count(args) > 1:
+        raise ValueError("--rl-spot-subscribers / --rl-sample-relay need an unsharded syncer "
+                         "(--syncer-shards 1)")
+    if syncer.role != "actor":
+        return ""
+    return ((f" --max-subscribers {subscribers}" if subscribers else "")
+            + (" --sample-relay" if relay else ""))
 
 
 def syncer_shard_count(args) -> int:

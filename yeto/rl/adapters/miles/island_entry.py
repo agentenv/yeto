@@ -341,6 +341,12 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
 
     from .buffer_rollout import island_env
 
+    env = os.environ if environ is None else environ
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
+        # S27 G-EA: island 0 publishes its fragment layout for the spot subscribers
+        from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
+
+        env[PUBLISH_ENV] = "1"
     if sample_roles.sample_role(args) == sample_roles.BOTH:
         return
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
@@ -348,12 +354,47 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
     # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
     sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
-    (os.environ if environ is None else environ).update(island_env(
+    env.update(island_env(
         config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
         shard=node, shards=getattr(args, "rl_buffer_shards", None),
         lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None)))
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
+    if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
+        env.update(sample_relay_env(args))
+    if getattr(args, "rl_spot_syncer", None) and config.role == sample_roles.SAMPLER:
+        env.update(spot_sampler_env(args))
+
+
+def spot_sampler_env(args) -> dict[str, str]:
+    """S27 G-EA (--rl-spot-syncer, sampler island): weights from that syncer as a
+    receive-only subscriber, groups to its relay channel --rl-spot-channel."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
+
+    host, port = _syncer_address(args.rl_spot_syncer)
+    return {SPOT_SYNCER_ENV: f"{host}:{port}", RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(getattr(args, "rl_spot_channel", 0) or 0))}
+
+
+def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
+    """S27 G-EA (--rl-sample-relay, trainer island): the spot samplers' groups come
+    through the head's sample relay. The trainer reads them from a buffer on local
+    disk (the relay pump fills it: ``yeto.rl.spot_rollout.relay_buffer``) and makes
+    no policy releases (the samplers follow the syncer as subscribers)."""
+    import tempfile
+
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, RELAY_PREFETCH_ENV
+
+    from .buffer_rollout import BUFFER_ROOT_ENV
+
+    host, port = _syncer_address(args.syncer)
+    root = Path(tmp_root or tempfile.gettempdir()) / "yeto-relay-buffer" / f"island{int(args.learner_id)}"
+    root.mkdir(parents=True, exist_ok=True)
+    prefetch = getattr(args, "rl_sample_relay_prefetch", None)
+    if prefetch is None:
+        prefetch = 2 * int(args.groups_per_round)
+    return {BUFFER_ROOT_ENV: str(root), RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(args.learner_id)), RELAY_PREFETCH_ENV: str(int(prefetch))}
 
 
 def _cut_auto(args) -> dict[str, float]:

@@ -728,6 +728,18 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     from ..rl.engine.sample_roles import substore_uri
 
     flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0):  # S27 G-EA: 0 (default) adds nothing
+        flags += f" --rl-spot-subscribers {int(args.rl_spot_subscribers)}"
+    if getattr(args, "rl_sample_relay", False):
+        if getattr(args, "rl_single_island_no_sync", False):
+            raise ValueError("--rl-sample-relay needs the syncer (no --rl-single-island-no-sync)")
+        flags += " --rl-sample-relay"
+        if getattr(args, "rl_sample_relay_prefetch", None) is not None:
+            flags += f" --rl-sample-relay-prefetch {int(args.rl_sample_relay_prefetch)}"
+    if getattr(args, "rl_spot_syncer", None):  # a sampler launch of its own (any cloud)
+        flags += f" --rl-spot-syncer {shlex.quote(args.rl_spot_syncer)}"
+        if int(getattr(args, "rl_spot_channel", 0) or 0):
+            flags += f" --rl-spot-channel {int(args.rl_spot_channel)}"
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_pool(args):  # a fixed roster adds nothing
@@ -750,7 +762,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         # trainer whose samplers follow it reads its own sub-store (one lane)
         substore = getattr(args, "rl_sample_substore", None)
         sample_store = resume_store[0] if substore is None else substore_uri(resume_store[0], substore)
-        lanes = 1 if substore else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
+        # S27 G-EE: a relay trainer reads its own relay channel through a local buffer
+        # that only it fills, so it reads that whole buffer (one lane)
+        own = substore or getattr(args, "rl_sample_relay", False)
+        lanes = 1 if own else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
         flags += f" --rl-sample-store {shlex.quote(sample_store)} --rl-sample-lanes {lanes}"
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):

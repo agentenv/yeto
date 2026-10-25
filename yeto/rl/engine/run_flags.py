@@ -754,6 +754,27 @@ _RESUME = (
     shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
                 help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
                 "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
+    # S27 G-EA: spot rollout islands on any cloud (yeto.rl.spot_rollout)
+    shared_flag("--rl-spot-subscribers", type=int, default=0, metavar="N",
+                help="the actor syncer admits N receive-only subscribers (spot sampler islands "
+                "on any cloud that follow the merged weights as bf16 broadcasts; never in "
+                "quorum, roster or final cut) and island 0 publishes its fragment layout on the "
+                "head's relay board. 0 (default): off, commands unchanged"),
+    shared_flag("--rl-sample-relay", action="store_true", default=False,
+                help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
+                "reads the spot samplers' groups from it (a local buffer filled by the relay "
+                "pump) and makes no policy releases. Off by default"),
+    shared_flag("--rl-spot-syncer", default=None, metavar="HOST:PORT",
+                help="--rl-sample-role sampler: follow the weights as a receive-only subscriber of "
+                "this actor syncer (no policy releases from the store) and write the groups to "
+                "its sample relay (channel --rl-spot-channel); for a sampler on another cloud. "
+                "Default off"),
+    shared_flag("--rl-spot-channel", type=int, default=0, metavar="N",
+                help="--rl-spot-syncer: the relay channel (the training island's learner id) "
+                "this sampler feeds; default 0"),
+    shared_flag("--rl-sample-relay-prefetch", type=int, default=None, metavar="GROUPS",
+                help="--rl-sample-relay trainer: groups the relay pump keeps unread in the local "
+                "buffer (default 2 rounds); the samplers' backlog is what is left in the relay"),
 )
 
 _SCHEDULING = (
