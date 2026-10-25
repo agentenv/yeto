@@ -1,6 +1,12 @@
 """verl-only checks of the neutral run config (decoupling 4.2 role; rl-verl-backend).
 
-First step: one GPU per island, FSDP2, no Megatron reference checkpoint.
+Two training engines (``megatron_engine.engine_for``):
+
+* FSDP2: TP = PP = EP = 1, data parallel over the island's cards;
+* Megatron (S27 G-DC, V8): TP / PP / EP > 1; the run then trains full
+  parameters on the Megatron engine island (``megatron_engine``).
+
+No Megatron reference checkpoint either way (verl loads the HF model).
 """
 
 from __future__ import annotations
@@ -13,26 +19,59 @@ def resolve_ref_load(args, model_path) -> str:
 
 
 def check_trainer_parallel(actor_gpus: int, tensor_parallel: int, pipeline_parallel: int) -> None:
-    if (tensor_parallel, pipeline_parallel) != (1, 1):
-        raise ValueError("verl FSDP2 backend: tensor/pipeline parallel must be 1")
-    if actor_gpus != 1:
-        raise ValueError("verl backend first step: one GPU per island")
+    if tensor_parallel <= 0 or pipeline_parallel <= 0 or actor_gpus <= 0:
+        raise ValueError("verl backend: trainer GPUs, TP and PP must be positive")
+    if actor_gpus % (tensor_parallel * pipeline_parallel):
+        raise ValueError("verl backend: TP*PP must divide the trainer GPUs (TP/PP > 1: Megatron engine)")
 
 
-# S26 E7 decision: the verl Megatron engine (the only verl path with expert
-# parallelism) is not wired into this adapter; MoE runs with EP go to Miles.
-EP_REFUSAL = ("verl 后端不支持专家并行（EP>1）：yeto 的 verl 适配层只接 FSDP2，"
-              "未接 verl Megatron 引擎（S26 E7 结论：不做）。EP 训练请用 Miles 后端")
+# S26 E7 had refused EP > 1 (no verl Megatron engine in this adapter). S27 G-DC
+# wires the Megatron engine island (megatron_engine): EP > 1 trains there.
+EP_NEEDS_MEGATRON = ("verl 后端的专家并行（EP>1）只在 Megatron 引擎岛上（megatron_engine）："
+                     "要求全参数、--rl-single-island-no-sync、--rl-placement fixed-partition")
 
 
 def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
-    if expert_parallel != 1:
-        raise ValueError(f"{EP_REFUSAL}；收到 expert_parallel={expert_parallel}")
+    if expert_parallel < 1 or actor_gpus % expert_parallel:
+        raise ValueError(f"verl backend: EP={expert_parallel} must divide the trainer GPUs {actor_gpus}")
 
 
 def check_global_batch(global_batch: int, data_parallel: int) -> None:
-    if data_parallel != 1 or global_batch <= 0:
-        raise ValueError("verl backend first step: data parallel 1 and a positive batch")
+    if data_parallel < 1 or global_batch <= 0 or global_batch % data_parallel:
+        raise ValueError("verl backend: the global batch must be positive and divide evenly across DP ranks")
+
+
+def megatron_problems(args) -> list[str]:
+    """Why a run with TP/PP/EP > 1 cannot run on the verl Megatron island ([] when it can);
+    the island refuses the same combinations at start (``island_entry.megatron_island_plan``)."""
+    problems = []
+    if getattr(args, "tuning", "lora") != "full":
+        problems.append("--tuning full")
+    if not getattr(args, "rl_single_island_no_sync", False):
+        problems.append("--rl-single-island-no-sync")
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        problems.append("--rl-max-policy-age 0")
+    return problems
+
+
+def check_engine_shape(args) -> None:
+    """Launcher-side refusal of a Megatron-engine run the island cannot run."""
+    if not megatron_run(args):
+        return
+    problems = megatron_problems(args)
+    if problems:
+        raise ValueError(f"{EP_NEEDS_MEGATRON}；缺：" + ", ".join(problems))
+
+
+def megatron_run(args) -> bool:
+    """The run trains on the verl Megatron island (TP/PP/EP > 1)."""
+    from .megatron_engine import ENGINE_MEGATRON, engine_for
+
+    return engine_for(tensor_parallel=getattr(args, "tensor_parallel", 1) or 1,
+                      pipeline_parallel=getattr(args, "pipeline_parallel", 1) or 1,
+                      expert_parallel=getattr(args, "expert_parallel", 1) or 1) == ENGINE_MEGATRON
 
 
 def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) -> None:
@@ -83,3 +122,8 @@ def refuse_agentic_argv(ignored: list[str]) -> None:
     given = sorted({token.split("=", 1)[0] for token in ignored} & flags)
     if given:
         raise ValueError("verl 后端不支持 Miles agentic 参数：" + ", ".join(given))
+
+
+def hf_export_supported(args) -> bool:
+    """``--rl-export-hf-rounds`` is wired on the Megatron island only."""
+    return megatron_run(args)

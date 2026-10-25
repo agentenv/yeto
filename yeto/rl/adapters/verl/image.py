@@ -46,9 +46,40 @@ def image_env() -> dict[str, str]:
     }
 
 
-def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True):
+def megatron_commands(max_jobs: int = 16) -> list[str]:
+    """S27 G-DC: the Megatron engine layers on top of :func:`build_commands` (variant
+    ``megatron``): the fork's ``megatron`` extra (``--inexact``: the vLLM and FSDP
+    packages stay), then causal-conv1d and mamba-ssm built for Hopper (the extra does
+    not list them; mamba-ssm needs its CUDA selective-scan module, so the build
+    cannot be skipped), then the flash-attn FA4 preview removed (it raises
+    AttributeError against the locked cutlass-dsl, Megatron-Core only catches
+    ImportError; Hopper does not use it). Same steps as ``megatron_recipe.image_commands``."""
+    from .pins import CAUSAL_CONV1D_VERSION, MAMBA_SSM_VERSION
+
+    env = f"MAX_JOBS={max_jobs} TORCH_CUDA_ARCH_LIST=9.0 CC=gcc CXX=g++"
+    return [
+        f"cd {VERL_ROOT} && UV_PYTHON=/usr/local/bin/python{VERL_PYTHON} uv sync --frozen --all-packages"
+        " --inexact --extra vllm --extra fsdp --extra megatron",
+        f"uv pip install --python {VENV_BIN}/python ninja packaging wheel setuptools",
+        f"{env} CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python {VENV_BIN}/python --no-build-isolation"
+        f" 'causal-conv1d=={CAUSAL_CONV1D_VERSION}'",
+        f"{env} MAMBA_FORCE_BUILD=TRUE uv pip install --python {VENV_BIN}/python"
+        f" --no-build-isolation --no-deps 'mamba-ssm=={MAMBA_SSM_VERSION}'",
+        f"rm -rf {VERL_ROOT}/.venv/lib/python{VERL_PYTHON}/site-packages/flash_attn/cute",
+    ]
+
+
+VARIANTS = (None, "megatron")
+
+
+def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True, variant: str | None = None):
     """The verl image; ``patched=False`` leaves the verl source as the fork ships it
-    (the bare-verl arms of the efficiency evaluation, which must not import yeto)."""
+    (the bare-verl arms of the efficiency evaluation, which must not import yeto).
+    ``variant="megatron"`` (``--rl-image verl-megatron-build:<commit>``, S27 G-DC) adds
+    the Megatron engine layers after the cached FSDP ones and applies the
+    ``megatron`` patch profile (``patch_verl``)."""
+    if variant not in VARIANTS:
+        raise ValueError(f"verl image variant {variant!r} is not one of {VARIANTS}")
     image = (
         modal.Image.from_registry(VERL_BASE_IMAGE, add_python=VERL_PYTHON)
         .apt_install("git", "build-essential", "curl", "libnuma1")
@@ -56,8 +87,12 @@ def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True):
         .run_commands(*build_commands(commit))
         .run_commands(*store_client_commands())
     )
+    if variant == "megatron":
+        image = image.run_commands(*megatron_commands())
     if patched:
         patch = Path(__file__).with_name("patch_verl.py")
+        profile = "megatron" if variant == "megatron" else "fsdp"
+        suffix = f" --profile {profile}" if variant == "megatron" else ""
         image = (image.add_local_file(str(patch), "/workspace/patch_verl.py", copy=True)
-                 .run_commands(f"{VENV_BIN}/python /workspace/patch_verl.py {VERL_ROOT}"))
+                 .run_commands(f"{VENV_BIN}/python /workspace/patch_verl.py {VERL_ROOT}{suffix}"))
     return image.env(image_env())

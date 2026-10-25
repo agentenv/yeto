@@ -13,14 +13,36 @@ FULLY_ASYNC_TOKEN_SOURCE = ("per-trajectory min/max_global_steps + per-call vers
                             "mapped to outer versions by the publication VersionMap")
 
 
-def verl_capabilities(fingerprint: str, *, unverified_mechanisms=(), fully_async_limit: int = 0):
+MEGATRON_FEATURES = ("eps_clip", "clip_higher")
+MEGATRON_TOKEN_SOURCE = ("publication (separate trainer/rollout pools, prompts submitted after the "
+                         "verified publication), not a per-sample engine report")
+
+
+def verl_capabilities(fingerprint: str, *, unverified_mechanisms=(), fully_async_limit: int = 0,
+                      megatron: bool = False):
     """``fully_async_limit`` 0: the sync colocated trainer (age 0).  > 0 (6.4b): the
     fully_async path -- rollouter and trainer on separate GPUs (fixed partition,
-    driver still serial), policy age up to the limit (checked against SUPPORT)."""
+    driver still serial), policy age up to the limit (checked against SUPPORT).
+
+    ``megatron`` (S27 G-DC): the Megatron island -- full parameters kept in the
+    trainer (``fragments`` layout), trainer and rollout pools apart (fixed
+    partition, driver serial), age 0."""
     from yeto.rl.engine.capabilities import EngineCapabilities, ExecutionCapabilities
 
     from .policy_age import SUPPORT
 
+    if megatron:
+        if fully_async_limit:
+            raise ValueError("verl Megatron island: the fully_async path is not wired")
+        capabilities = EngineCapabilities(
+            engine="verl", runtime_fingerprint=fingerprint, parameter_layouts={"fragments"},
+            placements={"fixed-partition"}, advantage_estimators={"grpo"}, dynamic_sampling_filters=set(),
+            execution_modes={"partitioned-serial"}, corrections={"none", "tis"},
+            # mapped to clip_ratio_low / clip_ratio_high by megatron_engine.build_overrides
+            features=frozenset(MEGATRON_FEATURES),
+            execution=ExecutionCapabilities(critic=False, max_policy_staleness=0, rollout_logprobs=True),
+            extra={"policy_token_source": MEGATRON_TOKEN_SOURCE, "train_engine": "megatron"})
+        return capabilities.with_unverified(unverified_mechanisms) if unverified_mechanisms else capabilities
     if fully_async_limit:
         SUPPORT.check(fully_async_limit)
     capabilities = EngineCapabilities(
@@ -48,7 +70,14 @@ miles_capabilities = verl_capabilities  # launcher call-site name (decoupling re
 
 
 def with_partitioned_serial(capabilities):
-    raise ValueError("verl 后端第一版不支持 fixed-partition 放置")
+    """Launcher-side declaration of the fixed-partition placement (S27 G-DC): the verl
+    Megatron island (trainer and rollout pools apart, driver serial) and the
+    fully_async path run it. No partitioned-overlap mode on verl."""
+    import dataclasses
+
+    return dataclasses.replace(
+        capabilities, placements=capabilities.placements | {"fixed-partition"},
+        execution_modes=capabilities.execution_modes | {"partitioned-serial"})
 
 
 def connect_island_ray(*_args, **_kwargs):

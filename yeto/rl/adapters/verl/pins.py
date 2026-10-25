@@ -77,3 +77,36 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # ``--rl-image`` value that selects the Modal-built verl image (no registry
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
+
+
+# --- Megatron engine image (S27 G-DC, V8) ------------------------------------
+#
+# ``--rl-image verl-megatron-build:<commit>``: the FSDP image above plus the
+# fork's ``megatron`` extra (same lock: torch, vLLM and transformers stay the
+# versions asserted above) and the Mamba training kernels the extra does not
+# list (built from source for Hopper, the fork's Nemotron example installs
+# them by hand). Versions the Megatron island asserts on top of
+# EXPECTED_VERSIONS (uv.lock of acad9875; mamba-ssm / causal-conv1d are the
+# versions S27 G-R's import check passed with, NEMOTRON-VERL.md section 2).
+MEGATRON_IMAGE_VARIANT = "megatron"
+VERL_MEGATRON_IMAGE = f"verl-{MEGATRON_IMAGE_VARIANT}-build:{VERL_COMMIT}"
+MAMBA_SSM_VERSION = "2.3.2.post1"
+CAUSAL_CONV1D_VERSION = "1.6.2.post1"
+EXPECTED_VERSIONS_MEGATRON = {
+    "megatron_core": "0.19.2",
+    "megatron_bridge": "0.6.2",
+    "transformer_engine": "2.16.1",
+    "mamba_ssm": MAMBA_SSM_VERSION,
+    "causal_conv1d": CAUSAL_CONV1D_VERSION,
+}
+
+
+def expected_versions_for_engine(engine: str, device_family: str = "nvidia") -> dict:
+    """Versions an island asserts: the family pins, plus the Megatron stack for the
+    Megatron engine island (NVIDIA only; the NPU Megatron path is MindSpeed)."""
+    expected = expected_versions(device_family)
+    if engine == "megatron":
+        if device_family != "nvidia":
+            raise ValueError(f"no verl Megatron image pins for device family {device_family!r}")
+        expected.update(EXPECTED_VERSIONS_MEGATRON)
+    return expected

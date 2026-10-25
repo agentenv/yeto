@@ -15,11 +15,13 @@ from .pins import VERL_COMMIT, VERL_IMAGE
 ISLAND_ENTRY_MODULE = "yeto.rl.adapters.verl.island_entry"
 NEEDS_MILES_SOURCE = False
 DEFAULT_RL_IMAGE = VERL_IMAGE
-_IMAGE = re.compile(r"verl-build:(?P<commit>[0-9a-f]{40})")
+# S27 G-DC: ``verl-megatron-build`` is the same image plus the Megatron engine layers
+_IMAGE = re.compile(r"verl(?:-megatron)?-build:(?P<commit>[0-9a-f]{40})")
 
 
 def rl_image_ok(rl_image: str) -> bool:
-    """``verl-build:<pinned commit>`` (Modal-built, see ``image``); other commits are refused."""
+    """``verl-build:<pinned commit>`` or ``verl-megatron-build:<pinned commit>``
+    (Modal-built, see ``image``); other commits are refused."""
     match = _IMAGE.fullmatch(rl_image or "")
     return bool(match) and match["commit"] == VERL_COMMIT
 

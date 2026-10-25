@@ -312,7 +312,11 @@ def _check_hf_export_launch_flags(args) -> None:
     if not getattr(args, "rl_checkpoint_store", None):
         raise ValueError(f"{EXPORT_HF_FLAG} needs --rl-checkpoint-store (the exports go to <store>/hf)")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles only")
+        # S27 G-DC: a backend may wire it for some of its runs (verl: the Megatron island)
+        supported = getattr(_rl_backend_module(args, "run_config_rules"), "hf_export_supported", None)
+        if not (callable(supported) and supported(args)):
+            raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles and the verl Megatron "
+                             "island (TP/PP/EP > 1) only")
     if getattr(args, "rl_elastic", False):
         raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
     if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)

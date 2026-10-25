@@ -68,10 +68,12 @@ def test_modal_runner_passes_engine_built_image_refs_through():
         image_ref_from_rl_image("verl-build:latest")
 
 
-def test_verl_run_config_rules_refuse_multi_gpu_and_megatron_options():
+def test_verl_run_config_rules_parallel_shapes():
+    # S27 G-DC (V8): data parallel on either engine; TP/PP > 1 (Megatron engine) must divide
     rules = backends.module("run_config_rules", "verl")
-    rules.check_trainer_parallel(1, 1, 1)
-    for bad in ((2, 1, 1), (1, 2, 1)):
+    for good in ((1, 1, 1), (2, 1, 1), (8, 1, 1), (8, 2, 1), (8, 2, 2)):
+        rules.check_trainer_parallel(*good)
+    for bad in ((1, 2, 1), (3, 2, 1), (0, 1, 1), (8, 0, 1)):
         with pytest.raises(ValueError):
             rules.check_trainer_parallel(*bad)
     with pytest.raises(ValueError):
@@ -341,8 +343,11 @@ def test_unmapped_reward_and_algorithm_fields_are_refused():
     with pytest.raises(reward_fn.UnmappedReward):
         reward_fn.function_for("my_reward:score")
     golden = json.loads(Path("tests/golden/decoupling/grpo_tis.json").read_text())["algorithm_spec"]
+    loss = golden["loss"]
+    # eps_clip / eps_clip_high: read by the Megatron island only (S27 G-DC)
     assert island_entry.algorithm_options(golden) == {"correction": "tis", "tis_upper": 2.0,
-                                                      "tis_lower": 0.0}
+                                                      "tis_lower": 0.0, "eps_clip": loss.get("eps_clip"),
+                                                      "eps_clip_high": loss.get("eps_clip_high")}
     assert island_entry.algorithm_options(None)["correction"] == "none"
 
 
@@ -489,10 +494,28 @@ def test_vllm_prefix_renaming_is_undone():
         "base_model.model.model.layers.0.self_attn.o_proj.lora_A.weight"
 
 
-def test_verl_refuses_expert_parallel_with_e7_reason():
-    # S26 E7: verl+EP is refused with the reason and the backend to use instead.
+def test_verl_expert_parallel_runs_on_the_megatron_engine():
+    # S26 E7 refused verl+EP; S27 G-DC (V8) wires the Megatron engine island: EP must
+    # divide the trainer GPUs, and the run must be one the Megatron island can run.
+    import argparse
+
     from yeto.rl.adapters.verl import run_config_rules as rules
 
     rules.check_expert_parallel(8, 1)
-    with pytest.raises(ValueError, match="E7.*Miles"):
-        rules.check_expert_parallel(8, 8)
+    rules.check_expert_parallel(8, 8)
+    with pytest.raises(ValueError, match="EP=3"):
+        rules.check_expert_parallel(8, 3)
+    good = argparse.Namespace(tuning="full", rl_single_island_no_sync=True, rl_placement="fixed-partition",
+                              rl_max_policy_age=0, tensor_parallel=1, pipeline_parallel=1, expert_parallel=8)
+    rules.check_engine_shape(good)
+    assert rules.megatron_run(good) and rules.hf_export_supported(good)
+    for name, value, missing in (("tuning", "lora", "--tuning full"),
+                                 ("rl_single_island_no_sync", False, "--rl-single-island-no-sync"),
+                                 ("rl_placement", "colocated", "--rl-placement fixed-partition"),
+                                 ("rl_max_policy_age", 1, "--rl-max-policy-age 0")):
+        bad = argparse.Namespace(**{**vars(good), name: value})
+        with pytest.raises(ValueError, match=missing):
+            rules.check_engine_shape(bad)
+    fsdp = argparse.Namespace(**{**vars(good), "expert_parallel": 1, "tuning": "lora"})
+    rules.check_engine_shape(fsdp)  # FSDP2 runs are not this check's business
+    assert not rules.megatron_run(fsdp) and not rules.hf_export_supported(fsdp)

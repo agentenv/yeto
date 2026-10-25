@@ -20,7 +20,20 @@ config and phase markers travel in the tensor stream (``lora_wire``); the
 rollout then reaches ``add_lora`` (and the read-back hook) as in the colocated
 path.
 
-Usage: python patch_verl.py <verl source root>
+Fifth patch (S27 G-DC, local, not pushed; ``--profile megatron`` only): verl's THD
+packing (``verl/models/mcore/util.py``) builds Megatron's ``PackedSeqParams``
+without ``total_tokens``, so Megatron never derives ``seq_idx`` and a Mamba
+layer runs the whole pack as one sequence: the conv and SSM state of one
+sample flow into the next (S27 G-AL found the same in Miles, GAL-REPORT.md:
+train/rollout log-prob gap 0.0885 -> 0.0179 once ``seq_idx`` is set). The
+patch passes the pack length when context parallelism is off.
+
+Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4;
+``megatron`` (the image ``verl-megatron-build``) applies 1, 2 and 5 -- the
+Megatron island trains full parameters, so the LoRA wire patches 3 and 4
+(which replace the checkpoint-engine sender) are left out.
+
+Usage: python patch_verl.py <verl source root> [--profile fsdp|megatron]
 """
 
 import sys
@@ -74,23 +87,80 @@ RECV_HOOK = (
     "            )\n"
 )
 
+SEQ_IDX_TARGET = "verl/models/mcore/util.py"
+SEQ_IDX_HELPER_ANCHOR = "def _compute_fp8_thd_align_size("
+SEQ_IDX_HELPER = (
+    "def _yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu):\n"
+    "    \"\"\"yeto S27 G-DC: ``total_tokens`` of the THD pack, so ``PackedSeqParams`` derives\n"
+    "    ``seq_idx`` and a Mamba layer restarts its state at every packed sample (CP off only).\"\"\"\n"
+    "    if cp_size != 1 or not _packed_seq_params_supports(\"total_tokens\"):\n"
+    "        return {}\n"
+    "    return {\"total_tokens\": int(sum(seqlens_in_batch_padded_cpu))}\n"
+    "\n"
+    "\n"
+)
+SEQ_IDX_PACKED_ANCHOR = (
+    "        cu_seqlens_kv_padded=cu_seqlens_padded,\n"
+    "    )\n"
+    "    if pre_process:\n"
+    "        return input_ids_rmpad.unsqueeze(0), packed_seq_params\n"
+)
+SEQ_IDX_PACKED_HOOK = (
+    "        cu_seqlens_kv_padded=cu_seqlens_padded,\n"
+    "        **_yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu),  # yeto S27 G-DC\n"
+    "    )\n"
+    "    if pre_process:\n"
+    "        return input_ids_rmpad.unsqueeze(0), packed_seq_params\n"
+)
+SEQ_IDX_ENGINE_ANCHOR = "        **extra_packed_args,\n    )\n"
+SEQ_IDX_ENGINE_HOOK = (
+    "        **extra_packed_args,\n"
+    "        **_yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu),  # yeto S27 G-DC\n"
+    "    )\n"
+)
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
-# "replace" substitutes it.
-PATCHES = ((TARGET, ANCHOR, HOOK, "after"), (CALLS_TARGET, CALLS_ANCHOR, CALLS_HOOK, "after"),
-           (SEND_TARGET, SEND_ANCHOR, SEND_HOOK, "replace"), (RECV_TARGET, RECV_ANCHOR, RECV_HOOK, "replace"))
+# "before" in front of it, "replace" substitutes it.
+READBACK = (TARGET, ANCHOR, HOOK, "after")
+RESUME_CALLS = (CALLS_TARGET, CALLS_ANCHOR, CALLS_HOOK, "after")
+LORA_SEND = (SEND_TARGET, SEND_ANCHOR, SEND_HOOK, "replace")
+LORA_RECV = (RECV_TARGET, RECV_ANCHOR, RECV_HOOK, "replace")
+SEQ_IDX = ((SEQ_IDX_TARGET, SEQ_IDX_HELPER_ANCHOR, SEQ_IDX_HELPER, "before"),
+           (SEQ_IDX_TARGET, SEQ_IDX_PACKED_ANCHOR, SEQ_IDX_PACKED_HOOK, "replace"),
+           (SEQ_IDX_TARGET, SEQ_IDX_ENGINE_ANCHOR, SEQ_IDX_ENGINE_HOOK, "replace"))
+PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
+PROFILES = {"fsdp": PATCHES, "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX)}
 
 
-def apply(root: Path) -> None:
-    for target, anchor, hook, mode in PATCHES:
+def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
+    if mode == "after":
+        return text.replace(anchor, anchor + hook)
+    if mode == "before":
+        return text.replace(anchor, hook + anchor)
+    return text.replace(anchor, hook)
+
+
+def apply(root: Path, profile: str = "fsdp") -> None:
+    try:
+        patches = PROFILES[profile]
+    except KeyError:
+        raise SystemExit(f"patch_verl: unknown profile {profile!r} (known: {sorted(PROFILES)})") from None
+    for target, anchor, hook, mode in patches:
         path = root / target
         text = path.read_text()
         if hook in text:
             continue
         if text.count(anchor) != 1:
             raise SystemExit(f"patch_verl: anchor occurs {text.count(anchor)} times in {target}")
-        path.write_text(text.replace(anchor, anchor + hook if mode == "after" else hook))
+        path.write_text(_patched(text, anchor, hook, mode))
 
 
 if __name__ == "__main__":
-    apply(Path(sys.argv[1]))
-    print("patch_verl: ok")
+    argv = sys.argv[1:]
+    chosen = "fsdp"
+    if "--profile" in argv:
+        at = argv.index("--profile")
+        chosen = argv[at + 1]
+        argv = argv[:at] + argv[at + 2:]
+    apply(Path(argv[0]), chosen)
+    print(f"patch_verl: ok ({chosen})")

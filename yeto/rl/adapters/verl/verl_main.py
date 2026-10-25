@@ -38,6 +38,9 @@ class YetoTaskRunner:
 
         import yeto.rl.adapters.verl.trainer  # noqa: F401  (registers trainer_mode yeto_sync)
 
+        megatron = plan.get("engine") == "megatron"
+        if megatron:  # S27 G-DC: registers trainer_mode yeto_separate (Megatron island)
+            import yeto.rl.adapters.verl.separate_trainer  # noqa: F401
         configure_verl_logging()
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
         config.transfer_queue.enable = True
@@ -50,9 +53,14 @@ class YetoTaskRunner:
                 config=config, llm_client=trainer.get_llm_client(),
                 teacher_client=trainer.get_teacher_client(),
                 reward_loop_worker_handles=trainer.get_reward_handles())
+            resolved = OmegaConf.to_container(config, resolve=True)
+            if megatron:
+                from yeto.rl.adapters.verl.megatron_ports import run_megatron_island
+
+                return run_megatron_island(trainer, manager, plan, resolved)
             from yeto.rl.adapters.verl.trainer import run_island
 
-            return run_island(trainer, manager, plan, OmegaConf.to_container(config, resolve=True))
+            return run_island(trainer, manager, plan, resolved)
         finally:
             tq.close()
 

@@ -801,6 +801,11 @@ def _prepare_rl_args(
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):
         agentic_check(args)
+    # S27 G-DC: a backend whose engine depends on the parallel shape (verl: TP/PP/EP > 1
+    # -> the Megatron island) refuses a shape that engine cannot run.
+    engine_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_engine_shape", None)
+    if callable(engine_check):
+        engine_check(args)
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")

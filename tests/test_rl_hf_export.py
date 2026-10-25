@@ -443,8 +443,8 @@ def test_verl_and_elastic_launches_are_refused():
     from yeto.launch import rl_ports
 
     args = _cli("--rl-export-hf-rounds", "2", "--rl-checkpoint-store", "/s")
-    args.rl_backend = "verl"
-    with pytest.raises(ValueError, match="miles only"):
+    args.rl_backend = "verl"  # an FSDP2 verl run (S27 G-DC: the Megatron island exports)
+    with pytest.raises(ValueError, match="verl Megatron island .* only"):
         rl_ports._check_hf_export_launch_flags(args)
     args.rl_backend, args.rl_elastic = "miles", True
     with pytest.raises(ValueError, match="--rl-elastic"):
