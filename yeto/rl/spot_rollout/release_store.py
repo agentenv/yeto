@@ -96,11 +96,12 @@ class SubscriberReleaseStore:
 
 def subscriber_id_for(sampler_id: str) -> int:
     """The sampler island's id on the head: ``2^31`` plus 31 bits of the SHA-256
-    of its sampler id. The same formula as the task dispenser's sampler holder id
+    of its sampler id. It is the task dispenser's sampler holder id
     (``yeto.rl.engine.task_dispense.sampler_holder_id``, S27 P4), so one sampler
     island has one id for its weights, its relay items and its rows."""
-    digest = hashlib.sha256(f"yeto-sampler:{sampler_id}".encode()).digest()
-    return (1 << 31) | (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF)
+    from yeto.rl.engine.task_dispense import sampler_holder_id
+
+    return sampler_holder_id(sampler_id)
 
 
 def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_model: str,
