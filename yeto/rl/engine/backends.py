@@ -84,9 +84,9 @@ _REGISTRY: dict[str, BackendEntry] = {
         "offpolicy_correction": f"{_MILES}.offpolicy_correction",
         "overlay": f"{_MILES}.overlay",
     }),
-    # rl-verl-backend: first step FSDP2 + vLLM, one GPU per island (roles the
-    # neutral code needs; codex/elastic-pool roles are not provided yet and
-    # fail with "没有提供" when asked for).
+    # rl-verl-backend: FSDP2 + vLLM islands, and (S27 G-DC) the Megatron engine
+    # island (EP/TP/PP); codex/elastic-pool roles are not provided yet and
+    # fail with "没有提供" when asked for.
     "verl": BackendEntry("verl", _VERL, {
         "rollout_meta": f"{_VERL}.rollout_meta_hook",
         "entry": f"{_VERL}.entry",
@@ -98,6 +98,11 @@ _REGISTRY: dict[str, BackendEntry] = {
         "image": f"{_VERL}.image",
         "policy_age": f"{_VERL}.policy_age",
         "offpolicy_correction": f"{_VERL}.offpolicy_correction",
+        # S27 G-DC (V10): the Megatron engine island's roles
+        "nemotron_h_recipe": f"{_VERL}.nemotron_h",
+        "placement": f"{_VERL}.placement",
+        "rollout": f"{_VERL}.rollout",
+        "publish": f"{_VERL}.publish_role",
     }),
 }
 

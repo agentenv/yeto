@@ -97,8 +97,9 @@ def test_a_miles_full_parameter_launch_still_needs_fixed_partition():
 
 
 @pytest.mark.parametrize("extra, match", [
-    # refused earlier by the verl placement role; full_parameter_problems names it too
-    (("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"), "fixed-partition"),
+    # S27 G-EK: fixed-partition is verl's separate mode now, but without standby cards
+    (("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--rl-standby-gpus", "1"),
+     "no --rl-standby-gpus|standby"),
     (("--rl-sync-full-parameter-rounds", "sweep", "--rl-sync-overlap"), "no --rl-sync-overlap"),
     (("--rl-sync-expert-token-weights",), "no --rl-sync-expert-token-weights"),
 ])
@@ -116,7 +117,7 @@ def test_a_missing_layout_hash_names_the_verl_planner():
 def test_verl_problems_cover_the_island_refusals():
     from types import SimpleNamespace
 
-    args = SimpleNamespace(rl_placement="fixed-partition", rl_sample_role="trainer", rl_max_policy_age=2,
+    args = SimpleNamespace(rl_placement="standby-only", rl_sample_role="trainer", rl_max_policy_age=2,
                            rl_rollout_quant_tier=1, expert_full_count=2, rl_peer_recovery=True,
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))

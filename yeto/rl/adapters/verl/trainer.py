@@ -205,7 +205,13 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
     ``FullParameterSync`` over the verl role stream.  Without one
     (``--rl-single-island-no-sync``): the local-only sync over a policy state
     that exports whole cuts.  Round cuts and the LoRA publish self-test do not
-    apply to a full-parameter island and are refused."""
+    apply to a full-parameter island and are refused.
+
+    S27 G-EK: with ``plan["separate"]`` the trainer has its own cards and the
+    rollout runs on standalone vLLM servers; the policy state and the stream read
+    the cut from the trainer workers as before (``VerlIsland.call_workers`` reaches
+    the trainer pool only), and the publication goes over verl's NCCL checkpoint
+    engine (``separate.SeparatePublisher``)."""
     from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.local_learner import ComponentIdentity
 
@@ -230,7 +236,9 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
             raise ValueError("a synced full-parameter verl island needs the full-parameter sync plan")
         sync, policy_state, _stream = build_full_parameter_sync(
             island, plan, backend_identity_sha256=identity_sha256)
-    return sync, policy_state, VerlFullParameterPublisher(island)
+    from .separate import full_parameter_publisher
+
+    return sync, policy_state, full_parameter_publisher(island, plan, VerlFullParameterPublisher)
 
 
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
@@ -311,12 +319,17 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
+    driver_options = {"placement": VerlPlacement(), "capabilities": _capabilities(_fingerprint(cfg))}
+    if full:  # S27 G-EK: verl's separate mode (trainer and rollout cards apart)
+        from .separate import driver_options as separate_driver_options
+
+        driver_options.update(separate_driver_options(plan, spec, driver_options["capabilities"]))
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
-        placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
-        sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
+        algorithm=spec, sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
+        **driver_options)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
