@@ -161,13 +161,12 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
         return total
 
     def _recovery_island(self, group, adapter, *, recovering: bool):
-        from yeto.rl.adapters.miles.full_parameter.peer_recovery import (
-            MilesPeerRecoveryIsland,
-            MilesRankShards,
-        )
+        from yeto.rl.adapters.miles.full_parameter.peer_recovery import MilesRankShards
+        from yeto.rl.engine.stream_recovery import recovery_island
 
+        # MilesRankShards captures (S27 G-EL), so this is the capturing island
         shards = MilesRankShards(group, adapter.layout.layout_hash)
-        return MilesPeerRecoveryIsland(self, shards, asyncio.get_running_loop(), recovering=recovering)
+        return recovery_island(self, shards, asyncio.get_running_loop(), recovering=recovering)
 
 
 def validate_optimizer_apply_transition(
