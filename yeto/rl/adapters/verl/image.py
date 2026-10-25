@@ -53,7 +53,8 @@ def megatron_commands(max_jobs: int = 16) -> list[str]:
     not list them; mamba-ssm needs its CUDA selective-scan module, so the build
     cannot be skipped), then the flash-attn FA4 preview removed (it raises
     AttributeError against the locked cutlass-dsl, Megatron-Core only catches
-    ImportError; Hopper does not use it). Same steps as ``megatron_recipe.image_commands``."""
+    ImportError; Hopper does not use it). ``megatron_recipe.image_commands`` (the bare-verl
+    smoke of S27 G-R) returns these same steps."""
     from .pins import CAUSAL_CONV1D_VERSION, MAMBA_SSM_VERSION
 
     env = f"MAX_JOBS={max_jobs} TORCH_CUDA_ARCH_LIST=9.0 CC=gcc CXX=g++"
