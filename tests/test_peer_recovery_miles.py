@@ -339,6 +339,52 @@ def test_other_tensor_parallel_layout_is_refused(tmp_path, stubs):
     assert cut_plugin.RESTORE_CUT_SHARD not in group.calls and client.closed
 
 
+class DigestGroup(FakeGroup):
+    """FakeGroup whose save and restore report the cut summary digests, as the
+    real cut_plugin does; ``tamper`` makes one rank restore other state."""
+
+    def __init__(self, *, tamper=False, **kw):
+        super().__init__(**kw)
+        self.tamper = tamper
+
+    def _digests(self, state):
+        body = json.dumps(state, sort_keys=True).encode()
+        return {"state_digest": hashlib.sha256(body).hexdigest(), "rng_digest": "rng",
+                "scheduler_samples": state["scheduler_steps"]}
+
+    async def run_plugin(self, name, kwargs):
+        out = await super().run_plugin(name, kwargs)
+        if name == cut_plugin.SAVE_CUT_SHARD:
+            return [{**r, **self._digests(state)} for r, state in zip(out, self.states, strict=True)]
+        if name == cut_plugin.RESTORE_CUT_SHARD:
+            if self.tamper:
+                self.states[-1] = {**self.states[-1], "m": [9.0] * 3}
+            return [{"path": cut_plugin.shard_name(c), **self._digests(state)}
+                    for c, state in zip(self.coords, self.states, strict=True)]
+        return out
+
+
+@pytest.mark.parametrize("tamper", [False, True])
+def test_restore_checks_every_rank_digest_against_the_donor(tmp_path, capsys, monkeypatch, tamper):
+    _install_miles_rebase_stub(monkeypatch)
+    donor = DigestGroup(adam_step=17)
+    asyncio.run(MilesRankShards(donor, LAYOUT_HASH).save(tmp_path))
+    ranks = json.loads((tmp_path / RANKS).read_text())
+    assert all({"state_digest", "rng_digest", "scheduler_samples"} <= set(f) for f in ranks["files"])
+    donor_line = capsys.readouterr().err
+    assert "donor snapshot: 2 rank shard(s)" in donor_line
+    fresh = DigestGroup(adam_step=0, tamper=tamper)
+    shards = MilesRankShards(fresh, LAYOUT_HASH)
+    if tamper:
+        with pytest.raises(RuntimeError, match="not the donor's state.*state_digest"):
+            asyncio.run(shards.restore(tmp_path))
+        return
+    asyncio.run(shards.restore(tmp_path))
+    restored_line = capsys.readouterr().err
+    assert "restored 2/2 rank shard(s)" in restored_line
+    assert donor_line.split("digests ")[-1].strip() == restored_line.split("digests ")[-1].strip()
+
+
 def test_rank_shard_on_another_node_refuses_the_snapshot(tmp_path):
     group = FakeGroup(tp=2, missing_rank=None)
     group.missing_rank = group.coords[1]
