@@ -17,6 +17,13 @@ entry also keeps the cut summary digests (state, RNG, LR scheduler position);
 after the restore every rank must re-export exactly those, as the
 single-island cut restore checks, else the restore fails.
 
+Donor write (S27 G-EL). At the safe point every rank only copies its state to
+host memory (``cut_plugin`` ``background="host"``) and writes its shard on a
+thread of its own while training goes on; later safe points only ask whether
+the writes finished (``MilesRankShards.captures``; the stream island is the
+neutral capturing one). ``--rl-peer-recovery-donor-write inline`` writes at
+the safe point as before.
+
 Layout tag. The parameter layout hash plus the trainer parallel layout read
 back from the ranks (world, TP, PP, CP, EP, DP). Only a donor with the same
 tag can serve; the shard restore checks every rank coordinate again.
@@ -38,6 +45,7 @@ from typing import Any
 
 from yeto.rl.engine.stream_recovery import (  # noqa: F401 - re-exported (Miles import path)
     RANKS,
+    CapturingStreamRecoveryIsland,
     PeerRecoveryOptions,
     RankShardSnapshot,
     StreamRecoveryIsland,
@@ -86,6 +94,7 @@ class MilesRankShards(RankShardSnapshot):
 
     schema = RANKS_SCHEMA
     tag_prefix = TAG_PREFIX
+    captures = True  # S27 G-EL: cut_plugin background="host"
 
     def __init__(self, group: Any, parameter_layout_hash: str, **kwargs: Any) -> None:
         super().__init__(parameter_layout_hash, **kwargs)
@@ -107,6 +116,40 @@ class MilesRankShards(RankShardSnapshot):
             raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
         return results
 
+    # -- S27 G-EL: copy at the safe point, write while training goes on ----------
+    async def start_ranks(self, directory: Path) -> None:
+        """Every rank copies its state to host memory now and writes its shard on a
+        thread of its own (cut_plugin ``background="host"``); returns at once."""
+        from yeto.rl.adapters.miles.cut_plugin import HOST_BACKGROUND, SAVE_CUT_SHARD
+
+        results = [dict(r) for r in await self.group.run_plugin(
+            SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": SNAPSHOT_CUT_ID,
+                             "background": HOST_BACKGROUND})]
+        refused = _refusals(results)
+        if refused:
+            if any("pending" in r for r in results):
+                await self.finish_writes()  # the other ranks' writes end before the next snapshot
+            raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
+
+    async def poll_ranks(self) -> bool:
+        """Whether every rank's background write finished (never waits)."""
+        from yeto.rl.adapters.miles.cut_plugin import POLL_CUT_SHARD
+
+        polls = await self.group.run_plugin(POLL_CUT_SHARD, {"cut_id": SNAPSHOT_CUT_ID})
+        return all(dict(p).get("done") for p in polls)
+
+    async def finish_writes(self) -> list[dict[str, Any]]:
+        from yeto.rl.adapters.miles.cut_plugin import FINISH_CUT_SHARD
+
+        return [dict(r) for r in await self.group.run_plugin(FINISH_CUT_SHARD, {"cut_id": SNAPSHOT_CUT_ID})]
+
+    async def finish_ranks(self) -> list[dict[str, Any]]:
+        results = await self.finish_writes()
+        refused = _refusals(results)
+        if refused:
+            raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
+        return results
+
     async def restore_ranks(self, directory: Path, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         from yeto.rl.adapters.miles.cut_plugin import RESTORE_CUT_SHARD
 
@@ -119,5 +162,5 @@ class MilesRankShards(RankShardSnapshot):
         return results
 
 
-# The role stream's island (the neutral one; the Miles name stays for imports).
-MilesPeerRecoveryIsland = StreamRecoveryIsland
+# The role stream's island (the neutral capturing one; the Miles name stays for imports).
+MilesPeerRecoveryIsland = CapturingStreamRecoveryIsland

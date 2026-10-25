@@ -36,6 +36,7 @@ CLOUD_CREDENTIAL_ENV_NAMES = frozenset(v for vals in CLOUD_CREDENTIAL_ENV.values
 # ``secrets=`` (redacted in sky's records), never to plain ``envs=``.
 SECRET_ENV_NAMES = frozenset({
     "HF_TOKEN", "WANDB_API_KEY", "CYBERGYM_API_KEY",
+    "BOAT_API_KEY",  # Harbor's boat sandboxes (yeto.rl.harness.harbor.boat_client)
     "YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET", "YETO_ISLAND_HMAC_KEY",
     # yeto.cloud.s3_store.SECRET_ENVS: the s3 store credential (a test keeps them equal)
     "YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "YETO_RL_STORE_S3_SESSION_TOKEN",

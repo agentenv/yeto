@@ -412,6 +412,11 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
         out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
+        # each node draws its own slot of the data, as sampler islands do (S26 E9.3);
+        # without it every node generates the same prompts in the same order
+        nodes = convertible_islands(args)
+        out.rl_sampler_data_slot = (DataSlot(nodes.index(island), len(nodes)).env()
+                                    if len(nodes) > 1 else None)
     elif out.rl_sample_role == SAMPLER:
         out.rl_sample_wait_s = None
     else:
@@ -463,8 +468,13 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         setattr(out, name, None)
     out.rl_syncer_epoch = None
     out.rl_sampler_node = node_name(island)
-    out.rl_sampler_data_slot = (DataSlot(samplers.index(island), len(samplers)).env()
-                                if len(samplers) > 1 else None)
+    if getattr(args, "rl_data_split", None) == "dispense":
+        # S27 P4: the sampler claims its rows from the group's actor syncer (no slot)
+        out.rl_sampler_dispense_island = island
+        out.rl_sampler_data_slot = None
+    else:
+        out.rl_sampler_data_slot = (DataSlot(samplers.index(island), len(samplers)).env()
+                                    if len(samplers) > 1 else None)
     out.rl_sample_wait_s = None
     out.total_steps = out.rl_synced_trainers * int(args.total_steps) // len(samplers)
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET:

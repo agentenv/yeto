@@ -47,8 +47,14 @@ from .buffer_rollout import (
     register_reader,
     renumber_group,
 )
-from .rollout_meta_hook import data_cursor, record_round_metadata
+from yeto.rl.engine.data_split import row_runs
+from yeto.rl.engine.task_dispense import DISPENSE_POSITION_KEY
 
+from .rollout_meta_hook import data_cursor, record_round_metadata
+from .task_dispense import written as dispense_written
+
+# the boat VM pools of the Harbor agentic path (``close_pools_now``, also used by .harbor_rollout)
+BOAT_POOL_MODULE = "yeto.rl.harness.harbor.boat_pool"
 
 def _flat(group: Any) -> list[Any]:
     out: list[Any] = []
@@ -93,15 +99,39 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
         await asyncio.to_thread(self._write, input.rollout_id, output.samples, cursor)
         return output
 
+    async def dispose(self) -> None:
+        """Miles calls this at ``RolloutExecutor.dispose()`` (the island's end). The
+        Harbor agentic path leases boat VMs in this process; trials that are still
+        suspended between rounds (a convertible node keeps them through its trainer
+        stints) hold theirs. Delete them here, as :mod:`.harbor_rollout` does for
+        the stock rollout function; otherwise they live until their boat TTL."""
+        import sys
+
+        try:
+            await super().dispose()
+        finally:
+            pools = sys.modules.get(BOAT_POOL_MODULE)  # imported only by a Harbor trial
+            if pools is not None:
+                deleted = await asyncio.to_thread(pools.close_pools_now)
+                if deleted:
+                    print(f"[sample-buffer] boat pool: deleted {deleted} VM(s) at rollout dispose",
+                          flush=True)
+
     def _write(self, rollout_id: int, groups: list[Any], cursor: dict[str, int] | None) -> None:
         finished = []
+        positions: list[int | None] = []
         for group in groups:
             samples = _flat(group)
             if any(s.status == Sample.Status.ABORTED for s in samples):
                 continue  # an aborted group is regenerated, never trained
             finished.append((f"r{int(rollout_id)}-g{samples[0].group_index}",
                              [s.to_dict() for s in samples]))
-        self._rounds.write_round(rollout_id, finished, cursor)
+            position = (getattr(samples[0], "metadata", None) or {}).get(DISPENSE_POSITION_KEY)
+            positions.append(position if isinstance(position, int) and not isinstance(position, bool)
+                             else None)
+        written = self._rounds.write_round(rollout_id, finished, cursor, positions)
+        # S27 P4: the rows of the groups now in the buffer are done for the dispenser
+        dispense_written(rollout_id, [p for p in positions[:written] if p is not None])
 
 
 class _BufferRound:
@@ -119,6 +149,11 @@ class _BufferRound:
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
+        # S27 G-EA: with YETO_SAMPLE_RELAY_ADDR the spot samplers' groups arrive through
+        # the head's relay; the pump appends them to this (local) buffer. Unset: no pump.
+        from yeto.rl.spot_rollout.relay_buffer import maybe_start_relay_pump
+
+        self.relay_pump = maybe_start_relay_pump(buffer)
         self.reader = BatchReader(
             buffer, cursor_log=open_lane_log(buffer),
             max_policy_age=int(age),
@@ -143,7 +178,9 @@ class _BufferRound:
             group, position=position, samples_per_group=self.samples_per_group)]
             for position, group in groups]
         record_round_metadata(self.args, int(input.rollout_id),
-                              buffer_stale_groups=int(report.stale_groups))
+                              buffer_stale_groups=int(report.stale_groups),
+                              **({"buffer_stale_positions": row_runs(stale)}
+                                 if (stale := getattr(report, "stale_positions", None)) else {}))
         self._run_round_hooks(samples)
         return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
 

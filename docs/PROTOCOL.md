@@ -758,13 +758,75 @@ and the data fingerprint; a later island with other values is refused.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
-| 51 | TASK_WELCOME | syncer → island | version:u16, lease_ms:u64, passes:u64 (0 = unlimited), max_block:u32, reconnect:u8, superseded:u8, superseded_incarnation:u64, reclaimed:u64, next:u64 |
+| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; or with streams (S27 P3) version:u16 (=2), learner_id:u32, incarnation:u64, fingerprint:[u8;32], n:u16 (1..256), n × (rows:u64, weight:u64 (1..2^62), name_len:u16 (≤ 64), name:utf-8), m:u16, m × stream:u16 (m = 0: every stream); then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
+| 51 | TASK_WELCOME | syncer → island | version:u16 (the TASK_HELLO's), lease_ms:u64, passes:u64 (0 = unlimited), max_block:u32, reconnect:u8, superseded:u8, superseded_incarnation:u64, reclaimed:u64, next:u64 |
 | 52 | TASK_CLAIM | island → syncer | seq:u64, count:u32 |
 | 53 | TASK_GRANT | syncer → island | status:u8 (0 grant, 1 wait, 2 end), block:u64, retry_ms:u32, n:u32, n × (start:u64, end:u64) |
 | 54 | TASK_REPORT | island → syncer | seq:u64, n:u32, n × (block:u64, kind:u8 (1 trained, 2 dropped, 3 requeue, 4 release), m:u32, m × (start:u64, end:u64)) |
 | 55 | TASK_ACK | syncer → island | settled:u64, requeued:u64, exhausted:u64 |
 | 56 | TASK_HEARTBEAT | island → syncer | empty (answered with TASK_ACK) |
+
+Streams (S27 P3, `--data-mix` and `--rl-island-task-labels`): the rows may be
+split into streams, one per (source data set, task label). A position then
+carries its stream in bits 40 and up: position `(s << 40) | k` is the `k`-th
+position of stream `s`, row `rows_s[pass_order(len(rows_s), seed, k //
+len(rows_s), stream=s)[k % len(rows_s)]]`. Every island declares the same
+stream table (rows, weight, name); a TASK_HELLO with another table is a
+mismatch. An island may accept only some streams (its task labels); it then
+gets only their positions. Fresh positions are interleaved across the
+accepted streams by weight (Tijdeman's earliest-deadline rule over every
+stream's weight; when none of the accepted streams is due, the one furthest
+behind): while every claiming island accepts every stream, after `n` fresh
+positions stream `s` has `n * w_s / sum(w)` of them to within one position.
+Queued positions of the accepted streams come first, in stream order.
+`--dispense-passes N` counts per stream. A claim that finds nothing gets WAIT
+while a live holder still holds a position of one of the claimer's streams,
+END once all of them are exhausted and reported. One stream with weight 1 and
+an empty name, accepted by every island, is the P2 dispenser: the island then
+speaks version 1 and positions are row sequence numbers.
+
+Sampler members (S27 P4; shared with the spot rollout subscribers and sample
+relay of S27 G-EA, `syncer/src/members.rs`): every head service that keeps
+per-process state for islands outside the learner session uses one membership
+rule.
+
+- Member = `(id, incarnation)`. `id`: a training island's learner id; a
+  sampler island's `2^31 | (u32_be(SHA-256("yeto-sampler:" + sampler_id)[0..4]) & 0x7fffffff)`
+  (`sampler_id` = its buffer shard name, `--rl-sampler-node`;
+  `task_dispense.sampler_holder_id`, `spot_rollout.release_store.subscriber_id_for`).
+  `incarnation`: one nonzero random u64 per island process, the same on every
+  channel the process opens (TASK_HELLO, SUBSCRIBE, RELAY_HELLO):
+  `task_dispense.member_incarnation()` (from `YETO_SAMPLER_INCARNATION`, the
+  sampler process id that Ray workers inherit).
+- One table per head process (`members::SharedMembers`), shared by the
+  task dispenser, the subscribers and the relay producers. A member joins
+  on whichever channel it opens first; the same incarnation on another
+  channel is the same member (nothing is superseded).
+- A new incarnation of an id supersedes the current one at once, on every
+  channel; a member silent on every channel for the lease
+  (`--dispense-lease-s`, also when the dispenser is off) expires. What
+  renews the lease: every TASK_* request, a subscriber's HEARTBEAT (the
+  client sends one every 10 s), every relay request of a producer.
+- A superseded or expired member is retired: its later requests on any
+  channel are refused with an ERROR that starts with `fenced: dispense`,
+  `fenced: subscriber` or `fenced: relay` and ends with the reason in
+  brackets (`(superseded)`, `(lease expired)`, `(from before a syncer
+  restart)`). The syncer also closes the member's idle subscriber and relay
+  connections within 0.2 s with that ERROR. Each service returns what the
+  member held: the dispenser its unreported positions, to the front of the
+  queue (with subscribers or relay on, within 0.25 s of the retirement;
+  otherwise at the next dispense request); items it stored in the relay stay.
+- A process fenced as `(superseded)` stops: a newer process of the same
+  island holds the id (its task source, subscriber and relay producer all
+  end). A process fenced for another reason opens again with a new
+  incarnation (the task source does; a fenced subscriber or relay producer
+  ends its process, whose relaunch has a new incarnation).
+
+Sampler islands (S27 P4) claim like training islands; their `learner_id` is
+`2^31` plus 31 bits of SHA-256 of their sampler id (buffer shard name), so a
+relaunched sampler supersedes its old process and the ids never meet a
+training island's learner id. A sampler reports a position trained once its
+group is in the sample buffer.
 
 Every request gets exactly one answer, in order. `seq` numbers an island
 process's CLAIM and REPORT requests (strictly increasing); a request resent
@@ -793,14 +855,89 @@ Semantics:
   block whose positions are all reported is retired, so the state grows with
   the blocks in flight, not with the rows.
 - A position is generated at least once and reported trained at most once.
-- Checkpoint: the dispenser record is written to `<checkpoint>.dispense`
+- Checkpoint (record `YDS2` with the stream table; a P2 `YDS1` record still
+  restores as one stream): the dispenser record is written to `<checkpoint>.dispense`
   at every checkpoint cut, before the checkpoint itself. `--resume` restores
   the record of that cut: every holder of the record is retired and its
   unreported positions are queued first; positions settled after the cut are
   given out again (the model returned to the cut too).
-- Log: `--dispense-log` gets one JSON line per event (`dispense_open`,
-  `_grant` with the first and last pass, `_pass_start`, `_wait`, `_end`,
+- Log: `--dispense-log` gets one JSON line per event (`dispense_streams` once
+  with the stream table, `dispense_open` with the accepted streams (`accept`,
+  null: every stream), `_grant` with the first and last pass, `_pass_start`
+  with its stream, `_wait`, `_end`,
   `_report`, `_block_done`, `_reclaim` with the reason `lease_expired` or
   `superseded`, `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
   every holder of the record inside `_restore`).
   `python -m tools.eval.dispense_check` replays it.
+## Receive-only subscribers (S27 G-EA, `--max-subscribers N`)
+
+A sampler island on any cloud can follow the global weights without being a
+learner. It opens the usual connection group, but its control socket's first
+frame is SUBSCRIBE (type 67) instead of HELLO:
+
+- body: a HELLO body with `learner_id = 2^31 | 31 bits` (the
+  SHA-256 of `yeto-sampler:<sampler id>`, the task dispenser's sampler
+  holder id) and dtype 2 (bf16), then the trailer `b"YSI1"` |
+  incarnation:u64 (the process's member incarnation, "Sampler members";
+  required); with a key it ends in
+  HMAC-SHA256(key, `b"yeto-subscribe-mac-v1\0"` | body);
+- data streams attach with the ordinary DATA_HELLO under the same id;
+- the syncer waits until a learner has established the session, then
+  compares the layout and its fingerprint (and the profile hash when sent)
+  with the session; the session contract and the compat group are not
+  compared (a subscriber never merges, so it may run another card type);
+- at most `--max-subscribers` are connected at once (a reconnect of the same
+  id replaces its old connection); 0 (default) refuses every SUBSCRIBE.
+
+The syncer sends a subscriber BCAST_FRAGMENT in the bf16 session format
+(`fragment_id:u32 | version:u64 | bf16 values`), whatever the learners'
+session dtype: at the first merge after it connected every fragment at its
+current version, then every merged version (the terminal step is not
+broadcast). The scheduler only puts the newest version of each fragment in
+the subscriber's pending set (it never awaits a subscriber); a forwarder
+task per subscriber sends at the link's pace, oldest version first, so a
+slow link skips versions instead of slowing merges. A subscriber is never in
+the roster or the learner membership: no PULL, no quorum or K, no final
+cut, no SHUTDOWN, no event-tape or status record. It is a sampler member
+("Sampler members"): HEARTBEAT renews the member lease, LEAVE is ignored,
+and a retired member gets ERROR `fenced: subscriber ...`. When the run ends every subscriber gets ERROR
+`subscriber: run finished`. Refusals are ERRORs that start with
+`subscriber refused:`. Unsharded syncers only.
+
+## Sample relay (S27 G-EA, `--sample-relay`)
+
+A small in-memory store-and-forward queue for rollout groups, on the syncer
+port, so a sampler on another cloud needs no shared volume or store
+credentials. Each relay connection starts with RELAY_HELLO; it never joins a
+learner session and never touches merge state (not in the profile hash).
+
+| type | name | payload |
+|---:|---|---|
+| 60 | RELAY_HELLO | version:u16 (=2), role:u8 (1 producer, 2 consumer, 3 board), channel:u32, client:u32, incarnation:u64, stream:u64; then HMAC-SHA256(key, `b"yeto-relay-hello-mac-v1\0"` \| body) with a key |
+| 61 | RELAY_WELCOME | version:u16, relay_epoch:u64, max_item_bytes:u64, max_items:u32, max_bytes:u64, depth |
+| 62 | RELAY_PUT | seq:u64, item bytes |
+| 63 | RELAY_PUT_ACK | seq:u64, status:u8 (0 stored, 1 duplicate, 2 full), item_id:u64, depth |
+| 64 | RELAY_TAKE | after:u64, ack_through:u64, max_items:u32, max_bytes:u64, wait_ms:u32 |
+| 65 | RELAY_ITEMS | n:u32, depth, n × (item_id:u64, producer:u32, len:u64, bytes) |
+| 66 | RELAY_STATUS | request: empty; answer: depth |
+
+`depth` = items:u32, bytes:u64, acked_through:u64, next_id:u64.
+
+- Channels: one per consuming training island; any number of producers; one
+  consumer (a newer consumer connection supersedes the older one, whose next
+  TAKE gets ERROR `relay superseded:`).
+- Producer: a sampler member (`client` = its id, `incarnation` = the
+  process's member incarnation, "Sampler members"); `stream` is random per
+  producer object. Sequence numbers start at 1 per (client, incarnation,
+  stream); a resend of the last number gets the same answer; FULL
+  (`--sample-relay-max-items`, `--sample-relay-max-mib`) stores nothing and
+  the producer retries. A retired producer gets ERROR `fenced: relay ...`.
+  Consumers and boards are not members.
+- Consumer: TAKE returns items with id > `after` and deletes items with id
+  <= `ack_through`; unacknowledged items are delivered again to a new
+  connection. TAKE waits up to `wait_ms` (at most 60 s) for an item.
+- Board (role 3): PUT replaces the board value of `channel` (up to 64 MiB),
+  TAKE returns it when its id is newer than `after`. Training island 0
+  publishes its fragment layout on board 1 for the subscribers.
+- Items live only in head memory; a head restart gives a new `relay_epoch`
+  and the clients reset their cursors. Refusals: ERROR `relay refused:`.

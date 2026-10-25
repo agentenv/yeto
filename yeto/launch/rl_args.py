@@ -1216,7 +1216,7 @@ def _prepare_rl_args(
     _apply_rl_outer_merge_options(args, num_islands=learners)
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
     _check_island_pool(args, num_islands=learners)
-    check_peer_recovery(args)
+    check_peer_recovery(args, clouds={spec.cloud for spec in specs})
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 

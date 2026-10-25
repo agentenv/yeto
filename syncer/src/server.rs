@@ -173,6 +173,12 @@ pub struct Config {
     /// the recover flag). Bound, donor tries and donor timeout only: it never
     /// changes a merge, so it is not in the semantic profile hash.
     pub recovery: crate::recovery::RecoveryConfig,
+    /// S27 G-EL: send a rejoin catch-up and a recovery replay from the
+    /// scheduler itself (the behavior before `resend.rs`): each fragment send
+    /// waits for the learner's link, so a slow link stalls every round and
+    /// lease. Off (default): a forwarder task per learner sends them while
+    /// the scheduler serves rounds. Wire timing only, not in the profile hash.
+    pub inline_resend: bool,
     /// S27 P4b: how rounds that the exact fold cannot reproduce (partial
     /// quorum, token weights) reduce pushes.  Numerics only (the result is
     /// within f32 rounding of the buffered merge), so not in the profile
@@ -198,6 +204,17 @@ pub struct Config {
     pub dispense: Option<crate::dispense::DispenseConfig>,
     /// JSONL log of every dispenser event (`task-dispense.jsonl`).
     pub dispense_log: Option<std::path::PathBuf>,
+    /// S27 G-EA: most receive-only subscribers connected at once; 0 = off
+    /// (SUBSCRIBE is refused). Subscribers never change a merge, so this is
+    /// not in the semantic profile hash.
+    pub max_subscribers: u32,
+    /// S27 G-EA: limits of the sample relay (`sample_relay.rs`); None = off
+    /// (RELAY_HELLO is refused). Not in the semantic profile hash.
+    pub sample_relay: Option<crate::sample_relay::RelayConfig>,
+    /// Lease of the shared member table (`members.rs`) when the task
+    /// dispenser is off (`--dispense-lease-s`; with the dispenser its lease
+    /// is the table's). Used by the subscribers and the relay producers.
+    pub member_lease: Duration,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -521,6 +538,259 @@ fn append_tensor_bytes(
     Ok(())
 }
 
+/// S27 G-EA: one receive-only subscriber connection (`subscriber.rs`).
+struct SubscriberConn {
+    group: Arc<Group>,
+    subscriber_id: u32,
+    /// The sampler process's member (`members.rs`): wire id and the
+    /// incarnation of its SUBSCRIBE trailer.
+    holder: crate::members::Holder,
+    pending: Mutex<crate::subscriber::Pending>,
+    notify: tokio::sync::Notify,
+    /// Set at SUBSCRIBE: the next publish offers every fragment.
+    needs_snapshot: std::sync::atomic::AtomicBool,
+    closed: std::sync::atomic::AtomicBool,
+    sent_fragments: AtomicU64,
+}
+
+impl SubscriberConn {
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+/// S27 G-EA: every subscriber connection of this syncer, by subscriber id.
+struct SubscriberHub {
+    max: u32,
+    /// The syncer's shared member table (subscribers are members).
+    members: crate::members::SharedMembers,
+    conns: Mutex<HashMap<u32, Arc<SubscriberConn>>>,
+    /// Groups of SUBSCRIBE connections still waiting for the session (their
+    /// data streams may already attach).
+    waiting: Mutex<HashMap<Member, Arc<Group>>>,
+}
+
+impl SubscriberHub {
+    fn new(max: u32, members: crate::members::SharedMembers) -> Self {
+        SubscriberHub {
+            max,
+            members,
+            conns: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The `fenced:` text when the member table retired `holder`.
+    fn fenced(&self, holder: crate::members::Holder) -> Option<String> {
+        let members = self.members.lock().unwrap();
+        members
+            .is_retired(holder)
+            .then(|| format!("{} {}", crate::subscriber::FENCED_PREFIX, members.fenced_text(holder)))
+    }
+
+    /// Register a connection; a live older connection of the same id is
+    /// closed (the newer generation wins, like a learner reconnect; an
+    /// older incarnation was retired by the member join and is told so).
+    fn register(&self, conn: Arc<SubscriberConn>) {
+        let old = self.conns.lock().unwrap().insert(conn.subscriber_id, conn.clone());
+        if let Some(old) = old {
+            old.close();
+        }
+    }
+
+    fn remove(&self, conn: &Arc<SubscriberConn>) {
+        conn.close();
+        let mut conns = self.conns.lock().unwrap();
+        if conns.get(&conn.subscriber_id).is_some_and(|c| Arc::ptr_eq(c, conn)) {
+            conns.remove(&conn.subscriber_id);
+        }
+    }
+
+    fn group(&self, member: Member) -> Option<Arc<Group>> {
+        if let Some(group) = self.waiting.lock().unwrap().get(&member) {
+            return Some(group.clone());
+        }
+        let id = member.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
+        self.conns
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|c| c.group.member == member)
+            .map(|c| c.group.clone())
+    }
+
+    /// Connected subscribers other than `subscriber_id` (a reconnect of the
+    /// same id replaces its old connection, so it does not count).
+    fn live_others(&self, subscriber_id: u32) -> usize {
+        self.conns.lock().unwrap().keys().filter(|id| **id != subscriber_id).count()
+    }
+
+    fn live(&self) -> Vec<Arc<SubscriberConn>> {
+        self.conns.lock().unwrap().values().cloned().collect()
+    }
+
+    /// Offer a fragment version to every subscriber (no await: the
+    /// scheduler never waits for a subscriber link). New subscribers also get
+    /// every other fragment at its current version.
+    fn publish(&self, st: &GlobalState, p: usize) {
+        for conn in self.live() {
+            if conn.is_closed() {
+                continue;
+            }
+            let mut queued = false;
+            {
+                let mut pending = conn.pending.lock().unwrap();
+                if conn.needs_snapshot.swap(false, Ordering::AcqRel) {
+                    for q in 0..st.params.len() {
+                        if conn.group.layout.fragments.get(q).and_then(|f| f.numel().ok()) == Some(st.params[q].len()) {
+                            queued |= pending.offer(q, st.versions[q], st.params[q].clone());
+                        }
+                    }
+                }
+                queued |= pending.offer(p, st.versions[p], st.params[p].clone());
+            }
+            if queued {
+                conn.notify.notify_one();
+            }
+        }
+    }
+
+    /// End of the run: tell every subscriber, then close it.
+    async fn finish(&self) {
+        let conns = self.live();
+        for conn in &conns {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                conn.group.send_small(
+                    MSG_ERROR,
+                    bytes::Bytes::from_static(crate::subscriber::RUN_FINISHED.as_bytes()),
+                ),
+            )
+            .await;
+            conn.close();
+        }
+        if !conns.is_empty() {
+            // Let the writer tasks flush the ERROR before the process exits.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// Send pending fragment versions to one subscriber at its link's pace.
+async fn subscriber_forwarder(conn: Arc<SubscriberConn>) {
+    loop {
+        if conn.is_closed() {
+            return;
+        }
+        let next = conn.pending.lock().unwrap().pop();
+        let Some((p, version, values)) = next else {
+            conn.notify.notified().await;
+            continue;
+        };
+        let prefix = crate::subscriber::bcast_prefix(p, version);
+        if let Err(error) = conn
+            .group
+            .send_tensor_large(MSG_BCAST_FRAGMENT, &prefix, DTYPE_BF16, &values)
+            .await
+        {
+            warn!(
+                subscriber = conn.subscriber_id,
+                generation = conn.group.member.generation,
+                fragment = p,
+                "subscriber send failed: {error:#}"
+            );
+            conn.close();
+            return;
+        }
+        drop(values);
+        let sent = conn.sent_fragments.fetch_add(1, Ordering::Relaxed) + 1;
+        if sent % 64 == 1 {
+            let pending = conn.pending.lock().unwrap();
+            info!(
+                subscriber = conn.subscriber_id,
+                fragment = p,
+                version,
+                sent,
+                pending = pending.len(),
+                coalesced = pending.coalesced,
+                "subscriber fragment sent"
+            );
+        }
+    }
+}
+
+/// A subscriber stream accepts only HEARTBEAT (renews the member's lease)
+/// and LEAVE (ignored); the connection ends at EOF, on any other frame, when
+/// the hub closes it, or when the member table retires its member (then it
+/// is told `fenced: subscriber ...` first).
+async fn subscriber_read_loop(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    conn: &Arc<SubscriberConn>,
+    hub: &SubscriberHub,
+) -> Result<()> {
+    loop {
+        let read = read_frame_limited(rd, |msg_type| match msg_type {
+            MSG_HEARTBEAT => Ok(12),
+            MSG_LEAVE => Ok(5),
+            other => bail!("a subscriber may not send message type {other}"),
+        });
+        let frame = tokio::select! {
+            frame = read => frame,
+            fenced = async {
+                loop {
+                    if let Some(message) = hub.fenced(conn.holder) {
+                        break Some(message);
+                    }
+                    if conn.is_closed() {
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } => return subscriber_fenced(conn, fenced).await,
+        };
+        match frame {
+            Ok(frame) => {
+                if frame.msg_type == MSG_HEARTBEAT {
+                    let renewed = {
+                        let mut members = hub.members.lock().unwrap();
+                        let now = Instant::now();
+                        members.expire(now);
+                        members.touch(conn.holder, now)
+                    };
+                    if !renewed {
+                        return subscriber_fenced(conn, hub.fenced(conn.holder)).await;
+                    }
+                }
+            }
+            Err(error) if error.downcast_ref::<std::io::Error>().is_some() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Close a subscriber connection; with a `fenced:` text, send it first.
+async fn subscriber_fenced(conn: &Arc<SubscriberConn>, fenced: Option<String>) -> Result<()> {
+    let Some(message) = fenced else {
+        conn.close();
+        return Ok(());
+    };
+    info!(subscriber = conn.subscriber_id, incarnation = conn.holder.incarnation, "{message}");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.group.send_small(MSG_ERROR, bytes::Bytes::from(message.clone().into_bytes())),
+    )
+    .await;
+    conn.close();
+    // Let the writer task flush the ERROR before the socket is dropped.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    bail!(message)
+}
+
 enum Event {
     Fatal {
         metric: &'static str,
@@ -659,6 +929,13 @@ struct RegistryState {
     membership_record: Option<std::path::PathBuf>,
     /// The task dispenser (S27 P2); its record is a checkpoint sidecar.
     dispense: Option<Arc<crate::dispense_service::DispenseService>>,
+    /// S27 G-EA: receive-only subscribers (None: --max-subscribers 0). Kept
+    /// apart from `current`/`groups`/`membership`, so no round, lease, final
+    /// cut or status record ever sees them.
+    subscribers: Option<Arc<SubscriberHub>>,
+    /// S27 G-EL: learners whose catch-up or recovery replay a forwarder
+    /// task sends; publications offer them each version instead of sending.
+    resends: HashMap<Member, Arc<ResendConn>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -795,7 +1072,10 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 /// The task dispenser of `cfg` (S27 P2): restored from the record next to
 /// the checkpoint on `--resume`, which retires every island process of the
 /// record and puts their unreported positions back first.
-fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
+fn initial_dispense(
+    cfg: &Config,
+    members: &crate::members::SharedMembers,
+) -> Result<Option<Arc<crate::dispense_service::DispenseService>>> {
     let Some(dispense) = cfg.dispense.clone() else { return Ok(None) };
     if cfg.shard.index != 0 {
         bail!("--dispense runs on shard 0 of a sharded head only");
@@ -808,6 +1088,7 @@ fn initial_dispense(cfg: &Config) -> Result<Option<Arc<crate::dispense_service::
         cfg.syncer_epoch,
         cfg.island_hmac_key.clone(),
         restore,
+        members.clone(),
     )?;
     info!(restored = restore.is_some(), "task dispenser on");
     Ok(Some(Arc::new(service)))
@@ -1112,6 +1393,15 @@ fn validate_config(cfg: &Config) -> Result<()> {
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
+    }
+    if cfg.max_subscribers > 0 && cfg.shard.is_sharded() {
+        bail!("--max-subscribers needs an unsharded syncer (--shard-count 1)");
+    }
+    if cfg.max_subscribers > crate::subscriber::SUBSCRIBER_ID_BIT {
+        bail!("--max-subscribers is too large");
+    }
+    if let Some(relay) = &cfg.sample_relay {
+        relay.validate()?;
     }
     cfg.membership.validate(cfg.learners, cfg.quorum)?;
     if !cfg.membership.is_static() {
@@ -1466,10 +1756,50 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
-    let dispense = initial_dispense(&cfg)?;
+    // S27: one member table for the dispenser, the subscribers and the relay
+    // producers, so one sampler process is one member on all three channels.
+    let members = crate::members::shared(cfg.dispense.as_ref().map_or(cfg.member_lease, |d| d.lease));
+    let dispense = initial_dispense(&cfg, &members)?;
+    let subscribers =
+        (cfg.max_subscribers > 0).then(|| Arc::new(SubscriberHub::new(cfg.max_subscribers, members.clone())));
+    if let Some(hub) = &subscribers {
+        info!(max_subscribers = hub.max, "receive-only subscribers enabled");
+    }
+    let relay = cfg
+        .sample_relay
+        .map(|relay_cfg| crate::sample_relay::RelayHub::new(relay_cfg, cfg.island_hmac_key.clone(), members.clone()));
+    if let Some(hub) = &relay {
+        let relay_cfg = hub.state.lock().unwrap().config();
+        info!(
+            max_items = relay_cfg.max_items,
+            max_bytes = relay_cfg.max_bytes,
+            max_item_bytes = relay_cfg.max_item_bytes,
+            "sample relay enabled"
+        );
+        hub.spawn_reporter(Duration::from_secs(60));
+    }
+    if let (Some(service), true) = (&dispense, subscribers.is_some() || relay.is_some()) {
+        // A subscriber or relay connection of a newer incarnation retires the
+        // old one in the shared table; reclaim its rows now, not at the next
+        // dispense request (with the dispenser alone nothing changes).
+        let service = service.clone();
+        let members = members.clone();
+        tokio::spawn(async move {
+            let mut seen = members.lock().unwrap().retirements();
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let now = members.lock().unwrap().retirements();
+                if now != seen {
+                    seen = now;
+                    service.with(|_, _| ());
+                }
+            }
+        });
+    }
     let registry: Registry = Arc::new(Mutex::new(RegistryState {
         membership_record,
         dispense: dispense.clone(),
+        subscribers: subscribers.clone(),
         ..RegistryState::new(membership)
     }));
     registry.lock().unwrap().persist_membership();
@@ -1491,6 +1821,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     if hello_auth.key.is_none() {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
+    let accept_relay = relay.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -1501,6 +1832,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let tx = event_tx.clone();
                     let hello_auth = hello_auth.clone();
                     let dispense = dispense.clone();
+                    let relay = accept_relay.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -1514,6 +1846,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             budget_cutoff,
                             hello_auth,
                             dispense,
+                            relay,
                         )
                         .await
                         {
@@ -1526,7 +1859,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     });
 
-    scheduler(cfg, event_rx, registry, budget_cutoff).await
+    let result = scheduler(cfg, event_rx, registry, budget_cutoff).await;
+    if let Some(hub) = subscribers {
+        hub.finish().await;
+    }
+    result
 }
 
 fn negotiated_payload_limits(layout: &Layout, dtype: u8, expert_tags: bool) -> Result<(u64, u64)> {
@@ -1790,13 +2127,15 @@ async fn handle_connection(
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
     dispense: Option<Arc<crate::dispense_service::DispenseService>>,
+    relay: Option<Arc<crate::sample_relay::RelayHub>>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
-        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
-        MSG_TASK_HELLO => Ok(4096),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {other}"),
+        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE | MSG_SUBSCRIBE => Ok(MAX_HELLO_FRAME),
+        MSG_TASK_HELLO => Ok(crate::protocol::MAX_TASK_HELLO),
+        crate::sample_relay::MSG_RELAY_HELLO => Ok(1024),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {other}"),
     })
     .await
     {
@@ -1984,10 +2323,16 @@ async fn handle_connection(
             };
             let learner_id = member.learner_id;
             let generation = member.generation;
+            let subscriber = crate::subscriber::is_subscriber_id(learner_id);
             // The control socket's HELLO may still be in flight; wait for it.
             let mut group = None;
             for _ in 0..200 {
-                group = registry.lock().unwrap().groups.get(&member).cloned();
+                group = if subscriber {
+                    let hub = registry.lock().unwrap().subscribers.clone();
+                    hub.and_then(|hub| hub.group(member))
+                } else {
+                    registry.lock().unwrap().groups.get(&member).cloned()
+                };
                 if group.is_some() {
                     break;
                 }
@@ -2023,7 +2368,25 @@ async fn handle_connection(
                 bail!(message);
             }
             tokio::spawn(writer_task(wr, rx, group.wire.clone()));
+            if subscriber {
+                // Outbound only: a subscriber data stream must stay silent.
+                let read = read_frame_limited(&mut rd, |msg_type| {
+                    bail!("a subscriber data stream may not send message type {msg_type}")
+                })
+                .await;
+                return match read {
+                    Err(error) if error.downcast_ref::<std::io::Error>().is_some() => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(_) => unreachable!(),
+                };
+            }
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
+        }
+        MSG_SUBSCRIBE => {
+            serve_subscriber(rd, wr, &first.payload, registry, session, semantic_profile_hash, hello_auth).await
+        }
+        crate::sample_relay::MSG_RELAY_HELLO => {
+            crate::sample_relay::serve(&mut rd, &mut wr, &first.payload, relay).await
         }
         MSG_BW_PROBE => {
             let request = open_hello(hello_auth.key.as_deref(), &first.payload)
@@ -2053,8 +2416,196 @@ async fn handle_connection(
                 bail!(message)
             }
         },
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO, got {t}"),
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {t}"),
     }
+}
+
+/// How long a SUBSCRIBE waits for the first learner to establish the session.
+const SUBSCRIBE_SESSION_WAIT: Duration = Duration::from_secs(1800);
+
+/// S27 G-EA: admit one receive-only subscriber (`subscriber.rs`). Checks:
+/// the MAC (subscribe domain), the HELLO body with a subscriber id below
+/// `--max-subscribers`, dtype bf16, and the established session's layout
+/// and fingerprint (and profile hash when offered). The session contract and
+/// compat group are not compared: a subscriber never merges, so it may run
+/// another card type. Nothing here touches the roster or the scheduler.
+async fn serve_subscriber(
+    mut rd: tokio::net::tcp::OwnedReadHalf,
+    mut wr: OwnedWriteHalf,
+    payload: &[u8],
+    registry: Registry,
+    session: Session,
+    semantic_profile_hash: [u8; 32],
+    hello_auth: Arc<HelloAuth>,
+) -> Result<()> {
+    let hub = registry.lock().unwrap().subscribers.clone();
+    let Some(hub) = hub else {
+        let message = "subscriber refused: this syncer runs without --max-subscribers";
+        let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    };
+    let parsed = open_subscribe(hello_auth.key.as_deref(), payload)
+        .and_then(crate::subscriber::split_incarnation)
+        .and_then(|(body, incarnation)| Ok((parse_hello_body(body, u32::MAX)?, incarnation)));
+    let (parsed, incarnation) = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let message = format!("subscriber refused: invalid SUBSCRIBE: {error:#}");
+            let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+            return Err(error);
+        }
+    };
+    let subscriber_id = parsed.learner_id & !crate::subscriber::SUBSCRIBER_ID_BIT;
+    let holder = crate::members::Holder { learner_id: parsed.learner_id, incarnation };
+    let refusal = if let Some(fenced) = hub.fenced(holder) {
+        Some(fenced)
+    } else if !crate::subscriber::is_subscriber_id(parsed.learner_id) {
+        Some("subscriber refused: the SUBSCRIBE id lacks the subscriber bit".to_string())
+    } else if hub.live_others(subscriber_id) >= hub.max as usize {
+        Some(format!("subscriber refused: {} subscribers are connected (--max-subscribers {})", hub.max, hub.max))
+    } else if parsed.dtype != DTYPE_BF16 {
+        Some(format!("subscriber refused: SUBSCRIBE dtype {} (subscribers receive bf16, dtype 2)", parsed.dtype))
+    } else if matches!(parsed.syncer_profile_hash, Some(offered) if offered != semantic_profile_hash) {
+        Some("subscriber refused: SUBSCRIBE syncer semantic profile does not match the running server".to_string())
+    } else {
+        None
+    };
+    if let Some(message) = refusal {
+        let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    }
+    let member = Member { learner_id: parsed.learner_id, generation: parsed.generation };
+    let num_fragments = parsed.layout.fragments.len();
+    let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
+    let group = Arc::new(Group {
+        member,
+        dtype: DTYPE_BF16,
+        expert_tokens: false,
+        layout: parsed.layout.clone(),
+        layout_fingerprint: parsed.layout_fingerprint,
+        session_contract_hash: parsed.session_contract_hash,
+        num_streams: parsed.num_streams,
+        max_init_payload: 0,
+        max_push_payload: 0,
+        max_chunked_inner: 0,
+        control: tx,
+        data: Mutex::new(HashMap::new()),
+        msg_id: AtomicU64::new(0),
+        rr: AtomicUsize::new(0),
+        reasm: Mutex::new(HashMap::new()),
+        // Its downlink bytes are counted under its subscriber id (head egress).
+        wire: wire_counter(parsed.learner_id),
+    });
+    // Its data streams may attach while it waits for the session.
+    hub.waiting.lock().unwrap().insert(member, group.clone());
+    let admitted = admit_subscriber(&mut wr, &parsed, &session).await;
+    hub.waiting.lock().unwrap().remove(&member);
+    admitted?;
+    // Join the shared member table: a new incarnation of this sampler retires
+    // its old one on every channel (its relay producer and its dispenser
+    // holder too); the same incarnation (a reconnect) keeps everything.
+    let joined = {
+        let mut members = hub.members.lock().unwrap();
+        let now = Instant::now();
+        members.expire(now);
+        match members.is_retired(holder) {
+            true => Err(format!("{} {}", crate::subscriber::FENCED_PREFIX, members.fenced_text(holder))),
+            false => Ok(members.join(holder, now)),
+        }
+    };
+    match joined {
+        Err(message) => {
+            let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+            bail!(message);
+        }
+        Ok(crate::members::Join::Joined { superseded: Some(old) }) => info!(
+            subscriber = subscriber_id,
+            incarnation,
+            superseded = old.incarnation,
+            "subscriber superseded an older incarnation of its sampler"
+        ),
+        Ok(_) => {}
+    }
+    let conn = Arc::new(SubscriberConn {
+        group,
+        subscriber_id,
+        holder,
+        pending: Mutex::new(crate::subscriber::Pending::new(num_fragments)),
+        notify: tokio::sync::Notify::new(),
+        needs_snapshot: std::sync::atomic::AtomicBool::new(true),
+        closed: std::sync::atomic::AtomicBool::new(false),
+        sent_fragments: AtomicU64::new(0),
+    });
+    tokio::spawn(writer_task(wr, rx, conn.group.wire.clone()));
+    hub.register(conn.clone());
+    info!(
+        subscriber = subscriber_id,
+        generation = member.generation,
+        incarnation,
+        num_streams = parsed.num_streams,
+        "subscriber connected (receive-only; not in the roster)"
+    );
+    tokio::spawn(subscriber_forwarder(conn.clone()));
+    let result = subscriber_read_loop(&mut rd, &conn, &hub).await;
+    hub.remove(&conn);
+    info!(
+        subscriber = subscriber_id,
+        generation = member.generation,
+        sent = conn.sent_fragments.load(Ordering::Relaxed),
+        "subscriber disconnected"
+    );
+    result
+}
+
+/// Wait for the first learner HELLO to establish the session, then compare
+/// the SUBSCRIBE layout with it; on a refusal the ERROR is already sent.
+async fn admit_subscriber(wr: &mut OwnedWriteHalf, parsed: &ParsedHello, session: &Session) -> Result<()> {
+    let deadline = Instant::now() + SUBSCRIBE_SESSION_WAIT;
+    let expected = loop {
+        if let Some(spec) = session.lock().unwrap().as_ref() {
+            break Some((spec.layout.clone(), spec.layout_fingerprint));
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let Some((layout, fingerprint)) = expected else {
+        let message = "subscriber refused: no learner session was established in time";
+        let _ = send_direct(wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    };
+    if layout != parsed.layout || fingerprint != parsed.layout_fingerprint {
+        let message = format!(
+            "subscriber refused: layout mismatch (session layout_fingerprint={} fragments={}, \
+             SUBSCRIBE layout_fingerprint={} fragments={})",
+            hex32(&fingerprint),
+            layout.fragments.len(),
+            hex32(&parsed.layout_fingerprint),
+            parsed.layout.fragments.len(),
+        );
+        let _ = send_direct(wr, MSG_ERROR, message.as_bytes()).await;
+        bail!(message);
+    }
+    Ok(())
+}
+
+/// With a key: verify and strip the trailing HMAC of a SUBSCRIBE (subscribe domain).
+fn open_subscribe<'a>(key: Option<&[u8]>, payload: &'a [u8]) -> Result<&'a [u8]> {
+    let Some(key) = key else { return Ok(payload) };
+    if payload.len() < crate::hmac::HMAC_LEN {
+        bail!("SUBSCRIBE shorter than its HMAC (island has no YETO_ISLAND_HMAC_KEY?)");
+    }
+    let (body, mac) = payload.split_at(payload.len() - crate::hmac::HMAC_LEN);
+    let mut framed = Vec::with_capacity(crate::subscriber::SUBSCRIBE_MAC_DOMAIN.len() + body.len());
+    framed.extend_from_slice(crate::subscriber::SUBSCRIBE_MAC_DOMAIN);
+    framed.extend_from_slice(body);
+    let expected = crate::hmac::hmac_sha256(key, &framed);
+    let diff = expected.iter().zip(mac).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    if diff != 0 {
+        bail!("SUBSCRIBE HMAC mismatch (wrong or missing island HMAC key)");
+    }
+    Ok(body)
 }
 
 /// Largest upload or download one BW_PROBE connection may ask for.
@@ -3090,6 +3641,11 @@ async fn scheduler(
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
     let mut catch_ups: CatchUps<Arc<Group>> = CatchUps::new();
+    // S27 G-EL (`resend.rs`): catch-ups and recovery replays go out on a
+    // forwarder task per learner. bf16-downlink sessions keep the inline
+    // path: their broadcasts are deltas against a shared anchor.
+    let background_resend = !cfg.inline_resend && st.downlink.is_none();
+    let mut resends = BulkResends::new();
     if dynamic {
         write_pool_status(&cfg, &registry, st.global_step, "running");
     }
@@ -3208,7 +3764,7 @@ async fn scheduler(
                 break;
             }
             let mut groups = current_groups(&registry);
-            groups.retain(|group| !catch_ups.holds(group.member));
+            groups.retain(|group| !catch_ups.holds(group.member) && !resends.holds(group.member));
             if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
@@ -3453,49 +4009,37 @@ async fn scheduler(
                 }
             }
             Some(CatchUpStep::Done(done)) => {
-                let group = done.group;
-                if done.tail.rejoin {
-                    registry
-                        .lock()
-                        .unwrap()
-                        .membership
-                        .record_catch_up(group.member, &st.versions);
-                    if dynamic {
-                        append_pool_record(
-                            cfg.event_tape.as_deref(),
-                            "pool_join",
-                            cfg.syncer_epoch,
-                            &format!(
-                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
-                                group.member.learner_id, group.member.generation, st.global_step
-                            ),
-                        );
-                        write_pool_status(&cfg, &registry, st.global_step, "running");
-                    }
-                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
-                        cutoff_established = true;
-                        break 'outer;
-                    }
+                if !finish_catch_up(&cfg, &st, &registry, &done.group, done.tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await {
+                    cutoff_established = true;
+                    break 'outer;
                 }
-                if done.tail.rebind {
-                    let repulls = rebind_current_unanswered_rounds(&registry, &mut inflight, group.member);
-                    for repull in repulls {
-                        if !send_small_until_cutoff(&group, MSG_PULL_REQ, repull.pull, &budget_cutoff).await {
-                            cutoff_established = true;
-                            break 'outer;
-                        }
-                        info!(
-                            learner_id = group.member.learner_id,
-                            old_generation = repull.old_generation,
-                            generation = group.member.generation,
-                            step = repull.t,
-                            fragment = repull.p,
-                            attempt = repull.attempt,
-                            base_version = repull.base_version,
-                            "rebound outstanding pull after captured generation disconnected"
-                        );
-                    }
+            }
+        }
+        // S27 G-EL: background resends (catch-ups and recovery replays sent by
+        // a forwarder task per learner). The scheduler only checks which ones
+        // are drained and runs their tails here.
+        for member in resends.drop_superseded(&registry) {
+            warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                "superseded learner resend dropped"
+            );
+        }
+        for done in resends.take_drained(&registry) {
+            let finished = match done.tail {
+                ResendTail::CatchUp(tail) => {
+                    finish_catch_up(&cfg, &st, &registry, &done.group, tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await
                 }
+                ResendTail::Recovery { replayed } => {
+                    finish_recovery_replay(
+                        &cfg, &st, &registry, &mut recovery, &done.group, replayed, dynamic, &mut inflight, fixed_roster, &budget_cutoff,
+                    )
+                    .await
+                }
+            };
+            if !finished {
+                cutoff_established = true;
+                break 'outer;
             }
         }
         if submitted_any {
@@ -3538,6 +4082,11 @@ async fn scheduler(
         if !catch_ups.is_empty() {
             // Poll events without sleeping, then send the next fragment.
             earliest = Some(deadline_now);
+        }
+        if !resends.is_empty() {
+            // Check the background resends for drained ones a few times a second.
+            let check = deadline_now + RESEND_CHECK_INTERVAL;
+            earliest = Some(earliest.map_or(check, |d| d.min(check)));
         }
         let wake = if let Some(pending) = publishing.as_mut() {
             // Same event-first bias; a durable checkpoint outranks compute
@@ -3842,7 +4391,27 @@ async fn scheduler(
                     // revalidates the generation before each send, because a
                     // newer HELLO may supersede this one meanwhile.
                     let fragments = if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
-                    catch_ups.enqueue(group.member, group, fragments, CatchUpTail::REJOIN);
+                    if background_resend {
+                        // S27 G-EL: offer the current values only once the
+                        // pending round is durable (as the inline catch-up
+                        // checks before each send); later versions come with
+                        // their publication.
+                        if let Some(pending) = publishing.take() {
+                            settle_pending_publish(
+                                &cfg,
+                                &st,
+                                &registry,
+                                &mut last_sync_secs,
+                                pending,
+                                &budget_cutoff,
+                                &mut busy_fragments,
+                            )
+                            .await?;
+                        }
+                        resends.start(&registry, &st, group.member, group, fragments, ResendTail::CatchUp(CatchUpTail::REJOIN));
+                    } else {
+                        catch_ups.enqueue(group.member, group, fragments, CatchUpTail::REJOIN);
+                    }
                 }
                 Event::Recovery { member, msg } => {
                     let restored = match msg {
@@ -3890,6 +4459,14 @@ async fn scheduler(
                             continue;
                         }
                     };
+                    if background_resend {
+                        // S27 G-EL: a forwarder task sends the replay; merges go on
+                        // and offer it every newer version until it is drained,
+                        // then the tail promotes the island (`take_drained`).
+                        resends.start(&registry, &st, member, group, replay.iter().copied(),
+                                      ResendTail::Recovery { replayed: replay.len() });
+                        continue;
+                    }
                     // Resend the newest value of each newer fragment; no
                     // broadcast can interleave until the island is promoted.
                     for &p in &replay {
@@ -3902,42 +4479,11 @@ async fn scheduler(
                             Err(error) => warn!(learner_id = member.learner_id, fragment = p, %error, "recovery replay encode failed"),
                         }
                     }
-                    let promoted = {
-                        let mut registry = registry.lock().unwrap();
-                        let promoted = registry.promote_recovered(member);
-                        if promoted {
-                            registry.membership.record_catch_up(member, &st.versions);
-                        }
-                        promoted
-                    };
-                    let Some((record, done)) = recovery.finish(member, st.global_step, &st.versions, replay.len(), Instant::now()) else {
-                        continue;
-                    };
-                    if !promoted {
-                        continue;
-                    }
-                    append_recovery_record(cfg.event_tape.as_deref(), &record);
-                    if record.missed {
-                        warn!(learner_id = member.learner_id, steps = record.steps, bound = ?record.bound_steps, "peer recovery missed its bound");
-                    } else {
-                        info!(learner_id = member.learner_id, steps = record.steps, path = ?record.source, "peer recovery done");
-                    }
-                    send_recovery(&registry, vec![done]).await;
-                    if dynamic {
-                        // The pool took the island back with recovered state; its
-                        // pushes are fenced at the versions it now holds.
-                        append_pool_record(
-                            cfg.event_tape.as_deref(),
-                            "pool_join",
-                            cfg.syncer_epoch,
-                            &format!(
-                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"recovered\":true,\"base_version\":{}",
-                                member.learner_id, member.generation, st.global_step
-                            ),
-                        );
-                        write_pool_status(&cfg, &registry, st.global_step, "running");
-                    }
-                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                    if !finish_recovery_replay(
+                        &cfg, &st, &registry, &mut recovery, &group, replay.len(), dynamic, &mut inflight, fixed_roster, &budget_cutoff,
+                    )
+                    .await
+                    {
                         cutoff_established = true;
                         break 'outer;
                     }
@@ -4021,7 +4567,24 @@ async fn scheduler(
                                 // the catch-up has finished.
                                 let fragments =
                                     if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
-                                catch_ups.enqueue(replacement, group, fragments, CatchUpTail::REBIND);
+                                if background_resend {
+                                    if let Some(pending) = publishing.take() {
+                                        settle_pending_publish(
+                                            &cfg,
+                                            &st,
+                                            &registry,
+                                            &mut last_sync_secs,
+                                            pending,
+                                            &budget_cutoff,
+                                            &mut busy_fragments,
+                                        )
+                                        .await?;
+                                    }
+                                    resends.start(&registry, &st, replacement, group, fragments,
+                                                  ResendTail::CatchUp(CatchUpTail::REBIND));
+                                } else {
+                                    catch_ups.enqueue(replacement, group, fragments, CatchUpTail::REBIND);
+                                }
                             }
                         }
                     }
@@ -4029,6 +4592,7 @@ async fn scheduler(
             },
         }
     }
+    resends.stop_all(&registry).await;
 
     if cfg.learner_budget_steps.is_some() {
         cutoff_established |= budget_cutoff.deadline().is_some();
@@ -5219,7 +5783,22 @@ async fn publish_round(
             }
             None => None,
         };
+        // S27 G-EA: offer this version to the subscribers first (no await);
+        // their forwarders send it while the learners are served below.
+        let subscribers = registry.lock().unwrap().subscribers.clone();
+        if let Some(hub) = subscribers {
+            hub.publish(st, p);
+        }
+        // S27 G-EL: learners being resent in the background get this version
+        // offered to their forwarder (no await) instead of sent inline.
+        let resends: Vec<Arc<ResendConn>> = registry.lock().unwrap().resends.values().cloned().collect();
+        for conn in &resends {
+            conn.offer(p, st.versions[p], st.params[p].clone());
+        }
         for group in current_groups(registry) {
+            if resends.iter().any(|conn| conn.group.member == group.member) {
+                continue;
+            }
             let sent = match &published {
                 Some(encoded) => {
                     send_tensor_until_cutoff(
@@ -6153,6 +6732,386 @@ impl<G: Clone> CatchUps<G> {
     }
 }
 
+/// How often the scheduler checks background resends while any is active.
+const RESEND_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// At the end of the round loop, wait this long for a forwarder to hand
+/// over the fragment it is sending before it is aborted.
+const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
+
+/// S27 G-EL: one learner connection whose catch-up or recovery replay a
+/// forwarder task sends (`resend.rs`). Publications offer it every newer
+/// version (no await) instead of sending to it inline.
+struct ResendConn {
+    group: Arc<Group>,
+    dtype: u8,
+    state: Mutex<ResendState>,
+    notify: tokio::sync::Notify,
+    stop: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct ResendState {
+    pending: crate::resend::Pending,
+    /// A fragment was popped and is not yet in the writer queues.
+    in_flight: bool,
+    /// The forwarder ended (stopped, or its stream failed: `error`).
+    ended: bool,
+    error: Option<String>,
+    sent: u64,
+    bytes: u64,
+}
+
+impl ResendConn {
+    fn offer(&self, p: usize, version: u64, values: Arc<Vec<f32>>) {
+        let queued = {
+            let mut state = self.state.lock().unwrap();
+            !state.ended && state.pending.offer(p, version, values)
+        };
+        if queued {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Every offered version is in the writer queues, or the forwarder ended.
+    fn drained(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.ended || (state.pending.is_empty() && !state.in_flight)
+    }
+}
+
+/// Send the pending fragment versions of one learner at its link's pace.
+/// A stop takes effect between fragments.
+async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow_and_update() {
+            break;
+        }
+        let next = {
+            let mut state = conn.state.lock().unwrap();
+            let next = state.pending.pop();
+            state.in_flight = next.is_some();
+            next
+        };
+        let Some((p, version, values)) = next else {
+            tokio::select! {
+                _ = conn.notify.notified() => {}
+                _ = stop.changed() => {}
+            }
+            continue;
+        };
+        let prefix = crate::resend::bcast_prefix(p, version);
+        let result = conn
+            .group
+            .send_tensor_large(MSG_BCAST_FRAGMENT, &prefix, conn.dtype, &values)
+            .await;
+        let bytes = tensor_nbytes(conn.dtype, values.len()).unwrap_or(0) as u64;
+        drop(values);
+        let mut state = conn.state.lock().unwrap();
+        state.in_flight = false;
+        match result {
+            Ok(()) => {
+                state.sent += 1;
+                state.bytes += bytes;
+            }
+            Err(error) => {
+                state.error = Some(format!("{error:#}"));
+                break;
+            }
+        }
+    }
+    let mut state = conn.state.lock().unwrap();
+    state.in_flight = false;
+    state.ended = true;
+}
+
+/// What a drained background resend still owes its learner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResendTail {
+    /// Rejoin catch-up: the same tail as an inline `CatchUps` entry.
+    CatchUp(CatchUpTail),
+    /// Recovery replay: promote, record and RECOVERY_DONE.
+    Recovery { replayed: usize },
+}
+
+struct BulkResend {
+    member: Member,
+    group: Arc<Group>,
+    conn: Arc<ResendConn>,
+    task: tokio::task::JoinHandle<()>,
+    tail: ResendTail,
+    started: Instant,
+    fragments: usize,
+}
+
+/// The background resends owned by the scheduler. Like `CatchUps`, a
+/// learner being resent joins no new round until its tail ran.
+struct BulkResends {
+    entries: Vec<BulkResend>,
+}
+
+impl BulkResends {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn holds(&self, member: Member) -> bool {
+        self.entries.iter().any(|entry| entry.member == member)
+    }
+
+    /// Offer the current value of every fragment in `fragments` to a new
+    /// forwarder of `member` (the pending publication must be durable).
+    /// A second catch-up for the same generation only adds its tail.
+    fn start(
+        &mut self,
+        registry: &Registry,
+        st: &GlobalState,
+        member: Member,
+        group: Arc<Group>,
+        fragments: impl IntoIterator<Item = usize>,
+        tail: ResendTail,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.member == member) {
+            if let (ResendTail::CatchUp(existing), ResendTail::CatchUp(more)) = (&mut entry.tail, tail) {
+                existing.rejoin |= more.rejoin;
+                existing.rebind |= more.rebind;
+            }
+            return;
+        }
+        let dtype = bulk_dtype(st.wire_dtype);
+        let mut pending = crate::resend::Pending::new(st.params.len());
+        let mut count = 0usize;
+        let mut bytes = 0usize;
+        for p in fragments {
+            if p < st.params.len() && pending.offer(p, st.versions[p], st.params[p].clone()) {
+                count += 1;
+                bytes += tensor_nbytes(dtype, st.params[p].len()).unwrap_or(0);
+            }
+        }
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let conn = Arc::new(ResendConn {
+            group: group.clone(),
+            dtype,
+            state: Mutex::new(ResendState { pending, ..ResendState::default() }),
+            notify: tokio::sync::Notify::new(),
+            stop,
+        });
+        registry.lock().unwrap().resends.insert(member, conn.clone());
+        let task = tokio::spawn(resend_forwarder(conn.clone(), stop_rx));
+        info!(
+            learner_id = member.learner_id,
+            generation = member.generation,
+            fragments = count,
+            bytes,
+            kind = ?tail,
+            "background resend started"
+        );
+        self.entries.push(BulkResend { member, group, conn, task, tail, started: Instant::now(), fragments: count });
+    }
+
+    /// Stop and drop the resends whose learner is no longer the generation
+    /// they were started for (no tail runs); returns those learners.
+    fn drop_superseded(&mut self, registry: &Registry) -> Vec<Member> {
+        let mut dropped = Vec::new();
+        {
+            let mut registry = registry.lock().unwrap();
+            self.entries.retain(|entry| {
+                let keep = match entry.tail {
+                    ResendTail::CatchUp(_) => registry.current.get(&entry.member.learner_id) == Some(&entry.member),
+                    ResendTail::Recovery { .. } => registry.is_recovering(entry.member),
+                };
+                if !keep {
+                    let _ = entry.conn.stop.send(true);
+                    registry.resends.remove(&entry.member);
+                    dropped.push(entry.member);
+                }
+                keep
+            });
+        }
+        dropped
+    }
+
+    /// Remove the drained resends (their learners get publications inline
+    /// again) and return them, oldest first, for their tails.
+    fn take_drained(&mut self, registry: &Registry) -> Vec<BulkResend> {
+        let mut drained = Vec::new();
+        let mut registry = registry.lock().unwrap();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if !self.entries[i].conn.drained() {
+                i += 1;
+                continue;
+            }
+            let entry = self.entries.remove(i);
+            registry.resends.remove(&entry.member);
+            let _ = entry.conn.stop.send(true);
+            let state = entry.conn.state.lock().unwrap();
+            match &state.error {
+                None => info!(
+                    learner_id = entry.member.learner_id,
+                    generation = entry.member.generation,
+                    fragments = entry.fragments,
+                    sent = state.sent,
+                    bytes = state.bytes,
+                    coalesced = state.pending.coalesced,
+                    seconds = entry.started.elapsed().as_secs_f64(),
+                    "background resend drained"
+                ),
+                Some(error) => warn!(
+                    learner_id = entry.member.learner_id,
+                    generation = entry.member.generation,
+                    sent = state.sent,
+                    %error,
+                    "background resend ended early; its tail still runs"
+                ),
+            }
+            drop(state);
+            drained.push(entry);
+        }
+        drained
+    }
+
+    /// End of the round loop: every forwarder hands over the fragment it is
+    /// sending (bounded by `RESEND_STOP_WAIT`, then aborted) and stops.
+    async fn stop_all(&mut self, registry: &Registry) {
+        let entries = std::mem::take(&mut self.entries);
+        {
+            let mut registry = registry.lock().unwrap();
+            for entry in &entries {
+                registry.resends.remove(&entry.member);
+                let _ = entry.conn.stop.send(true);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + RESEND_STOP_WAIT;
+        for mut entry in entries {
+            if tokio::time::timeout_at(deadline, &mut entry.task).await.is_err() {
+                warn!(
+                    learner_id = entry.member.learner_id,
+                    generation = entry.member.generation,
+                    "background resend still sending at the end of training; aborted"
+                );
+                entry.task.abort();
+            }
+        }
+    }
+}
+
+/// Tail of a finished rejoin catch-up (inline `CatchUps` or background
+/// resend). False when the budget cutoff was established.
+#[allow(clippy::too_many_arguments)]
+async fn finish_catch_up(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    group: &Arc<Group>,
+    tail: CatchUpTail,
+    dynamic: bool,
+    inflight: &mut [Round],
+    fixed_roster: bool,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    if tail.rejoin {
+        registry
+            .lock()
+            .unwrap()
+            .membership
+            .record_catch_up(group.member, &st.versions);
+        if dynamic {
+            append_pool_record(
+                cfg.event_tape.as_deref(),
+                "pool_join",
+                cfg.syncer_epoch,
+                &format!(
+                    "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
+                    group.member.learner_id, group.member.generation, st.global_step
+                ),
+            );
+            write_pool_status(cfg, registry, st.global_step, "running");
+        }
+        if !repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await {
+            return false;
+        }
+    }
+    if tail.rebind {
+        let repulls = rebind_current_unanswered_rounds(registry, inflight, group.member);
+        for repull in repulls {
+            if !send_small_until_cutoff(group, MSG_PULL_REQ, repull.pull, budget_cutoff).await {
+                return false;
+            }
+            info!(
+                learner_id = group.member.learner_id,
+                old_generation = repull.old_generation,
+                generation = group.member.generation,
+                step = repull.t,
+                fragment = repull.p,
+                attempt = repull.attempt,
+                base_version = repull.base_version,
+                "rebound outstanding pull after captured generation disconnected"
+            );
+        }
+    }
+    true
+}
+
+/// Tail of a recovery replay whose fragments went out (inline or in the
+/// background): promote the island, record the recovery, send RECOVERY_DONE
+/// with the current versions, write the pool record and repull its rounds.
+/// False when the budget cutoff was established.
+#[allow(clippy::too_many_arguments)]
+async fn finish_recovery_replay(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    recovery: &mut PeerRecovery,
+    group: &Arc<Group>,
+    replayed: usize,
+    dynamic: bool,
+    inflight: &mut [Round],
+    fixed_roster: bool,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    let member = group.member;
+    let promoted = {
+        let mut registry = registry.lock().unwrap();
+        let promoted = registry.promote_recovered(member);
+        if promoted {
+            registry.membership.record_catch_up(member, &st.versions);
+        }
+        promoted
+    };
+    let Some((record, done)) = recovery.finish(member, st.global_step, &st.versions, replayed, Instant::now()) else {
+        return true;
+    };
+    if !promoted {
+        return true;
+    }
+    append_recovery_record(cfg.event_tape.as_deref(), &record);
+    if record.missed {
+        warn!(learner_id = member.learner_id, steps = record.steps, bound = ?record.bound_steps, "peer recovery missed its bound");
+    } else {
+        info!(learner_id = member.learner_id, steps = record.steps, path = ?record.source, "peer recovery done");
+    }
+    send_recovery(registry, vec![done]).await;
+    if dynamic {
+        // The pool took the island back with recovered state; its
+        // pushes are fenced at the versions it now holds.
+        append_pool_record(
+            cfg.event_tape.as_deref(),
+            "pool_join",
+            cfg.syncer_epoch,
+            &format!(
+                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"recovered\":true,\"base_version\":{}",
+                member.learner_id, member.generation, st.global_step
+            ),
+        );
+        write_pool_status(cfg, registry, st.global_step, "running");
+    }
+    repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await
+}
+
 async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
     let dtype = bulk_dtype(st.wire_dtype);
     for group in current_groups(registry) {
@@ -7069,11 +8028,15 @@ mod tests {
             syncer_epoch: 0,
             membership: Default::default(),
             recovery: Default::default(),
+            inline_resend: false,
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
             dispense: None,
             dispense_log: None,
+            max_subscribers: 0,
+            sample_relay: None,
+            member_lease: Duration::from_secs(300),
             shard: Default::default(),
         }
     }
@@ -7745,6 +8708,117 @@ mod tests {
         assert_eq!(frame.msg_type, MSG_CHUNK);
         assert_eq!(frame.parts.len(), 2);
         frame.parts[1][4]
+    }
+
+    fn resend_test_state(fragments: usize) -> GlobalState {
+        let layout = Layout {
+            fragments: (0..fragments)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, DTYPE_F32).unwrap();
+        for p in 0..fragments {
+            state.init_fragment(p, vec![p as f32; 4]).unwrap();
+        }
+        state
+    }
+
+    /// (fragment, version, first value) of one BCAST_FRAGMENT chunk.
+    fn resent_fragment(frame: &OutFrame) -> (u32, u64, f32) {
+        assert_eq!(chunked_inner_type(frame), MSG_BCAST_FRAGMENT);
+        let inner = &frame.parts[1];
+        (
+            u32::from_le_bytes(inner[13..17].try_into().unwrap()),
+            u64::from_le_bytes(inner[17..25].try_into().unwrap()),
+            f32::from_le_bytes(inner[25..29].try_into().unwrap()),
+        )
+    }
+
+    /// S27 G-EL: the scheduler only offers; a forwarder sends at the link's
+    /// pace. A version published while the link is full replaces the pending
+    /// one, and the resend is drained only once every offer is handed over.
+    #[tokio::test]
+    async fn background_resend_follows_a_slow_link_and_ends_at_the_newest_versions() {
+        let mut st = resend_test_state(3);
+        let learner = member(1, 7);
+        // Queue of one frame: the second fragment waits for the reader.
+        let (control, mut frames) = mpsc::channel(1);
+        let group = test_group_with_control(learner, control);
+        let registry = registry_with_group(group.clone());
+        let mut resends = BulkResends::new();
+        resends.start(&registry, &st, learner, group.clone(), 0..3, ResendTail::Recovery { replayed: 3 });
+        assert!(resends.holds(learner) && registry.lock().unwrap().resends.contains_key(&learner));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(resends.take_drained(&registry).is_empty(), "the link has taken one fragment only");
+        // A merge of fragment 2 is published meanwhile (publish_round offers it).
+        st.versions[2] = 5;
+        st.params[2] = Arc::new(vec![9.0; 4]);
+        let conn = registry.lock().unwrap().resends[&learner].clone();
+        conn.offer(2, st.versions[2], st.params[2].clone());
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            got.push(resent_fragment(&frames.recv().await.unwrap()));
+        }
+        assert_eq!(got, vec![(0, 0, 0.0), (1, 0, 1.0), (2, 5, 9.0)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let drained = loop {
+            let drained = resends.take_drained(&registry);
+            if !drained.is_empty() || Instant::now() > deadline {
+                break drained;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].tail, ResendTail::Recovery { replayed: 3 });
+        assert!(resends.is_empty() && !registry.lock().unwrap().resends.contains_key(&learner));
+        let state = drained[0].conn.state.lock().unwrap();
+        assert_eq!((state.sent, state.pending.coalesced, state.error.is_none()), (3, 1, true));
+        drop(state);
+        // Nothing else was sent: the stale version 0 of fragment 2 never went out.
+        assert!(frames.try_recv().is_err());
+    }
+
+    /// A catch-up for a generation that is no longer current is stopped
+    /// without its tail; a second catch-up for the same generation only adds
+    /// its tail; a failed stream ends the resend and its tail still runs.
+    #[tokio::test]
+    async fn background_resend_superseded_merged_and_failed() {
+        let st = resend_test_state(2);
+        let old = member(2, 1);
+        let (control, frames) = mpsc::channel(1);
+        let group = test_group_with_control(old, control);
+        let registry = registry_with_group(group.clone());
+        let mut resends = BulkResends::new();
+        resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
+        resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REBIND));
+        assert_eq!(resends.entries.len(), 1);
+        assert_eq!(resends.entries[0].tail, ResendTail::CatchUp(CatchUpTail { rejoin: true, rebind: true }));
+        assert!(resends.drop_superseded(&registry).is_empty());
+        let newer = member(2, 2);
+        registry.lock().unwrap().register_group(test_group(newer), Instant::now()).unwrap();
+        assert_eq!(resends.drop_superseded(&registry), vec![old]);
+        assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
+        drop(frames);
+
+        // Closed link: the forwarder ends with the error; the resend is drained.
+        let (control, frames) = mpsc::channel(1);
+        drop(frames);
+        let group = test_group_with_control(newer, control);
+        resends.start(&registry, &st, newer, group, 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let drained = loop {
+            let drained = resends.take_drained(&registry);
+            if !drained.is_empty() || Instant::now() > deadline {
+                break drained;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].conn.state.lock().unwrap().error.is_some());
     }
 
     #[tokio::test]

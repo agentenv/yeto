@@ -187,7 +187,9 @@ def test_the_launcher_sends_peer_recovery_to_verl_islands_and_the_plan_carries_i
         section = vfs.plan_section(parsed, _run_dict(), model_path=str(model_dir), sync="strict",
                                    algorithm_spec_sha256="a" * 64)["full_parameter"]
         assert section["peer_recovery"] == {"store": parsed.rl_peer_recovery_store, "recover": False,
-                                            "ttl_s": 900.0, "timeout_s": 900.0, "staging": None}
+                                            "ttl_s": 900.0, "timeout_s": 900.0, "staging": None,
+                                            # S27 G-EL defaults (neutral options since s27-next2)
+                                            "manifest_wait_s": 120.0, "donor_write": "background"}
         assert section["syncer_epoch"] == parsed.rl_syncer_epoch
         config = vfs.role_stream_config(section, syncer="h:1", learner_id=learner_id, model_revision="a" * 40)
         assert config.peer_recovery.recover is False and config.syncer_epoch == parsed.rl_syncer_epoch
@@ -304,7 +306,10 @@ def test_a_relaunched_verl_island_recovers_adam_state_from_a_peer_through_the_re
     rounds, fragments = 12, len(_layout().fragments.fragments)
     process, port, profile = _start_syncer(syncer_binary, tmp_path, fragments=fragments, rounds=rounds, extra=(
         "--rl-sync-full-parameter-rounds", "async", "--rl-sync-final-cut", "download",
-        "--rl-sync-quorum", "1", "--rl-peer-recovery", "--rl-peer-recovery-store", str(store)))
+        # (the launcher only writes the syncer command here; since S27 G-EL a Modal
+        # island's snapshot store must lie on the mounted Volume, s27-next2 merge)
+        "--rl-sync-quorum", "1", "--rl-peer-recovery", "--rl-checkpoint-store", "modal-volume://v/run",
+        "--rl-peer-recovery-store", "modal-volume://v/run-peer"))
     # What the donor held when it wrote its snapshot (read on the donor's worker).
     saved: list[dict] = []
     real_save = vcut.remote_save_rank

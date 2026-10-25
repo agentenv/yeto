@@ -22,7 +22,7 @@ from .storage import (
     _rl_checkpoint_storage_name, droppable_rejoins_in_new_container, modal_checkpoint_store,
     resumes_in_new_container,
 )
-from .harness_env import modal_sandbox_secret_name
+from .harness_env import harbor_island_envs, harbor_relay_tunnel_port, is_harbor_agent, modal_sandbox_secret_name
 from .fleet import TEARDOWN_UNVERIFIED_EXIT
 
 
@@ -73,6 +73,9 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs[key] = value
     if rl:  # 0.20: Modal ships cfg.envs as a modal.Secret
         envs.update(island_hmac_secret(args))
+    harbor = rl and is_harbor_agent(args)
+    if harbor:  # boat token and the gate relay port (tunnelled by rank 0)
+        envs.update(harbor_island_envs(envs))
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
@@ -129,6 +132,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
         checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        harbor_layer=harbor,
+        harbor_relay_port=harbor_relay_tunnel_port(envs) if harbor else None,
         named_secrets=((modal_sandbox_secret_name(args, spec),)
                        if getattr(args, "modal_sandbox_secret", None) else ()),
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
@@ -255,7 +260,13 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
             time.sleep(5)
-MODAL_STOP_VERIFY_ATTEMPTS = 5
+# After `modal app stop` an island container gets up to 30 s to answer the input
+# cancellation and up to 30 s more to shut its runner down (Modal system log: "failed to
+# respond to cancellation for too long: 30 seconds", "shutting down for too long (grace
+# period: 30 seconds)"); `modal app list` showed the last task up to ~6 s after it ended.
+# S27 runs took 17-60 s from the stop to "stopped" (EXTRA-CONTAINER.md); 5 checks (~25 s)
+# reported 8 of them as not stopped (exit 5). 25 checks wait about 2 min.
+MODAL_STOP_VERIFY_ATTEMPTS = 25
 MODAL_STOP_VERIFY_DELAY_S = 5.0
 
 
@@ -332,12 +343,21 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
+def finalized_island_containers(id_guards: dict, collectors: dict) -> set[str]:
+    """The container ids that islands printed (``ContainerIdGuard.first``, by island
+    name) for the islands whose event tape has ``rl_learner_finalized``."""
+    return {cid for name, guard in list(id_guards.items())
+            if getattr(collectors.get(name), "finalized", False)
+            for cid in dict(getattr(guard, "first", None) or {}).values()}
+
+
 def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True,
-                             attributed=None):
+                             attributed=None, finished=None):
     """The log-independent container guard (modal_runner.ContainerSetPoller), only when
     a new container is never expected: no launcher relaunch, no checkpoint-store resume
     and no droppable island. None otherwise. ``attributed()`` returns the container ids
-    the islands printed (container id -> (island, rank))."""
+    the islands printed (container id -> (island, rank)); ``finished()`` the ones of
+    islands that already finalized."""
     if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
         return None
     if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
@@ -348,7 +368,7 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
 
     expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
     poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change,
-                                attributed=attributed)
+                                attributed=attributed, finished=finished)
     return poller.start() if start else poller
 
 

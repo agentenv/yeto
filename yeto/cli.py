@@ -99,13 +99,23 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "fully self-cleaning run), or a local path / omitted (artifact "
         "stays on the head, which is kept up)",
     )
-    p.add_argument(
+    data = p.add_mutually_exclusive_group(required=True)
+    data.add_argument(
         "--data",
-        required=True,
         help="fine-tuning data: HF dataset id, local path (dir/file of "
         "jsonl/json/parquet or a save_to_disk dir), or a cloud URI "
         "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
         "via SkyPilot file mounts; rows are messages-format chat traces",
+    )
+    data.add_argument(
+        "--data-mix",
+        default=None,
+        metavar="SPEC",
+        help="RL with --rl-data-split dispense (S27 P3): several prompt data sets "
+        "with weights, 'a.jsonl=0.7,org/ds@rev=0.3' (local paths or HF ids with "
+        "an optional @revision). The launcher writes them into one prompt file "
+        "(the run's --data); the dispenser interleaves them so that any prefix of "
+        "the rows given out is within one row of the weights",
     )
     p.add_argument(
         "--data-format",
@@ -1205,6 +1215,13 @@ def cmd_launch(args) -> int:
             f"--cluster-prefix.",
             file=sys.stderr,
         )
+        return 1
+    try:  # S27 P3: --data-mix becomes one prompt file before anything pins --data
+        from .launch.data_mix import materialize_data_mix
+
+        materialize_data_mix(args)
+    except (ImportError, OSError, ValueError) as exc:
+        print(f"[yeto] --data-mix: {exc}", file=sys.stderr)
         return 1
     try:
         from .launcher import prepare_launch_args

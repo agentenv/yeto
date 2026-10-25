@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.modal_container_guard import (COST, EXIT_STOPPED, RESCHED, ContainerGuard, GuardConfig,
-                                         ProgressCounter, main)
+                                         IslandEnds, ProgressCounter, main)
 
 APP = "yeto-s27-ch-d0a"
 # the ids of s27-ch-d0a: the two original containers and the two extra ones
@@ -66,6 +66,47 @@ def test_an_original_gone_while_an_extra_is_present_stops_the_run():
     assert A in decision.stop[1] and C in decision.stop[1]
     assert {"event": "original_gone", "container_id": A}.items() <= next(
         e for e in decision.events if e["event"] == "original_gone").items()
+
+
+# s27-ek-b (2026-10-25): both islands finalized; an idle container of island 1's function
+# started at 14:43:25Z; island 1's container left at its normal end.
+EK_I0, EK_I1, EK_X = ("ta-01M5SQHXHTE3G91GN7YZSGMPER", "ta-01M5SQHXNQ4FPENB16T90SWYTR",
+                      "ta-01M5SR86VJ7924QF3BRVTR6AXR")
+EK_T0, EK_TX = "2026-10-25 14:31:13+00:00", "2026-10-25 14:43:25+00:00"
+EK_ORIG = [_row(EK_I0, EK_T0), _row(EK_I1, EK_T0)]
+EK_LOG = (f"[s27-ek-b-l0-modal] [modal-island 0] rank 0 container {EK_I0}\n"
+          f"[s27-ek-b-l1-modal] [modal-island 1] rank 0 container {EK_I1}\n"
+          '[s27-ek-b-l1-modal] YETO_RL_EVENT {"event":"rl_learner_finalized","island_id":1,"time_unix":1.0}\n')
+
+
+def test_an_original_of_a_finished_island_leaving_beside_an_extra_does_not_stop():
+    guard = _guard()
+    guard.observe(30.0, EK_ORIG, progress=1)
+    guard.observe(60.0, EK_ORIG + [_row(EK_X, EK_TX)], progress=2, finished={EK_I1})
+    decision = guard.observe(90.0, [_row(EK_I0, EK_T0), _row(EK_X, EK_TX)], progress=3, finished={EK_I1})
+    assert decision.stop is None
+    gone = next(e for e in decision.events if e["event"] == "original_gone")
+    assert gone["container_id"] == EK_I1 and gone["island_finished"] is True
+    # the same poll without the end record: a replacement island, as before
+    other = _guard()
+    other.observe(30.0, EK_ORIG, progress=1)
+    stop = other.observe(60.0, [_row(EK_I0, EK_T0), _row(EK_X, EK_TX)], progress=2).stop
+    assert stop is not None and stop[0] == RESCHED and EK_I1 in stop[1]
+
+
+def test_island_ends_reads_container_lines_and_finalized_events(tmp_path):
+    log = tmp_path / "launch.stream.log"
+    ends = IslandEnds(log)
+    assert ends.read() == set()  # no file yet
+    lines = EK_LOG.splitlines(keepends=True)
+    log.write_text(lines[0] + lines[1] + lines[2][:40])
+    assert ends.read() == set() and ends.island_of == {EK_I0: "0", EK_I1: "1"}
+    with open(log, "a") as fh:
+        fh.write(lines[2][40:])
+    assert ends.read() == {EK_I1}
+    with open(log, "a") as fh:  # key order of the record does not matter
+        fh.write('YETO_RL_EVENT {"island_id": 0, "event": "rl_learner_finalized"}\n')
+    assert ends.read() == {EK_I0, EK_I1}
 
 
 def test_a_replacement_after_both_originals_left_stops_the_run():
@@ -124,6 +165,60 @@ def test_a_missing_original_without_extras_and_fewer_containers_never_stop():
 
 
 # -- cost guard -----------------------------------------------------------------------------------
+
+
+# -- expected island relaunches (fault injection runs) ---------------------------------------------
+
+# a 2-island run of 2 containers each: island 1 (B, C) is killed and relaunched as (E, F),
+# later killed again and relaunched as (G, H)
+C1, E, F, G, H, X = (f"ta-relaunch-{n}" for n in "cefghx")
+FOUR = [_row(A, T_ORIG), _row(B, T_ORIG), _row(C1, T_ORIG), _row(D, T_ORIG)]
+
+
+def _relaunched(*ids: str, keep=(A, D)) -> list[dict]:
+    return [_row(c, T_ORIG) for c in keep] + [_row(c, T_EXTRA) for c in ids]
+
+
+def test_expected_relaunches_keep_the_run_until_more_containers_than_allowed():
+    guard = _guard(nodes=4, replacements=4)
+    assert guard.observe(30.0, FOUR, progress=1).stop is None
+    assert guard.observe(60.0, _relaunched(), progress=2).stop is None  # island 1 gone
+    # the relaunch: originals gone, new containers present (rule 1 is off) ...
+    assert guard.observe(90.0, _relaunched(E, F), progress=3).stop is None
+    # ... and present for longer than extra_max_s (rule 3 is off)
+    assert guard.observe(2_000.0, _relaunched(E, F), progress=4).stop is None
+    # a second relaunch of island 1
+    assert guard.observe(2_030.0, _relaunched(), progress=5).stop is None
+    assert guard.observe(2_060.0, _relaunched(G, H), progress=6).stop is None
+    assert guard.observe(4_000.0, _relaunched(G, H), progress=7).stop is None
+    # a fifth extra container: more than the run expected, the usual rules apply again
+    stop = guard.observe(4_030.0, _relaunched(G, H, X), progress=8).stop
+    assert stop is not None and stop[0] == RESCHED and "gone" in stop[1]
+
+
+def test_expected_relaunches_still_stop_on_no_progress_and_on_double_billing():
+    stalled = _guard(nodes=4, replacements=2)
+    stalled.observe(30.0, FOUR, progress=1)
+    assert stalled.observe(60.0, _relaunched(E, F), progress=1).stop is None
+    stop = stalled.observe(400.0, _relaunched(E, F), progress=1).stop
+    assert stop is not None and "no progress line" in stop[1]
+
+    double = _guard(nodes=4, replacements=2)
+    double.observe(30.0, FOUR, progress=1)
+    # the relaunched island starts before the old island's containers left
+    assert double.observe(60.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=2).stop is None
+    assert double.observe(600.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=3).stop is None
+    stop = double.observe(700.0, FOUR + [_row(E, T_EXTRA), _row(F, T_EXTRA)], progress=4).stop
+    assert stop is not None and stop[0] == RESCHED and "beside old ones" in stop[1]
+
+
+def test_no_expected_relaunch_by_default():
+    guard = _guard(nodes=4)
+    guard.observe(30.0, FOUR, progress=1)
+    stop = guard.observe(60.0, _relaunched(E, F), progress=2).stop
+    assert stop is not None and "replacement island" in stop[1]
+    with pytest.raises(ValueError):
+        _guard(replacements=-1)
 
 
 def test_the_cost_counts_every_container_and_the_head():
@@ -237,6 +332,44 @@ def test_cli_stops_once_when_an_original_is_replaced(tmp_path):
     assert "gone while extra container(s)" in (run / "RESCHED_FIRED").read_text()
     assert len((run / "stopped.log").read_text().splitlines()) == 1
     assert int((tmp_path / "counter").read_text()) == 2  # no poll after the stop
+
+
+def test_cli_keeps_a_finished_run_whose_island_left_beside_an_extra(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "launch.stream.log").write_text(EK_LOG)
+    steps = [{"rows": EK_ORIG, "progress": True},
+             {"rows": EK_ORIG + [_row(EK_X, EK_TX)], "progress": True},
+             {"rows": [_row(EK_I0, EK_T0), _row(EK_X, EK_TX)], "progress": True},
+             {"rows": [], "progress": True}]
+    rc, run = _cli(tmp_path, steps, "--max-polls", "4")
+    assert rc == 0 and not (tmp_path / "stops.txt").exists() and not (run / "RESCHED_FIRED").exists()
+    events = [json.loads(line) for line in (run / "poll/extra-containers.jsonl").read_text().splitlines()]
+    assert [(e["event"], e["container_id"], e.get("island_finished")) for e in events] == [
+        ("extra_seen", EK_X, None), ("original_gone", EK_I1, True),
+        ("extra_gone", EK_X, None), ("original_gone", EK_I0, False)]
+
+
+def test_extra_log_capture_names_the_function_in_a_time_window(tmp_path, monkeypatch):
+    import tools.modal_container_guard as guard_mod
+
+    commands = []
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+
+    monkeypatch.setattr(guard_mod.subprocess, "Popen", FakePopen)
+    args = guard_mod.parse_args(["--run-dir", str(tmp_path), "--app", APP, "--nodes", "2", "--rate", "1",
+                                 "--max-polls", "1"])
+    now = 1792939422.0  # 2026-10-25T14:43:42Z, the poll that saw the s27-ek-b extra container
+    guard_mod._diagnose_extra(args, guard_mod.RunFiles(tmp_path), "ap-x", EK_X, EK_TX, now)
+    guard_mod._diagnose_extra(args, guard_mod.RunFiles(tmp_path), None, EK_X, EK_TX, now)  # no app id
+    assert len(commands) == 1
+    command = commands[0]
+    assert "--show-function-id" in command and command[command.index("--container") + 1] == EK_X
+    assert command[command.index("--since") + 1] == "2026-10-25T14:42:25+00:00"  # start - 60 s
+    assert command[command.index("--until") + 1] == "2026-10-25T14:44:42+00:00"  # poll + 60 s
+    assert guard_mod._log_window("not a time", now)[1] == "2026-10-25T14:33:42+00:00"  # poll - 600 s
 
 
 def test_cli_cost_cap_override_file_stops_the_run(tmp_path):

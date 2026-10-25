@@ -68,6 +68,8 @@ from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.suspend import TurnGate, after_suspension
 from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.gateway.gate_relay import GateRelay
+from yeto.rl.harness.gateway.relay_env import (  # noqa: F401 - re-exported names
+    RELAY_HOST_ENV, RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_PUBLIC_HOST_ENV, RELAY_SECRET_FILE_ENV)
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
 from yeto.rl.harness.harbor.codex_provider import use_yeto_codex
@@ -153,11 +155,6 @@ def append_sample_log(record: dict[str, Any], environ: Any = None) -> None:
 # --------------------------------------------------------------- suspension
 
 TEST_HOLD_EXTRA_ENV = "YETO_TEST_SUSPEND_HOLD_EXTRA_S"  # test only, see test_hold_extra_s
-RELAY_PORT_ENV = "YETO_HARBOR_GATE_RELAY_PORT"
-RELAY_HOST_ENV = "YETO_HARBOR_GATE_RELAY_HOST"
-RELAY_PUBLIC_HOST_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_HOST"
-RELAY_PUBLIC_BASE_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_BASE"
-RELAY_SECRET_FILE_ENV = "YETO_HARBOR_GATE_RELAY_SECRET_FILE"
 
 
 @dataclass(frozen=True)
@@ -316,6 +313,40 @@ def trial_config_builder(task: AgentTask, example: Any, metadata: dict[str, Any]
     return example_config_builder(example, metadata, request_kwargs)
 
 
+# ------------------------------------------------------------------ abort hook
+
+_trials: LoopLocal[set[asyncio.Task]] = LoopLocal(set)
+
+
+async def _run_trial(coro: Any) -> Any:
+    """Run one trial as its own task, so :func:`abort` can cancel it."""
+    task = asyncio.ensure_future(coro)
+    trials = _trials.get()
+    trials.add(task)
+    try:
+        return await task
+    finally:
+        trials.discard(task)
+
+
+async def abort(args: Any) -> None:
+    """Miles abort hook (``miles.utils.misc.call_agent_abort_hook``): cancel the trials in flight.
+
+    Miles calls it when a rollout has enough groups (a group with an ABORTED
+    sample is dropped and replaced, so surplus groups are common) and then
+    waits for every pending group.  Without it each surplus trial runs on to
+    its agent timeout: GPU time and boat sandboxes for samples that are
+    discarded.  A cancelled trial's group is discarded by Miles; its sandbox
+    goes back to the boat pool or is deleted at rollout dispose (TTL otherwise).
+    """
+    del args
+    trials = list(_trials.get())
+    for task in trials:
+        task.cancel()
+    if trials:
+        logger.info("harbor agent abort: cancelled %d trial(s) in flight", len(trials))
+
+
 async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] | None = None,
               metadata: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
     """Miles ``--custom-agent-function-path`` entry: one Harbor trial under the yeto outer layer."""
@@ -334,7 +365,7 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     suffix = uuid.uuid4().hex[:12]
     trajectory_id = f"{task.trajectory_id}-{suffix}" if task.trajectory_id else uuid.uuid4().hex
     if settings is None:
-        trajectory = await run_agent_task(task, harness, session_url, gate())
+        trajectory = await _run_trial(run_agent_task(task, harness, session_url, gate()))
         result = trajectory.to_metadata()
         append_sample_log(sample_log_record(task, trajectory_id, result))
         return result
@@ -343,7 +374,7 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     relay = _relay(settings, session_url)
     endpoint = await relay.open(session_url, ledger)
     try:
-        trajectory = await run_agent_task(task, harness, endpoint, gate(), ledger=ledger)
+        trajectory = await _run_trial(run_agent_task(task, harness, endpoint, gate(), ledger=ledger))
     finally:
         relay.close(endpoint)
         turns.unregister(ledger)
