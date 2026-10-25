@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -17,6 +16,12 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.full_parameter_identity import (
+    full_parameter_identity,
+    identity_sha256,
+    is_sha256,
+    local_init as local_init_rule,
+)
 from yeto.rl.engine.run_flags import (
     FULL_PARAMETER_ASYNC_MAX_PIPELINE,
     FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
@@ -677,9 +682,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
     )
 
 
-def _canonical_sha256(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(payload).hexdigest()
+_canonical_sha256 = identity_sha256  # yeto/rl/engine/full_parameter_identity.py
 
 
 # Miles flags whose values may differ between islands of one full-parameter run:
@@ -819,17 +822,8 @@ def _trains_base_parameters(args) -> bool:
     )
 
 
-def _is_sha256(value: Any) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-
-
-def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
-    """``(layout hash, config hash)`` of a full-parameter island: no LoRA layout,
-    the model config is the identity."""
-
-    return model_config_sha256, _canonical_sha256(
-        {"schema": "yeto-full-parameter-mode-v1", "model_config_sha256": model_config_sha256}
-    )
+_is_sha256 = is_sha256  # yeto/rl/engine/full_parameter_identity.py
+_full_parameter_identity = full_parameter_identity  # the same rule for every engine
 
 
 def _no_sync_island(args) -> bool:
@@ -951,8 +945,7 @@ def _local_init(args, async_rounds: bool) -> bool:
     """Local init (S27): every island launched by one run loads the same base
     checkpoint, so async rounds keep it as version 0 by default; the syncer
     refuses the run if the islands' fragment digests disagree."""
-    mode = getattr(args, "init_mode", "auto")
-    return mode == "local" or (mode == "auto" and async_rounds)
+    return local_init_rule(getattr(args, "init_mode", "auto"), async_rounds)
 
 
 def _dense_full_sync_config(

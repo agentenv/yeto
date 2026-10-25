@@ -54,6 +54,13 @@ from yeto.rl.engine.full_parameter_stream import (
     RoleStreamConfig,
     session_contract_hash,
 )
+from yeto.rl.engine.full_parameter_identity import (  # noqa: F401 - full_parameter_identity is re-exported
+    full_parameter_identity,
+    identity_sha256,
+    is_sha256,
+    local_init as local_init_rule,
+)
+from yeto.rl.engine.loop_runner import LoopRunner
 from yeto.rl.local_learner import ParameterLayout
 
 from . import full_parameter as fp
@@ -651,17 +658,9 @@ CONTRACT_RUN_FIELDS = (
 )
 
 
-def _canonical_sha256(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
-    """``(identity layout hash, config hash)`` of a full-parameter island: the
-    model config is the identity (the same rule as the Miles island's
-    ``_full_parameter_identity``; there is no LoRA layout)."""
-
-    return model_config_sha256, _canonical_sha256(
-        {"schema": "yeto-full-parameter-mode-v1", "model_config_sha256": model_config_sha256})
+# ``full_parameter_identity`` (re-exported here) and the identity hash are the
+# Miles island's rules too: yeto/rl/engine/full_parameter_identity.py.
+_canonical_sha256 = identity_sha256
 
 
 def training_contract_sha256(run: Mapping[str, Any], *, model: str, model_revision: str,
@@ -735,15 +734,10 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
     )
 
 
-class _LoopRunner:
-    """One private event loop for the island's stream calls.  It is never made
-    the thread's current loop, so verl code that reads that loop is unaffected."""
-
-    def __init__(self) -> None:
-        self.loop = asyncio.new_event_loop()
-
-    def run(self, coroutine):
-        return self.loop.run_until_complete(coroutine)
+# One private event loop for the island's stream calls (the engine-neutral
+# runner the Miles ports use). It is never made the thread's current loop, so
+# verl code that reads that loop is unaffected.
+_LoopRunner = LoopRunner
 
 
 def build_full_parameter_sync(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str):
@@ -852,8 +846,7 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--rl-peer-recovery-store", default=None)
 
 
-def _sha256_hex(value: Any) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+_sha256_hex = is_sha256  # yeto/rl/engine/full_parameter_identity.py
 
 
 def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: str,
@@ -935,7 +928,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         "wan_stall_timeout": float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
         "max_fragment_bytes": int(args.sweep_fragment_max_bytes),
         "final_cut": args.sweep_final_cut,
-        "local_init": args.init_mode == "local" or (args.init_mode == "auto" and async_rounds),
+        "local_init": local_init_rule(args.init_mode, async_rounds),
         "matrix_merge": args.rl_sync_matrix_merge,
         "island_pool": pool,
     }
