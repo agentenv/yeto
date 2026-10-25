@@ -9408,6 +9408,65 @@ mod tests {
         assert!(waited.is_err(), "--inline-broadcast waits on the slow link");
     }
 
+    /// S27 G-FD: `try_send_tensor_now` reserves every chunk's slot on the
+    /// stream the round-robin puts it on, queues the same frames as
+    /// `send_tensor_large`, and queues nothing when one stream is full.
+    #[tokio::test]
+    async fn try_send_tensor_now_reserves_each_stream_and_queues_the_same_frames() {
+        let (control, _control_rx) = mpsc::channel(4);
+        let mut receivers = Vec::new();
+        let mut streams = HashMap::new();
+        for index in 0..3u16 {
+            let (sender, receiver) = mpsc::channel(3);
+            streams.insert(index, sender);
+            receivers.push(receiver);
+        }
+        let group = Group {
+            member: member(0, 1),
+            dtype: DTYPE_F32,
+            layout: Layout { fragments: Vec::new() },
+            layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
+            num_streams: 3,
+            max_init_payload: 0,
+            max_push_payload: 0,
+            expert_tokens: false,
+            max_chunked_inner: u64::MAX,
+            control,
+            data: Mutex::new(streams),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(1),
+            reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
+        };
+        let values: Vec<f32> = (0..11).map(|value| value as f32 - 3.0).collect();
+        let prefix = crate::resend::bcast_prefix(2, 9);
+        // 13 + 12 + 44 = 69 bytes in chunks of 16: 5 chunks from stream 1 on
+        // (streams 1, 2, 0, 1, 2), so streams 1 and 2 take 2 and stream 0 one.
+        assert!(group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap());
+        let queued: Vec<usize> = receivers.iter().map(|receiver| receiver.len()).collect();
+        assert_eq!(queued, vec![1, 2, 2]);
+        // Streams 1 and 2 have one free slot each; this frame needs two on
+        // stream 0 or 1 (rr is now 6): nothing is queued.
+        assert!(!group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap());
+        assert_eq!(receivers.iter().map(|receiver| receiver.len()).collect::<Vec<_>>(), queued);
+        // The frames reassemble to the inner frame `send_tensor_large` sends.
+        let mut chunks = Vec::new();
+        for receiver in &mut receivers {
+            while let Ok(frame) = receiver.try_recv() {
+                let offset = u64::from_le_bytes(frame.parts[0][16..24].try_into().unwrap());
+                chunks.push((offset, frame.parts[1].to_vec()));
+            }
+        }
+        chunks.sort();
+        let inner: Vec<u8> = chunks.into_iter().flat_map(|(_, bytes)| bytes).collect();
+        assert_eq!(inner, buffered_tensor_inner(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values));
+        // A closed stream is the same error as on the awaiting path.
+        drop(receivers);
+        let error = group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap_err();
+        assert!(error.downcast_ref::<OutboundStreamClosed>().is_some());
+    }
+
     /// (version, kind, base, digest, values) of a bf16-downlink BCAST chunk.
     fn downlink_frame(frame: &OutFrame) -> (u64, u8, u64, [u8; 32], Vec<f32>) {
         assert_eq!(chunked_inner_type(frame), MSG_BCAST_FRAGMENT);
