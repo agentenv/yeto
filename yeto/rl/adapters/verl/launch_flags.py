@@ -94,4 +94,30 @@ def full_parameter_problems(args) -> list[str]:
             problems.append(f"no {option} (not offered by the verl stream)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
         problems.append(f"the verl layout hash and fragment count from `{FULL_PARAMETER_PLAN_COMMAND}`")
+    ignored = [option for dest, off, option in IGNORED_ON_VERL_FULL_PARAMETER
+               if getattr(args, dest, off) not in (off, None)]
+    if ignored:
+        problems.append("no " + ", ".join(ignored) + " (the verl full-parameter island has no such option; "
+                        "it would ignore it)")
     return problems
+
+
+# S27 G-DS: options the launcher forwards to every island that the verl island
+# entry does not parse (parse_known_args would drop them without a word):
+# (args dest, value when off, option). Refused instead, before any cloud work.
+IGNORED_ON_VERL_FULL_PARAMETER = (
+    ("rl_verify_every_round", False, "--rl-verify-every-round"),
+    ("rl_lr_schedule", "auto", "--rl-lr-schedule"),
+    ("rl_eval_interval", None, "--rl-eval-interval"),
+    ("rl_max_tokens_per_gpu", None, "--rl-max-tokens-per-gpu"),
+    ("rl_deterministic_trainer", False, "--rl-deterministic-trainer"),
+    ("rl_activation_recompute", False, "--rl-activation-recompute"),
+    ("rl_gradient_accumulation_fusion", False, "--rl-gradient-accumulation-fusion"),
+    ("rl_async_buffer_rounds", None, "--rl-async-buffer-rounds"),
+    ("rl_lora_dropout", None, "--rl-lora-dropout"),
+    ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
+    ("rl_observe_timeline", False, "--rl-observe-timeline"),
+    ("rl_profile_trainer", False, "--rl-profile-trainer"),
+    ("rl_debug_dump", False, "--rl-debug-dump"),
+    ("rl_resource_sample_interval", None, "--rl-resource-sample-interval"),
+)

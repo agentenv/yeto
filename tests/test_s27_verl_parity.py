@@ -442,3 +442,31 @@ def test_syncer_checkpoint_options_reach_the_syncer_and_leave_the_verl_islands_u
             tuned_argv, base_argv = _island_argv(tuned, learner_id), _island_argv(base, learner_id)
             i, j = tuned_argv.index("--syncer-profile-sha256"), base_argv.index("--syncer-profile-sha256")
             assert strip(tuned_argv[:i] + tuned_argv[i + 2:]) == strip(base_argv[:j] + base_argv[j + 2:])
+
+
+# ----------------------------------------------------------------------------- nothing ignored
+@pytest.mark.parametrize("extra", [
+    ("--rl-verify-every-round",), ("--rl-lr-schedule", "constant"), ("--rl-max-tokens-per-gpu", "4096"),
+    ("--rl-deterministic-trainer",), ("--rl-activation-recompute",), ("--rl-gradient-accumulation-fusion",),
+    ("--rl-async-buffer-rounds", "2"), ("--rl-lora-dropout", "0.1"), ("--rl-observe-timeline",),
+    ("--rl-profile-trainer",), ("--rl-debug-dump",), ("--rl-resource-sample-interval", "5"),
+])
+def test_options_a_verl_full_parameter_island_would_ignore_are_refused(extra):
+    """Each of these reached the verl island and was dropped by parse_known_args."""
+    with pytest.raises(ValueError, match="would ignore it"):
+        _prepared(_verl_args(*extra))
+
+
+def test_every_refused_option_is_one_the_verl_island_does_not_parse():
+    from yeto.rl.adapters.verl import launch_flags
+
+    parser_options = set(island_entry.parse_args(_parsed_argv())[0].__dict__)
+    for dest, _off, _option in launch_flags.IGNORED_ON_VERL_FULL_PARAMETER:
+        assert dest not in parser_options, dest
+
+
+def _parsed_argv():
+    return ["--model", "m", "--model-revision", "a" * 40, "--data", "d", "--learner-id", "0",
+            "--reward-function", "r", "--global-rounds", "1", "--groups-per-round", "1",
+            "--samples-per-group", "1", "--rollout-max-response-len", "1", "--event-tape", "t",
+            "--inner-lr", "1", "--seq-len", "1", "--seed", "1"]
