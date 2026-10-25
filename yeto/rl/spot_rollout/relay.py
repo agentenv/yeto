@@ -46,6 +46,11 @@ a newer consumer owns the channel; ``fenced: relay`` means the syncer's
 island member table retired this producer's member (a newer incarnation of
 the sampler joined on any channel, or its lease expired): fatal, the process
 does not come back under the same incarnation (:class:`RelayFenced`).
+
+Head gone (S27 G-EM): producers and consumers retry a broken link, but give
+up with :class:`RelayGone` once no request succeeded for ``gone_s`` seconds
+(default :data:`DEFAULT_GONE_S`); a producer's ``should_stop()`` ends the
+retries at once with :class:`RelayStopped`.
 """
 
 from __future__ import annotations
@@ -110,6 +115,17 @@ class RelaySuperseded(RelayError):
 
 class RelayFenced(RelayRefused):
     """The syncer retired this producer's member (superseded or expired)."""
+
+
+class RelayGone(RelayError):
+    """No relay request succeeded for ``gone_s`` seconds: the head is gone (not retried)."""
+
+
+class RelayStopped(RelayError):
+    """The caller asked to stop while the link was broken (not retried)."""
+
+
+DEFAULT_GONE_S = 900.0  # a head unreachable this long has ended or failed
 
 
 @dataclass(frozen=True)
@@ -249,16 +265,25 @@ class RelayConnection:
         return Depth.decode(self.request(MSG_RELAY_STATUS, b"", expect=MSG_RELAY_STATUS))
 
 
+def _check_gone(last_ok: float, gone_s: float | None, clock, what: str) -> None:
+    if gone_s is not None and clock() - last_ok >= gone_s:
+        raise RelayGone(f"no relay {what} succeeded for {clock() - last_ok:.0f} s (gone_s {gone_s:g}): "
+                        "the head is gone")
+
+
 class RelayProducer:
     """Put items into one channel; reconnects and resends on a broken link.
     ``incarnation``: the process's member incarnation (default
     ``task_dispense.member_incarnation()``, shared with its subscriber and
-    task dispenser connections)."""
+    task dispenser connections).
+    Gives up after ``gone_s``; ``should_stop()`` ends the retries (module doc)."""
 
     def __init__(self, addr: tuple[str, int], channel: int, producer: int, *,
                  key: bytes | None = None, timeout: float = 120.0, retry_s: float = 2.0,
                  max_attempts: int | None = None, sleep=time.sleep,
-                 incarnation: int | None = None) -> None:
+                 incarnation: int | None = None,
+                 gone_s: float | None = DEFAULT_GONE_S, should_stop=lambda: False,
+                 clock=time.monotonic) -> None:
         if incarnation is None:
             from yeto.rl.engine.task_dispense import member_incarnation
 
@@ -269,6 +294,10 @@ class RelayProducer:
         self.retry_s = float(retry_s)
         self.max_attempts = max_attempts
         self.sleep = sleep
+        self.gone_s = None if gone_s is None else float(gone_s)
+        self.should_stop = should_stop
+        self.clock = clock
+        self.last_ok = clock()
         self.last_depth: Depth | None = None
         self.stored = 0
         self.full_answers = 0
@@ -286,12 +315,17 @@ class RelayProducer:
                 if self.conn.sock is None:
                     self.conn.connect()
                     self.reconnects += 1
-                return call()
+                result = call()
+                self.last_ok = self.clock()
+                return result
             except RelayRefused:
                 raise
-            except RelayError:
+            except RelayError as error:
                 if self.max_attempts is not None and attempt >= self.max_attempts:
                     raise
+                if self.should_stop():
+                    raise RelayStopped(f"stopping with a broken relay link: {error}") from error
+                _check_gone(self.last_ok, self.gone_s, self.clock, "put")
                 self.sleep(self.retry_s)
 
     def put(self, data: bytes) -> PutAck:
@@ -342,11 +376,15 @@ class RelayConsumer:
 
     def __init__(self, addr: tuple[str, int], channel: int, consumer: int = 0, *,
                  key: bytes | None = None, timeout: float = 120.0, retry_s: float = 2.0,
-                 max_bytes: int = 256 << 20, sleep=time.sleep) -> None:
+                 max_bytes: int = 256 << 20, sleep=time.sleep,
+                 gone_s: float | None = DEFAULT_GONE_S, clock=time.monotonic) -> None:
         self.conn = RelayConnection(addr, ROLE_CONSUMER, channel, consumer, key=key, timeout=timeout)
         self.retry_s = float(retry_s)
         self.max_bytes = int(max_bytes)
         self.sleep = sleep
+        self.gone_s = None if gone_s is None else float(gone_s)
+        self.clock = clock
+        self.last_ok = clock()
         self.after = 0
         self.acked = 0
         self.epoch: int | None = None
@@ -377,12 +415,14 @@ class RelayConsumer:
                 body = self.conn.request(MSG_RELAY_TAKE, payload, expect=MSG_RELAY_ITEMS,
                                          limit=self.max_bytes + (64 << 20) + 4096,
                                          timeout=self.conn.timeout + wait_s)
+                self.last_ok = self.clock()
                 break
             except RelayRefused:
                 raise
             except RelaySuperseded:
                 raise
             except RelayError:
+                _check_gone(self.last_ok, self.gone_s, self.clock, "take")
                 self.sleep(self.retry_s)
         (n,) = struct.unpack_from("<I", body)
         self.last_depth = Depth.decode(body, 4)

@@ -13,7 +13,10 @@ handle replacement. Only its two channels differ:
   instead of the volume's ``FileSampleBuffer``.
 
 It stops when the syncer says the run finished, when the syncer link stays
-down for ``syncer_lost_s``, or on the reclaim marker (PREEMPTED).
+down for ``syncer_lost_s``, when the relay did not answer for ``relay_gone_s``,
+or on the reclaim marker (PREEMPTED). Every relay item names the cut that
+generated each of its versions (S27 G-EM); the base weights served before the
+first cut are named by the digest of ``base_dir``.
 
 ``python -m yeto.rl.spot_rollout.sampler --spec SPEC.json``: the engine
 sampler spec (``engine``, ``sampling``, ``prompts``, ``reward``, ``checks``,
@@ -23,7 +26,7 @@ the relay), ``channel`` (the training island it feeds), ``base_model`` (HF
 directory with config and tokenizer; default ``base_dir``), ``work_dir``;
 optional ``num_streams`` (4), ``reload_every`` (1 merged version),
 ``converter`` (``module:callable``; default Miles' ``megatron_to_hf``),
-``model_name``, ``layout_timeout_s`` (1800), ``syncer_lost_s`` (1800),
+``model_name``, ``layout_timeout_s`` (1800), ``syncer_lost_s`` (1800), ``relay_gone_s`` (900),
 ``num_rollouts`` (no limit), ``store`` (local membership records; default
 ``<work_dir>/store``), ``telemetry`` (false: no device telemetry). The subscriber id is
 :func:`~.release_store.subscriber_id_for` of ``sampler_id`` (the task
@@ -47,7 +50,7 @@ class SpotChannels:
 
     def __init__(self, spec: Mapping[str, Any], environ: Mapping[str, str] | None = None, *,
                  incarnation: str, emit: Callable[..., None]) -> None:
-        from yeto.protocol import island_hmac_key_from_env
+        from yeto.protocol import island_hmac_key_from_env, layout_fingerprint
         from yeto.rl.engine.task_dispense import member_incarnation
 
         from . import layout_manifest
@@ -78,7 +81,8 @@ class SpotChannels:
         # The producer's stream is random per connection object: a restarted writer
         # never reuses the sequence numbers of an earlier one.
         self.producer = RelayProducer(self.addr, int(spec["channel"]), self.subscriber_id, key=key,
-                                      incarnation=self.incarnation)
+                                      incarnation=self.incarnation,
+                                      gone_s=float(spec.get("relay_gone_s", 900.0)))
         self.syncer_lost_s = float(spec.get("syncer_lost_s", 1800.0))
         self._lost_since: float | None = None
         convert = converter_from_spec(spec)
@@ -90,9 +94,11 @@ class SpotChannels:
             lambda cut: materialize(self.layout, cut, base_model=base_model, out_root=work / "weights",
                                     convert=convert, model_name=spec.get("model_name")),
             read_position=lambda: self.buffer.read_position(),
-            reload_every=int(spec.get("reload_every", 1)), finished=self.client.run_finished)
+            reload_every=int(spec.get("reload_every", 1)), finished=self.client.run_finished,
+            layout_fingerprint=layout_fingerprint(self.layout).hex(),
+            base_version=int(spec.get("base_version", 0)), base_dir=spec.get("base_dir") or base_model)
         self.buffer = RelaySampleBuffer(self.producer, fragment_versions=self.releases.fragment_versions,
-                                        should_stop=self.stopping)
+                                        should_stop=self.stopping, cut_of=self.releases.cut_identity)
         emit("rl_spot_sampler_channels", syncer=f"{self.addr[0]}:{self.addr[1]}",
              subscriber_id=self.subscriber_id, channel=int(spec["channel"]),
              member_incarnation=f"{self.incarnation:016x}",
@@ -108,7 +114,8 @@ class SpotChannels:
 
     def stopping(self) -> bool:
         # fenced: a newer process of this sampler took its id on the head
-        return self.client.run_finished() or self.client.fenced() or self.syncer_lost()
+        return (self.client.run_finished() or self.client.fenced() or self.syncer_lost()
+                or self.buffer.gone)
 
     def close(self) -> None:
         try:

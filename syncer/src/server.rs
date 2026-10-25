@@ -654,7 +654,10 @@ impl SubscriberHub {
         }
     }
 
-    /// End of the run: tell every subscriber, then close it.
+    /// End of the run: tell every subscriber, let the notices reach the
+    /// sockets, then close the connections. S27 G-EM: closing right after the
+    /// send let a subscriber see its data streams end before the notice and
+    /// redial a finished head (run s27-ea-a1).
     async fn finish(&self) {
         let conns = self.live();
         for conn in &conns {
@@ -666,11 +669,16 @@ impl SubscriberHub {
                 ),
             )
             .await;
+        }
+        if !conns.is_empty() {
+            // Let the writer tasks flush the ERROR before the connections close.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        for conn in &conns {
             conn.close();
         }
         if !conns.is_empty() {
-            // Let the writer tasks flush the ERROR before the process exits.
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 }

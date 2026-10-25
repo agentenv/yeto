@@ -27,6 +27,7 @@ from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event
 
 from .buffer_rollout import (
     DATA_SLOT_ENV,
+    EXTERNAL_CUT_ROUND_ATTR,
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
     INCARNATION_ENV,
@@ -161,6 +162,14 @@ class _BufferRound:
                               buffer_stale_groups=int(report.stale_groups),
                               **({"buffer_stale_positions": row_runs(stale)}
                                  if (stale := getattr(report, "stale_positions", None)) else {}))
+        if getattr(self, "relay_pump", None) is not None:
+            # S27 G-EM: the round's evidence names external merged cuts and bounds
+            # their age by the merged version this take gated on
+            if report.gate_version is None:
+                raise SampleBufferRolloutError(f"rollout {input.rollout_id}: a relay trainer "
+                                               "took groups without a merged gate version")
+            setattr(self.args, EXTERNAL_CUT_ROUND_ATTR,
+                    {"rollout_id": int(input.rollout_id), "merged_version": int(report.gate_version)})
         self._run_round_hooks(samples)
         return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
 

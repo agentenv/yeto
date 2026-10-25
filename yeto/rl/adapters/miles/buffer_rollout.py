@@ -396,6 +396,8 @@ class TakeReport:
     prefetched: int = 0
     # S27 P4: task-dispenser positions of the stale groups (their sampler had a dispenser)
     stale_positions: list[int] = field(default_factory=list)
+    # the version the max_policy_age gate compared against (not a metric)
+    gate_version: int | None = None
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -534,7 +536,8 @@ class BatchReader:
                                wait_s=round(self.clock() - started, 3), select_s=round(select_s, 3),
                                read_s=round(read_s, 3), decode_s=round(decode_s, 3),
                                prefetched=sum(1 for _, _, early in chosen if early),
-                               stale_positions=stale_positions)
+                               stale_positions=stale_positions,
+                               gate_version=None if current_version is None else int(current_version))
 
     def _settle(self, reads: list[Future]) -> float:
         """Wait for ``reads`` (their errors surface at ``result()``); the seconds waited."""
@@ -624,6 +627,17 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
 def register_reader(reader: BatchReader) -> None:
     """Called by the reader rollout function in the rollout executor's process."""
     _ACTIVE[TRAINER] = reader
+    pending = _PENDING_RELAY_GATE.pop(TRAINER, None)
+    if pending is not None:  # S27 G-EM: relay mode only (executor_set_relay_gate_version)
+        reader.gate_version = pending
+
+
+# S27 G-EM: a relay trainer's gate version set before its reader exists (the first
+# publication precedes the first rollout call, which builds the reader).
+_PENDING_RELAY_GATE: dict[str, int] = {}
+# Relay mode: the round and the gate version of the last take, on the rollout
+# args, for the trajectory evidence of that round (full_parameter.evidence).
+EXTERNAL_CUT_ROUND_ATTR = "yeto_rl_external_cut_round"
 
 
 def _active_reader() -> BatchReader:
@@ -652,6 +666,16 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
     if reader is None:
         return None
     return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
+
+
+def executor_set_relay_gate_version(_executor: Any, version: int) -> int | None:
+    """:func:`executor_set_gate_version` of a relay trainer (S27 G-EM): a gate set
+    before the reader exists is kept and applied when the reader registers, so
+    the first take already gates on the merged version."""
+    if _ACTIVE.get(TRAINER) is None:
+        _PENDING_RELAY_GATE[TRAINER] = int(version)
+        return None
+    return executor_set_gate_version(_executor, version)
 
 
 def executor_set_gate_version(_executor: Any, version: int) -> int | None:

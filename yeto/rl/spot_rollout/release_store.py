@@ -16,6 +16,14 @@ same two calls without any store:
 * ``resolve(release)``: the HF directory of that cut, written on local disk
   (:mod:`.materialize`).
 
+The release's ``policy_hash`` is the cut digest
+(:func:`yeto.rl.engine.external_policy.cut_digest`: layout fingerprint, every
+fragment's version and the SHA-256 of its bytes). :meth:`cut_identity` names
+the cut of every merged version this sampler loaded, for the relay items
+(S27 G-EM: the trainer's evidence names the cut that generated each sample);
+the base version (the weights served before the first cut) is named by
+:func:`~yeto.rl.engine.external_policy.base_cut_digest` of ``base_dir``.
+
 Everything after that is unchanged: the follower's load hook
 (``EngineReleaseLoader`` of the Miles sampler island,
 ``PortReleaseLoader`` of the engine sampler island) loads the directory,
@@ -33,6 +41,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine.external_policy import ExternalCutError, base_cut_digest, cut_digest
 from yeto.rl.engine.policy_release import PolicyRelease, ReleaseIncomplete
 
 from .subscriber import WeightCut, WeightFollower
@@ -45,7 +54,9 @@ class SubscriberReleaseStore:
                  read_position: Callable[[], int | None] = lambda: None,
                  base_version: int = 0, reload_every: int = 1,
                  finished: Callable[[], bool] = lambda: False,
-                 wall: Callable[[], float] = time.time) -> None:
+                 wall: Callable[[], float] = time.time,
+                 layout_fingerprint: str = "", keep_served: int = 16,
+                 base_dir: str | Path | None = None) -> None:
         if int(reload_every) < 1:
             raise ValueError("reload_every must be >= 1")
         self.follower = follower
@@ -58,6 +69,13 @@ class SubscriberReleaseStore:
         self._seq = 0
         self._current: PolicyRelease | None = None
         self._cuts: dict[int, WeightCut] = {}
+        self.layout_fingerprint = str(layout_fingerprint)
+        self.keep_served = int(keep_served)
+        # merged version -> identity of the cut loaded for it (resolve)
+        self._served: dict[int, dict[str, Any]] = {}
+        self.base_version = int(base_version)
+        self.base_dir = base_dir
+        self._base_identity: dict[str, Any] | None = None
 
     def finished(self) -> bool:
         """The syncer said the run ended (the sampler loop's stop condition)."""
@@ -69,7 +87,7 @@ class SubscriberReleaseStore:
         if cut is not None and cut.merged_version >= self._offered + self.reload_every:
             self._seq += 1
             self._offered = int(cut.merged_version)
-            digest = hashlib.sha256(repr(cut.versions).encode()).hexdigest()
+            digest = self._digest(cut)
             self._current = PolicyRelease(
                 seq=self._seq, version=int(cut.merged_version), policy_hash=digest,
                 path=f"subscriber-r{self._seq}-v{cut.merged_version}", released_at=round(self.wall(), 3),
@@ -80,11 +98,39 @@ class SubscriberReleaseStore:
             return None
         return dataclasses.replace(self._current, buffer_selected=self.read_position())
 
+    def _digest(self, cut: WeightCut) -> str:
+        if not cut.digests:  # a cut built without fragment digests (tests)
+            return hashlib.sha256(repr(cut.versions).encode()).hexdigest()
+        return cut_digest(self.layout_fingerprint, cut.versions, cut.digests)
+
     def resolve(self, release: PolicyRelease, *, from_store: bool = False) -> Path:
         cut = self._cuts.get(int(release.seq))
         if cut is None:
             raise ReleaseIncomplete(f"r{release.seq}: a newer cut replaced it")
-        return Path(self.materialize(cut))
+        path = Path(self.materialize(cut))
+        self._served[int(release.version)] = {"merged_version": int(release.version),
+                                              "digest": str(release.policy_hash),
+                                              "fragment_versions": [int(v) for v in cut.versions]}
+        for old in sorted(self._served)[:-self.keep_served]:
+            del self._served[old]
+        return path
+
+    def cut_identity(self, merged_version: int) -> dict[str, Any] | None:
+        """The cut this sampler loaded for ``merged_version`` (None: not loaded, or
+        older than the last ``keep_served`` loads)."""
+        found = self._served.get(int(merged_version))
+        if found is None and int(merged_version) == self.base_version and self.base_dir is not None:
+            if self._base_identity is None:  # computed once, on the first base-version group
+                try:
+                    digest = base_cut_digest(self.base_dir)
+                except (ExternalCutError, OSError) as error:  # the base groups are not sent
+                    print(f"[spot-sampler] no identity for the base weights: {error}", flush=True)
+                    self.base_dir = None
+                    return None
+                self._base_identity = {"merged_version": self.base_version, "digest": digest,
+                                       "fragment_versions": []}
+            found = self._base_identity
+        return None if found is None else dict(found)
 
     def records(self) -> list[PolicyRelease]:
         return [] if self._current is None else [self._current]
@@ -113,7 +159,7 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
     (closed with the process), HF directories under ``work_dir``."""
     import os
 
-    from yeto.protocol import island_hmac_key_from_env
+    from yeto.protocol import island_hmac_key_from_env, layout_fingerprint
 
     from . import layout_manifest
     from .materialize import materialize
@@ -146,4 +192,5 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
         lambda cut: materialize(layout, cut, base_model=base_model, out_root=out, model_name=model_name),
         read_position=getattr(buffer, "read_position", lambda: None),
         # fenced: a newer process of this sampler took its id on the head
-        finished=lambda: client.run_finished() or client.fenced())
+        finished=lambda: client.run_finished() or client.fenced(),
+        layout_fingerprint=layout_fingerprint(layout).hex(), base_dir=base_model)
