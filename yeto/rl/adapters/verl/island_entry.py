@@ -431,16 +431,15 @@ def main(argv=None) -> int:
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
-        # S27 G-EW: one refusal per path, each lifted by the change that wires it
-        # (VERL-PARITY #11: fully_async with a rollouter; #14: the buffer trainer)
-        if full and limit and buffer_section is None:
-            raise SystemExit("verl 全参数岛不支持 --rl-max-policy-age > 0（全参数 fully_async 路径未接，VERL-PARITY #11）")
         if full and args.rl_rollout_quant_tier:
             raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
         pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
         if pools is not None and buffer_section is not None:  # S27 G-EW: no rollout on a buffer trainer
             raise SystemExit("verl 全参数缓冲训练岛（--rl-sample-role trainer）不接 --rl-placement fixed-partition："
                              "它没有 rollout 卡，采样岛生成")
+        if full and limit and buffer_section is None and pools is None:  # S27 G-EV (VERL-PARITY #11)
+            raise SystemExit("verl 全参数 fully_async 岛（--rl-max-policy-age > 0）需要 --rl-placement fixed-partition "
+                             "--rl-rollout-gpus N：rollouter 在自己的卡上生成")
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
@@ -476,7 +475,7 @@ def main(argv=None) -> int:
     if megatron is not None:
         asserted_keys = megatron_engine.ASSERTED_KEYS
         resume, store_note = megatron_resume(args, resume)
-    elif pools is not None:  # S27 G-EK: the FSDP2 island in verl's separate mode
+    elif pools is not None and not limit:  # S27 G-EK: the FSDP2 island in verl's separate mode
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
 
         asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
@@ -509,7 +508,11 @@ def main(argv=None) -> int:
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
-        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
+        before = asserted_keys
+        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync, pools=pools)
+        if full:  # S27 G-EV: a full-parameter island keeps its training options' asserted keys
+            asserted_keys = tuple(dict.fromkeys((*asserted_keys, *before)))
+        pools = None  # S27 G-EV: the fully_async path places its own pools; not verl's separate mode
         append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
@@ -653,7 +656,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)
-    if pools is not None:
+    if pools is not None and not limit:  # limit > 0: the fully_async pools (fully_async_plan)
         from .separate import with_separate_pools
 
         overrides = with_separate_pools(overrides, pools)
@@ -805,7 +808,7 @@ def sample_buffer_section(args) -> dict | None:
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
-def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
+def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *, pools=None):
     """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
     and a TIS correction) so a wrong spec fails before verl starts.
@@ -827,8 +830,11 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     profile = execution_profile_for(spec, limit, groups_per_round=args.groups_per_round,
                                     samples_per_group=args.samples_per_group, sync=sync)
     check_algorithm_contract(profile, spec)
+    # S27 G-EV (VERL-PARITY #11): a full-parameter island's pools from the launcher's
+    # fixed-partition flags (separate.pools_from_args); a LoRA island keeps 1 + 1
+    sizes = {} if pools is None else {"rollout_gpus": pools.rollout_gpus, "trainer_gpus": pools.trainer_gpus}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
-                                    rounds=args.global_rounds)
+                                    rounds=args.global_rounds, **sizes)
     out = apply_to_overrides(out, correction_mapping(spec))
     from yeto.hw.catalog import device_family
 

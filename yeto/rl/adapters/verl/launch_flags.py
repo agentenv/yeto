@@ -92,14 +92,14 @@ def full_parameter_problems(args) -> list[str]:
         problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (a verl buffer "
                         "trainer starts no engine; the sampler islands generate)")
     # S27 G-EW: a synced buffer trainer runs verl's fully_async trainer over the sample buffer
-    # (--rl-max-policy-age >= 1, sample_roles); a full-parameter island with its own rollout
-    # runs the synchronous trainer (VERL-PARITY #11). S27 G-EV: with --rl-rollout-ahead 1 the
-    # limit bounds the one-version lag of the separate mode's synchronous trainer
-    # (policy_age.rollout_ahead_problems)
+    # (--rl-max-policy-age >= 1, sample_roles). S27 G-EV: with --rl-rollout-ahead 1 the limit
+    # bounds the one-version lag of the separate mode's synchronous trainer (VERL-PARITY #10);
+    # without it a limit > 0 runs verl's fully_async trainer and rollouter (VERL-PARITY #11),
+    # the rollouter on its own cards
     if (int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args)
-            and not int(getattr(args, "rl_rollout_ahead", 0) or 0)):
-        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the verl full-parameter island runs "
-                        "the synchronous trainer)")
+            and placement != "fixed-partition"):
+        problems.append("--rl-placement fixed-partition with --rl-max-policy-age > 0 (the fully_async "
+                        "rollouter, or the rollout servers of --rl-rollout-ahead, generate on their own cards)")
     if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
         problems.append("no --rl-rollout-quant-tier")
     if int(getattr(args, "expert_full_count", 0) or 0):
@@ -147,7 +147,8 @@ NOT_MAPPED_REASONS = {
                                "(VERL-PARITY #25)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
-    "--rl-async-buffer-rounds": "needs --rl-max-policy-age > 0, which the full-parameter island refuses",
+    "--rl-async-buffer-rounds": "Miles' fully_async buffer depth; verl's fully_async rollouter has no such "
+                                "option (its staleness_threshold follows --rl-max-policy-age)",
     "--rl-lora-dropout": "a full-parameter island has no LoRA adapter",
     "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
     "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "

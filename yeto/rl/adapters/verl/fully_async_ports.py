@@ -368,6 +368,63 @@ class FullyAsyncPublisher:
         return PublicationResult(manifest, frozenset({MEMBER}))
 
 
+class FullyAsyncFullParameterPublisher:
+    """yeto publication of a full-parameter fully_async island (S27 G-EV, VERL-PARITY #11).
+
+    The trainer actor pushes its weights to the rollouter over verl's NCCL
+    checkpoint engine (``yeto_push_weights``, the same push as the LoRA path; the
+    ``lora_wire`` patches pass a stream without LoRA through unchanged). The
+    pairing ``param_version <-> policy version`` is recorded as on the LoRA path.
+    There is no read-back of what vLLM loaded (the LoRA read-back does not cover
+    full weights; as the separate mode, ``separate.READBACK_STATUS``): the
+    per-round train/rollout log-prob criteria are the check. ``state`` is the
+    trainer-resident handle of the full-parameter policy state
+    (``fully_async_full``); the trainer must still hold it (``check_holds``)."""
+
+    def __init__(self, island: FullyAsyncIsland, *, push_timeout_s: float = 600.0):
+        self.island = island
+        self.push_timeout_s = push_timeout_s
+
+    def publish(self, state) -> PublicationResult:
+        from yeto.rl.engine.driver import PublicationError
+        from yeto.rl.engine.ports import PublicationCause
+
+        from .separate import READBACK_STATUS, WEIGHT_TRANSPORT
+
+        isl = self.island
+        version = int(state.policy_version)
+        check = getattr(state, "check_holds", None)
+        if callable(check):
+            check()  # the trainer still holds the hashed weights
+        started = time.monotonic()
+        try:  # S19 async5: a push that never returns must end the island, not hang it
+            pushed = isl.call("yeto_push_weights", timeout=self.push_timeout_s)
+        except TimeoutError as exc:
+            isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", {
+                "policy_version": version, "status": "PUSH_TIMEOUT", "detail": str(exc)[:300],
+                "update_seconds": time.monotonic() - started})
+            raise PublicationError(f"verl fully_async full-parameter publication v{version}: push timeout",
+                                   cause=PublicationCause.UPDATE_FAILED) from exc
+        param_version = int(pushed["param_version"])
+        isl.vmap.record(param_version, version)  # raises on contradiction / regression
+        digest = state.policy_tensor_hash()
+        payload_hash, payload_bytes = state.payload_digest
+        record = {"policy_version": version, "status": READBACK_STATUS, "param_version": param_version,
+                  "update_seconds": time.monotonic() - started, "rollouter_timing": pushed.get("timing"),
+                  "policy_tensor_hash": digest, "payload_bytes": int(payload_bytes),
+                  "transport": WEIGHT_TRANSPORT, "version_map": isl.vmap.to_dict()}
+        isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", record)
+        isl.emit("rl_publication_check", **record)
+        isl.emit("rl_verl_version_map", param_version=param_version, outer_version=version)
+        isl.published = (version, digest)
+        isl.hashes[version] = digest
+        manifest = InferencePublicationManifest(
+            publication_mode="full", base_policy_version=None, target_policy_version=version,
+            target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
+            payload_hash=payload_hash, payload_bytes=int(payload_bytes), complete=True)
+        return PublicationResult(manifest, frozenset({MEMBER}))
+
+
 class FullyAsyncPlacement:
     def describe(self) -> PlacementDescription:
         return PlacementDescription(FULLY_ASYNC_PLACEMENT, ("cuda:trainer-0",), ("cuda:rollouter-0",),

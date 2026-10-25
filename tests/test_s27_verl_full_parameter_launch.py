@@ -123,8 +123,9 @@ def test_verl_problems_cover_the_island_refusals():
                            rl_rollout_quant_tier=1, expert_full_count=2, rl_peer_recovery=True,
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))
-    for needle in ("--rl-placement colocated", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
-                   "--expert-full-count"):
+    # S27 G-EV: a limit > 0 runs on its own rollout cards (VERL-PARITY #10 / #11)
+    for needle in ("--rl-placement colocated", "--rl-placement fixed-partition with --rl-max-policy-age > 0",
+                   "--rl-rollout-quant-tier", "--expert-full-count"):
         assert needle in problems, needle
     assert "--rl-sample-role" not in problems
     assert "--rl-peer-recovery" not in problems  # S27 G-ED: the verl stream recovers from a peer

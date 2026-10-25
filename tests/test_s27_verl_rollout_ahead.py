@@ -489,7 +489,6 @@ def test_the_default_command_has_no_rollout_ahead():
     (lambda: _verl("--rl-single-island-no-sync", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
                    *AHEAD, gpu="modal:2xh200"), "--tuning full"),
     (lambda: _synced("--rl-rollout-ahead", "1"), "--rl-max-policy-age >= 1"),
-    (lambda: _synced("--rl-max-policy-age", "1"), "--rl-rollout-ahead 1"),
     (lambda: _verl("--rl-sync-preset", "full-parameter", "--rl-parameter-layout-sha256", "e" * 64,
                    "--fragments", "4", "--rl-sync-mode", "strict", "--rl-placement", "fixed-partition",
                    "--rl-rollout-gpus", "1", *AHEAD), "asynchronous rounds"),

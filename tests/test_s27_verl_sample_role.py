@@ -296,8 +296,9 @@ def test_release_weights_follow_the_parameter_mode():
         release_weights_for(lora, {"parameter_mode": "full", "model_path": "/m"})
 
 
-def test_a_full_parameter_fully_async_island_with_a_rollouter_is_still_refused(tmp_path, verl_trainer):
-    actor = FullBufferActor(seed=0)
-    base = _full_base(tmp_path, actor.model)
-    with pytest.raises(ValueError, match="VERL-PARITY #11"):
-        verl_trainer.run_fully_async_island(actor, lambda: None, _plan(tmp_path, base, rounds=1, groups=1), {})
+def test_a_full_parameter_fully_async_island_with_a_rollouter_is_wired(verl_trainer):
+    # S27 G-EV (VERL-PARITY #11): the refusal is gone; the rollouter path runs in
+    # test_s27_verl_fully_async_rollouter.py
+    import inspect
+
+    assert "with a rollouter is not wired" not in inspect.getsource(verl_trainer)

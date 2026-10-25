@@ -345,8 +345,8 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
     from .entry import verl_capabilities
-    from .fully_async_ports import (FullyAsyncIsland, FullyAsyncPlacement, FullyAsyncPublisher,
-                                    FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
+    from .fully_async_ports import (FullyAsyncFullParameterPublisher, FullyAsyncIsland, FullyAsyncPlacement,
+                                    FullyAsyncPublisher, FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
     from . import round_cuts
     from .fully_async_cut import optimizer_steps_per_round
     from .fully_async_full import full_parameter_hashes, full_parameter_ports, is_full_parameter
@@ -398,12 +398,12 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
-    if full and buffer_ports is None:  # VERL-PARITY #11: the rollouter's full-parameter publication
-        raise ValueError("a full-parameter fully_async island with a rollouter is not wired (VERL-PARITY #11)")
     if buffer_ports is None:
-        rollout, publisher, placement = (FullyAsyncRolloutPool(island),
-                                         FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))),
-                                         FullyAsyncPlacement())
+        # S27 G-EV (VERL-PARITY #11): a full-parameter island pushes its whole weights to
+        # the rollouter (no LoRA read-back); a LoRA island keeps the read-back publisher
+        publisher = (FullyAsyncFullParameterPublisher(island) if full
+                     else FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))))
+        rollout, placement = FullyAsyncRolloutPool(island), FullyAsyncPlacement()
     else:
         rollout, publisher, placement = buffer_ports(island)
     if buffer_ports is not None and plan.get("resume"):
