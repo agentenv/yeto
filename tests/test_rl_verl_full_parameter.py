@@ -26,7 +26,7 @@ SHAPES = {
 class _Module:
     """Stand-in for the unwrapped FSDP2 training module."""
 
-    def __init__(self, shapes=SHAPES, *, dtype=torch.float32, prefix="", frozen=()):
+    def __init__(self, shapes=SHAPES, *, dtype=torch.float32, prefix="", frozen=(), buffers=()):
         self._params = {
             f"{prefix}{name}": torch.nn.Parameter(
                 torch.arange(_numel(shape), dtype=dtype).reshape(shape),
@@ -34,9 +34,17 @@ class _Module:
             )
             for name, shape in shapes.items()
         }
+        # persistent buffers, as a leaf nn.Module holds them (S27 G-EQ3: the HF
+        # export reads them too, a MoE router's correction bias is one)
+        self._buffers = {f"{prefix}{name}": torch.full(shape, 0.5, dtype=dtype)
+                         for name, shape in dict(buffers).items()}
+        self._non_persistent_buffers_set: set[str] = set()
 
     def named_parameters(self):
         return list(self._params.items())
+
+    def named_modules(self):
+        return [("", self)]
 
 
 def _numel(shape) -> int:
@@ -218,3 +226,17 @@ def test_the_lora_island_command_is_unchanged():
     assert "actor_rollout_ref.model.target_modules=all-linear" in overrides
     assert "actor_rollout_ref.model.lora.merge=False" in overrides
     assert not [key for key in overrides if "parameter_mode" in key]
+
+
+def test_the_manifest_and_the_export_include_persistent_buffers():
+    """S27 G-EQ3: a checkpoint tensor can be a persistent buffer, so the export
+    must read it; the sync layout stays parameters only."""
+    module = _Module(buffers={"gate.bias": (4,)})
+    manifest = fp.remote_manifest(_worker(module))
+    assert "gate.bias" not in manifest["shapes"]  # not a parameter: not in the sync layout
+    assert manifest["buffers"] == {"gate.bias": [4]} and manifest["buffer_dtypes"] == ["torch.float32"]
+    assert fp.agree_on_shapes([manifest, manifest], key="buffers") == {"gate.bias": (4,)}
+    exported = fp.remote_export_fragment(_worker(module), ["gate.bias"], True)["tensors"]
+    assert torch.equal(exported["gate.bias"], torch.full((4,), 0.5))
+    assert fp.agree_on_shapes([manifest]) == {name: tuple(shape)
+                                              for name, shape in manifest["shapes"].items()}
