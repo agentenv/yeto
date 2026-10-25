@@ -739,6 +739,22 @@ NCCL_TRACE_PREFIX_DEFAULT = "/tmp/nccl_trace_rank_"
 PY_SPY_CANDIDATES = ("py-spy", "/opt/sglang/bin/py-spy")
 
 
+def python_pids(proc: str = "/proc", limit: int | None = 200) -> list[tuple[int, str]]:
+    """(pid, command line cut to ``limit`` chars) of every Python or Ray worker process except this one."""
+    out = []
+    for name in os.listdir(proc):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open(os.path.join(proc, name, "cmdline"), "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        if cmd.startswith("ray::") or "python" in cmd.split(" ", 1)[0]:
+            out.append((int(name), cmd if limit is None else cmd[:limit]))
+    return sorted(out)
+
+
 class HangStackDumper:
     """Capture every Python process's stack when a collective times out.
 
@@ -778,18 +794,7 @@ class HangStackDumper:
             return []
 
     def python_pids(self) -> list[tuple[int, str]]:
-        out = []
-        for name in os.listdir(self.proc):
-            if not name.isdigit() or int(name) == os.getpid():
-                continue
-            try:
-                with open(os.path.join(self.proc, name, "cmdline"), "rb") as f:
-                    cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
-            except OSError:
-                continue
-            if cmd.startswith("ray::") or "python" in cmd.split(" ", 1)[0]:
-                out.append((int(name), cmd[:200]))
-        return sorted(out)
+        return python_pids(self.proc)
 
     def dump(self, reason: str) -> str:
         self.dumps += 1
@@ -829,6 +834,208 @@ class HangStackDumper:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+STACK_SAMPLE_MATCH_DEFAULT = "island_entry"  # yeto.rl.adapters.<backend>.island_entry
+STACK_SAMPLE_KEEP_DEFAULT = 20
+PR_SET_PTRACER = 0x59616D61
+PR_SET_PTRACER_ANY = (1 << 64) - 1  # (unsigned long)-1
+
+
+def stack_sample_interval_s(env) -> float | None:
+    """Env YETO_STACK_SAMPLE_S: seconds between periodic stack samples; unset, "" or <= 0 = off."""
+    raw = str((env or {}).get("YETO_STACK_SAMPLE_S", "")).strip()
+    if not raw:
+        return None
+    value = float(raw)
+    return value if value > 0 else None
+
+
+def allow_any_ptracer(env=None) -> bool | None:
+    """Let any process in the container ptrace this one, when periodic stack sampling is on.
+
+    A Modal (gVisor) container runs with Yama ptrace_scope=1 and without
+    CAP_SYS_PTRACE.  py-spy started by the runner is a sibling of the island
+    driver, not its ancestor, so it gets EACCES ("Failed to copy Py_Version
+    symbol"; S27 G-CQ on CPU, T4 and 1xH200 containers).  After the target calls
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY), py-spy dumps it (G-CQ: a
+    400-thread process in 0.1-0.3 s).  The island entry calls this at start.
+    Returns None when sampling is off, else whether the prctl succeeded."""
+    if stack_sample_interval_s(os.environ if env is None else env) is None:
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        ok = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        ok = False
+    print(f"[yeto-stack-sample] pid {os.getpid()}: PR_SET_PTRACER_ANY {'set' if ok else 'failed'}", flush=True)
+    return ok
+
+
+class PeriodicStackSampler:
+    """Every ``interval_s``, ``py-spy dump`` each Python process whose command
+    line contains ``match`` (default: the island driver) into a ring of
+    ``keep`` files in the tape dir, and append one index line per round.
+
+    S27 RAY-SEGV: the 120B island driver died of SIGSEGV in many threads at
+    once; neither Ray's Abseil handler nor faulthandler finished printing, so
+    the only stacks left are those sampled before the crash.  Opt-in via env
+    ``YETO_STACK_SAMPLE_S`` (seconds; unset or 0 = off).  Other env:
+    ``YETO_STACK_SAMPLE_MATCH`` (substring, default ``island_entry``),
+    ``YETO_STACK_SAMPLE_KEEP`` (ring size, default 20),
+    ``YETO_STACK_SAMPLE_NATIVE=1`` (add ``--native``),
+    ``YETO_STACK_SAMPLE_NONBLOCKING=1`` (add ``--nonblocking``: the target is
+    not paused; default py-spy pauses it, G-CQ: 0.1-0.3 s for 400 threads).
+    The target must allow the ptrace first (``allow_any_ptracer``).  Files:
+    ``stack-samples-rank<R>-<slot>.txt`` and ``stack-samples-rank<R>.jsonl``
+    (round, slot, time, pids, return codes, seconds: the newest round is the
+    last line)."""
+
+    def __init__(self, out_dir: str, rank: int, *, interval_s: float,
+                 match: str = STACK_SAMPLE_MATCH_DEFAULT, keep: int = STACK_SAMPLE_KEEP_DEFAULT,
+                 native: bool = False, nonblocking: bool = False, timeout_s: float = 60.0,
+                 py_spy: str | None = None, proc: str = "/proc"):
+        if interval_s <= 0 or keep < 1:
+            raise ValueError("stack sampler needs interval_s > 0 and keep >= 1")
+        self.out_dir, self.rank, self.interval_s, self.match = out_dir, rank, interval_s, match
+        self.keep, self.native, self.nonblocking, self.timeout_s = keep, native, nonblocking, timeout_s
+        self.py_spy = py_spy or next((p for p in (_which(c) for c in PY_SPY_CANDIDATES) if p), None)
+        self.proc = proc
+        self.rounds = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_env(cls, env: dict, out_dir: str, rank: int) -> "PeriodicStackSampler | None":
+        interval = stack_sample_interval_s(env)
+        if interval is None:
+            return None
+        flag = lambda name: str(env.get(name, "")).strip() in {"1", "true", "yes"}  # noqa: E731
+        return cls(out_dir, rank, interval_s=interval,
+                   match=str(env.get("YETO_STACK_SAMPLE_MATCH") or STACK_SAMPLE_MATCH_DEFAULT),
+                   keep=int(env.get("YETO_STACK_SAMPLE_KEEP") or STACK_SAMPLE_KEEP_DEFAULT),
+                   native=flag("YETO_STACK_SAMPLE_NATIVE"), nonblocking=flag("YETO_STACK_SAMPLE_NONBLOCKING"))
+
+    def command(self, pid: int) -> list[str]:
+        return [self.py_spy or "py-spy", "dump", "--pid", str(pid),
+                *(["--native"] if self.native else []), *(["--nonblocking"] if self.nonblocking else [])]
+
+    def targets(self) -> list[tuple[int, str]]:
+        return [(pid, cmd[:200]) for pid, cmd in python_pids(self.proc, limit=None) if self.match in cmd]
+
+    def sample(self) -> dict:
+        """One round: dump every target into the next ring slot."""
+        slot = self.rounds % self.keep
+        self.rounds += 1
+        os.makedirs(self.out_dir, exist_ok=True)
+        path = os.path.join(self.out_dir, f"stack-samples-rank{self.rank}-{slot:02d}.txt")
+        rec: dict = {"round": self.rounds, "slot": slot, "t": round(time.time(), 3), "pids": [], "rc": [],
+                     "secs": []}
+        with open(path, "w") as f:
+            f.write(f"# round {self.rounds} at {rec['t']} (py-spy={self.py_spy}, match={self.match!r})\n")
+            for pid, cmd in self.targets():
+                f.write(f"\n===== pid {pid}: {cmd}\n")
+                f.flush()
+                t0 = time.monotonic()
+                if self.py_spy is None:
+                    rc: int | str = "no py-spy"
+                    f.write("py-spy not found\n")
+                else:
+                    try:
+                        res = subprocess.run(self.command(pid), capture_output=True, text=True,
+                                             timeout=self.timeout_s)
+                        rc = res.returncode
+                        f.write(res.stdout + res.stderr)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        rc = type(exc).__name__
+                        f.write(f"py-spy failed: {exc}\n")
+                rec["pids"].append(pid)
+                rec["rc"].append(rc)
+                rec["secs"].append(round(time.monotonic() - t0, 3))
+        with open(os.path.join(self.out_dir, f"stack-samples-rank{self.rank}.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return rec
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self.sample()
+            except Exception as exc:  # noqa: BLE001 - sampling must never take the island down
+                print(f"[yeto-stack-sample] rank {self.rank}: round failed: {exc!r}", flush=True)
+
+    def start(self) -> None:
+        print(f"[yeto-stack-sample] rank {self.rank}: every {self.interval_s:g} s, match {self.match!r}, "
+              f"keep {self.keep} (py-spy={self.py_spy})", flush=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="yeto-stack-sample")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+# S27 RAY-SEGV: a gVisor process that touches more than about 2**22 non-adjacent
+# pages gets SIGSEGV (host mapping limit; G-CM/G-CQ: 4,063,232-4,194,304 pages on
+# Modal CPU, T4 and 1xH200 containers, all "4.19.0-gvisor").  Multi-container
+# islands report "5.15.0-gvisor" and could not be probed without a 16-GPU run.
+# This child touches every other page of a PROT_NONE reservation (each touched
+# page is its own mapping) and prints progress, so its last line brackets the
+# limit; it uses ~4 KiB of memory per page and only kills itself.
+HOST_MAP_PROBE_SCRIPT = r"""
+import ctypes, faulthandler, mmap, sys, time
+faulthandler.enable()
+n, report = int(sys.argv[1]), int(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+page = 4096
+base = libc.mmap(None, 2 * n * page, 0, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, -1, 0)
+if base in (None, ctypes.c_void_p(-1).value):
+    print("MAPPROBE mmap_failed errno=%d" % ctypes.get_errno(), flush=True)
+    sys.exit(2)
+print("MAPPROBE start pages=%d" % n, flush=True)
+t0 = time.time()
+for i in range(n):
+    addr = base + 2 * i * page
+    if libc.mprotect(addr, page, mmap.PROT_READ | mmap.PROT_WRITE) != 0:
+        print("MAPPROBE mprotect_failed touched=%d errno=%d" % (i, ctypes.get_errno()), flush=True)
+        sys.exit(3)
+    ctypes.memset(addr, 1, 1)
+    if (i + 1) % report == 0:
+        print("MAPPROBE touched=%d secs=%.1f" % (i + 1, time.time() - t0), flush=True)
+print("MAPPROBE ok touched=%d secs=%.1f" % (n, time.time() - t0), flush=True)
+"""
+
+
+def start_host_map_probe(env: dict, rank: int, out_dir: str, *, python: str | None = None):
+    """Opt-in via env YETO_HOST_MAP_PROBE_PAGES=<pages> (unset or 0 = off): on
+    rank 0 only, run HOST_MAP_PROBE_SCRIPT in the background and log to
+    ``host-map-probe-rank0.log`` in the tape dir (last line: the exit code).
+    Returns the watcher thread, or None when off."""
+    raw = str((env or {}).get("YETO_HOST_MAP_PROBE_PAGES", "")).strip()
+    pages = int(raw) if raw else 0
+    if pages <= 0 or rank != 0:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"host-map-probe-rank{rank}.log")
+    report = max(1, min(131072, pages // 8))
+    log = open(path, "w")
+    proc = subprocess.Popen([python or sys.executable, "-c", HOST_MAP_PROBE_SCRIPT, str(pages), str(report)],
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def wait() -> None:
+        rc = proc.wait()
+        log.write(f"MAPPROBE exit rc={rc}\n")
+        log.close()
+        print(f"[yeto-host-map-probe] rank {rank}: exit rc={rc} ({path})", flush=True)
+
+    print(f"[yeto-host-map-probe] rank {rank}: {pages} pages, pid {proc.pid} -> {path}", flush=True)
+    thread = threading.Thread(target=wait, daemon=True, name="yeto-host-map-probe")
+    thread.start()
+    return thread
 
 
 def _which(cmd: str) -> str | None:
@@ -880,9 +1087,15 @@ def island_main(cfg_json: str) -> int:
     stacks = HangStackDumper.from_env(env, TAPE_SOURCE_DIR, rank)
     if stacks is not None:
         stacks.start()
+    sampler = PeriodicStackSampler.from_env(env, TAPE_SOURCE_DIR, rank)
+    if sampler is not None:
+        sampler.start()
+    start_host_map_probe(env, rank, TAPE_SOURCE_DIR)
     try:
         return _island_body(cfg, rank, ips, all_ips, env, tape)
     finally:
+        if sampler is not None:
+            sampler.stop()
         if stacks is not None:
             stacks.stop()
         if hostmem is not None:

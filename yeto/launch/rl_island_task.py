@@ -19,7 +19,8 @@ from .remote_setup import (
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
-    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_spill_dir_prelude,
+    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_head_env,
+    rl_island_ray_spill_dir_prelude,
     rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
 )
 from .syncer import (
@@ -525,7 +526,8 @@ def make_miles_island_task(
             "}\n"
             "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
-            "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
+            # S27 RAY-SEGV R1: head-only RAY_* (plasma preallocation, start wait); "" when unset.
+            f"  {rl_island_ray_head_env(args)}ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
             # On a multi-node island the dashboard must listen on the node

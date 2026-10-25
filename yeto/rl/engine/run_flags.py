@@ -444,6 +444,22 @@ _PLACEMENT = (
              help="RL island: directory for Ray object spilling (default: the island's Ray "
              "temp dir on the container/VM disk). Point it at the largest local disk; on "
              "Modal size the disk with --modal-ephemeral-disk-gib"),
+    cli_flag("--rl-island-ray-head-object-store-gib", type=int, default=None, metavar="GIB",
+             help="RL island: object store size of the head node (node 0) only, in GiB; worker "
+             "nodes keep --rl-island-ray-object-store-gib. Unset = the head uses the same "
+             "size as the workers"),
+    cli_flag("--rl-island-ray-head-preallocate", action="store_true", default=False,
+             help="RL island: start the head's raylet with RAY_preallocate_plasma_memory=1, so "
+             "the whole head object store is populated once, sequentially, at start (S27 "
+             "RAY-SEGV R1: the island driver on gVisor got SIGSEGV when its shared-memory "
+             "mappings were fragmented). Needs an explicit head store size. Ray notes the "
+             "populate runs at a few GB/s on Linux (raise --rl-island-ray-head-start-wait-s); "
+             "on a Modal CPU container a 300 GiB head started in 8.4 s (G-CQ)"),
+    cli_flag("--rl-island-ray-head-start-wait-s", type=int, default=None, metavar="SECONDS",
+             help="RL island: how long the head's `ray start` and raylet wait for the raylet "
+             "to come up (RAY_raylet_start_wait_time_s and RAY_raylet_client_num_connect_attempts, "
+             "1 s per attempt). Default with --rl-island-ray-head-preallocate: 120 (Ray's "
+             "default); unset without it = Ray's defaults, nothing added to the command"),
     cli_flag("--rl-node-inventory", default=None, metavar="PATH",
              help="rl-ssh-node-pool: YAML inventory of the nodes yeto reaches by SSH "
              "(per node: ssh target, optional jump host, device family, card, card count, "
