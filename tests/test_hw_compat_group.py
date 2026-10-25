@@ -145,3 +145,17 @@ def test_launch_parser_accepts_rl_compat_group():
     launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
     actions = {opt: a for a in launch._actions for opt in a.option_strings}
     assert actions["--rl-compat-group"].default is None
+
+
+def test_spot_without_volume_drops_the_island_bucket():
+    # G-DF T3: a Nebius spot island without a store credential keeps no completed-groups bucket
+    from types import SimpleNamespace
+
+    from yeto import cli
+    from yeto.cloud.droppable import island_keeps_spot_volume
+
+    launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
+    actions = {opt: a for a in launch._actions for opt in a.option_strings}
+    assert actions["--spot-without-volume"].dest == "spot_without_volume"
+    assert island_keeps_spot_volume(SimpleNamespace(spot=True))
+    assert not island_keeps_spot_volume(SimpleNamespace(spot=True, spot_without_volume=True))
