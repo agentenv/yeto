@@ -58,6 +58,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -87,6 +88,13 @@ ARRAY_STATE = "state.npz"
 DEFAULT_TTL_S = 3600.0
 DEFAULT_SWEEP_EVERY_S = 300.0
 DEFAULT_HASH_WORKERS = 8  # one Megatron rank shard per thread on an 8-GPU trainer
+# S27 G-EL: a manifest that is not visible yet is read again after store reloads
+# with backoff (2, 4, 8, 16, 30, 30 ... s) for up to this long in total; 0: refuse
+# at once (the behavior before). Hardening only: in s27-elastic-a the manifest was
+# missing because the snapshot was on the donor's local disk (a launch bug).
+DEFAULT_MANIFEST_WAIT_S = 120.0
+MANIFEST_RETRY_FIRST_S = 2.0
+MANIFEST_RETRY_MAX_S = 30.0
 _LOCATOR = re.compile(r"^s(\d{13})-([0-9a-f]{32})$")
 _CHUNK = 1 << 20
 
@@ -135,6 +143,23 @@ class FileRecoverableIsland(Protocol):
         """Restore the snapshot in ``directory`` (taken at fragment
         ``versions``). Return the versions to report as held: ``versions``, or
         None to have the syncer resend every fragment."""
+
+    # Optional (S27 G-EL), all three or none: a donor that takes its state at the
+    # safe point and writes the files while it trains on (DonorService ``capture``).
+    #
+    # start_recovery_snapshot(directory) -> handle: copy the state (host memory)
+    #     and start writing it into ``directory``; return quickly.
+    # recovery_snapshot_written(handle) -> bool: whether every file is written
+    #     (asked at later safe points; never waits).
+    # finish_recovery_snapshot(handle) -> None: collect the written files once
+    #     ``recovery_snapshot_written`` is True; raises SnapshotRefused when a
+    #     part was refused or failed.
+
+
+def captures_snapshots(island: Any) -> bool:
+    """The island implements the optional capture-then-write methods."""
+    return all(callable(getattr(island, name, None)) for name in (
+        "start_recovery_snapshot", "recovery_snapshot_written", "finish_recovery_snapshot"))
 
 
 class SnapshotIntegrityError(RuntimeError):
@@ -307,9 +332,17 @@ class SnapshotStore:
                  hold_writer: Callable[[], Any] | None = None,
                  hash_workers: int = DEFAULT_HASH_WORKERS,
                  staging: str | os.PathLike | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 manifest_wait_s: float = DEFAULT_MANIFEST_WAIT_S,
+                 sleep: Callable[[float], Any] = time.sleep) -> None:
         if hash_workers < 1:
             raise ValueError("hash_workers must be >= 1")
+        if not manifest_wait_s >= 0:
+            raise ValueError("manifest_wait_s must be >= 0")
+        self.manifest_wait_s = float(manifest_wait_s)
+        self._sleep = sleep
+        #: Reloads that found no manifest yet, over this store's life.
+        self.manifest_retries = 0
         self.objects = objects
         self.prefix = prefix.strip("/")
         self.local_root = None if local_root is None else Path(local_root).expanduser()
@@ -398,10 +431,27 @@ class SnapshotStore:
 
     # -- read -------------------------------------------------------------------
     def manifest(self, locator: str, sha256: bytes) -> SnapshotManifest:
-        self.reload()
-        data = self.objects.read(self.manifest_key(locator))
-        if data is None:
-            raise SnapshotIntegrityError(f"snapshot {locator!r} not found")
+        """The manifest named by the syncer, checked against ``sha256``. Not found
+        after a reload: reload and read again with backoff for up to
+        ``manifest_wait_s`` seconds in total before refusing."""
+        waited, pause = 0.0, MANIFEST_RETRY_FIRST_S
+        while True:
+            self.reload()
+            data = self.objects.read(self.manifest_key(locator))
+            if data is not None:
+                break
+            remaining = self.manifest_wait_s - waited
+            if remaining <= 0:
+                suffix = f" after {waited:.0f}s of store reloads" if waited else ""
+                raise SnapshotIntegrityError(f"snapshot {locator!r} not found{suffix}")
+            step = min(pause, remaining)
+            self.manifest_retries += 1
+            print(f"[yeto-peer-recovery] snapshot {locator!r} not visible yet; reloading the store "
+                  f"again in {step:.0f}s ({waited:.0f}/{self.manifest_wait_s:.0f}s waited)",
+                  file=sys.stderr, flush=True)
+            self._sleep(step)
+            waited += step
+            pause = min(2 * pause, MANIFEST_RETRY_MAX_S)
         if hashlib.sha256(data).digest() != sha256:
             raise SnapshotIntegrityError(f"snapshot {locator!r} sha256 mismatch")
         return SnapshotManifest.from_bytes(data)
@@ -485,13 +535,15 @@ class DirectorySnapshotStore(SnapshotStore):
 
 
 def snapshot_store_for(path: str | os.PathLike, *, environ: Mapping[str, str] | None = None,
-                       staging: str | os.PathLike | None = None) -> SnapshotStore:
+                       staging: str | os.PathLike | None = None,
+                       manifest_wait_s: float = DEFAULT_MANIFEST_WAIT_S) -> SnapshotStore:
     """The snapshot store of an island: ``path`` is a checkpoint store path, so
     the launch layer's store selection (Modal Volume, S3, OSS, bucket mount,
     plain directory: :func:`yeto.rl.engine.resume.store_for`) applies."""
     from yeto.rl.engine.resume import store_for
 
-    return SnapshotStore.for_checkpoint_store(store_for(path, environ=environ), staging=staging)
+    return SnapshotStore.for_checkpoint_store(store_for(path, environ=environ), staging=staging,
+                                              manifest_wait_s=manifest_wait_s)
 
 
 def write_array_state(directory: Path, state: Mapping[str, np.ndarray]) -> None:
@@ -584,15 +636,26 @@ class DonorService:
     the next one); the training loop never sees that error. Every ``sweep_every_s``
     it also removes snapshots older than ``ttl_s`` from the store (any island's).
 
+    ``capture`` (S27 G-EL; None: on when the island implements the optional
+    capture-then-write methods, see :class:`FileRecoverableIsland`): at the safe
+    point the island only copies its state to host memory and starts writing
+    the files; the service asks at later safe points whether they are written
+    (never waits), then hashes, commits and answers in the background. Training
+    pauses only for the copy (Nemotron Nano: the inline write paused the donor
+    for 545.6 s in s27-elastic-a). False: the island writes the files at the
+    safe point (the behavior before).
+
     :attr:`timings` has one row per finished snapshot: ``write_s`` (training
-    loop paused), ``commit_s`` (hash + commit + answer), ``bytes`` and ``result``.
+    loop paused: the copy, or the whole write inline), ``background_write_s``
+    (capture mode: from the copy to the last written file, training ran),
+    ``commit_s`` (hash + commit + answer), ``bytes`` and ``result``.
     ``log`` (e.g. ``print`` to stderr) gets one line per refused or finished
     snapshot, prefixed with ``name`` (the role)."""
 
     def __init__(self, client: SyncerClient, island: Any, store: SnapshotStore, *,
                  ttl_s: float = DEFAULT_TTL_S, sweep_every_s: float = DEFAULT_SWEEP_EVERY_S,
-                 background: bool | None = None, log: Callable[[str], Any] | None = None,
-                 name: str = "island") -> None:
+                 background: bool | None = None, capture: bool | None = None,
+                 log: Callable[[str], Any] | None = None, name: str = "island") -> None:
         if not ttl_s > 0 or not sweep_every_s > 0:
             raise ValueError("snapshot ttl and sweep interval must be positive")
         self.client = client
@@ -602,6 +665,12 @@ class DonorService:
         self.ttl_s = ttl_s
         self.sweep_every_s = sweep_every_s
         self.background = file_island if background is None else bool(background)
+        can_capture = captures_snapshots(self.island)
+        if capture and not can_capture:
+            raise ValueError("this island cannot capture a snapshot and write it later")
+        self.capture = can_capture if capture is None else bool(capture)
+        # The snapshot whose files the island is still writing (capture mode).
+        self._capturing: dict[str, Any] | None = None
         self.log = log
         self.name = name
         self._next_sweep = 0.0
@@ -617,8 +686,8 @@ class DonorService:
 
     @property
     def busy(self) -> bool:
-        """A snapshot is being hashed or committed on the worker thread."""
-        return self._worker is not None and self._worker.is_alive()
+        """A snapshot is being written (capture mode), hashed or committed."""
+        return self._capturing is not None or (self._worker is not None and self._worker.is_alive())
 
     def poll(self) -> int:
         """Serve every request the island is caught up for; returns how many
@@ -628,6 +697,9 @@ class DonorService:
             # A newer request for the same recovering generation replaces the old one.
             self._waiting[(request.recovering_id, request.recovering_generation)] = request
         served = self._collect()
+        if self._capturing is not None:
+            self._check_captured()
+            return served
         if self.busy or not self._waiting:
             return served
         held = tuple(self.island.fragment_versions())
@@ -638,7 +710,10 @@ class DonorService:
             started = time.monotonic()
             writer = self.store.begin()
             try:
-                self.island.write_recovery_snapshot(writer.directory)
+                if self.capture:
+                    handle = self.island.start_recovery_snapshot(writer.directory)
+                else:
+                    self.island.write_recovery_snapshot(writer.directory)
                 tag = self.island.layout_tag()
             except SnapshotRefused as exc:
                 writer.abort()
@@ -647,6 +722,11 @@ class DonorService:
             except BaseException:
                 writer.abort()
                 raise
+            if self.capture:
+                self._in_flight = writer.locator
+                self._capturing = {"job": (key, request, writer, held, tag, time.monotonic() - started),
+                                   "handle": handle, "captured": time.monotonic()}
+                break  # one snapshot in flight; later polls check its files
             job = (key, request, writer, held, tag, time.monotonic() - started)
             if self.background:
                 self._in_flight = writer.locator
@@ -658,15 +738,41 @@ class DonorService:
             served += self._collect()
         return served
 
+    def _check_captured(self) -> None:
+        """Capture mode, at a safe point: once every file of the captured snapshot
+        is written, collect them and hash + commit + answer on the worker thread."""
+        pending = self._capturing
+        key, request, writer, held, tag, write_s = pending["job"]
+        try:
+            if not self.island.recovery_snapshot_written(pending["handle"]):
+                return  # still writing; keep training
+            self.island.finish_recovery_snapshot(pending["handle"])
+        except SnapshotRefused as exc:
+            self._capturing, self._in_flight = None, None
+            writer.abort()
+            self._refuse(request, str(exc))
+            return
+        except BaseException:
+            self._capturing, self._in_flight = None, None
+            writer.abort()
+            raise
+        self._capturing = None
+        background_write_s = time.monotonic() - pending["captured"]
+        self._worker = threading.Thread(target=self._finish, args=(key, request, writer, held, tag, write_s),
+                                        kwargs={"background_write_s": background_write_s}, daemon=True,
+                                        name="peer-snapshot-commit")
+        self._worker.start()
+
     def wait(self, timeout: float | None = None) -> bool:
-        """Wait for the snapshot in flight (tests, shutdown); True when none is left."""
+        """Wait for the hash + commit in flight (tests, shutdown); True when none is
+        left. A captured snapshot still being written needs more polls."""
         worker = self._worker
         if worker is not None:
             worker.join(timeout)
         return not self.busy
 
     def _finish(self, key, request: rp.SnapshotRequest, writer: SnapshotWriter, held, tag: str,
-                write_s: float) -> None:
+                write_s: float, background_write_s: float | None = None) -> None:
         started = time.monotonic()
         try:
             locator, sha256 = writer.commit(held, tag)
@@ -687,6 +793,8 @@ class DonorService:
                 result, detail = "retry", None
         timing = {"recovering_id": request.recovering_id, "result": result, "bytes": writer.bytes,
                   "write_s": round(write_s, 3), "commit_s": round(time.monotonic() - started, 3)}
+        if background_write_s is not None:
+            timing["background_write_s"] = round(background_write_s, 3)
         with self._lock:
             self._done.append((key, request, result, detail, timing))
 
@@ -703,9 +811,15 @@ class DonorService:
                 self._refuse(request, detail)
             else:
                 self._waiting.setdefault(key, request)
-            self._say(f"donor snapshot for learner {timing['recovering_id']}: {result}, {timing['bytes']} bytes, "
-                      f"write {timing['write_s']:.1f}s (training paused), "
-                      f"hash+commit {timing['commit_s']:.1f}s (training ran)")
+            if "background_write_s" in timing:
+                self._say(f"donor snapshot for learner {timing['recovering_id']}: {result}, {timing['bytes']} bytes, "
+                          f"capture {timing['write_s']:.1f}s (training paused), "
+                          f"write {timing['background_write_s']:.1f}s + "
+                          f"hash+commit {timing['commit_s']:.1f}s (training ran)")
+            else:
+                self._say(f"donor snapshot for learner {timing['recovering_id']}: {result}, {timing['bytes']} bytes, "
+                          f"write {timing['write_s']:.1f}s (training paused), "
+                          f"hash+commit {timing['commit_s']:.1f}s (training ran)")
         if not self.busy:
             self._worker, self._in_flight = None, None
         return served

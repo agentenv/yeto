@@ -1073,6 +1073,11 @@ def peer_recovery_options(args, environ=None):
         # snapshot write, commit, read and the full resend take tens of minutes).
         timeout_s=ttl_s,
         staging=getattr(args, "rl_peer_recovery_staging", None),
+        # S27 G-EL: both default on; the flags bring the behavior before back
+        **({} if getattr(args, "rl_peer_recovery_manifest_wait_s", None) is None
+           else {"manifest_wait_s": float(args.rl_peer_recovery_manifest_wait_s)}),
+        **({} if getattr(args, "rl_peer_recovery_donor_write", None) is None
+           else {"donor_write": str(args.rl_peer_recovery_donor_write)}),
     )
 
 

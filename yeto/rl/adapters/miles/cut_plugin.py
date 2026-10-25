@@ -55,6 +55,7 @@ from .state_plugin import (
 _MODULE = "yeto.rl.adapters.miles.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
 FINISH_CUT_SHARD = f"{_MODULE}.finish_cut_shard"
+POLL_CUT_SHARD = f"{_MODULE}.poll_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
 # Opt-in: read the optimizer back right after the load and report where a mismatch arises.
@@ -777,7 +778,13 @@ REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
 _PENDING_SHARDS: dict[str, Any] = {}
 
 
-def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool = False) -> dict[str, Any]:
+# S27 G-EL: ``save_cut_shard(background=HOST_BACKGROUND)``: a host copy written by a
+# thread of this rank, no other copy (peer snapshots of a 30B trainer: 8 ranks x
+# about 59 GB of host memory next to a training container at about 289 GiB of 768)
+HOST_BACKGROUND = "host"
+
+
+def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool | str = False) -> dict[str, Any]:
     """Write this rank's shard (tmp + fsync + rename) and return its summary.
 
     A refusal (unsupported configuration, not at a step boundary, ...) is
@@ -788,13 +795,23 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     ``background`` (E1): take the state now (at this step boundary) and write, hash
     and summarize it off the training thread (:func:`_write_background`), so
     training goes on; returns ``{"pending": cut_id}``. :func:`finish_cut_shard`
-    returns the summary.
+    returns the summary, :func:`poll_cut_shard` says whether it is ready.
+
+    ``background="host"`` (:data:`HOST_BACKGROUND`, S27 G-EL peer snapshots): the
+    state is copied to host memory here (the host path of :func:`_capture`) and a
+    thread of this rank writes the shard from that copy (:func:`_write_refusing`,
+    the inline write's code), without the device copies, the shared-memory buffer
+    and the writer process of the E1 path: those hold up to three copies of the
+    shard at once, about 1.4 TB on an 8-rank 30B trainer.
     """
+    host = background == HOST_BACKGROUND
     try:
         with trainer_resident(actor):
-            captured = _capture(actor, cut_id=cut_id, device_copy=background)
+            captured = _capture(actor, cut_id=cut_id, device_copy=bool(background) and not host)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+    if host:
+        captured["capture"] = {**captured["capture"], "reason": "host_background"}
     if not background:
         return _write_refusing(captured, directory=directory, cut_id=cut_id)
     from concurrent.futures import ThreadPoolExecutor
@@ -802,9 +819,29 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     if cut_id in _PENDING_SHARDS:
         return {REFUSED: f"cut {cut_id} is already being written", REFUSAL_KIND: "refused"}
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
-    _PENDING_SHARDS[cut_id] = (pool, pool.submit(_write_background, captured, directory=directory, cut_id=cut_id))
+    write = _write_host_background if host else _write_background
+    _PENDING_SHARDS[cut_id] = (pool, pool.submit(write, captured, directory=directory, cut_id=cut_id))
     pool.shutdown(wait=False)
     return {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
+
+
+def poll_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
+    """Whether this rank's background write of ``cut_id`` finished (never waits):
+    ``{"done": bool}``; ``done`` with ``"missing"`` when nothing is pending."""
+    pending = _PENDING_SHARDS.get(cut_id)
+    if pending is None:
+        return {"done": True, "missing": True}
+    return {"done": bool(pending[1].done())}
+
+
+def _write_host_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Thread of the trainer process: :func:`_write_refusing` of a host capture."""
+    try:
+        result = _write_refusing(captured, directory=directory, cut_id=cut_id)
+    except BaseException:
+        _remove_partial(directory, captured["coord"])
+        raise
+    return {**result, "writer": {"mode": "host_thread"}}
 
 
 def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:

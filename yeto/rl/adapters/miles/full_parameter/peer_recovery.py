@@ -41,6 +41,7 @@ from typing import Any
 
 from yeto.protocol import BcastFragment
 from yeto.rl.peer_recovery import (
+    DEFAULT_MANIFEST_WAIT_S,
     SnapshotIntegrityError,
     SnapshotRefused,
     check_restored_digests,
@@ -71,12 +72,19 @@ class PeerRecoveryOptions:
     ttl_s: float = 3600.0
     timeout_s: float = 3600.0
     staging: str | None = None
+    # S27 G-EL (``--rl-peer-recovery-manifest-wait-s``, ``--rl-peer-recovery-donor-write``)
+    manifest_wait_s: float = DEFAULT_MANIFEST_WAIT_S
+    donor_write: str = "background"
 
     def __post_init__(self) -> None:
         if not self.store:
             raise ValueError("peer recovery needs a snapshot store")
         if not self.ttl_s > 0 or not self.timeout_s > 0:
             raise ValueError("peer recovery ttl and timeout must be positive")
+        if not self.manifest_wait_s >= 0:
+            raise ValueError("peer recovery manifest wait must be >= 0")
+        if self.donor_write not in ("background", "inline"):
+            raise ValueError(f"peer recovery donor write {self.donor_write!r}: background or inline")
 
 
 def parallel_layout(coords: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -133,6 +141,43 @@ class MilesRankShards:
 
         results = [dict(r) for r in await self.group.run_plugin(
             SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": SNAPSHOT_CUT_ID})]
+        await self._record(directory, results)
+
+    # -- S27 G-EL: copy at the safe point, write while training goes on ----------
+    async def start(self, directory: Path) -> Path:
+        """Every rank copies its state to host memory now and writes its shard on a
+        thread of its own (cut_plugin ``background="host"``); returns at once."""
+        from yeto.rl.adapters.miles.cut_plugin import HOST_BACKGROUND, SAVE_CUT_SHARD
+
+        results = [dict(r) for r in await self.group.run_plugin(
+            SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": SNAPSHOT_CUT_ID,
+                             "background": HOST_BACKGROUND})]
+        refused = _refusals(results)
+        if refused:
+            if any("pending" in r for r in results):
+                await self.finish_writes()  # the other ranks' writes end before the next snapshot
+            raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
+        return Path(directory)
+
+    async def written(self) -> bool:
+        """Whether every rank's background write finished (never waits)."""
+        from yeto.rl.adapters.miles.cut_plugin import POLL_CUT_SHARD
+
+        polls = await self.group.run_plugin(POLL_CUT_SHARD, {"cut_id": SNAPSHOT_CUT_ID})
+        return all(dict(p).get("done") for p in polls)
+
+    async def finish_writes(self) -> list[dict[str, Any]]:
+        from yeto.rl.adapters.miles.cut_plugin import FINISH_CUT_SHARD
+
+        return [dict(r) for r in await self.group.run_plugin(FINISH_CUT_SHARD, {"cut_id": SNAPSHOT_CUT_ID})]
+
+    async def finish(self, directory: Path) -> None:
+        """Collect every rank's written shard (after :meth:`written`); refuses
+        unless every shard is here."""
+        await self._record(Path(directory), await self.finish_writes())
+
+    async def _record(self, directory: Path, results: list[dict[str, Any]]) -> None:
+        """The rank list of the snapshot (:data:`RANKS`) from every rank's summary."""
         refused = _refusals(results)
         if refused:
             raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
@@ -213,6 +258,16 @@ class MilesPeerRecoveryIsland:
 
     def write_recovery_snapshot(self, directory: Path) -> None:
         self._call(self.shards.save(Path(directory)))
+
+    # S27 G-EL: the donor's capture-then-write (DonorService ``capture``)
+    def start_recovery_snapshot(self, directory: Path) -> Path:
+        return self._call(self.shards.start(Path(directory)))
+
+    def recovery_snapshot_written(self, handle: Path) -> bool:
+        return bool(self._call(self.shards.written()))
+
+    def finish_recovery_snapshot(self, handle: Path) -> None:
+        self._call(self.shards.finish(handle))
 
     def read_recovery_snapshot(self, directory: Path, versions: Sequence[int]) -> None:
         if self.restored:

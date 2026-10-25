@@ -25,7 +25,15 @@ from yeto import recovery_protocol as rp
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, BcastFragment, SyncerClient, encode_hello, layout_fingerprint
 from yeto.rl.pool_client import LeaseHeartbeat
-from yeto.rl.peer_recovery import DirectorySnapshotStore, DonorService, Snapshot, read_array_state, recover
+from yeto.rl.peer_recovery import (
+    DirectorySnapshotStore,
+    DonorService,
+    Snapshot,
+    SnapshotIntegrityError,
+    SnapshotRefused,
+    read_array_state,
+    recover,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 NUMEL = 64
@@ -843,3 +851,110 @@ def test_snapshot_store_rejects_path_locators(tmp_path):
     for bad in ("../x.npz", "a/b.npz", ".hidden", "", "s123-abc"):
         with pytest.raises(SnapshotIntegrityError):
             store.get(bad, b"\0" * 32)
+
+
+# -- S27 G-EL: capture then write, and a manifest that shows up late ----------
+
+
+class _CapturingIsland(_FileIsland):
+    """A sharded trainer that copies its state at the safe point and writes the
+    files later (``written_after`` safe points), like the Miles ranks' threads."""
+
+    def __init__(self, versions, written_after=2, refuse_at_finish=None):
+        super().__init__(versions)
+        self.written_after = written_after
+        self.refuse_at_finish = refuse_at_finish
+        self.calls: list[str] = []
+
+    def start_recovery_snapshot(self, directory):
+        self.calls.append("start")
+        self.polls = 0
+        return directory
+
+    def recovery_snapshot_written(self, handle):
+        self.calls.append("written?")
+        self.polls += 1
+        if self.polls >= self.written_after:
+            (handle / "rank0.shard").write_bytes(b"y" * 12)
+            return True
+        return False
+
+    def finish_recovery_snapshot(self, handle):
+        self.calls.append("finish")
+        if self.refuse_at_finish:
+            raise SnapshotRefused(self.refuse_at_finish)
+
+
+def test_capturing_donor_answers_once_the_files_are_written(tmp_path):
+    store = DirectorySnapshotStore(tmp_path)
+    lines = []
+    request = rp.SnapshotRequest(2, 77, 9, (5, 6))
+    client = _ScriptedClient(requests=[request])
+    island = _CapturingIsland([5, 7], written_after=3)
+    donor = DonorService(client, island, store, log=lines.append, name="actor")
+    assert donor.capture and donor.background
+    assert [donor.poll() for _ in range(4)] == [0, 0, 0, 0], "each safe point returns at once"
+    assert island.calls == ["start", "written?", "written?", "written?", "finish"]
+    assert donor.wait(5) and donor.poll() == 1
+    (_, sent_request, versions, _sha, locator), = client.sent
+    assert sent_request == request and versions == (5, 7)
+    manifest = store.manifest(locator, _sha)
+    assert manifest.files["rank0.shard"]["bytes"] == 12
+    timing, = donor.timings
+    assert timing["background_write_s"] >= 0 and timing["result"] == "served"
+    line, = lines
+    assert "capture " in line and "(training paused), write " in line and "hash+commit" in line
+
+
+def test_capturing_donor_refusal_and_the_inline_switch(tmp_path):
+    store = DirectorySnapshotStore(tmp_path / "a")
+    client = _ScriptedClient(requests=[rp.SnapshotRequest(2, 77, 9, (5, 6))])
+    donor = DonorService(client, _CapturingIsland([5, 7], written_after=1, refuse_at_finish="rank 3 failed"), store)
+    assert donor.poll() == 0 and donor.poll() == 0
+    (_, reason), = donor.refused
+    assert reason == "rank 3 failed" and not donor.busy and store.locators() == []
+    # capture=False: the island writes at the safe point (the behavior before G-EL).
+    inline_island = _CapturingIsland([5, 7])
+    client = _ScriptedClient(requests=[rp.SnapshotRequest(2, 78, 9, (5, 6))])
+    donor = DonorService(client, inline_island, DirectorySnapshotStore(tmp_path / "b"), capture=False)
+    assert donor.poll() == 0 and donor.wait(5) and donor.poll() == 1
+    assert inline_island.calls == [] and "background_write_s" not in donor.timings[0]
+    with pytest.raises(ValueError, match="cannot capture"):
+        DonorService(client, _FileIsland([5, 7]), DirectorySnapshotStore(tmp_path / "c"), capture=True)
+
+
+class _LateManifestStore(DirectorySnapshotStore):
+    """The manifest becomes visible after ``after`` reloads (or never)."""
+
+    def __init__(self, root, after, **kwargs):
+        self.slept: list[float] = []
+        super().__init__(root, sleep=self.slept.append, **kwargs)
+        self.after = after
+        self.reloads = 0
+        self.hidden: dict[str, bytes] = {}
+
+    def reload(self):
+        self.reloads += 1
+
+    def _visible(self):
+        return self.after is not None and self.reloads > self.after
+
+
+def test_a_late_manifest_is_read_again_after_reloads_with_a_bounded_wait(tmp_path):
+    for after, wait_s, found in ((3, 120.0, True), (None, 50.0, False), (None, 0.0, False)):
+        store = _LateManifestStore(tmp_path / f"{after}-{wait_s}", after, manifest_wait_s=wait_s)
+        with store.begin() as writer:
+            (writer.directory / "f").write_bytes(b"z")
+            locator, sha = writer.commit((1,), "t")
+        key = store.manifest_key(locator)
+        real_read = store.objects.read
+        store.objects.read = lambda k, _read=real_read, _s=store, _key=key: (
+            _read(k) if k != _key or _s._visible() else None)
+        if found:
+            assert store.manifest(locator, sha).versions == (1,)
+            assert store.slept == [2.0, 4.0, 8.0] and store.manifest_retries == 3
+        else:
+            with pytest.raises(SnapshotIntegrityError, match="not found"):
+                store.manifest(locator, sha)
+            assert sum(store.slept) == wait_s, "the total wait is bounded"
+            assert all(s <= 30.0 for s in store.slept)

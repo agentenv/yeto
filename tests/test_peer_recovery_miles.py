@@ -65,6 +65,10 @@ class FakeGroup:
         self.generation = 0
         self.applied = []
         self.calls = []
+        # Background writes (S27 G-EL): polls until every rank reports done.
+        self.write_polls = 1
+        self.pending_shards = None
+        self.polls_until_written = 0
 
     async def run_plugin(self, name, kwargs):
         self.calls.append(name)
@@ -79,6 +83,16 @@ class FakeGroup:
                     (Path(kwargs["directory"]) / path).write_bytes(data)
                 out.append({"path": path, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
                             "coord": coord})
+            if kwargs.get("background") == cut_plugin.HOST_BACKGROUND:
+                # S27 G-EL: the ranks write in the background; FINISH returns the summaries
+                self.pending_shards, self.polls_until_written = out, self.write_polls
+                return [{"pending": kwargs["cut_id"], "coord": r["coord"]} for r in out]
+            return out
+        if name == cut_plugin.POLL_CUT_SHARD:
+            self.polls_until_written -= 1
+            return [{"done": self.polls_until_written <= 0} for _ in self.coords]
+        if name == cut_plugin.FINISH_CUT_SHARD:
+            out, self.pending_shards = self.pending_shards, None
             return out
         if name == cut_plugin.RESTORE_CUT_SHARD:
             by_path = {f["path"]: f for f in kwargs["files"]}
@@ -193,7 +207,7 @@ class FakeClient:
         self.closed = True
 
 
-def config(store, *, recover, timeout_s=10.0, island_lease_s=None):
+def config(store, *, recover, timeout_s=10.0, island_lease_s=None, donor_write="background"):
     return RoleStreamConfig(
         island_lease_s=island_lease_s,
         algorithm="grpo", role="actor",
@@ -203,7 +217,8 @@ def config(store, *, recover, timeout_s=10.0, island_lease_s=None):
         local_horizon=1, optimizer_steps_per_round=1, training_contract_hash="2" * 64,
         syncer_profile_hash="3" * 64, pipeline_depth=P, algorithm_spec_sha256="a1" * 32,
         partial_quorum=True, syncer_epoch=3,
-        peer_recovery=PeerRecoveryOptions(store=str(store), recover=recover, timeout_s=timeout_s))
+        peer_recovery=PeerRecoveryOptions(store=str(store), recover=recover, timeout_s=timeout_s,
+                                          donor_write=donor_write))
 
 
 def _install_miles_rebase_stub(monkeypatch):
@@ -246,22 +261,27 @@ def stubs(monkeypatch):
     return SimpleNamespace(clients=clients, kwargs=seen_kwargs)
 
 
-def serve(stream) -> int:
-    """One donor safe point and, once the background hash + commit finished, the
-    next one (where a finished snapshot is reported); returns the snapshots served."""
+def serve(stream, *, max_polls=10) -> int:
+    """Donor safe points until the snapshot is served: the copy (S27 G-EL capture),
+    the safe points that find the shards written, and, once the background hash +
+    commit finished, the one that reports it; returns the snapshots served."""
     async def run() -> int:
         served = await stream.serve_peer_snapshots()
-        if stream._donor is not None:
-            assert stream._donor.background and stream._donor.wait(10)
+        for _ in range(max_polls):
+            donor = stream._donor
+            if donor is None or served or (not donor.busy and not donor._waiting):
+                break
+            assert donor.background
+            donor.wait(10)  # the hash + commit thread, once the shards are written
             served += await stream.serve_peer_snapshots()
         return served
 
     return asyncio.run(run())
 
 
-def donor_stream(store_root, group, client):
+def donor_stream(store_root, group, client, *, donor_write="background"):
     """A running donor: initialized normally, then at fragment versions (3, 4)."""
-    stream = MilesFullParameterRoleStream(config(store_root, recover=False))
+    stream = MilesFullParameterRoleStream(config(store_root, recover=False, donor_write=donor_write))
     stream.group, stream.adapter, stream.client = group, FakeAdapter(), client
     stream._fragment_versions = [3, 4]
     return stream
@@ -277,7 +297,10 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
     assert serve(donor) == 1
     (_, versions, sha256, locator), = donor_client.sent
     assert versions == (3, 4)
-    assert donor_group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS]
+    # S27 G-EL: the ranks copy at the safe point and write in the background; a later
+    # safe point finds them written and collects them.
+    assert donor_group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS,
+                                 cut_plugin.POLL_CUT_SHARD, cut_plugin.FINISH_CUT_SHARD]
 
     resent = [BcastFragment(0, 5, stored(0, 5, "g0"), stored=True), BcastFragment(1, 6, stored(1, 6, "g1"),
                                                                                    stored=True)]
@@ -430,3 +453,68 @@ def test_restore_without_scheduler_rebase_fails_the_first_apply(tmp_path, stubs,
     monkeypatch.setattr(cut_plugin, "rebase_full_parameter_tracking", lambda actor: None)
     with pytest.raises(Exception, match="no local-step receipt"):
         asyncio.run(MilesFullParameterRoleStream(config(store_root, recover=True)).initialize(FakeGroup()))
+
+
+# -- S27 G-EL: the donor copies at the safe point and writes while it trains ----
+
+
+@pytest.mark.parametrize("donor_write", ["background", "inline"])
+def test_donor_copies_at_the_safe_point_and_writes_while_training(tmp_path, stubs, donor_write):
+    """Background (default): the safe point only starts the ranks' host-copy
+    writes; later safe points ask (never wait) and the snapshot is answered once
+    every shard is written. Inline (the behavior before): one SAVE at the safe
+    point writes the shards."""
+    store_root = tmp_path / "store"
+    group = FakeGroup(adam_step=17)
+    group.write_polls = 3  # the shards take three safe points to write
+    client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    donor = donor_stream(store_root, group, client, donor_write=donor_write)
+
+    if donor_write == "inline":
+        assert serve(donor) == 1
+        assert group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS]
+        assert "background_write_s" not in donor._donor.timings[0]
+        return
+
+    async def safe_points():
+        early = [await donor.serve_peer_snapshots() for _ in range(3)]
+        assert early == [0, 0, 0] and client.sent == [], "not answered before every shard is written"
+        assert group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS,
+                               cut_plugin.POLL_CUT_SHARD, cut_plugin.POLL_CUT_SHARD]
+        assert donor._donor.busy and donor._donor._capturing is not None
+        served = 0
+        for _ in range(5):
+            served += await donor.serve_peer_snapshots()
+            donor._donor.wait(10)
+        return served
+
+    assert asyncio.run(safe_points()) == 1
+    assert group.calls[-2:] == [cut_plugin.POLL_CUT_SHARD, cut_plugin.FINISH_CUT_SHARD]
+    (_, versions, sha256, locator), = client.sent
+    assert versions == (3, 4)
+    timing, = donor._donor.timings
+    assert timing["result"] == "served" and timing["background_write_s"] >= 0
+    ranks = json.loads((store_root / "peer-snapshots" / locator / "files" / RANKS).read_text())
+    assert [f["path"] for f in ranks["files"]] == [cut_plugin.shard_name(c) for c in group.coords]
+
+
+def test_a_rank_refusing_the_background_copy_refuses_the_snapshot(tmp_path, stubs):
+    class RefusingGroup(FakeGroup):
+        async def run_plugin(self, name, kwargs):
+            if name == cut_plugin.SAVE_CUT_SHARD and kwargs.get("background"):
+                self.calls.append(name)
+                return [{"pending": kwargs["cut_id"], "coord": self.coords[0]},
+                        {cut_plugin.REFUSED: "not at a step boundary", cut_plugin.REFUSAL_KIND: "refused"}]
+            if name == cut_plugin.FINISH_CUT_SHARD:
+                self.calls.append(name)
+                return [{"path": "x"}]
+            return await super().run_plugin(name, kwargs)
+
+    group = RefusingGroup()
+    client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    donor = donor_stream(tmp_path / "store", group, client)
+    assert serve(donor) == 0 and client.sent == []
+    (_, reason), = donor._donor.refused
+    assert "not at a step boundary" in reason
+    # The rank that did start writing was drained before the refusal.
+    assert group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.FINISH_CUT_SHARD]
