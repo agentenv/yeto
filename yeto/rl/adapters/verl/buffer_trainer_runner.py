@@ -129,6 +129,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.rl.engine.policy_release import PolicyReleaseStore
         from yeto.rl.engine.resume import store_for
         from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+        from yeto.rl.engine.release_delta import default_mirror
         from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
         from .buffer_feed import RowShape
@@ -150,8 +151,12 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
                                      lane=BufferLane.parse(section.get("lane")),
                                      shards=section.get("shards"))
+        # S27 G-EQ3 (gap 20): the mirror lets this trainer rebuild the store's newest
+        # release when that one is a delta, so a restarted island can still make its
+        # next release a delta against it instead of uploading a whole checkpoint.
         releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
-                                                environ=environ))
+                                                environ=environ),
+                                      mirror=default_mirror(environ))
         shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
                          int(tokenizer.pad_token_id))
 
