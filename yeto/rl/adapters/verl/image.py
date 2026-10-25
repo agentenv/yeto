@@ -70,6 +70,11 @@ def megatron_commands(max_jobs: int = 16) -> list[str]:
 
 
 VARIANTS = (None, "megatron")
+# S27 G-DC: the Megatron island sends the weights from the trainer container to the
+# rollout container over NCCL (verl's checkpoint engine, cupy NCCL). Without the
+# verbs libraries NCCL cannot use the cluster's RDMA network and falls back to
+# sockets: s27-dc-smoke2's first 63 GB update took 57.7 s (about 1.1 GB/s).
+RDMA_PACKAGES = ("rdma-core", "ibverbs-providers")
 
 
 def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True, variant: str | None = None):
@@ -88,7 +93,7 @@ def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True, variant:
         .run_commands(*store_client_commands())
     )
     if variant == "megatron":
-        image = image.run_commands(*megatron_commands())
+        image = image.run_commands(*megatron_commands()).apt_install(*RDMA_PACKAGES)
     if patched:
         patch = Path(__file__).with_name("patch_verl.py")
         profile = "megatron" if variant == "megatron" else "fsdp"
