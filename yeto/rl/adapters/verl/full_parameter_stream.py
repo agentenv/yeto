@@ -1123,21 +1123,29 @@ class VerlFullParameterLocalState:
         return self.adapter
 
     def export(self, *, policy_version: int | None = None):
-        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
         from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 
         version = self.policy_version if policy_version is None else int(policy_version)
         adapter = self._adapter()
         cut = self.runner.run(adapter.capture(self.group, policy_version=version, local_step_generation=0))
+        trained = self.group.trained_rounds
 
         def never(_version: int):
             raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
+
+        def holds(_state) -> None:
+            # S27 G-EV: the separate-mode publisher checks the trainer still holds the
+            # exported cut (no optimizer step since: the group counts every trained round)
+            if self.group.trained_rounds != trained:
+                raise WeightsChanged(f"the trainer trained {self.group.trained_rounds - trained} round(s) "
+                                     f"after the cut of v{version} was exported")
 
         return TrainerResidentState(
             layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
             config_hash=self.component.config_hash, layout_hash=cut.layout_hash, policy_version=version,
             digest=PolicyDigest(cut.policy_hash, cut.content_hash, adapter.expected_parameter_scalar_count * 4, ()),
-            materialize_fn=never)
+            materialize_fn=never, holds_fn=holds)
 
     def apply(self, state, *, optimizer: str, local_step: int) -> None:
         raise RuntimeError("a full-parameter verl island without an outer sync never applies a cut "

@@ -377,3 +377,23 @@ def _server_pid(monkeypatch):
     monkeypatch.setattr(_Actor, "__ray_call__", property(call))
     yield
     monkeypatch.setattr(_Actor, "__ray_call__", real)
+
+
+def test_a_no_sync_separate_mode_publication_passes_the_trainer_holds_check():
+    """s27-ew-o2 (GPU) failed its first publication: the no-sync local state's export had no
+    trainer-weights check, and ``SeparatePublisher`` calls ``check_holds`` (WeightsChanged
+    "resident state has no trainer weights check"). The export now carries G-EV's check:
+    it holds until the trainer trains another round."""
+    from test_s27_verl_full_parameter_sync import COMPONENT, MAX_FRAGMENT_BYTES, _Island, _Model
+    from yeto.rl.adapters.verl import full_parameter_stream as vfs
+    from yeto.rl.engine.policy_digest import WeightsChanged
+
+    island = _Island(_Model())
+    group = vfs.VerlFullParameterGroup(island)
+    state = vfs.VerlFullParameterLocalState(group, component=COMPONENT, max_fragment_bytes=MAX_FRAGMENT_BYTES)
+    exported = state.export(policy_version=0)
+    exported.check_holds()  # what SeparatePublisher.publish calls first
+    group.trained_rounds += 1  # the trainer port records one more trained round
+    with pytest.raises(WeightsChanged, match="trained 1 round"):
+        exported.check_holds()
+    state.export(policy_version=1).check_holds()
