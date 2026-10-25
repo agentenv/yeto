@@ -372,7 +372,8 @@ def test_publisher_uses_the_nccl_engine_with_the_policy_version(tmp_path):
         mp.MegatronPublisher(island).publish(state)
 
 
-def test_driver_runs_rounds_over_the_megatron_ports(tmp_path):
+@pytest.mark.parametrize("spec_file", [None, "tools/eval/efficiency/algo-eff-miles.json"])
+def test_driver_runs_rounds_over_the_megatron_ports(tmp_path, spec_file):
     from yeto.rl.adapters.verl import megatron_ports as mp
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.contracts import LocalStepReceipt
@@ -420,7 +421,8 @@ def test_driver_runs_rounds_over_the_megatron_ports(tmp_path):
             return TrainStepMetrics(grad_norm=0.5, loss=0.1, pg_loss=0.1, lr=1e-6, train_step=0,
                                     applied_lrs=(1e-6,))
 
-    spec = AlgorithmSpec()
+    # the D0 spec (TIS, eps_clip / eps_clip_high) passes the handshake of the Megatron capabilities
+    spec = AlgorithmSpec.from_dict(json.loads(Path(spec_file).read_text())) if spec_file else AlgorithmSpec()
     plan = {"groups_per_round": 2, "samples_per_group": 2}
     driver = IslandDriver(
         learner_id=0, rollout=Rollout(), trainer=Trainer(), policy_state=mp.MegatronPolicyState(island),
@@ -544,3 +546,26 @@ def test_launcher_allows_the_hf_export_on_the_megatron_island_only():
     rl_ports._check_hf_export_launch_flags(argparse.Namespace(**base))
     with pytest.raises(ValueError, match="verl Megatron"):
         rl_ports._check_hf_export_launch_flags(argparse.Namespace(**{**base, "expert_parallel": 1}))
+
+
+def test_worker_digest_hashes_the_owned_bf16_bytes(monkeypatch):
+    import hashlib
+
+    torch = pytest.importorskip("torch")
+    from yeto.rl.adapters.verl import megatron_ports as mp
+
+    layer = torch.nn.Linear(3, 2).to(torch.bfloat16)
+    expert = torch.nn.Parameter(torch.arange(4, dtype=torch.bfloat16).reshape(2, 2))
+    expert.allreduce = False
+    layer.register_parameter("experts_w", expert)
+    worker = SimpleNamespace(actor=SimpleNamespace(engine=SimpleNamespace(module=[layer])))
+    monkeypatch.setattr(mp, "_parallel_coordinates", lambda: dict(tp=0, pp=0, ep=2, dp=1, edp=0))
+    record = mp.remote_megatron_digest(worker)
+    keys = [row[0] for row in record["tensors"]]
+    assert keys == ["0:experts_w@tp0.pp0.ep2"]  # dp rank 1: dense weights are owned by dp rank 0
+    raw = expert.detach().reshape(-1).view(torch.uint8).numpy().tobytes()
+    assert record["tensors"][0][3] == hashlib.sha256(raw).hexdigest() and record["bytes"] == 8
+    monkeypatch.setattr(mp, "_parallel_coordinates", lambda: dict(tp=0, pp=0, ep=0, dp=0, edp=0))
+    rows = mp.remote_megatron_digest(worker)["tensors"]
+    assert [r[0] for r in rows] == ["0:weight@tp0.pp0", "0:bias@tp0.pp0", "0:experts_w@tp0.pp0.ep0"]
+    assert mp.remote_megatron_layout(worker) == [r[:3] for r in rows]

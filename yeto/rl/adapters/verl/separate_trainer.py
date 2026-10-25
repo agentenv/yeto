@@ -21,6 +21,8 @@ The yeto mismatch criteria are attached right after the old log-probs, as in
 
 from __future__ import annotations
 
+import time
+
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
@@ -50,8 +52,23 @@ class YetoSeparateTrainer(PPOTrainerSeparateAsync):
     def on_step_end(self):  # publication happens after the outer boundary (driver)
         return None
 
+    def _timed(self, name: str, fn, *args):
+        """verl's own loop wraps each stage in ``marked_timer``; the yeto ports call the
+        stages directly, so the two the efficiency record needs are timed here
+        (``timing_s/old_log_prob`` and ``timing_s/update_actor`` in the step metrics)."""
+        started = time.perf_counter()
+        try:
+            return fn(*args)
+        finally:
+            timing = getattr(self, "timing_raw", None)
+            if isinstance(timing, dict):
+                timing[name] = timing.get(name, 0.0) + (time.perf_counter() - started)
+
+    def _update_actor(self, batch, metrics):
+        return self._timed("update_actor", super()._update_actor, batch, metrics)
+
     def _compute_old_log_prob(self, batch, metrics):
-        batch = PPOTrainer._compute_old_log_prob(self, batch, metrics)
+        batch = self._timed("old_log_prob", PPOTrainer._compute_old_log_prob, self, batch, metrics)
         sink = self.yeto_criteria_sink
         if sink is not None:
             from .ports_impl import criteria_from_trainer_batch

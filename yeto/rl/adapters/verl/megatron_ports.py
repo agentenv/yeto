@@ -119,7 +119,7 @@ def remote_megatron_digest(worker_dict) -> dict:
 
     with torch.no_grad(), ThreadPoolExecutor(max_workers=HASH_THREADS, thread_name_prefix="yeto-meg-hash") as pool:
         for key, param in owned_parameters(_chunks(worker), coords):
-            host = param.detach().contiguous().view(torch.uint8).reshape(-1).cpu().numpy()
+            host = param.detach().reshape(-1).contiguous().view(torch.uint8).cpu().numpy()
             total += int(host.nbytes)
             rows.append([key, list(param.shape), str(param.dtype)])
             futures.append(pool.submit(sha, host))
