@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart sky-api every 12 h when idle
+
+[Timer]
+OnCalendar=*-*-* 03,15:30:00 UTC
+RandomizedDelaySec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

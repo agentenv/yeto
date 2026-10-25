@@ -1,0 +1,9 @@
+# Planned restart of the SkyPilot API server, skipped while user requests run.
+[Unit]
+Description=Planned restart of sky-api (Nebius SDK leak mitigation)
+
+[Service]
+Type=oneshot
+# Exit code 0 = idle, restart; 1 = busy, skip this time (ExecCondition semantics).
+ExecCondition=/usr/local/bin/sky-api-idle-check
+ExecStart=/bin/systemctl restart sky-api.service

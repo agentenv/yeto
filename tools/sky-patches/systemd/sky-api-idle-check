@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Exit 0 when the SkyPilot API server has no running user request, else 1.
+
+Reads <SKY_HOME>/.sky/api_server/requests.db read-only. Daemon requests
+(status refresh, heartbeat, ...) always show RUNNING and are ignored.
+Set SKY_HOME to the home directory of the user that runs the server.
+"""
+import os
+import sqlite3
+import sys
+
+home = os.environ.get('SKY_HOME', os.path.expanduser('~'))
+db = os.path.join(home, '.sky', 'api_server', 'requests.db')
+# RequestName.REQUEST_DAEMON_* in sky/server/requests/request_names.py (0.13.0).
+DAEMONS = {'sky.' + n for n in (
+    'status-refresh', 'volume-refresh', 'managed-job-status-refresh',
+    'sky-serve-status-refresh', 'pool-status-refresh', 'server-heartbeat',
+    'expired-token-cleanup')}
+try:
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
+    rows = con.execute(
+        "SELECT name FROM requests WHERE status IN ('PENDING', 'RUNNING')"
+    ).fetchall()
+except sqlite3.Error as e:
+    print(f'cannot read {db}: {e}; skip restart', file=sys.stderr)
+    sys.exit(1)
+busy = [n for (n,) in rows if n not in DAEMONS]
+if busy:
+    print(f'busy: {sorted(set(busy))}; skip restart', file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
