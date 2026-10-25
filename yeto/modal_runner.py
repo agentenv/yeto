@@ -27,10 +27,12 @@ module imports (and is unit-tested) without the SDK or credentials.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import socket
 import subprocess
@@ -94,11 +96,21 @@ MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB":
 # and commits them; the launcher pulls them back into the local run dir.
 TAPE_MOUNT = "/yeto-tape"
 TAPE_SOURCE_DIR = "/root/yeto-output"
+# The Miles ports image's interpreter (the one Ray and Miles run), as the S26
+# E0.4 Miles Harbor layer used it.
+HARBOR_LAYER_PYTHON = "$(command -v python)"
+HARBOR_RELAY_SECRET_PATH = "/root/.yeto-harbor-relay-secret"
 TAPE_SYNC_INTERVAL_S = 30.0
 # Files outside the tape directory that the tape also mirrors (flattened to
 # "<parent dir>.<file>"): a full-parameter island's trajectory evidence lives
 # in a private mkdtemp directory under ~/yeto-rl that ends with the container.
-TAPE_MIRROR_GLOBS = ("/root/yeto-rl/trajectory-evidence-*/rollout-*.json",)
+TAPE_MIRROR_GLOBS = (
+    "/root/yeto-rl/trajectory-evidence-*/rollout-*.json",
+    # Harbor agent trials (HARBOR_TRIALS_DIR under the tape directory, S27 G-DA):
+    # the trial result (verifier reward, timings, exception) and Codex's output.
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/result.json",
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/agent/codex.txt",
+)
 TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")  # .pt: verl raw log-prob dumps
 TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
@@ -246,6 +258,12 @@ class ModalIslandConfig:
     # Container disk in GiB (None = Modal's default). Ray spills its object
     # store here (see yeto.launch.modal_islands.modal_ephemeral_disk_gib).
     ephemeral_disk_gib: int | None = None
+    # Harbor agent islands (yeto.launch.harness_env): the image gets the
+    # Harbor layer (harbor + boat-sdk, image_layer.modal_harbor_layer), and
+    # rank 0 forwards the gate relay port through a Modal tunnel so sandboxes
+    # outside Modal (boat) reach the Miles session server.
+    harbor_layer: bool = False
+    harbor_relay_port: int | None = None
 
     @property
     def function_name(self) -> str:
@@ -279,6 +297,12 @@ class ModalIslandConfig:
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
                 )
+        if self.harbor_layer and (self.training_mode != "rl" or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref or "")):
+            raise ValueError("the Harbor layer goes on a Miles registry image (RL islands only)")
+        if self.harbor_relay_port is not None and not self.harbor_layer:
+            raise ValueError("harbor_relay_port is for Harbor agent islands (harbor_layer)")
+        if self.harbor_relay_port is not None and not 0 < int(self.harbor_relay_port) <= 65535:
+            raise ValueError(f"harbor_relay_port {self.harbor_relay_port} is not a TCP port")
         if (self.volume_name is None) != (self.volume_mount is None):
             raise ValueError("volume_name and volume_mount go together")
         if (self.tape_volume_name is None) != (self.tape_subdir is None):
@@ -426,6 +450,14 @@ def cluster_rank_and_ips(info) -> tuple[int, list[str]]:
     return int(info.rank), ipv4 or list(info.container_ips)
 
 
+def mirror_base(pattern: str) -> Path:
+    """The directory above a mirror glob's first wildcard: a mirrored file is named
+    by its path below it, ``/`` -> ``.`` (``<dir>-*/x.json`` -> ``<dir>-abc.x.json``)."""
+    wild = min((i for i, ch in enumerate(pattern) if ch in "*?["), default=len(pattern))
+    prefix = pattern[:wild]
+    return Path(prefix) if prefix.endswith("/") else Path(prefix).parent
+
+
 class TapeSync:
     """Mirror tape files of ``src`` into ``dst`` and commit the Volume,
     every ``interval_s`` in a daemon thread and once more on ``stop()``.
@@ -482,9 +514,10 @@ class TapeSync:
                     copied += self._copy_if_changed(f, f.name)
         for pattern in self.mirror_globs:
             root = Path(pattern).anchor or "."
+            base = mirror_base(pattern)
             for f in sorted(Path(root).glob(str(Path(pattern).relative_to(root)))):
                 if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
-                    copied += self._copy_if_changed(f, f"{f.parent.name}.{f.name}")
+                    copied += self._copy_if_changed(f, ".".join(f.relative_to(base).parts))
         self.commit()
         self.syncs += 1
         return copied
@@ -1095,7 +1128,8 @@ def island_main(cfg_json: str) -> int:
         sampler.start()
     start_host_map_probe(env, rank, TAPE_SOURCE_DIR)
     try:
-        return _island_body(cfg, rank, ips, all_ips, env, tape)
+        with harbor_relay_tunnel(cfg, rank, env):
+            return _island_body(cfg, rank, ips, all_ips, env, tape)
     finally:
         if sampler is not None:
             sampler.stop()
@@ -1108,6 +1142,35 @@ def island_main(cfg_json: str) -> int:
             print(f"[modal-tape] rank {rank}: {tape.syncs} commit(s) to "
                   f"{cfg.tape_volume_name}:{cfg.tape_subdir}/rank{rank}, errors {len(tape.errors)}",
                   flush=True)
+
+
+@contextlib.contextmanager
+def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=None):
+    """Rank 0 of a Harbor agent island: forward the gate relay port through a
+    Modal tunnel for the island's lifetime and give the relay its public base
+    and a fresh path secret (``harbor_agent.relay_settings``). The secret is
+    made here, in the container, and only its file path is in ``env``. Other
+    ranks and other islands: no tunnel, ``env`` unchanged."""
+    if cfg.harbor_relay_port is None or rank != 0:
+        yield
+        return
+    from yeto.rl.harness.gateway.relay_env import (
+        RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_SECRET_FILE_ENV)
+
+    if forward is None:
+        import modal
+
+        forward = modal.forward
+    with forward(int(cfg.harbor_relay_port)) as tunnel:
+        fd = os.open(HARBOR_RELAY_SECRET_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(secrets.token_urlsafe(24))
+        env[RELAY_PORT_ENV] = str(int(cfg.harbor_relay_port))
+        env[RELAY_PUBLIC_BASE_ENV] = tunnel.url
+        env[RELAY_SECRET_FILE_ENV] = HARBOR_RELAY_SECRET_PATH
+        print(f"[modal-island {cfg.learner_id}] harbor relay port {cfg.harbor_relay_port} "
+              f"tunnelled at {tunnel.url}", flush=True)
+        yield
 
 
 EPHEMERAL_PORT_RANGE = "/proc/sys/net/ipv4/ip_local_port_range"
@@ -1377,6 +1440,10 @@ class ModalOps:
                 )
             else:
                 image = modal.Image.from_registry(cfg.image_ref)
+            if cfg.harbor_layer:
+                from yeto.rl.harness.harbor.image_layer import modal_harbor_layer
+
+                image = modal_harbor_layer(image, "miles", HARBOR_LAYER_PYTHON)
         else:
             image = modal.Image.debian_slim(python_version=cfg.python_version)
             if cfg.pip_requirements:

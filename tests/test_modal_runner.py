@@ -560,7 +560,20 @@ def test_tape_sync_mirrors_trajectory_evidence_outside_the_tape_dir(tmp_path):
     copied = dst / "trajectory-evidence-0-abc.rollout-00000000.json"
     assert copied.read_text() == '{"schema": 4}'
     assert sync.sync_once() == 0
-    assert mr.TAPE_MIRROR_GLOBS == ("/root/yeto-rl/trajectory-evidence-*/rollout-*.json",)
+    assert mr.TAPE_MIRROR_GLOBS[0] == "/root/yeto-rl/trajectory-evidence-*/rollout-*.json"
+
+
+def test_tape_sync_mirrors_harbor_trials_by_their_path_below_the_glob(tmp_path):
+    src, dst = tmp_path / "out", tmp_path / "vol" / "rank0"
+    trial = src / "harbor-trials" / "fix-git__20261025__AbC"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "result.json").write_text('{"reward": 1}')
+    (trial / "agent" / "codex.txt").write_text("{}")
+    globs = tuple(g.replace(mr.TAPE_SOURCE_DIR, str(src)) for g in mr.TAPE_MIRROR_GLOBS[1:])
+    sync = mr.TapeSync(str(src), str(dst), lambda: None, interval_s=3600, mirror_globs=globs)
+    assert sync.sync_once() == 2
+    assert (dst / "fix-git__20261025__AbC.result.json").read_text() == '{"reward": 1}'
+    assert (dst / "fix-git__20261025__AbC.agent.codex.txt").read_text() == "{}"
 
 
 def test_tape_sync_errors_never_raise(tmp_path):
