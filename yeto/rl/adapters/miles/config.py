@@ -1244,6 +1244,10 @@ TRAIN_EXTRA_FLAGS = frozenset({
     "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
     "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
     "--moe-flex-dispatcher-backend",
+    # S27 G-EF: Miles computes the loss log-probabilities over the sequence in chunks
+    # of N tokens instead of one fp32 full-vocabulary block (s27-ef-c1 ran out of
+    # memory there on a long agentic sample: 11.94 GiB for one block)
+    "--log-probs-chunk-size",
 })
 
 
