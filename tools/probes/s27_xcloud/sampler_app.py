@@ -245,6 +245,24 @@ def _mark_on_signal() -> None:
             print(f"[xc] {name} handler not installed (not the main thread)", flush=True)
 
 
+def _wait_sampler(child: subprocess.Popen, log: Path) -> int:
+    """Wait for the sampler. After a reclaim the engine sampler holds the process for
+    ``engine_sampler_entry.RECLAIM_HOLD_S`` (300 s) so a spot cloud can stop the
+    container; here the stop is ours (the marker), so once the sampler printed its
+    ``done`` line (its tape, buffer commits and leave record are written by then) the
+    hold is cut short with SIGKILL (a signal only writes the marker)."""
+    while True:
+        try:
+            return child.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+        if Path(RECLAIM_MARKER).exists() and b"[engine-sampler] done:" in log.read_bytes()[-4096:]:
+            time.sleep(2.0)
+            child.kill()
+            print("[xc] sampler done after the stop marker: hold cut short", flush=True)
+            return child.wait()
+
+
 # Modal has no "H200!" form (H200 has no upgrade path); the function checks the GPU names itself.
 @app.function(image=image, volumes={"/models": models, STORE_MOUNT: xc, "/data/logs": logs}, gpu=f"H200:{TP}",
               cpu=16, memory=MEMORY_MIB, timeout=TIMEOUT_S)
@@ -290,7 +308,7 @@ def sampler(tag: str, cfg: dict) -> int:
         child = subprocess.Popen([sys.executable, "-m", "yeto.rl.engine.engine_sampler", "--spec",
                                   str(out / "spec.json")], cwd=WORKDIR, env=env, stdout=log,
                                  stderr=subprocess.STDOUT)
-        rc = child.wait()  # a signal only writes the marker (never kills the sampler)
+        rc = _wait_sampler(child, out / "sampler.log")
     nvml.terminate()
     stop.set()
     watcher.join(timeout=30)
