@@ -196,17 +196,43 @@ def rl_island_gpu_env(args, spec) -> str:
             f'(CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"\n')
 
 
-def rl_island_ray_storage(args, *, head: bool) -> str:
+# Clouds whose RL island runs in sky's docker runtime with a fixed /dev/shm:
+# Ray refuses an object store larger than /dev/shm at `ray start`. Nebius gives
+# the container 200 GB (G-DF yeto-df-6: "configured object store size (644 GB)
+# exceeds /dev/shm size (200 GB)").
+SHM_CAPPED_STORE_CLOUDS = frozenset({"nebius"})
+SHM_STORE_FRACTION = (9, 10)  # the store gets at most 90% of /dev/shm
+
+
+def shm_capped_store_bytes(requested: int) -> str:
+    """Shell for ``min(requested, 90% of /dev/shm)`` in bytes, evaluated on the node
+    at ``ray start`` (the requested size when /dev/shm cannot be read); prints a
+    note to stderr when it lowers the size."""
+    num, den = SHM_STORE_FRACTION
+    return ("$(r=%d; s=$(df -B1 --output=size /dev/shm 2>/dev/null | tail -1 | tr -dc 0-9); "
+            "s=$(( ${s:-0} * %d / %d )); "
+            "if [ \"$s\" -gt 0 ] && [ \"$s\" -lt \"$r\" ]; then "
+            "echo \"[yeto-island] Ray object store lowered from $r to $s bytes (90%% of /dev/shm)\" >&2; "
+            "echo \"$s\"; else echo \"$r\"; fi)") % (requested, num, den)
+
+
+def rl_island_ray_storage(args, *, head: bool, cloud: str | None = None) -> str:
     """``ray start`` flags for the island's object store size and spill dir.
 
     The spill directory is a cluster setting, so only the head gets it (its
-    raylets read it from the GCS); every node gets the store size."""
+    raylets read it from the GCS); every node gets the store size. On a cloud in
+    :data:`SHM_CAPPED_STORE_CLOUDS` the size is capped at 90% of the node's
+    /dev/shm when the node starts Ray."""
     flags = ""
     store_gib = getattr(args, "rl_island_ray_object_store_gib", None)
     if store_gib is not None:
         if int(store_gib) < 1:
             raise ValueError("--rl-island-ray-object-store-gib must be >= 1")
-        flags += f" --object-store-memory={int(store_gib) << 30}"
+        requested = int(store_gib) << 30
+        if cloud in SHM_CAPPED_STORE_CLOUDS:
+            flags += f' --object-store-memory="{shm_capped_store_bytes(requested)}"'
+        else:
+            flags += f" --object-store-memory={requested}"
     spill_dir = getattr(args, "rl_island_ray_spill_dir", None)
     if head and spill_dir:
         spilling = json.dumps({"type": "filesystem", "params": {"directory_path": spill_dir}})
