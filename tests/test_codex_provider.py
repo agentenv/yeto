@@ -20,6 +20,17 @@ def test_timeout_env_default_and_override():
             cp.stream_idle_timeout_from_env({cp.STREAM_IDLE_TIMEOUT_ENV: bad})
 
 
+def test_retry_env_default_override_and_bounds():
+    # S27 G-EF: explicit retry counts, so a short 502/503 does not end the trial
+    for name in (cp.REQUEST_MAX_RETRIES_ENV, cp.STREAM_MAX_RETRIES_ENV):
+        assert cp.max_retries_from_env(name, {}) == 8
+        assert cp.max_retries_from_env(name, {name: "0"}) == 0
+        assert cp.max_retries_from_env(name, {name: "100"}) == 100
+        for bad in ("x", "-1", "101"):
+            with pytest.raises(HarnessConfigError):
+                cp.max_retries_from_env(name, {name: bad})
+
+
 def test_setup_command_writes_a_valid_provider_after_harbors_base_url(tmp_path):
     # Harbor's own line first, then ours, then a later MCP table: one valid TOML file.
     script = "\n".join((
@@ -34,6 +45,7 @@ def test_setup_command_writes_a_valid_provider_after_harbors_base_url(tmp_path):
     assert config["model_providers"]["yeto"] == {
         "name": "yeto", "base_url": "http://relay:1/v1", "env_key": "OPENAI_API_KEY",
         "wire_api": "responses", "stream_idle_timeout_ms": 1_800_000,
+        "request_max_retries": 8, "stream_max_retries": 8,
     }
     assert config["openai_base_url"] == "http://relay:1/v1"
     assert "x" in config["mcp_servers"]
@@ -41,9 +53,10 @@ def test_setup_command_writes_a_valid_provider_after_harbors_base_url(tmp_path):
 
 def test_use_yeto_codex_switches_the_agent_class(monkeypatch):
     agent = SimpleNamespace(name="codex", import_path=None, kwargs={"version": "0.145.0"})
-    cp.use_yeto_codex(agent, {cp.STREAM_IDLE_TIMEOUT_ENV: "900"})
+    cp.use_yeto_codex(agent, {cp.STREAM_IDLE_TIMEOUT_ENV: "900", cp.STREAM_MAX_RETRIES_ENV: "3"})
     assert (agent.name, agent.import_path) == (None, cp.CODEX_AGENT_IMPORT_PATH)
-    assert agent.kwargs == {"version": "0.145.0", "stream_idle_timeout_s": 900}
+    assert agent.kwargs == {"version": "0.145.0", "stream_idle_timeout_s": 900,
+                            "request_max_retries": 8, "stream_max_retries": 3}
 
 
 def test_yeto_codex_class_adds_the_provider(tmp_path):
@@ -53,6 +66,12 @@ def test_yeto_codex_class_adds_the_provider(tmp_path):
     agent = YetoCodex(logs_dir=tmp_path, model_name="openai/m", stream_idle_timeout_s=60,
                       extra_env={"OPENAI_BASE_URL": "http://relay/v1"})
     assert YetoCodex.name() == "codex"
-    assert "stream_idle_timeout_ms = 60000" in agent._build_register_mcp_servers_command()
+    command = agent._build_register_mcp_servers_command()
+    assert "stream_idle_timeout_ms = 60000" in command
+    assert "request_max_retries = 8" in command and "stream_max_retries = 8" in command
+    tuned = YetoCodex(logs_dir=tmp_path, model_name="openai/m", request_max_retries=12, stream_max_retries=0,
+                      extra_env={"OPENAI_BASE_URL": "http://relay/v1"})
+    command = tuned._build_register_mcp_servers_command()
+    assert "request_max_retries = 12" in command and "stream_max_retries = 0" in command
     bare = YetoCodex(logs_dir=tmp_path, model_name="openai/m")
     assert bare._build_register_mcp_servers_command() is None

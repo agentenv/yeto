@@ -416,7 +416,8 @@ _PLACEMENT = (
         "--rl-placement",
         choices=["colocated", "fixed-partition"],
         default="colocated",
-        help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
+        help="ports: colocated (default) or a fixed partition (rl-infra-spec 2.1); full "
+        "parameters colocate only on one island without outer sync (--rl-single-island-no-sync)",
     ),
     cli_flag(
         "--rl-rollout-gpus",
