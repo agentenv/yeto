@@ -327,6 +327,15 @@ NEMOTRON_FIX_HOOK = (
     "            print(f'[yeto] nemotron_h_torch_fix: {_yeto_nh_result}', flush=True)\n"
     "        except Exception as _yeto_nh_error:  # a build without yeto, or another model family\n"
     "            print(f'[yeto] nemotron_h_torch_fix not applied: {_yeto_nh_error!r}', flush=True)\n"
+    "        # yeto S27 G-EQ4: this implementation has no recompute hook, so an Ascend node\n"
+    "        # installs one (64 GiB card; yeto.rl.nemotron_h_recompute decides by device family)\n"
+    "        try:\n"
+    "            from yeto.rl import nemotron_h_recompute as _yeto_nh_rc\n"
+    "\n"
+    "            _yeto_nh_rc_result = _yeto_nh_rc.apply()\n"
+    "            print(f'[yeto] nemotron_h_recompute: {_yeto_nh_rc_result}', flush=True)\n"
+    "        except Exception as _yeto_nh_rc_error:  # a build without yeto, or another family\n"
+    "            print(f'[yeto] nemotron_h_recompute not applied: {_yeto_nh_rc_error!r}', flush=True)\n"
     "        from verl.utils.model import get_hf_auto_model_class\n"
 )
 NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")

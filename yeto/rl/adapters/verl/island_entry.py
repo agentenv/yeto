@@ -650,7 +650,14 @@ def gradient_checkpointing_for(args, model_path: str) -> bool:
     unconditionally, and a model that refuses takes the island down after the
     whole model is built (npu1: HF NemotronH of transformers 5.3 sets
     ``supports_gradient_checkpointing = False``). ``--rl-activation-recompute``
-    is an explicit request, so it is refused instead of silently dropped."""
+    is an explicit request, so it is refused instead of silently dropped.
+
+    S27 G-EQ4: a false answer here no longer means the island stores every
+    activation. transformers' NemotronH has no recompute hook at all (its source
+    never mentions ``gradient_checkpointing``), so an Ascend island installs one
+    itself -- :mod:`yeto.rl.nemotron_h_recompute` wraps the block forward, which
+    is what made a 64 GiB card fit more than one step. That hook is applied in
+    the worker, next to the Mamba2 scan fix, and it leaves verl's own flag off."""
     supported = model_supports_gradient_checkpointing(
         model_path, trust_remote_code=bool(getattr(args, "trust_remote_code", False)))
     requested = bool(getattr(args, "rl_activation_recompute", False))
@@ -658,7 +665,8 @@ def gradient_checkpointing_for(args, model_path: str) -> bool:
         if requested:
             raise SystemExit(f"--rl-activation-recompute：{model_path} 的 transformers 实现不支持"
                              "重算激活（supports_gradient_checkpointing = False）")
-        print(f"[yeto-verl] activation recompute off: {model_path} 的 transformers 实现不支持", flush=True)
+        print(f"[yeto-verl] activation recompute off (verl 的开关): {model_path} 的 transformers 实现不支持；"
+              "昇腾岛改由 yeto.rl.nemotron_h_recompute 自己装重算钩子", flush=True)
         return False
     return True
 
@@ -760,6 +768,18 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
     A model whose implementation supports activation recomputation does not need
     the entropy knobs (the recompute already bounds the head), so they are only
     added when it is off.
+
+    S27 G-EQ4 checked the first bullet instead of assuming it: the fork holds two
+    engine config classes, and only the VeOmni one takes ``mixed_precision`` as a
+    bool (``workers/config/engine.py:418``), while the FSDP one takes the dict
+    (:282). ``FSDPActorConfig.__post_init__`` sets ``engine = fsdp_config``, so the
+    override does arrive -- composed and converted, the engine reports
+    ``mixed_precision = {'param_dtype': 'bf16', 'reduce_dtype': 'bf16',
+    'buffer_dtype': 'fp32'}`` and FSDP2's policy is ``reduce_dtype=torch.bfloat16``
+    (``tools/probe_mp.py`` on npu1). The bf16 reduce was therefore **already** in
+    force through every out-of-memory attempt, and it is not the missing saving.
+    What was missing is activation recompute, which this implementation cannot do
+    at all: see :mod:`yeto.rl.nemotron_h_recompute`, installed in the worker.
 
     What is deliberately *not* here: verl's ``enable_activation_offload``. It
     looked like the remaining lever, but on this model it fails in the backward
