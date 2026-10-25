@@ -452,6 +452,46 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
     assert any(r["kind"] == "delta_accepted" for r in island_1[rejoin + 1:]), "the restarted island never contributed"
 
 
+@needs_cargo
+def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tmp_path, monkeypatch):
+    """K = 1 with a fixed roster (quorum 2): the fast island waits at its
+    boundaries for the slow island's pushes; the cap fields reach its tape."""
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-parity-lead-cap-key")
+    monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
+    rounds, fragments = 4, len(_layout(matrix_merge="rda").fragments.fragments)
+    process, port, profile = _start_syncer(syncer_binary, tmp_path, fragments=fragments, rounds=rounds, extra=(
+        "--rl-sync-full-parameter-rounds", "async", "--rl-sync-final-cut", "download",
+        "--rl-sync-quorum", "2", "--rl-sync-max-local-rounds-ahead", "1"))
+    results: dict = {}
+    try:
+        plans = []
+        for i in range(2):
+            plan = _plan(i, port, profile, rounds=rounds, fragments=fragments, async_rounds=True,
+                         matrix_merge="rda", pipeline=2, final_cut="download")
+            plan[vfs.PLAN_KEY]["max_local_rounds_ahead"] = 1
+            plans.append(plan)
+        threads = [threading.Thread(target=_train_rounds, args=(0, plans[0], results), kwargs={"pace_s": 0.0}),
+                   threading.Thread(target=_train_rounds, args=(1, plans[1], results), kwargs={"pace_s": 0.3})]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=180)
+        assert process.wait(timeout=30) == 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        log = process.communicate(timeout=10)[0]
+    fast, slow = results[0][0], results[1][0]
+    assert "error" not in fast and "error" not in slow, (fast.get("error"), slow.get("error"), log[-2000:])
+    fast_rounds = [f for e, f in fast["events"] if e == "rl_full_parameter_round"]
+    slow_rounds = [f for e, f in slow["events"] if e == "rl_full_parameter_round"]
+    assert all(f["sync/max_local_rounds_ahead"] == 1 for f in fast_rounds)
+    assert fast_rounds[-1]["sync/lead_waits"] > 0, fast_rounds[-1]
+    # Without the cap the unpaced island would run hundreds of local rounds meanwhile.
+    assert len(fast_rounds) <= len(slow_rounds) + 2, (len(fast_rounds), len(slow_rounds))
+    assert fast["final_ack"] == slow["final_ack"] == [{"acknowledged": True}]
+
+
 # ----------------------------------------------------------------------------- syncer-only options
 def test_syncer_checkpoint_options_reach_the_syncer_and_leave_the_verl_islands_unchanged():
     from yeto import launcher
