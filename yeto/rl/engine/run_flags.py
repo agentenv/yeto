@@ -1279,6 +1279,46 @@ _SYNC = (
         "fragments without embedding tensors by radial-directional averaging, embedding "
         "fragments stay averaged",
     ),
+    shared_flag(
+        "--rl-sync-layout",
+        choices=("shape-bound", "shape-free"),
+        default="shape-bound",
+        help="full-parameter sync only: shape-bound (default) names every tensor by the trainer "
+        "rank that owns it, so every island needs the same TP/EP/DP/PP shape; shape-free "
+        "(yeto.rl.engine.shape_free_layout) addresses global slices, so islands of different "
+        "shapes (--rl-island-placement ISLAND:tensor-parallel=N ...) share one session; the backend "
+        "must support shape-free layouts",
+    ),
+    shared_flag(
+        "--rl-sync-shape-free-tp-units",
+        type=int,
+        default=1,
+        metavar="G",
+        help="--rl-sync-layout shape-free: cut every tensor-parallel split parameter into G units; "
+        "every island's TP must divide G (default 1: TP1 islands only)",
+    ),
+    shared_flag(
+        "--rl-sync-shape-free-expert-classes",
+        type=int,
+        default=8,
+        metavar="X",
+        help="--rl-sync-layout shape-free: experts of a layer form X placement classes; every "
+        "island's EP must divide X (default 8)",
+    ),
+    shared_flag(
+        "--rl-sync-shape-free-dense-groups",
+        type=int,
+        default=8,
+        metavar="D",
+        help="--rl-sync-layout shape-free: dense parameters form D owner groups, which an island "
+        "spreads over its data-parallel ranks (default 8)",
+    ),
+    shared_flag(
+        "--rl-sync-shape-free-split-layers",
+        action="store_true",
+        help="--rl-sync-layout shape-free: no placement class spans two layers (needed by "
+        "islands with pipeline parallelism)",
+    ),
     cli_flag(
         "--rl-initial-adapter",
         default=None,

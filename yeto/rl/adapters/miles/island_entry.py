@@ -730,6 +730,26 @@ _DENSE_PLACEMENT_MILES_SWITCHES = frozenset(
     }
 )
 
+# Parallel-shape flags left out of the contract only with a shape-free
+# full-parameter layout (--rl-sync-layout shape-free): each island then trains
+# with its own TP/PP/CP/EP split and micro-batching, which change how the
+# global batch is computed but not what it computes. Expert tensor parallelism
+# stays in (the shape-free layout needs 1 everywhere).
+_SHAPE_FREE_PARALLEL_MILES_FLAGS = frozenset(
+    {
+        "--tensor-model-parallel-size",
+        "--pipeline-model-parallel-size",
+        "--context-parallel-size",
+        "--expert-model-parallel-size",
+        "--decoder-first-pipeline-num-layers",
+        "--decoder-last-pipeline-num-layers",
+        "--num-layers-per-virtual-pipeline-stage",
+        "--max-tokens-per-gpu",
+        "--micro-batch-size",
+    }
+)
+_SHAPE_FREE_PARALLEL_MILES_SWITCHES = frozenset({"--sequence-parallel"})
+
 _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
     {
         "compression_config",
@@ -973,6 +993,7 @@ def _dense_full_sync_config(
         partial_quorum=async_rounds,
         local_init=_local_init(args, async_rounds),
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
+        shape_free=shape_free_granularity(args),
         peer_recovery=peer_recovery_options(args),
         # an island pool sets the epoch (and lease); else peer recovery may
         **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
@@ -1114,6 +1135,36 @@ def _require_unquantized_full_parameter_rollout_model(model_path: str | Path) ->
         )
 
 
+def shape_free_granularity(args: Any):
+    """The island's shape-free granularity (``--rl-sync-shape-free-*``), or None
+    with the shape-bound layout (``--rl-sync-layout``, default shape-bound)."""
+
+    from yeto.rl.engine.shape_free_layout import LAYOUT_SHAPE_FREE, Granularity
+
+    if getattr(args, "rl_sync_layout", "shape-bound") != LAYOUT_SHAPE_FREE:
+        return None
+    return Granularity(
+        tp_units=int(getattr(args, "rl_sync_shape_free_tp_units", 1)),
+        expert_classes=int(getattr(args, "rl_sync_shape_free_expert_classes", 8)),
+        dense_groups=int(getattr(args, "rl_sync_shape_free_dense_groups", 8)),
+        split_layers=bool(getattr(args, "rl_sync_shape_free_split_layers", False)),
+    )
+
+
+def shape_free_layout_contract(args: Any) -> dict[str, Any] | None:
+    """The shape-free granularity as a contract entry; None with the shape-bound layout."""
+
+    granularity = shape_free_granularity(args)
+    if granularity is None:
+        return None
+    return {
+        "tp_units": granularity.tp_units,
+        "expert_classes": granularity.expert_classes,
+        "dense_groups": granularity.dense_groups,
+        "split_layers": granularity.split_layers,
+    }
+
+
 def _expert_full_contract(args: Any) -> dict[str, Any]:
     """Expert-full selection that reaches Miles through the environment, not argv.
 
@@ -1151,11 +1202,12 @@ def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
 
 
 def _dense_shared_miles_argv(
-    miles_argv: Sequence[str], *, per_island_placement: bool = False
+    miles_argv: Sequence[str], *, per_island_placement: bool = False, shape_free: bool = False
 ) -> list[str]:
     """``miles_argv`` without the island-local flags and their values.
 
-    ``per_island_placement`` also drops the placement flags and switches.
+    ``per_island_placement`` also drops the placement flags and switches;
+    ``shape_free`` (a shape-free full-parameter layout) the parallel-shape ones.
     """
 
     local_flags = _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS
@@ -1163,6 +1215,9 @@ def _dense_shared_miles_argv(
     if per_island_placement:
         local_flags |= _DENSE_PLACEMENT_MILES_FLAGS
         local_switches |= _DENSE_PLACEMENT_MILES_SWITCHES
+    if shape_free:
+        local_flags |= _SHAPE_FREE_PARALLEL_MILES_FLAGS
+        local_switches |= _SHAPE_FREE_PARALLEL_MILES_SWITCHES
     shared_argv = []
     index = 0
     while index < len(miles_argv):
@@ -1201,7 +1256,10 @@ def _dense_full_training_contract_sha256(
     """
 
     per_island_placement = bool(getattr(args, "rl_per_island_placement", False))
-    shared_argv = _dense_shared_miles_argv(miles_argv, per_island_placement=per_island_placement)
+    shape_free = shape_free_layout_contract(args)
+    shared_argv = _dense_shared_miles_argv(
+        miles_argv, per_island_placement=per_island_placement, shape_free=shape_free is not None
+    )
     explicit_rollout_seed = getattr(args, "rollout_seed", None)
     rollout_seed_contract = (
         {"mode": "fixed", "value": explicit_rollout_seed}
@@ -1211,6 +1269,8 @@ def _dense_full_training_contract_sha256(
     return _canonical_sha256(
         {
             **_expert_full_contract(args),
+            # A shape-bound layout keeps its v6 contract hash unchanged.
+            **({} if shape_free is None else {"shape_free_layout": shape_free}),
             "schema": "yeto-dense-full-training-contract-v6",
             "shared_miles_argv": shared_argv,
             "per_island_placement": per_island_placement,

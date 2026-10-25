@@ -377,3 +377,85 @@ def offline_layout(manifests: Sequence[RankManifest], *, model_revision: str, co
         stream_role=layout_stream_role(algorithm, role),
         matrix_merge=matrix_merge,
     )
+
+
+# -- shape-free layout (yeto.rl.engine.shape_free_layout) --------------------------
+#
+# Megatron's tensor-parallel attributes of every Nemotron-H parameter, the ones a
+# Miles partition report carries: column-parallel weights split dimension 0,
+# row-parallel weights dimension 1; Mamba ``in_proj`` packs z/x/B/C/dt and
+# ``conv1d`` packs x/B/C (``mamba_mixer.py`` ``partition_sizes``); norms, the
+# router and the latent projections are copies on every TP rank; experts are
+# whole (expert TP 1).
+_ROW_PARALLEL = (".mixer.out_proj.weight", ".self_attention.linear_proj.weight", ".mlp.linear_fc2.weight",
+                 ".mlp.shared_experts.linear_fc2.weight")
+_COLUMN_PARALLEL = ("embedding.word_embeddings.weight", "output_layer.weight", ".self_attention.linear_qkv.weight",
+                    ".mlp.linear_fc1.weight", ".mlp.shared_experts.linear_fc1.weight", ".mixer.dt_bias",
+                    ".mixer.A_log", ".mixer.D", ".mixer.norm.weight")
+
+
+def tensor_parallel_partition(geometry: NemotronHGeometry, name: str, tp: int) -> tuple[int, tuple[int, ...]] | None:
+    """``(partition dimension, local block sizes)`` of one parameter at TP ``tp``,
+    or None for a parameter tensor parallelism does not split."""
+
+    if _is_expert(name):
+        return None
+    inner = _divide(geometry.mamba_inner, tp, "Mamba inner size")
+    state = _divide(geometry.mamba_groups, tp, "Mamba groups") * geometry.ssm_state_size
+    if name.endswith(".mixer.in_proj.weight"):
+        heads = _divide(geometry.mamba_num_heads, tp, "Mamba heads")
+        return 0, (inner, inner, state, state, heads)
+    if name.endswith((".mixer.conv1d_weight", ".mixer.conv1d_bias")):
+        return 0, (inner, state, state)
+    if name.endswith(_ROW_PARALLEL):
+        return 1, ()
+    if name.endswith(_COLUMN_PARALLEL):
+        return 0, ()
+    return None
+
+
+def shape_free_rank_parameters(geometry: NemotronHGeometry, *, tp: int, ep: int, world: int,
+                               vocab_divisor: int = 128):
+    """Every rank's :class:`yeto.rl.engine.shape_free_layout.RankParameters` at PP 1 and CP 1.
+
+    Megatron's rank order: TP innermost (a TP group is consecutive ranks), the
+    dense data-parallel group the ranks with the same TP rank; with expert TP 1
+    the EP rank is ``rank % ep`` and the expert data-parallel group the ranks
+    with the same EP rank."""
+
+    from yeto.rl.engine.shape_free_layout import LocalParameter, RankParameters
+
+    if world % tp or world % ep or (geometry.num_experts and geometry.num_experts % ep):
+        raise NemotronHLayoutError(f"TP {tp} / EP {ep} do not divide {world} ranks and the experts")
+    if geometry.tie_word_embeddings:
+        raise NemotronHLayoutError("tied embeddings are not modelled")
+    dp = world // tp
+    vocab = _divide(_padded_vocab(geometry.vocab_size, vocab_divisor, tp), tp, "padded vocabulary")
+    ranks = []
+    for rank in range(world):
+        tp_rank, dp_rank, ep_rank = rank % tp, rank // tp, rank % ep
+        specs = [(_PREFIX + "embedding.word_embeddings.weight", (vocab, geometry.hidden_size))]
+        for layer, symbol in enumerate(geometry.pattern):
+            specs += _layer_specs(geometry, symbol, layer, tp=tp, ep=ep, ep_rank=ep_rank)
+        specs += [(_PREFIX + "decoder.final_norm.weight", (geometry.hidden_size,)),
+                  (_PREFIX + "output_layer.weight", (vocab, geometry.hidden_size))]
+        parameters = []
+        for name, shape in specs:
+            partition = tensor_parallel_partition(geometry, name, tp)
+            if partition is None:
+                parameters.append(LocalParameter(name, tuple(shape), _is_expert(name)))
+                continue
+            dim, sizes = partition
+            parameters.append(LocalParameter(name, tuple(shape), False, dim, sizes or (shape[dim],)))
+        ranks.append(RankParameters(
+            key=rank,
+            shard_id=f"tp{tp_rank}-of-{tp}.pp0-of-1.ep{ep_rank}-of-{ep}.cp0-of-1.dp{dp_rank}-of-{dp}",
+            rank=rank,
+            tp_rank=tp_rank,
+            tp_size=tp,
+            dense_ranks=tuple(index * tp + tp_rank for index in range(dp)),
+            expert_ranks=tuple(other for other in range(world) if other % ep == ep_rank),
+            tensor_parallel_ranks=tuple(dp_rank * tp + index for index in range(tp)),
+            parameters=tuple(sorted(parameters)),
+        ))
+    return tuple(ranks)

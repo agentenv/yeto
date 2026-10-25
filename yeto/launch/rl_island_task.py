@@ -85,6 +85,25 @@ def _rl_matrix_merge_flag(args) -> str:
     return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
 
 
+def _rl_layout_flags(args) -> str:
+    """The shape-free layout flags; "" with the default shape-bound layout (argv unchanged)."""
+
+    if getattr(args, "rl_sync_layout", "shape-bound") != "shape-free":
+        return ""
+    flags = " --rl-sync-layout shape-free"
+    for flag, dest, default in (
+        ("--rl-sync-shape-free-tp-units", "rl_sync_shape_free_tp_units", 1),
+        ("--rl-sync-shape-free-expert-classes", "rl_sync_shape_free_expert_classes", 8),
+        ("--rl-sync-shape-free-dense-groups", "rl_sync_shape_free_dense_groups", 8),
+    ):
+        value = int(getattr(args, dest, default))
+        if value != default:
+            flags += f" {flag} {value}"
+    if getattr(args, "rl_sync_shape_free_split_layers", False):
+        flags += " --rl-sync-shape-free-split-layers"
+    return flags
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -216,6 +235,7 @@ def make_miles_island_task(
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
         + _rl_matrix_merge_flag(args)
+        + _rl_layout_flags(args)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
