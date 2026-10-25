@@ -35,7 +35,7 @@ from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 from . import config as vconf
 from . import megatron_engine
 from . import run_config_rules
-from .pins import VERL_COMMIT, VERL_ROOT, expected_versions_for_engine
+from .pins import VERL_COMMIT, expected_versions_for_engine, verl_root
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -69,6 +69,12 @@ def parse_args(argv):
     # S26 E3: bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
+    # S27 G-EQ2: the launcher passes this to every island; the verl island used to
+    # ignore it, so a model whose HF support ships with the checkpoint could not load
+    p.add_argument("--trust-remote-code", action="store_true")
+    # S27 G-EQ2: FSDP2 host-memory offload (npu1: 64 GiB cards, 30B full parameters)
+    p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
+                   default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
@@ -127,9 +133,6 @@ def parse_args(argv):
     p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
-    # S27 G-EZ: FSDP2 CPUOffloadPolicy for a full-parameter island whose resident
-    # state does not fit the cards (config.VerlRunConfig.fsdp_cpu_offload)
-    p.add_argument("--rl-fsdp-cpu-offload", action="store_true", default=False)
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)
@@ -321,14 +324,25 @@ def _ray_resources(address: str) -> dict:
     return {}
 
 
-def island_gpus(ray_info: Mapping[str, Any]) -> int:
-    """GPUs of this single-node island: the island-local Ray's ``GPU`` resource
-    (the launcher starts it with every card of the container), else 1.
+def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None) -> int:
+    """Cards of this single-node island: the island-local Ray's accelerator
+    resource (the launcher starts it with every card of the container), else 1.
 
     S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
-    trained on one rank (e9-g3-a); every card now joins the FSDP2 group."""
+    trained on one rank (e9-g3-a); every card now joins the FSDP2 group.
+
+    S27 G-EQ2 (npu1): the resource is named ``GPU`` on CUDA and ``NPU`` on
+    Ascend (``catalog.ray_accelerator_resource``), so an 8-card Ascend island
+    used to read 1 here and train on one rank. Either key is read, so a node
+    whose Ray reports the other name still gives its cards."""
+    from yeto.hw.catalog import ray_accelerator_resource
+
     resources = ray_info.get("after") or ray_info.get("before") or {}
-    return max(1, int(resources.get("GPU", 0)))
+    resource = ray_accelerator_resource(device_family)
+    count = int(resources.get(resource, 0))
+    if not count:  # the other family's spelling, when this node's family was read wrong
+        count = max(int(resources.get(name, 0)) for name in ("GPU", "NPU"))
+    return max(1, count)
 
 
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
@@ -357,9 +371,14 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself (V2 b).
     # Inside a Modal container the launcher's island Ray is the only Ray on the node.
     info["stop_rc"] = subprocess.run(["ray", "stop", "--force"], timeout=180).returncode
-    gpus = int(before.get("GPU", 0))
+    # S27 G-EQ2: the cards come back under this node's own resource name; on an
+    # Ascend node that is --resources '{"NPU": n}', not --num-gpus (catalog).
+    from yeto.hw.catalog import ray_accelerator_resource, ray_start_accelerator_flag
+
+    resource = ray_accelerator_resource()
+    gpus = int(before.get(resource, 0)) or max(int(before.get(name, 0)) for name in ("GPU", "NPU"))
     cmd = (f'ray start --head --node-ip-address={host} --port={port} --num-cpus={min_cpus} '
-           f'--num-gpus={gpus} --include-dashboard=false --temp-dir={temp}')
+           f'{ray_start_accelerator_flag(gpus)} --include-dashboard=false --temp-dir={temp}')
     info["restart"] = cmd
     info["restart_rc"] = subprocess.run(cmd, shell=True).returncode
     info["after"] = _ray_resources(address)
@@ -410,9 +429,7 @@ def main(argv=None) -> int:
         print("[yeto-verl] Ray restart did not give enough CPU slots", file=sys.stderr, flush=True)
         return 3
 
-    from huggingface_hub import snapshot_download
-
-    model_path = snapshot_download(args.model, revision=args.model_revision)
+    model_path = island_model_path(args.model, args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
                                         slot=island_data_slot(args))
@@ -569,7 +586,7 @@ def main(argv=None) -> int:
         start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
     try:
         with log.open("a") as handle:
-            proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
+            proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in proc.stdout:
                 sys.stdout.write(line)
@@ -579,6 +596,66 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def island_model_path(model: str, revision: str | None) -> str:
+    """This island's model directory: a hub repo id at the pinned revision, or a
+    directory that already exists on this node.
+
+    S27 G-EQ2 (npu1): an on-prem cluster stages the weights itself and its nodes
+    may have no route to the hub at all (npu1's n2-n4 do not), so a directory is
+    used as is. The pinned revision then cannot be checked -- the plan keeps the
+    flag's value and the island's identity still fingerprints ``config.json`` of
+    the files actually loaded (``full_parameter_stream.plan_section``)."""
+    local = Path(os.path.expanduser(model))
+    if local.is_dir():
+        if not (local / "config.json").is_file():
+            raise SystemExit(f"--model {model} 是本机目录但没有 config.json")
+        print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} 未校验)", flush=True)
+        return str(local)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model, revision=revision)
+
+
+def model_supports_gradient_checkpointing(model_path: str, *, trust_remote_code: bool = False) -> bool | None:
+    """Whether this model's HF implementation can recompute activations, or None
+    when it cannot be determined (no transformers, an unmapped architecture).
+
+    Only the model class is looked at, never the weights: ``supports_gradient_
+    checkpointing`` is a class attribute of ``PreTrainedModel``."""
+    try:
+        from transformers import AutoConfig
+        from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING
+
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+        model_class = MODEL_FOR_CAUSAL_LM_MAPPING[type(config)]
+        return bool(getattr(model_class, "supports_gradient_checkpointing", True))
+    except Exception as error:  # noqa: BLE001 - a probe never stops the island
+        print(f"[yeto-verl] gradient checkpointing support unknown for {model_path}: "
+              f"{type(error).__name__}: {error}", flush=True)
+        return None
+
+
+def gradient_checkpointing_for(args, model_path: str) -> bool:
+    """Whether this island recomputes activations (S27 G-EQ2).
+
+    Default on, as before. Turned off only when this model's implementation says
+    it cannot: verl's FSDP2 engine calls ``gradient_checkpointing_enable()``
+    unconditionally, and a model that refuses takes the island down after the
+    whole model is built (npu1: HF NemotronH of transformers 5.3 sets
+    ``supports_gradient_checkpointing = False``). ``--rl-activation-recompute``
+    is an explicit request, so it is refused instead of silently dropped."""
+    supported = model_supports_gradient_checkpointing(
+        model_path, trust_remote_code=bool(getattr(args, "trust_remote_code", False)))
+    requested = bool(getattr(args, "rl_activation_recompute", False))
+    if supported is False:
+        if requested:
+            raise SystemExit(f"--rl-activation-recompute：{model_path} 的 transformers 实现不支持"
+                             "重算激活（supports_gradient_checkpointing = False）")
+        print(f"[yeto-verl] activation recompute off: {model_path} 的 transformers 实现不支持", flush=True)
+        return False
+    return True
 
 
 def fsdp_separate_pools(args, ray_info: dict):
@@ -599,6 +676,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
     except that a spec clip range is refused: only the Megatron island maps it).
     ``pools`` (:func:`fsdp_separate_pools`, S27 G-EK): the trainer trains on its own
     cards and the rollout runs on standalone vLLM servers (``separate.with_separate_pools``)."""
+    offload = getattr(args, "rl_fsdp_offload", "none") or "none"
     clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
     if clips:
         raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
@@ -618,7 +696,11 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
-        fsdp_cpu_offload=bool(getattr(args, "rl_fsdp_cpu_offload", False)),
+        trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
+        gradient_checkpointing=gradient_checkpointing_for(args, model_path),
+        param_offload=offload in ("param", "both"), optimizer_offload=offload in ("optimizer", "both"),
+        # fsdp2 offloads through CPUOffloadPolicy; the two flags above are the FSDP1 path
+        offload_policy=offload in ("param", "both"),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)

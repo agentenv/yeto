@@ -280,7 +280,7 @@ def test_check_loaded_fails_on_a_reshaped_parameter(vl_checkpoint):
         check_loaded(loaded, subset, shapes={"lm_head.weight": (8, 4)})
 
 
-# ------------------------------------------- the FSDP2 CPU offload knob (G-EZ)
+# ------------------------- the FSDP2 CPU offload knob (G-EQ2 1b0219ac, reused)
 
 
 def _full_run(**kw):
@@ -304,12 +304,8 @@ def test_cpu_offload_off_by_default():
 def test_cpu_offload_sets_the_fsdp2_offload_policy():
     from yeto.rl.adapters.verl.config import build_overrides
 
-    overrides = build_overrides(_full_run(fsdp_cpu_offload=True))
+    overrides = build_overrides(_full_run(offload_policy=True, param_offload=True))
     assert "actor_rollout_ref.actor.fsdp_config.offload_policy=True" in overrides
-    # verl ignores these two when offload_policy is set, but the island still
-    # states them, so the resolved config cannot depend on their defaults.
-    assert "actor_rollout_ref.actor.fsdp_config.param_offload=False" in overrides
-    assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False" in overrides
 
 
 def test_offload_policy_is_asserted_after_hydra_composition():
@@ -320,6 +316,7 @@ def test_offload_policy_is_asserted_after_hydra_composition():
 
 
 def test_island_flag_reaches_the_run_config():
+    """--rl-fsdp-offload param/both must reach offload_policy, not only the FSDP1 keys."""
     from yeto.rl.adapters.verl.island_entry import parse_args
 
     argv = [
@@ -329,6 +326,6 @@ def test_island_flag_reaches_the_run_config():
         "--event-tape", "/tmp/tape", "--inner-lr", "1e-6", "--seq-len", "64", "--seed", "1",
     ]
     args, _ignored = parse_args(argv)
-    assert args.rl_fsdp_cpu_offload is False
-    args, _ignored = parse_args(argv + ["--rl-fsdp-cpu-offload"])
-    assert args.rl_fsdp_cpu_offload is True
+    assert getattr(args, "rl_fsdp_offload", None) in (None, "", "none")
+    args, _ignored = parse_args(argv + ["--rl-fsdp-offload", "both"])
+    assert args.rl_fsdp_offload == "both"

@@ -22,7 +22,17 @@ import sys
 import ray
 
 PLAN_ENV = "YETO_VERL_PLAN"
-FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR")
+# S27 G-EQ2 (npu1): HCCL_ and ASCEND_ join the list because an Ascend island's
+# collective and runtime settings are set on the island process (the launcher's
+# activate script: HCCL_SOCKET_IFNAME, HCCL_CONNECT_TIMEOUT, HCCL_BUFFSIZE,
+# ASCEND_RT_VISIBLE_DEVICES, ASCEND_GLOBAL_LOG_LEVEL ...). Without forwarding,
+# a Ray worker of an already-running cluster starts with none of them and picks
+# the wrong interface or the default buffer size. Neither prefix can carry a
+# cloud credential (secret-handling-hardening: the credential names are
+# AWS_, OSS_, MODAL_, NEBIUS_, HF_TOKEN; HF_ was already here and HF_TOKEN is
+# refused by the island credential guard).
+FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR",
+                        "HCCL_", "ASCEND_")
 
 
 @ray.remote(num_cpus=1)
@@ -72,6 +82,13 @@ class YetoTaskRunner:
 CUMEM_HOST_ENV = "NCCL_CUMEM_HOST_ENABLE"
 
 
+# Ray assigns each worker its own cards and writes them into this variable, so
+# the driver's value must not be forwarded: a worker would see every card of the
+# node and bind the wrong one (S27 G-EQ2). ``NPU_NOSET_ENV`` below is how an
+# Ascend island keeps the cards visible where Ray would blank them instead.
+NEVER_FORWARD_ENV = ("ASCEND_RT_VISIBLE_DEVICES",)
+
+
 def _runtime_env(fully_async: bool = False) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
@@ -84,8 +101,14 @@ def _runtime_env(fully_async: bool = False) -> dict:
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
         # credential matches these prefixes (secret-handling-hardening).
-        if key.startswith(FORWARD_ENV_PREFIXES):
+        if key.startswith(FORWARD_ENV_PREFIXES) and key not in NEVER_FORWARD_ENV:
             env["env_vars"][key] = value
+    # S27 G-EQ2: the Ascend NOSET switch is set on the driver by
+    # _keep_npu_visible_in_cpu_actors, but a Ray worker of an already-running
+    # cluster inherits the raylet's environment, not the driver's, so it has to
+    # travel in the runtime env as well (the caller's own value still wins).
+    if os.environ.get(NPU_NOSET_ENV):
+        env["env_vars"].setdefault(NPU_NOSET_ENV, os.environ[NPU_NOSET_ENV])
     return env
 
 
