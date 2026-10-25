@@ -54,6 +54,13 @@ class YetoSeparateTrainer(PPOTrainerSeparateAsync):
     def on_step_end(self):  # publication happens after the outer boundary (driver)
         return None
 
+    def prepare_step(self) -> dict:
+        # verl's fit loop calls on_step_begin before each step (it resets the step's
+        # sample-wait counters that on_sample_end adds to); the yeto rollout port
+        # starts a round with prepare_step, so the step begins here
+        self.on_step_begin()
+        return super().prepare_step()
+
     def _timed(self, name: str, fn, *args):
         """verl's own loop wraps each stage in ``marked_timer``; the yeto ports call the
         stages directly, so the two the efficiency record needs are timed here
