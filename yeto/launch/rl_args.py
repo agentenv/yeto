@@ -639,10 +639,13 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int) -> None
         sample_roles=(getattr(args, "rl_sample_role", None) or "both") != "both"
         or bool(getattr(args, "rl_island_sample_role", None)),
         elastic=bool(getattr(args, "rl_elastic", False)),
+        # a single-island store is the resume store (ledger and cuts) unless it holds
+        # only the HF exports (--rl-checkpoint-store-export-only, S27 G-CO)
         island_cuts=(any(getattr(args, name, None) is not None
                          for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"))
                      or (bool(getattr(args, "rl_single_island_no_sync", False))
-                         and bool(getattr(args, "rl_checkpoint_store", None)))),
+                         and bool(getattr(args, "rl_checkpoint_store", None))
+                         and not bool(getattr(args, "rl_checkpoint_store_export_only", False)))),
         overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
     )
     if problems:

@@ -337,13 +337,42 @@ def hf_export_flags(args) -> str:
     return f" --rl-export-hf-rounds {rounds} --rl-export-hf-store {shlex.quote(store)}"
 
 
+def store_export_only(args) -> bool:
+    """``--rl-checkpoint-store-export-only``: the store of a ``--rl-single-island-no-sync``
+    launch holds only the HF exports (no ``--rl-resume-store``: no ledger, no cuts)."""
+    return bool(getattr(args, "rl_checkpoint_store_export_only", False))
+
+
+def _check_export_only_store(args) -> None:
+    """``--rl-checkpoint-store-export-only`` (S27 G-CO): only a single-island store with
+    HF exports, and none of the flags that need the resume store."""
+    flag = "--rl-checkpoint-store-export-only"
+    if not getattr(args, "rl_checkpoint_store", None):
+        raise ValueError(f"{flag} needs --rl-checkpoint-store")
+    if getattr(args, "rl_elastic", False) or not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError(f"{flag} needs --rl-single-island-no-sync without --rl-elastic (a synced "
+                         "launch never resumes from its store: HF exports alone already use it)")
+    if not hf_exports_requested(args):
+        raise ValueError(f"{flag} needs --rl-export-hf-rounds (the exports are the only use of the store)")
+    given = [f for name, f in _CUT_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    if getattr(args, "rl_resume_allow_config_change", False):
+        given.append("--rl-resume-allow-config-change")
+    if given:
+        raise ValueError(f"{flag}: no resume store, so no {', '.join(given)}")
+
+
 def _check_resume_launch_flags(args) -> bool:
     """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
-    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
+    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags.
+    ``--rl-checkpoint-store-export-only``: False (the store holds only HF exports)."""
     from ..rl.engine.cut_interval import cut_interval_for
 
     store = getattr(args, "rl_checkpoint_store", None)
     elastic = bool(getattr(args, "rl_elastic", False))
+    if store_export_only(args):
+        _check_export_only_store(args)
+        rl_checkpoint_store_plan(args)  # validates the form (single island, no sync)
+        return False
     for name, flag in _CUT_LAUNCH_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -704,6 +733,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)
+    if resume_store is not None and store_export_only(args):
+        resume_store = None  # S27 G-CO: the store holds only the HF exports (below)
     if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
         flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
