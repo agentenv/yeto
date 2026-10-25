@@ -760,6 +760,43 @@ def test_a_failed_snapshot_commit_is_refused_not_raised(tmp_path):
         assert donor.timings[0]["result"] == "refused"
 
 
+class _FileIsland(_ArrayIsland):
+    """A sharded trainer: writes its own snapshot files."""
+
+    def write_recovery_snapshot(self, directory):
+        (directory / "rank0.shard").write_bytes(b"x" * 10)
+
+    def read_recovery_snapshot(self, directory, versions):
+        return versions
+
+
+def test_background_is_the_default_for_file_islands_and_the_service_logs(tmp_path):
+    store = DirectorySnapshotStore(tmp_path)
+    assert DonorService(_ScriptedClient(), _ArrayIsland([0, 0]), store).background is False
+    lines = []
+    request = rp.SnapshotRequest(2, 77, 9, (5, 6))
+    client = _ScriptedClient(requests=[request])
+    donor = DonorService(client, _FileIsland([5, 7]), store, log=lines.append, name="actor")
+    assert donor.background is True
+    assert donor.poll() == 0 and donor.wait(5) and donor.poll() == 1
+    line, = lines
+    assert line.startswith("[yeto-peer-recovery] actor donor snapshot for learner 2: served, 10 bytes, write ")
+
+
+def test_restored_digests_must_equal_the_donors():
+    from yeto.rl.peer_recovery import check_restored_digests, digest_fingerprint
+
+    keys = ("state_digest", "rng_digest")
+    saved = [{"path": f"r{r}", "state_digest": f"s{r}", "rng_digest": "g", "sha256": "x"} for r in range(3)]
+    same = [{"path": f"r{r}", "state_digest": f"s{r}", "rng_digest": "g"} for r in (2, 0, 1)]
+    assert check_restored_digests(saved, same, keys) == digest_fingerprint(saved, keys)
+    assert check_restored_digests([{"path": "r0", "sha256": "x"}], [], keys) is None, "an older donor: nothing to check"
+    with pytest.raises(RuntimeError, match="r1: restored state_digest differs"):
+        check_restored_digests(saved, [*same[:2], {"path": "r1", "state_digest": "other", "rng_digest": "g"}], keys)
+    with pytest.raises(RuntimeError, match="r2: no restore summary"):
+        check_restored_digests(saved, same[1:], keys)
+
+
 def test_snapshot_store_hashes_in_parallel_and_passes_the_commit_budget(tmp_path):
     from contextlib import contextmanager
 

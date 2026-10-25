@@ -40,23 +40,21 @@ from pathlib import Path
 from typing import Any
 
 from yeto.protocol import BcastFragment
-from yeto.rl.peer_recovery import SnapshotIntegrityError, SnapshotRefused
+from yeto.rl.peer_recovery import (
+    SnapshotIntegrityError,
+    SnapshotRefused,
+    check_restored_digests,
+    digest_fingerprint,
+)
 
 RANKS = "ranks.json"
 RANKS_SCHEMA = "yeto.miles_peer_snapshot/v1"
 SNAPSHOT_CUT_ID = "peer-snapshot"
 _LAYOUT_KEYS = ("world", "tp", "pp", "cp", "ep", "dp")
 # Per-rank digests of the cut summary (cut_plugin): the restored trainer must
-# re-export the donor's state, RNG and LR scheduler position exactly.
+# re-export the donor's state, RNG and LR scheduler position exactly
+# (yeto.rl.peer_recovery.check_restored_digests, shared with other backends).
 DIGEST_KEYS = ("state_digest", "rng_digest", "scheduler_samples")
-
-
-def digest_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
-    """One short digest over every rank's (path, DIGEST_KEYS): the donor logs it
-    when it writes a snapshot and the recovering island when it restored one,
-    so the two log lines show bitwise-equal trainer state."""
-    body = sorted([str(r.get("path")), *(str(r.get(k)) for k in DIGEST_KEYS)] for r in rows)
-    return hashlib.sha256(json.dumps(body).encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -149,7 +147,7 @@ class MilesRankShards:
         (directory / RANKS).write_text(json.dumps(ranks, sort_keys=True), encoding="utf-8")
         if all(k in f for f in files for k in DIGEST_KEYS):
             print(f"[yeto-peer-recovery] donor snapshot: {len(files)} rank shard(s), "
-                  f"{sum(f['bytes'] for f in files)} bytes, digests {digest_fingerprint(files)}",
+                  f"{sum(f['bytes'] for f in files)} bytes, digests {digest_fingerprint(files, DIGEST_KEYS)}",
                   file=sys.stderr, flush=True)
 
     async def restore(self, directory: Path) -> None:
@@ -170,31 +168,13 @@ class MilesRankShards:
         if refused:
             # The trainer may be partly written: the caller must not train on it.
             raise RuntimeError("rank refused the peer snapshot restore: " + "; ".join(refused))
-        self._check_restored(files, results)
-
-    @staticmethod
-    def _check_restored(files: Sequence[Mapping[str, Any]], results: Sequence[Mapping[str, Any]]) -> None:
-        """Every rank whose shard carries the donor's digests re-exports exactly
-        them after the restore (as the single-island cut restore checks). A
-        mismatch leaves a trainer that is not the donor's: the caller must not
-        train on it."""
-        saved = [f for f in files if all(k in f for k in DIGEST_KEYS)]
-        if not saved:
-            return
-        by_path = {r.get("path"): r for r in results}
-        problems = []
-        for f in saved:
-            r = by_path.get(f["path"])
-            if r is None:
-                problems.append(f"{f['path']}: no restore summary")
-                continue
-            problems += [f"{f['path']}: restored {k} differs from the donor's (rank diff {r.get('diff')})"
-                         for k in DIGEST_KEYS if r.get(k) != f[k]]
-        if problems:
-            raise RuntimeError("peer snapshot restore is not the donor's state: " + "; ".join(problems[:8]))
-        print(f"[yeto-peer-recovery] restored {len(saved)}/{len(files)} rank shard(s): state, RNG and LR "
-              f"scheduler digests equal the donor's, digests {digest_fingerprint([by_path[f['path']] for f in saved])}",
-              file=sys.stderr, flush=True)
+        # Every rank must re-export the donor's digests (as the single-island cut
+        # restore checks); else the trainer is not the donor's and must not train.
+        fingerprint = check_restored_digests(files, results, DIGEST_KEYS)
+        if fingerprint is not None:
+            checked = sum(1 for f in files if all(k in f for k in DIGEST_KEYS))
+            print(f"[yeto-peer-recovery] restored {checked}/{len(files)} rank shard(s): state, RNG and LR "
+                  f"scheduler digests equal the donor's, digests {fingerprint}", file=sys.stderr, flush=True)
 
 
 class MilesPeerRecoveryIsland:

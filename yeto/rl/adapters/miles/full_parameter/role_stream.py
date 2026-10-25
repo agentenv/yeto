@@ -584,8 +584,6 @@ class MilesFullParameterRoleStream:
         self._tokens_at_base = 0
         # S27 E-3 peer recovery: the donor service, and how this stream started.
         self._donor = None
-        self._donor_refusals_reported = 0
-        self._donor_timings_reported = 0
         self.recovery_outcome = None
         self._routed_at_base = RoutedTokens()
         self.terminal_manifest: FinalManifest | None = None
@@ -912,23 +910,14 @@ class MilesFullParameterRoleStream:
             from yeto.rl.peer_recovery import DonorService
 
             island = self._recovery_island(self.group, self.adapter, recovering=False)
-            # A whole-trainer snapshot (rank shards with the FP32 main copy and
-            # moments) is hundreds of GB for a 30B model: only the shard write
-            # pauses training; hashing and the store commit run in the background.
+            # A file island (rank shards with the FP32 main copy and moments, hundreds
+            # of GB for a 30B model): the service hashes and commits in the background
+            # and logs each refused or finished snapshot.
             self._donor = DonorService(self.client, island, self._snapshot_store(),
-                                       ttl_s=self.config.peer_recovery.ttl_s, background=True)
-        served = await asyncio.to_thread(self._donor.poll)
-        for request, reason in self._donor.refused[self._donor_refusals_reported:]:
-            print(f"[yeto-peer-recovery] {self.config.role} donor refused a snapshot for learner "
-                  f"{request.recovering_id}: {reason}", file=sys.stderr, flush=True)
-        self._donor_refusals_reported = len(self._donor.refused)
-        for timing in self._donor.timings[self._donor_timings_reported:]:
-            print(f"[yeto-peer-recovery] {self.config.role} donor snapshot for learner "
-                  f"{timing['recovering_id']}: {timing['result']}, {timing['bytes']} bytes, "
-                  f"write {timing['write_s']:.1f}s (training paused), "
-                  f"hash+commit {timing['commit_s']:.1f}s (training ran)", file=sys.stderr, flush=True)
-        self._donor_timings_reported = len(self._donor.timings)
-        return served
+                                       ttl_s=self.config.peer_recovery.ttl_s,
+                                       log=lambda text: print(text, file=sys.stderr, flush=True),
+                                       name=self.config.role)
+        return await asyncio.to_thread(self._donor.poll)
 
     def _local_version_zero(self, adapter, initial, sink):
         """Local init: this island's own version-0 cut is its version-0

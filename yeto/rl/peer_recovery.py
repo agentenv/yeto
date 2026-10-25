@@ -526,6 +526,41 @@ class _ArrayFiles:
         return versions
 
 
+def digest_fingerprint(rows: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> str:
+    """One short digest over every row's ``path`` and ``keys``: the donor logs it
+    when it writes a snapshot and the recovering island when it restored one, so
+    the two log lines show the same trainer state."""
+    body = sorted([str(r.get("path")), *(str(r.get(k)) for k in keys)] for r in rows)
+    return hashlib.sha256(json.dumps(body).encode()).hexdigest()[:16]
+
+
+def check_restored_digests(saved: Sequence[Mapping[str, Any]], restored: Sequence[Mapping[str, Any]],
+                           keys: Sequence[str]) -> str | None:
+    """A sharded trainer's restore must re-export the donor's per-shard digests.
+
+    ``saved``: the snapshot's shard rows (``path`` + ``keys``, written by the
+    donor); ``restored``: the rows each rank reports after its restore. Rows
+    without every key are not checked (an older donor). Returns the digest
+    fingerprint of the checked rows (None when none carries the keys); raises
+    RuntimeError when a rank restored other state: the trainer is not the
+    donor's and must not train."""
+    checked = [row for row in saved if all(k in row for k in keys)]
+    if not checked:
+        return None
+    by_path = {row.get("path"): row for row in restored}
+    problems = []
+    for row in checked:
+        now = by_path.get(row["path"])
+        if now is None:
+            problems.append(f"{row['path']}: no restore summary")
+            continue
+        problems += [f"{row['path']}: restored {k} differs from the donor's (rank diff {now.get('diff')})"
+                     for k in keys if now.get(k) != row[k]]
+    if problems:
+        raise RuntimeError("peer snapshot restore is not the donor's state: " + "; ".join(problems[:8]))
+    return digest_fingerprint([by_path[row["path"]] for row in checked], keys)
+
+
 def as_file_island(island: Any) -> FileRecoverableIsland:
     if callable(getattr(island, "write_recovery_snapshot", None)):
         return island
@@ -541,26 +576,34 @@ class DonorService:
     commit and the answer to the syncer follow inline, or with ``background``
     on a worker thread, so the island trains on while a large snapshot is
     hashed and committed (Nemotron Nano: about 470 GB on a Modal Volume, whose
-    commit alone can take longer than 600 s). One snapshot is in flight at a
-    time; a later :meth:`poll` reports it. A snapshot that cannot be written,
+    commit alone can take longer than 600 s). ``background`` None (default):
+    on for an island that writes its own snapshot files (a sharded trainer:
+    Miles, verl), off for array state. One snapshot is in flight at a time;
+    a later :meth:`poll` reports it. A snapshot that cannot be written,
     hashed or committed is refused (the syncer times out the donor and asks
     the next one); the training loop never sees that error. Every ``sweep_every_s``
     it also removes snapshots older than ``ttl_s`` from the store (any island's).
 
     :attr:`timings` has one row per finished snapshot: ``write_s`` (training
-    loop paused), ``commit_s`` (hash + commit + answer), ``bytes`` and ``result``."""
+    loop paused), ``commit_s`` (hash + commit + answer), ``bytes`` and ``result``.
+    ``log`` (e.g. ``print`` to stderr) gets one line per refused or finished
+    snapshot, prefixed with ``name`` (the role)."""
 
     def __init__(self, client: SyncerClient, island: Any, store: SnapshotStore, *,
                  ttl_s: float = DEFAULT_TTL_S, sweep_every_s: float = DEFAULT_SWEEP_EVERY_S,
-                 background: bool = False) -> None:
+                 background: bool | None = None, log: Callable[[str], Any] | None = None,
+                 name: str = "island") -> None:
         if not ttl_s > 0 or not sweep_every_s > 0:
             raise ValueError("snapshot ttl and sweep interval must be positive")
         self.client = client
+        file_island = callable(getattr(island, "write_recovery_snapshot", None))
         self.island = as_file_island(island)
         self.store = store
         self.ttl_s = ttl_s
         self.sweep_every_s = sweep_every_s
-        self.background = background
+        self.background = file_island if background is None else bool(background)
+        self.log = log
+        self.name = name
         self._next_sweep = 0.0
         self._waiting: dict[tuple[int, int], rp.SnapshotRequest] = {}
         self.served: list[tuple[rp.SnapshotRequest, str]] = []
@@ -599,7 +642,7 @@ class DonorService:
                 tag = self.island.layout_tag()
             except SnapshotRefused as exc:
                 writer.abort()
-                self.refused.append((request, str(exc)))
+                self._refuse(request, str(exc))
                 continue
             except BaseException:
                 writer.abort()
@@ -657,12 +700,23 @@ class DonorService:
                 self.served.append((request, detail))
                 served += 1
             elif result == "refused":
-                self.refused.append((request, detail))
+                self._refuse(request, detail)
             else:
                 self._waiting.setdefault(key, request)
+            self._say(f"donor snapshot for learner {timing['recovering_id']}: {result}, {timing['bytes']} bytes, "
+                      f"write {timing['write_s']:.1f}s (training paused), "
+                      f"hash+commit {timing['commit_s']:.1f}s (training ran)")
         if not self.busy:
             self._worker, self._in_flight = None, None
         return served
+
+    def _refuse(self, request: rp.SnapshotRequest, reason: str) -> None:
+        self.refused.append((request, reason))
+        self._say(f"donor refused a snapshot for learner {request.recovering_id}: {reason}")
+
+    def _say(self, text: str) -> None:
+        if self.log is not None:
+            self.log(f"[yeto-peer-recovery] {self.name} {text}")
 
     def _maybe_sweep(self) -> None:
         now = time.monotonic()
