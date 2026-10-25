@@ -134,3 +134,16 @@ def test_launch_keeps_the_fixed_partition_island_command():
     tokens = _island_tokens(plan)
     assert tokens[tokens.index("--rl-placement") + 1] == "fixed-partition"
     assert tokens[tokens.index("--rollout-num-gpus") + 1] == "2"
+
+
+def test_launch_refuses_expandable_segments_on_a_colocated_island():
+    # torch_memory_saver (Miles --offload-train) refuses expandable segments at actor start
+    alloc = ("--modal-env", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _plan("modal:1x2xh100", "--rollout-num-gpus-per-engine", "2", *alloc)
+    plan = _plan("modal:1x4xh100", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "2",
+                 "--rollout-num-gpus-per-engine", "2", *alloc)  # no offload: allowed
+    assert plan["island_requests"][0]["placement"]["placement"] == "fixed-partition"
+    plan = _plan("modal:1x2xh100", "--rollout-num-gpus-per-engine", "2",
+                 "--modal-env", "PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512")
+    assert plan["island_requests"][0]["placement"]["placement"] == "colocated"

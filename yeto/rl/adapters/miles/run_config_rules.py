@@ -46,6 +46,23 @@ def check_global_batch(global_batch: int, data_parallel: int) -> None:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
 
 
+def check_island_env(*, placement: str, env_pairs) -> None:
+    """S27 G-EF: a colocated island runs Miles' ``--offload-train`` (the adapter
+    forces it), whose torch_memory_saver refuses to start when PyTorch's
+    allocator uses expandable segments (``torch_memory_saver.entrypoint``:
+    "expandable_segments is not supported yet"). Refused before any GPU starts.
+    ``env_pairs``: the island's ``KEY=VALUE`` environment options."""
+    if placement != "colocated":
+        return
+    for item in env_pairs or ():
+        key, _, value = str(item).partition("=")
+        if key == "PYTORCH_CUDA_ALLOC_CONF" and "expandable_segments:True" in value:
+            raise ValueError(
+                "a colocated Miles island offloads the trainer with torch_memory_saver, which "
+                "refuses PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; drop that environment "
+                "option or use --rl-placement fixed-partition")
+
+
 def _miles_pin_gap(first: str, feature: str) -> str | None:
     """Why the pinned Miles lacks ``feature``, first in fork commit ``first``; None when it has it."""
     from yeto.rl.adapters.miles import pins
