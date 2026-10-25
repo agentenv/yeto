@@ -1064,6 +1064,35 @@ def build_full_parameter_sync(island: Any, plan: Mapping[str, Any], *, backend_i
     return sync, FullParameterPolicyState(sync), stream
 
 
+def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str):
+    """``(sync, policy state)`` of a full-parameter verl island (S27 B10), for every
+    trainer that holds the FSDP2 actor workers behind ``island.call_workers``: the
+    synchronous trainer (``trainer._full_parameter_ports``) and the fully_async and
+    buffer trainers (:mod:`.fully_async_full`, S27 G-EW).
+
+    Sets ``island.full_group`` (the trainer port records each round on it). With an
+    outer sync (``plan["full_parameter"]``): the engine-neutral ``FullParameterSync``
+    over the verl role stream. Without one (``plan["sync"] == "none"``): the
+    local-only sync over :class:`VerlFullParameterLocalState`, whose layout hash
+    becomes ``island.layout_hash``."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.local_learner import ComponentIdentity
+
+    island.full_group = VerlFullParameterGroup(island)
+    if plan["sync"] == "none":
+        component = ComponentIdentity(role="actor", model_revision=plan["model_revision"].lower(),
+                                      config_hash=plan["model_config_sha256"])
+        policy_state = VerlFullParameterLocalState(island.full_group, component=component,
+                                                   max_fragment_bytes=DEFAULT_MAX_FRAGMENT_BYTES)
+        island.layout_hash = policy_state.layout_hash
+        return LocalOnlySync(int(plan["global_rounds"])), policy_state
+    if not plan.get(PLAN_KEY):
+        raise ValueError("a synced full-parameter verl island needs the full-parameter sync plan")
+    sync, policy_state, _stream = build_full_parameter_sync(
+        island, plan, backend_identity_sha256=backend_identity_sha256)
+    return sync, policy_state
+
+
 class VerlFullParameterLocalState:
     """``PolicyState`` of a full-parameter island without an outer sync
     (``--rl-single-island-no-sync``): every export is a whole cut of the

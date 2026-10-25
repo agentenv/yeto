@@ -87,6 +87,9 @@ class FullyAsyncIsland:
         self.published: tuple[int, str] | None = None
         self.last_metrics: dict = {}
         self.last_criteria: dict = {}
+        # A full-parameter island's trainer group (``full_parameter_stream.VerlFullParameterGroup``,
+        # set by ``fully_async_full.full_parameter_ports``, S27 G-EW); None on a LoRA island.
+        self.full_group = None
 
     # hooks of ports_impl.VerlPolicyState (run on the trainer actor's worker group)
     def export_tensors(self) -> tuple[dict, dict]:
@@ -98,6 +101,12 @@ class FullyAsyncIsland:
 
     def call_workers(self, fn, *args):
         return self.call("yeto_call_workers", fn, *args)
+
+    def call_workers_shared(self, fn, *args):
+        """:meth:`call_workers` with every argument put in the trainer actor's object
+        store once (``ports_impl.VerlIsland.call_workers_shared``; whole parameter
+        tensors of a full-parameter apply are not serialized per worker)."""
+        return self.call("yeto_call_workers_shared", fn, *args)
 
     def append_jsonl(self, name: str, record: dict) -> None:
         with (self.out / name).open("a") as handle:
@@ -254,13 +263,21 @@ class FullyAsyncTrainerGroup(CutPorts):
         if grad_norm is not None:
             self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
-        return LocalStepReceipt(
+        receipt = LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
             base_policy_version=batch.policy_version, base_policy_hash=batch.policy_hash,
             input_batch_hash=_sha("|".join(ids)), trajectory_ids=ids,
             trained_tokens=sum(g.token_count for g in batch.groups), optimizer_steps=1,
             optimizer_step_succeeded=grad_norm is not None,
             parameter_layout_hash=isl.layout_hash)
+        if isl.full_group is not None:  # S27 G-EW: as ports_impl.VerlTrainerGroup.train_step
+            from .full_parameter_stream import VerlRoundEvidence
+
+            isl.full_group.record_round(receipt, VerlRoundEvidence(
+                rollout_id=batch.rollout_id, behavior_policy_hash=batch.policy_hash,
+                input_batch_hash=receipt.input_batch_hash, trained_tokens=receipt.trained_tokens,
+                trajectory_ids=ids))
+        return receipt
 
     def step_metrics(self):
         return self._metrics
