@@ -152,8 +152,11 @@ def test_export_release_trims_the_host_only_in_trim_mode(monkeypatch):
             def empty_cache():
                 return None
 
+            synchronize = empty_cache
+
         monkeypatch.setattr(torch, "cuda", _Alloc, raising=False)
     monkeypatch.setenv(hm.HOST_MEMORY_ENV, "trim")
     assert fp.remote_release_memory(None)["host"]["malloc_trim"] is True
+    assert "host" not in fp.remote_release_memory(None, False)  # a per-file release of the export
     monkeypatch.setenv(hm.HOST_MEMORY_ENV, "report")
     assert "host" not in fp.remote_release_memory(None)

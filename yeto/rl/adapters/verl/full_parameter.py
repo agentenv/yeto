@@ -398,7 +398,7 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
     return result
 
 
-def remote_release_memory(worker_dict) -> dict:
+def remote_release_memory(worker_dict, host: bool = True) -> dict:
     """Give the device allocator's cached blocks back (S27 G-EQ3).
 
     Why: a full export gathers every parameter whole on the device
@@ -421,7 +421,7 @@ def remote_release_memory(worker_dict) -> dict:
     device.empty_cache()
     result = {"before": before,
               "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}
-    if host_memory.host_memory_mode() == "trim":  # S27 G-EZ3: the export's host copies too
+    if host and host_memory.host_memory_mode() == "trim":  # S27 G-EZ3: the export's host copies too
         result["host"] = host_memory.release_host_memory()
     return result
 

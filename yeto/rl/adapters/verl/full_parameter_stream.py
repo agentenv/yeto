@@ -449,11 +449,12 @@ class VerlFullParameterGroup:
             raise RuntimeError(f"verl export returned {len(readers)} reader results, expected 1")
         return {name: _owned(array) for name, array in readers[0]["arrays"].items()}
 
-    async def release_memory(self) -> list[dict]:
+    async def release_memory(self, host: bool = True) -> list[dict]:
         """Free the workers' cached device blocks (:func:`.full_parameter.remote_release_memory`);
-        the island calls it after an export, whose gathers leave large blocks cached."""
+        the island calls it after an export, whose gathers leave large blocks cached.
+        ``host``: also trim the host heap when ``YETO_HOST_MEMORY=trim`` (S27 G-EZ3)."""
 
-        return await asyncio.to_thread(self.island.call_workers, fp.remote_release_memory)
+        return await asyncio.to_thread(self.island.call_workers, fp.remote_release_memory, host)
 
     async def export_fragment(self, units: Sequence[tuple[str, int, int]], numel: int, *,
                               payload: bool, sha256: bool) -> dict[str, Any]:

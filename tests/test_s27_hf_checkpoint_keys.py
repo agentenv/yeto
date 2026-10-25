@@ -370,8 +370,8 @@ def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
     group = _Group(parameters, buffers)
     calls = []
 
-    async def release_memory():
-        calls.append(True)
+    async def release_memory(host=True):
+        calls.append(host)
         return [{"before": {"allocated": 1, "reserved": 40}, "after": {"allocated": 1, "reserved": 8}},
                 {"before": {"allocated": 1, "reserved": 36}, "after": {"allocated": 1, "reserved": 4}}]
 
@@ -381,6 +381,7 @@ def test_the_export_gives_the_workers_cached_device_blocks_back(tmp_path):
     # once per written file (the step after an export has to fit on the same card)
     # plus once at the end, which is the one last_layout reports
     assert len(calls) == 3, calls
+    assert calls == [False, False, True]  # the host heap is trimmed once, after the export (S27 G-EZ3)
     assert writer.last_layout["freed"] == {"reserved_before": 40, "reserved_after": 8, "workers": 2}
 
 
