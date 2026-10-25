@@ -238,6 +238,29 @@ def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_p
     assert len(rec["checks"]) == launcher.MODAL_STOP_VERIFY_ATTEMPTS
 
 
+def test_modal_app_stopping_for_a_minute_is_confirmed(monkeypatch, tmp_path):
+    """S27 (8 runs, EXTRA-CONTAINER.md): Modal took 17-60 s from the app stop to
+    "stopped, 0 tasks" (30 s cancellation grace + 30 s runner shutdown grace); 5 checks
+    about 5 s apart reported a stopping app as not stopped and the run exited 5."""
+    calls = []
+
+    def listing(app):  # 12 checks (~60 s at 5 s) still stopping, then stopped
+        calls.append(1)
+        if len(calls) <= 12:
+            return _rows(app, ("ap-new", "stopping...", 1, "2999-01-01T00:00:00+00:00"))
+        return _rows(app, ("ap-new", "stopped", 0, "2999-01-01T00:00:00+00:00"))
+
+    code, rec = _run_one_modal(monkeypatch, tmp_path, listing)
+    assert code == 4 and rec["confirmed_stopped"] is True  # 4: the island failed, not 5
+    assert len(rec["checks"]) == 13
+
+
+def test_modal_stop_check_waits_about_two_minutes():
+    # launcher's own bindings: the autouse fixture patches only the module's delay
+    wait = (launcher.MODAL_STOP_VERIFY_ATTEMPTS - 1) * launcher.MODAL_STOP_VERIFY_DELAY_S
+    assert wait >= 120.0  # twice the slowest observed stop (60 s)
+
+
 def test_same_name_old_stopped_new_running_is_not_confirmed(monkeypatch, tmp_path):
     code, rec = _run_one_modal(monkeypatch, tmp_path, lambda app: _rows(
         app, ("ap-old", "stopped", 0, "2020-01-01T00:00:00+00:00"),

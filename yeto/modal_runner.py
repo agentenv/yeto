@@ -1628,6 +1628,9 @@ class ContainerIdGuard:
 # S27 s27-ch-d0a: two extra containers of the island function appeared beside the two
 # claimed ones, which kept training; they printed no island line. How long such extra
 # containers may stay listed while every claimed container is still listed.
+# (S27 G-EO, EXTRA-CONTAINER.md: in 10 runs of 10-21..10-25 each extra container was a
+# container of a running island's own function that got no input -- its Modal log has
+# no function call id, only the image banner -- while the island's input kept running.)
 EXTRA_CONTAINER_GRACE_S = 600.0
 
 
@@ -1658,15 +1661,22 @@ class ContainerSetPoller:
       prints a second container id for its slot, which trips
       :class:`ContainerIdGuard` at once.
 
+    ``finished()`` returns the claimed container ids whose island already logged
+    ``rl_learner_finalized``. Such a container leaves the list at the island's normal
+    end; it is not "no longer listed" (s27-ek-b: island 1 finished, its container
+    left while an idle extra container of island 1's function was listed, and the
+    guard failed a completed run with exit 7).
+
     An unclaimed container that left the list never ran island code (as far as the
     logs show) and is not counted. A failed list is skipped (never trips)."""
 
     def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
-                 attributed=None, grace_s: float = EXTRA_CONTAINER_GRACE_S,
+                 attributed=None, finished=None, grace_s: float = EXTRA_CONTAINER_GRACE_S,
                  clock=time.monotonic) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
         self.attributed = attributed if attributed is not None else dict
+        self.finished = finished if finished is not None else set
         self.grace_s = float(grace_s)
         self.clock = clock
         self.seen: set[str] = set()
@@ -1711,7 +1721,12 @@ class ContainerSetPoller:
         msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
                f"claimed, with {free} of {self.expected_count} island slot(s) still free "
                f"(claimed: {owners})")
-        lost = sorted(cid for cid in claimed if cid not in ids)
+        try:
+            ended = set(self.finished() or ())
+        except Exception as exc:  # noqa: BLE001 - no end record: every claimed container counts
+            print(f"[launcher] finished-island check failed: {exc}", flush=True)
+            ended = set()
+        lost = sorted(cid for cid in claimed if cid not in ids and cid not in ended)
         if lost:
             self._trip(f"{msg}; claimed container(s) {', '.join(lost)} no longer listed "
                        "(an island was rescheduled)")
@@ -1721,8 +1736,9 @@ class ContainerSetPoller:
             self.extra_since = now
         if set(unclaimed) - self.warned:
             self.warned |= set(unclaimed)
-            print(f"[launcher] WARNING: {msg}; every claimed container is still listed, so the run "
-                  f"continues while the extra container(s) stay at most {self.grace_s:.0f} s",
+            print(f"[launcher] WARNING: {msg}; every claimed container is still listed or its "
+                  f"island finished, so the run continues while the extra container(s) stay "
+                  f"at most {self.grace_s:.0f} s",
                   flush=True)
         if now - self.extra_since > self.grace_s:
             self._trip(f"{msg}; extra container(s) listed for {now - self.extra_since:.0f} s "
