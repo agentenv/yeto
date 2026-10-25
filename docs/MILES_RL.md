@@ -375,8 +375,8 @@ dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
 
 - Islands that generate and train (the default sample role), two or more of
   them: by default (`--rl-data-split auto`) they claim their rows from the
-  task dispenser (below) when the launch can use it. Otherwise (verl, no
-  syncer, `--rl-elastic`, `--syncer-shards > 1`, Miles fully_async, island
+  task dispenser (below) when the launch can use it. Otherwise (verl, the
+  SAO streaming preset, no syncer, `--rl-elastic`, `--syncer-shards > 1`, Miles fully_async, island
   round cuts, `--eval-only`; the launch log names the reason), and with
   `--rl-data-split stride`, the island with learner id `k` of `N` reads the
   rows with `i % N == k`, in data order. The

@@ -49,7 +49,11 @@ def dispense_blockers(args) -> list[str]:
     ``--rl-data-split auto`` falls back to the row slots (stride) on any of
     these; an explicit ``dispense`` is refused on them (``island_tasks``)."""
 
+    from ..rl.engine.selection import SAO_STREAMING_SYNC_PRESET
+
     out = []
+    if getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET:
+        out.append(f"--rl-sync-preset {SAO_STREAMING_SYNC_PRESET} (no GPU check with the dispenser)")
     backend = getattr(args, "rl_backend", None) or "miles"
     if backend != "miles":
         out.append(f"--rl-backend {backend} (the dispenser is wired for Miles only)")
