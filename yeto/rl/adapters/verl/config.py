@@ -27,6 +27,13 @@ from .pins import VERL_COMMIT
 MODES = ("train", "diagnose")
 SUPPORTED_CORRECTIONS = ("none", "tis")
 DESIGNED_NOT_MAPPED = ("icepop",)  # in design D7, mapping to verl not verified yet
+# ``parameter_mode``: the island's trainable set. "lora" is the original
+# one-card adapter island; "full" (S27 B10 phase 1) trains every parameter on
+# ``n_gpus`` cards with FSDP2 data parallelism and FP32 masters
+# (:mod:`.full_parameter`).  A full-parameter island has no outer sync yet, so
+# the launcher pairs it with ``--rl-single-island-no-sync``.
+PARAMETER_MODES = ("lora", "full")
+FULL_PARAMETER_MODE = "full"
 
 
 class VerlConfigError(ValueError):
@@ -39,6 +46,7 @@ class VerlRunConfig:
     train_file: str
     val_file: str
     out_dir: str
+    parameter_mode: str = "lora"
     lora_rank: int = 32
     lora_alpha: int = 32
     target_modules: str = "all-linear"
@@ -78,11 +86,24 @@ class VerlRunConfig:
         return asdict(self)
 
 
+def full_parameter(cfg: VerlRunConfig) -> bool:
+    return cfg.parameter_mode == FULL_PARAMETER_MODE
+
+
 def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
     """Raise :class:`VerlConfigError` naming the first violated rule."""
-    if cfg.lora_rank <= 0:
-        raise VerlConfigError("verl 后端第一版只支持 LoRA（lora_rank 必须 > 0）")
-    if cfg.lora_alpha != cfg.lora_rank:
+    if cfg.parameter_mode not in PARAMETER_MODES:
+        raise VerlConfigError(
+            f"parameter_mode 必须是 {PARAMETER_MODES} 之一，得到 {cfg.parameter_mode!r}")
+    if full_parameter(cfg):
+        if cfg.lora_rank != 0:
+            raise VerlConfigError("全参数模式必须 lora_rank=0（全参数岛不带适配器）")
+        if cfg.model_dtype != "fp32":
+            raise VerlConfigError(
+                "全参数同步要求 FP32 主权重：model_dtype 必须是 fp32（见 full_parameter 模块说明）")
+    elif cfg.lora_rank <= 0:
+        raise VerlConfigError("LoRA 模式的 lora_rank 必须 > 0（全参数请用 parameter_mode=full）")
+    if not full_parameter(cfg) and cfg.lora_alpha != cfg.lora_rank:
         raise VerlConfigError(
             f"lora_alpha ({cfg.lora_alpha}) 必须等于 rank ({cfg.lora_rank})：yeto 规范 LoRA 不带缩放")
     if cfg.engine_commit != expected_commit:
@@ -146,10 +167,12 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         f"actor_rollout_ref.model.path={cfg.model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",
-        f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
-        f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
-        f"actor_rollout_ref.model.target_modules={cfg.target_modules}",
-        f"actor_rollout_ref.model.lora.merge={cfg.lora_merge}",
+        *(["actor_rollout_ref.model.lora_rank=0"] if full_parameter(cfg) else [
+            f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
+            f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
+            f"actor_rollout_ref.model.target_modules={cfg.target_modules}",
+            f"actor_rollout_ref.model.lora.merge={cfg.lora_merge}",
+        ]),
         "actor_rollout_ref.actor.strategy=fsdp2",
         f"actor_rollout_ref.actor.fsdp_config.model_dtype={cfg.model_dtype}",
         f"actor_rollout_ref.actor.optim.lr={cfg.lr!r}",
