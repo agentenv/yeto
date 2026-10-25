@@ -80,7 +80,8 @@ def _raw_delta(learner: int, step: int, fid: int) -> np.ndarray:
 
 
 class _RawIsland(threading.Thread):
-    """A raw-client island: answers every PULL against its newest version."""
+    """A raw-client island: answers every PULL against its newest version,
+    except one PULL it leaves to the other island (:meth:`leave_one_from`)."""
 
     def __init__(self, client: SyncerClient, learner: int) -> None:
         super().__init__(daemon=True)
@@ -89,6 +90,22 @@ class _RawIsland(threading.Thread):
         self.seen: set = set()
         self.halt = threading.Event()
         self.error: BaseException | None = None
+        self._lock = threading.Lock()
+        self._leave_from: int | None = None
+        self.left: list[int] = []  # global steps of the PULLs it did not answer
+
+    def leave_one_from(self, global_step: int) -> None:
+        """Leave unanswered the first new PULL whose step is ``global_step`` or later."""
+        with self._lock:
+            if self._leave_from is None:
+                self._leave_from = global_step
+
+    def _leaves(self, global_step: int) -> bool:
+        with self._lock:
+            if self.left or self._leave_from is None or global_step < self._leave_from:
+                return False
+            self.left.append(global_step)
+            return True
 
     def step(self) -> None:
         self.client.check_health()
@@ -99,6 +116,8 @@ class _RawIsland(threading.Thread):
             if key in self.seen:
                 continue
             self.seen.add(key)
+            if self._leaves(permit.global_step):
+                continue
             self.client.push_fragment(
                 permit.fragment_id, permit.global_step, permit.round_attempt,
                 self.versions[permit.fragment_id], permit.global_step, 1, 7,
@@ -184,6 +203,22 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
             client = real_client(*args, **kwargs)
             original = client.send_initial_fragments
             client.send_initial_fragments = lambda parts: sent_init.append(1) or original(parts)
+            drain_pulls = client.drain_pulls
+
+            def drain_and_leave():
+                # Quorum 1 closes a round with its first push, and island 0
+                # answers a PULL about as fast as the restarted island does
+                # (both ~2 ms on yeto-cpu-test, S27 G-EI). Left as a race, the
+                # restarted island lost every round after its re-JOIN in some
+                # runs. Island 0 leaves one round that the restarted island
+                # was asked for (this PULL's step or a later one) to it, so
+                # that round can close only with the restarted island's delta.
+                permits = drain_pulls()
+                if permits:
+                    islands[0].leave_one_from(min(permit.global_step for permit in permits))
+                return permits
+
+            client.drain_pulls = drain_and_leave
             return client
 
         monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", client_factory)
@@ -242,6 +277,11 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
     rejoin = next(i for i, r in enumerate(island_1) if r.get("kind") == "pool_join" and r.get("catch_up"))
     after = island_1[rejoin + 1:]
     assert any(r["kind"] == "delta_accepted" for r in after), "the restarted island never contributed"
+    # The round island 0 left closed with the restarted island's delta alone.
+    left = islands[0].left
+    assert len(left) == 1, "the restarted island never got a PULL that island 0 could leave to it"
+    closed_by = {r["step"]: r["raw_weights"] for r in records if r.get("kind") == "outer_step"}
+    assert [weight[0] for weight in closed_by[left[0]]] == [1], (left, closed_by.get(left[0]))
     # Quorum 1 closes some rounds before the island answers (out_of_round);
     # nothing is refused for its base after the catch-up.
     assert {r.get("reason") for r in after if r["kind"] == "delta_rejected"} <= {"out_of_round"}, after
