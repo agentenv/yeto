@@ -265,16 +265,21 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
     identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    # S27 G-EV: a policy-age limit (rollout ahead) is part of the island's contract, as on
+    # Miles (agentic-rollout-utilization 2.1); limit 0 leaves the identity unchanged
+    from yeto.rl.engine.policy_age import bind_policy_age
+
+    identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
     if full:
-        sync, policy_state, publisher = _full_parameter_ports(island, plan, identity.sha256())
+        sync, policy_state, publisher = _full_parameter_ports(island, plan, identity_sha)
         layout_hash = island.layout_hash
     else:
         sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
-                          identity_sha256=identity.sha256(), compat_group=identity.compat_group)
+                          identity_sha256=identity_sha, compat_group=identity.compat_group)
         policy_state = VerlPolicyState(island)
         publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
-                 "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
+                 "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "parameter_mode": "full" if full else "lora", "init_seconds": time.time() - t0})
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
@@ -298,8 +303,10 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
+        from .separate import wire_rollout_ahead
 
         wire_full_parameter_extras(driver, island, plan)
+        wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",

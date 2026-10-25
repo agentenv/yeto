@@ -75,6 +75,8 @@ def parse_args(argv):
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
+    # S27 G-EV (VERL-PARITY #10): the separate-mode island generates one batch ahead
+    p.add_argument("--rl-rollout-ahead", type=int, default=0)
     # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
     # the engine sampler island, yeto.rl.engine.engine_sampler). --rl-resume-store
     # names the buffer's store there, and the round-cut store otherwise (N7.6b)
@@ -418,7 +420,7 @@ def main(argv=None) -> int:
     algo = algorithm_options(spec_dict)
     chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
     max_prompt = 512
-    limit = int(args.rl_max_policy_age or 0)
+    ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None
     if engine == megatron_engine.ENGINE_MEGATRON:  # S27 G-DC: verl Megatron island
@@ -536,7 +538,8 @@ def main(argv=None) -> int:
         "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
-        "max_policy_age": limit, "fully_async": bool(limit),
+        "max_policy_age": int(args.rl_max_policy_age or 0), "fully_async": bool(limit),
+        **({"rollout_ahead": ahead} if ahead else {}),  # S27 G-EV: separate.wire_rollout_ahead
         "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
@@ -576,6 +579,38 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def rollout_ahead_of(args) -> tuple[int, int]:
+    """S27 G-EV (VERL-PARITY #10): ``(--rl-rollout-ahead, the fully_async limit)``.
+
+    Rollout ahead runs verl's separate mode with its synchronous trainer: the
+    rollout servers generate round r+1 with the published policy r while the
+    trainer trains round r (``separate``, ``VerlRolloutPool.start_generate``).
+    ``--rl-max-policy-age`` then bounds that one-version lag and does not select
+    the fully_async path (the limit returned is 0). The launcher refuses the same
+    combinations first (``policy_age.rollout_ahead_problems`` and the engine-neutral
+    ``rollout_ahead.launch_problems``); the island refuses them again here."""
+    from .policy_age import MAX_ROLLOUT_AHEAD
+
+    ahead = int(getattr(args, "rl_rollout_ahead", 0) or 0)
+    limit = int(args.rl_max_policy_age or 0)
+    if not ahead:
+        return 0, limit
+    problems = []
+    if not 0 < ahead <= MAX_ROLLOUT_AHEAD:
+        problems.append(f"--rl-rollout-ahead 0..{MAX_ROLLOUT_AHEAD}")
+    if args.parameter_mode != vconf.FULL_PARAMETER_MODE:
+        problems.append("--tuning full (a LoRA island's fixed partition is the fully_async path)")
+    if (args.rl_placement or "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition (the rollout servers on their own cards)")
+    if limit < ahead:
+        problems.append(f"--rl-max-policy-age >= {ahead} (every sample lags {ahead} version)")
+    if args.rl_sample_role:
+        problems.append("no --rl-sample-role")
+    if problems:
+        raise SystemExit("verl 岛的 --rl-rollout-ahead 需要：" + "; ".join(problems))
+    return ahead, 0
 
 
 def fsdp_separate_pools(args, ray_info: dict):
@@ -662,8 +697,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         problems.append("--rl-single-island-no-sync (outer sync is not wired)")
     if (args.rl_placement or "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
-    if int(args.rl_max_policy_age or 0) != 0:
-        problems.append("--rl-max-policy-age 0 (the fully_async path is not wired)")
+    if int(args.rl_max_policy_age or 0) != 0 and not int(args.rl_rollout_ahead or 0):
+        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the fully_async path is not wired)")
     if args.rl_sample_role or args.rl_rollout_quant_tier:
         problems.append("no --rl-sample-role / --rl-rollout-quant-tier")
     if args.rl_data_slot:

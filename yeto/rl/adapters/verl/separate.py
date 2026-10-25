@@ -13,6 +13,15 @@ One verl island, two pools on its cards (``--rl-placement fixed-partition``):
 * weights reach the rollout servers through verl's NCCL checkpoint engine
   (``standalone_checkpoint_manager.update_weights``): :class:`SeparatePublisher`.
 
+Rollout ahead (S27 G-EV, VERL-PARITY #10; ``--rl-rollout-ahead 1``,
+``yeto.rl.engine.rollout_ahead``): the driver submits round r+1 to the rollout
+servers with the published policy r before the trainer trains round r, and
+waits for that batch before it publishes r+1 (``VerlRolloutPool.start_generate``
+/ ``finish_generate``). Every sample then lags one version; the profile carries
+that age under the bounded-staleness contract (:func:`policy_age_of`), and the
+trainer's TIS on the rollout log-probs corrects it. Off (the default), the
+profile, the capabilities and the driver are those of the serial island.
+
 Everything here is independent of the training engine. G-DC wrote it for the
 Megatron island (s27-verl-megatron); G-EK moved the engine-neutral part here so
 the FSDP2 full-parameter island runs the same mode (VERL-PARITY #13). The
@@ -199,15 +208,47 @@ class SeparatePlacement:
                                     extra={"weight_transport": WEIGHT_TRANSPORT, "shape": self.shape})
 
 
-def execution_profile(spec, plan: dict, *, name: str, engine: str, outer_protocol: str = "none"):
-    """The partitioned-serial profile of a separate island (on-policy, age 0)."""
-    from yeto.rl.engine.execution_profile import ExecutionProfile
+def policy_age_of(plan: dict) -> int:
+    """The policy age a separate island's samples may have: the run's
+    ``--rl-max-policy-age`` with rollout ahead (every sample lags one version, the
+    launcher checked the limit is at least that), else 0 (serial rounds)."""
+    return int(plan.get("max_policy_age") or 0) if int(plan.get("rollout_ahead") or 0) else 0
 
+
+def execution_profile(spec, plan: dict, *, name: str, engine: str, outer_protocol: str = "none"):
+    """The partitioned-serial profile of a separate island: on-policy and age 0, or
+    with rollout ahead the bounded-staleness contract at :func:`policy_age_of`."""
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.policy_age import BOUNDED_STALENESS_CONTRACT
+
+    age = policy_age_of(plan)
     return ExecutionProfile(
         name=name, execution_mode="partitioned-serial", outer_protocol=outer_protocol,
-        algorithm_contract="on-policy", max_policy_age=0,
+        algorithm_contract=BOUNDED_STALENESS_CONTRACT if age else "on-policy", max_policy_age=age,
         groups_per_batch=int(plan["groups_per_round"]), samples_per_group=int(plan["samples_per_group"]),
         algorithm_spec_sha256=spec.sha256(), extra={"engine": engine})
+
+
+def with_policy_age(capabilities, plan: dict):
+    """``capabilities`` declaring the policy age of :func:`policy_age_of` (unchanged at 0)."""
+    import dataclasses
+
+    age = policy_age_of(plan)
+    if not age:
+        return capabilities
+    return dataclasses.replace(capabilities, execution=dataclasses.replace(
+        capabilities.execution, max_policy_staleness=age))
+
+
+def wire_rollout_ahead(driver: Any, plan: dict) -> None:
+    """The driver of a separate island generates ``plan["rollout_ahead"]`` batch ahead
+    (0: serial rounds, nothing set). The driver checks its ports when it starts
+    (``rollout_ahead.driver_problems``)."""
+    ahead = int(plan.get("rollout_ahead") or 0)
+    if ahead and not plan.get("separate") and not plan.get("megatron"):
+        raise ValueError("rollout ahead needs verl's separate mode (trainer and rollout cards apart)")
+    if ahead:
+        driver.rollout_ahead = ahead
 
 
 # ----------------------------------------------------------------------------- the FSDP2 island (S27 G-EK)
@@ -228,6 +269,6 @@ def driver_options(plan: dict, spec, capabilities) -> dict:
     from .entry import with_partitioned_serial
 
     return {"placement": SeparatePlacement(plan["separate"]),
-            "capabilities": with_partitioned_serial(capabilities),
+            "capabilities": with_policy_age(with_partitioned_serial(capabilities), plan),
             "profile": execution_profile(spec, plan, name="verl-fsdp2-separate", engine="verl-fsdp2",
                                          outer_protocol="none" if plan.get("sync") == "none" else "strict-avg")}

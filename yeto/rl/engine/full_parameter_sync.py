@@ -1540,7 +1540,10 @@ class FullParameterSync(RoundCutHooks):
             raise RuntimeError(f"round {rollout_id} trains from published policy v{version}")
         if evidence.behavior_policy_hash == policy_hash:
             return evidence
-        return bind_round_policy(evidence, policy_hash)
+        # a backend whose round evidence is not the persisted trajectory evidence
+        # (verl's VerlRoundEvidence) binds it with the same rule itself
+        bind = getattr(evidence, "bound_to_round_policy", None)
+        return bind(policy_hash) if callable(bind) else bind_round_policy(evidence, policy_hash)
 
     async def _serve_peer_snapshots(self) -> None:
         """S27 E-3: a donor answers snapshot requests here, after this

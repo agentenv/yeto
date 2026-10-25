@@ -93,9 +93,13 @@ def full_parameter_problems(args) -> list[str]:
                         "trainer starts no engine; the sampler islands generate)")
     # S27 G-EW: a synced buffer trainer runs verl's fully_async trainer over the sample buffer
     # (--rl-max-policy-age >= 1, sample_roles); a full-parameter island with its own rollout
-    # runs the synchronous trainer (VERL-PARITY #11)
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args):
-        problems.append("--rl-max-policy-age 0 (the verl full-parameter island runs the synchronous trainer)")
+    # runs the synchronous trainer (VERL-PARITY #11). S27 G-EV: with --rl-rollout-ahead 1 the
+    # limit bounds the one-version lag of the separate mode's synchronous trainer
+    # (policy_age.rollout_ahead_problems)
+    if (int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args)
+            and not int(getattr(args, "rl_rollout_ahead", 0) or 0)):
+        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the verl full-parameter island runs "
+                        "the synchronous trainer)")
     if int(getattr(args, "rl_rollout_quant_tier", 0) or 0):
         problems.append("no --rl-rollout-quant-tier")
     if int(getattr(args, "expert_full_count", 0) or 0):

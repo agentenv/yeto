@@ -40,7 +40,8 @@ from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, Wei
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
 
 from .ports_impl import MEMBER, VerlIsland, VerlRolloutPool, VerlTrainerGroup, _inner_worker  # noqa: F401
-from .separate import READBACK_STATUS, SeparatePlacement, SeparatePublisher, execution_profile  # noqa: F401
+from .separate import (READBACK_STATUS, SeparatePlacement, SeparatePublisher, execution_profile,  # noqa: F401
+                       wire_rollout_ahead, with_policy_age)
 
 DIGEST_PREFIX = b"yeto-verl-megatron-policy-v1\0"
 PAYLOAD_PREFIX = b"yeto-verl-megatron-payload-v1\0"
@@ -395,10 +396,12 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=MegatronTrainerGroup(island),
         policy_state=MegatronPolicyState(island), publisher=MegatronPublisher(island),
-        placement=MegatronPlacement(shape), capabilities=verl_capabilities(fingerprint, megatron=True),
+        placement=MegatronPlacement(shape),
+        capabilities=with_policy_age(verl_capabilities(fingerprint, megatron=True), plan),
         algorithm=spec, sync=LocalOnlySync(int(plan["global_rounds"])), events=tape,
         profile=_execution_profile(spec, plan), layout=LAYOUT_FRAGMENTS)
     driver.data_slot = plan.get("data_slot")
+    wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
     driver.hf_exports = hf_exports_for(plan, island)
     state = driver.run()
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
