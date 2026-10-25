@@ -20,7 +20,8 @@ entry picks one and writes one summary:
 RUN_DIR/args.txt, or verl island files (``verl-plan-*.json`` / ``verl-runtime-*.json``)
 in the island mirrors, else Miles. For the verl reader, ``--learners`` defaults to the
 number of island mirrors and ``--total-steps`` to the syncer's fragment steps of
-args.txt (``--total-steps`` x ``--fragments``).
+args.txt (``--total-steps`` x ``--fragments``); a no-sync island (``--rl-single-island-no-sync``)
+has no syncer, so the reader's syncer rows (merges, rejected, final_ack, ogn_spike) are N/A.
 
 Output: the reader's own report, then one line ``backend=<b> overall=<PASS|WARN|FAIL>``;
 ``--json`` writes ``{"backend", "overall", "checks": [{"check", "status", "detail"}],
@@ -44,6 +45,7 @@ READERS = {
     "verl": HERE.parent / "probes" / "s27_verl_full" / "health_launch.py",
 }
 VERL_FILES = ("verl-plan-*.json", "verl-runtime-*.json")
+SYNCER_CHECKS = ("merges", "rejected", "final_ack", "ogn_spike")  # verl reader rows read from the syncer
 
 
 def _load(backend: str):
@@ -101,6 +103,12 @@ def _verl(run: Path, args) -> dict:
     learners = args.learners or learners
     total = args.total_steps or total or 32
     result = reader.check(run, learners, total)
+    if "--rl-single-island-no-sync" in _args_tokens(run):
+        # a no-sync island has no syncer: its merge, final-cut and outer-gnorm rows do not apply
+        for r in result["rows"]:
+            if r["check"] in SYNCER_CHECKS:
+                r["status"], r["detail"] = "N/A", "no syncer (--rl-single-island-no-sync)"
+        result["counts"] = {s: sum(r["status"] == s for r in result["rows"]) for s in ("PASS", "WARN", "FAIL", "N/A")}
     for r in result["rows"]:
         print(f"{r['status']:5} {r['check']:10} {r['detail']}")
     print(" ".join(f"{k}={v}" for k, v in result["counts"].items()))

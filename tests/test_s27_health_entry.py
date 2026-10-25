@@ -75,3 +75,17 @@ def test_the_summary_is_never_written_into_the_run_dir(tmp_path):
     run = _run(tmp_path, args="launch --rl-backend verl")
     with pytest.raises(SystemExit, match="inside the run dir"):
         health.main([str(run), "--json", str(run / "x.json")])
+
+
+def test_a_no_sync_island_has_no_syncer_rows(tmp_path, monkeypatch):
+    run = _run(tmp_path, args="launch --rl-backend verl --rl-single-island-no-sync --total-steps 8", islands=1)
+    rows = [{"check": "merges", "status": "FAIL", "detail": "syncer steps 0"},
+            {"check": "final_ack", "status": "FAIL", "detail": "islands [False]"},
+            {"check": "lp_abs", "status": "PASS", "detail": "0.01"}]
+    monkeypatch.setattr(health, "_load", lambda b: SimpleNamespace(
+        check=lambda path, learners, total: {"rows": [dict(r) for r in rows], "counts": {"FAIL": 2, "PASS": 1}}))
+    out = tmp_path / "s.json"
+    assert health.main([str(run), "--json", str(out)]) == 0
+    summary = json.loads(out.read_text())
+    assert summary["overall"] == "PASS"
+    assert [c["status"] for c in summary["checks"]] == ["N/A", "N/A", "PASS"]
