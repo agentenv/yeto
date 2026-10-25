@@ -391,3 +391,80 @@ def test_parse_args_accepts_the_separate_flags():
         "--actor-num-gpus-per-node", "1", "--rollout-num-gpus-per-engine", "1"])
     assert ignored == [] and isinstance(args, argparse.Namespace)
     assert fp.MASTER_DTYPE == "torch.float32"
+
+
+# ----------------------------------------------------------------------------- VERL-PARITY #14, first step
+def test_a_full_parameter_trainer_releases_its_weights_through_the_buffer_publisher(tmp_path):
+    """The full-parameter release (``buffer_ports.full_release_weights`` + ``merged_release.
+    write_full_checkpoint``): the fully_async trainer actor's ``yeto_call_workers`` hook gives the
+    full-parameter group the trainer workers, the island's HF writer (G-DS) writes the release, version
+    0 (the base) is not released, a trained version is, and the release loads as the trainer's weights."""
+    import asyncio
+
+    from safetensors.torch import load_file
+
+    from yeto.rl.adapters.verl import buffer_feed as bf
+    from yeto.rl.adapters.verl.buffer_ports import BufferReleasePublisher, full_release_weights
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
+    from yeto.rl.adapters.verl.hf_export import VerlHfWriter
+    from yeto.rl.engine.hf_export import COMPLETE_MARKER
+    from yeto.rl.engine.policy_release import PolicyReleaseStore
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+    from yeto.rl.local_learner import ComponentIdentity
+
+    model = _Model(seed=0)
+    worker = _Island(model).worker  # the trainer worker behind the actor
+
+    class Actor:  # YetoBufferTrainer: the fully_async trainer actor
+        param_version = 0
+
+        def __call__(self, name, *args, timeout=None):
+            if name == "yeto_call_workers":
+                fn, *rest = args
+                return [fn(worker, *rest)]
+            return getattr(self, name)(*args)
+
+        def yeto_param_version(self):
+            return self.param_version
+
+    actor = Actor()
+    island = FullyAsyncIsland(actor, learner_id=0, limit=1, required=1, out_dir=str(tmp_path / "out"),
+                              readback_dir=str(tmp_path / "rb"))
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text('{"torch_dtype": "bfloat16"}')
+    (base / "tokenizer.json").write_text("{}")
+    group = vfs.VerlFullParameterGroup(island)
+    state_port = vfs.VerlFullParameterLocalState(
+        group, component=ComponentIdentity(role="actor", model_revision="a" * 40, config_hash="b" * 64),
+        max_fragment_bytes=64)
+    store = CheckpointStore(tmp_path / "store")
+    feed = bf.BufferFeed(FileSampleBuffer(store, batch_size=1), vmap=lambda: island.vmap,
+                         shape=bf.RowShape(prompt_length=4, response_length=4, pad_token_id=0),
+                         add_group=print, record=print)
+    releases = PolicyReleaseStore(store)
+    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base,
+                                       weights=full_release_weights(VerlHfWriter(group, base, run=asyncio.run)))
+    publisher.publish(state_port.export(policy_version=0))
+    assert releases.latest() is None  # version 0 is the base checkpoint: the samplers start on it
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(0.25)
+    actor.param_version = 1
+    state = state_port.export(policy_version=1)
+    result = publisher.publish(state)
+    latest = releases.latest()
+    assert (latest.version, latest.policy_hash) == (1, state.policy_tensor_hash())
+    landed = Path(store.root) / releases.release_dir / latest.path
+    # the weights and the base's non-weight files, plus the store's own release record
+    assert sorted(p.name for p in landed.iterdir()) == ["RELEASE.json", "config.json", "model.safetensors",
+                                                        "tokenizer.json"]
+    assert COMPLETE_MARKER not in {p.name for p in landed.iterdir()}
+    weights = load_file(str(landed / "model.safetensors"))
+    assert sorted(weights) == sorted(SHAPES)
+    for name, value in model.values().items():
+        assert weights[name].dtype == torch.bfloat16 and torch.equal(weights[name], value.to(torch.bfloat16))
+    assert result.manifest.payload_bytes == sum(latest.files.values())
+    record = json.loads((tmp_path / "out" / "verl-buffer-release-0.jsonl").read_text().splitlines()[-1])
+    assert record["released"] and record["merge"]["files"] == ["config.json", "model.safetensors", "tokenizer.json"]

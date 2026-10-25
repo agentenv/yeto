@@ -17,6 +17,12 @@ The base policy (version 0, LoRA B all zero: the merged weights are the base)
 is not released: the samplers start on the base weights as version 0. A
 version-0 state with any non-zero B is released like any other version.
 
+What a release writes comes from the publisher's ``weights`` (S27 G-EK, VERL-PARITY
+#14): :func:`lora_release_weights` (the default: the adapter merged into the
+base) or :func:`full_release_weights` (a full-parameter trainer: its FP32 masters
+in the model's dtype, written by the island's HF writer, ``hf_export``; version
+0 is the base checkpoint itself and is not released).
+
 Synced trainers (S25 C3, ``yeto.rl.engine.merged_release``; the same rules as
 the Miles trainer island): every island records, at each publication, the
 merged version (``merged_version``: the syncer's outer version of the applied
@@ -53,7 +59,7 @@ from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 from .buffer_feed import BufferCall, BufferFeed, MergedVersions, RowShape
 from .fully_async_ports import MEMBER, FullyAsyncIsland, FullyAsyncRolloutPool
 from .fully_async_round import FULLY_ASYNC_PLACEMENT
-from .merged_release import LORA_B, write_merged_checkpoint
+from .merged_release import LORA_B, write_full_checkpoint, write_merged_checkpoint
 
 BASE_POLICY_VERSION = 0
 RELEASE_EVENT = "rl_policy_released"  # the Miles trainer island's event name
@@ -71,23 +77,66 @@ def is_base_adapter(version: int, tensors: Mapping[str, Any]) -> bool:
         not bool(t.detach().abs().max() > 0) for name, t in tensors.items() if name.endswith(LORA_B))
 
 
+class ReleaseWeights:
+    """The weights one publication would release (S27 G-EK): ``write(directory)``
+    writes them as a HF checkpoint and returns a summary; ``is_base(version)``: the
+    released policy would be the base checkpoint the samplers start on (nothing to
+    release); ``fallback_bytes``: the payload size reported when nothing is released."""
+
+    def __init__(self, write: Callable[[Path], dict[str, Any]], is_base: Callable[[int], bool],
+                 fallback_bytes: int) -> None:
+        self.write = write
+        self.is_base = is_base
+        self.fallback_bytes = int(fallback_bytes)
+
+
+def lora_release_weights(base_dir: str | Path, merge: Callable[..., dict[str, Any]] = write_merged_checkpoint):
+    """A LoRA trainer's releases: the adapter merged into the base (module doc)."""
+    base = Path(base_dir)
+
+    def weights(state: Any) -> ReleaseWeights:
+        tensors = dict(state.to_lora().tensors)
+        return ReleaseWeights(lambda directory: merge(base, tensors, directory),
+                              lambda version: is_base_adapter(version, tensors),
+                              # the adapter in bf16 as on the fully_async path
+                              sum(int(t.numel()) * 2 for t in tensors.values()))
+
+    return weights
+
+
+def full_release_weights(writer: Callable[[int, Path], None]):
+    """A full-parameter trainer's releases (S27 G-EK): ``writer`` is the island's HF
+    writer (``hf_export.VerlHfWriter`` over the trainer workers); version 0 is the
+    base checkpoint. Fallback payload: the policy's own payload size."""
+
+    def weights(state: Any) -> ReleaseWeights:
+        return ReleaseWeights(lambda directory: write_full_checkpoint(writer, directory),
+                              lambda version: int(version) == BASE_POLICY_VERSION,
+                              int(state.payload_digest[1]))
+
+    return weights
+
+
 class BufferReleasePublisher:
     """yeto publication as a store release of the merged policy (module doc).
 
     ``feed`` gives the buffer read position; ``base_dir`` is the base HF
     checkpoint the adapter trains over; ``lane``: a synced trainer's buffer lane
-    (module doc; None for a single trainer)."""
+    (module doc; None for a single trainer); ``weights``: what a release writes
+    (:func:`lora_release_weights` over ``base_dir`` and ``merge`` when None)."""
 
     def __init__(self, island: FullyAsyncIsland, releases: PolicyReleaseStore, feed: BufferFeed,
                  *, base_dir: str | Path, clock: Callable[[], float] = time.monotonic,
                  merge: Callable[..., dict[str, Any]] = write_merged_checkpoint,
-                 lane: BufferLane | None = None) -> None:
+                 lane: BufferLane | None = None,
+                 weights: Callable[[Any], ReleaseWeights] | None = None) -> None:
         self.island = island
         self.releases = releases
         self.feed = feed
         self.base_dir = Path(base_dir)
         self.clock = clock
         self.merge = merge
+        self.weights = weights  # None: the LoRA merge over base_dir with self.merge (read at publish)
         self.lane = lane
         self.driver: Any = None
         self.guard = MergedReleaseGuard(self._on_gap)
@@ -135,16 +184,16 @@ class BufferReleasePublisher:
         param_version = int(isl.call("yeto_param_version"))
         isl.vmap.record(param_version, version)  # raises on contradiction / regression
         digest = state.policy_tensor_hash()
-        tensors = dict(state.to_lora().tensors)
+        weights = (self.weights or lora_release_weights(self.base_dir, self.merge))(state)
         started = self.clock()
         merge: dict[str, Any] = {}
         release = None
         position = self.feed.read_cursor()
         shards = self.feed.read_shards()
         released = self._release_version(state)
-        if released is not None and not is_base_adapter(released, tensors):
+        if released is not None and not weights.is_base(released):
             def write(directory: Path) -> None:
-                merge.update(self.merge(self.base_dir, tensors, directory))
+                merge.update(weights.write(directory))
 
             release = self.releases.release(released, digest, write, buffer_selected=position,
                                             buffer_shards=shards, weights=FULL, origin=self._origin(state))
@@ -172,8 +221,8 @@ class BufferReleasePublisher:
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
             payload_hash=_sha(json.dumps({"release": record.get("path"), "hash": digest})),
-            # the release's files, or (nothing released) the adapter in bf16 as on the fully_async path
-            payload_bytes=int(record.get("payload_bytes") or sum(int(t.numel()) * 2 for t in tensors.values())),
+            # the release's files, or (nothing released) the weights' fallback size
+            payload_bytes=int(record.get("payload_bytes") or weights.fallback_bytes),
             complete=True)
         return PublicationResult(manifest, frozenset({MEMBER}))
 
@@ -190,6 +239,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          shape: RowShape, base_dir: str | Path,
                          tokenize: Callable[[str], Sequence[int]] | None = None,
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
+                         weights: Callable[[Any], ReleaseWeights] | None = None,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -212,5 +262,5 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
-    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane)
+    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane, weights=weights)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()
