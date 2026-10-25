@@ -23,7 +23,8 @@ from yeto.rl.adapters.miles import train_gap_probe as probe  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_state():
     saved = dict(probe._STATE)
-    probe._STATE.update(installed=False, actor=None, mode="legacy", probe=True, iter_s=None, fills=0)
+    probe._STATE.update(installed=False, actor=None, mode="legacy", probe=True, iter_s=None, fills=0,
+                        check=0, checked=0, fast_off=None)
     yield
     probe._STATE.clear()
     probe._STATE.update(saved)
@@ -136,7 +137,7 @@ def _assert_same(left, right):
 
 
 def test_fill_mode_parses_and_rejects_unknown_values():
-    assert probe.fill_mode({}) == "legacy"
+    assert probe.fill_mode({}) == "serial" == probe.DEFAULT_FILL
     assert probe.fill_mode({probe.FILL_ENV: " AB "}) == "ab"
     with pytest.raises(probe.TrainGapConfigError):
         probe.fill_mode({probe.FILL_ENV: "fast"})
@@ -273,7 +274,7 @@ def _call_fill(module, *, args=None):
 def test_probe_prints_one_record_per_fill_and_keeps_legacy_result():
     calls = []
     module = _fake_module(calls)
-    assert _install(module, {}, rollout_id=4)
+    assert _install(module, {probe.FILL_ENV: "legacy"}, rollout_id=4)
     records, replays = _call_fill(module)
     assert calls == ["iter", "legacy"]
     (record,) = records
@@ -331,11 +332,208 @@ def test_compact_refusal_runs_legacy_and_says_why():
     assert records[0]["mode"] == "legacy" and records[0]["compact_refused"] == "context parallel > 1"
 
 
+def test_default_fill_is_serial_and_installs_without_the_probe():
+    calls, seen = [], []
+    module = _fake_module(calls)
+    inner = module.fill_replay_data
+
+    def fill_replay_data(**kwargs):
+        seen.append(torch.get_num_threads())
+        return inner(**kwargs)
+
+    module.fill_replay_data = fill_replay_data
+    before = torch.get_num_threads()
+    torch.set_num_threads(2)
+    try:
+        assert _install(module, {probe.PROBE_ENV: "0"}, rollout_id=0) is True
+        records, replays = _call_fill(module)
+        assert records == [] and seen == [1] and torch.get_num_threads() == 2
+        assert all(len(r.top_indices_list) == 2 for r in replays)
+    finally:
+        torch.set_num_threads(before)
+
+
+def test_check_count_parses_and_rejects_bad_values():
+    assert probe.check_count({}) == 0 and probe.check_count({probe.CHECK_ENV: " 3 "}) == 3
+    for bad in ("-1", "two", "1.5"):
+        with pytest.raises(probe.TrainGapConfigError):
+            probe.check_count({probe.CHECK_ENV: bad})
+
+
+def _call_fill_keep(module, *, seed=3):
+    """``_call_fill`` that also returns the rollout dict (the fill must delete the replay key)."""
+    data, chunks = _case(seed=seed, samples=7, streams=5, topk=2, micro_batches=3)
+    rollout_data = {k: list(v) for k, v in data.items()}
+    replays = [_Replay(None), _Replay(4), _Replay(2)]
+    out = io.StringIO()
+    with redirect_stdout(out):
+        module.get_data_iterator(None)
+        module.fill_replay_data(args=_args(multiplier=4, sp=False), models=None,
+                                data_iterator=[_Iterator(rollout_data, chunks)], num_microbatches=[3],
+                                rollout_data=rollout_data, data_key="rollout_routed_experts",
+                                replay_list=replays, register_replay_list_func=_sequential)
+    lines = [line for line in out.getvalue().splitlines() if line.startswith(probe.LOG_PREFIX)]
+    bodies = [line[len(probe.LOG_PREFIX):].lstrip() for line in lines]
+    records = [json.loads(body) for body in bodies if body.startswith("{")]
+    return records, replays, rollout_data, out.getvalue()
+
+
+def _legacy_of(seed=3):
+    data, chunks = _case(seed=seed, samples=7, streams=5, topk=2, micro_batches=3)
+    return _run(_reference_fill, data=data, chunks=chunks, args=_args(multiplier=4, sp=False),
+                state=_state(), stream_idx=[None, 4, 2])
+
+
+def test_shadow_check_compares_the_first_compact_fills_only():
+    calls = []
+    module = _fake_module(calls)
+    assert _install(module, {probe.FILL_ENV: "compact", probe.CHECK_ENV: "1"}, rollout_id=1)
+    records, replays, rollout_data, _ = _call_fill_keep(module)
+    assert calls == ["iter", "legacy"]  # the shadow ran Miles' fill once
+    (record,) = records
+    assert record["mode"] == "compact" and record["check"]["equal"] is True
+    assert record["check"]["tensors"] == 3 * 3 and record["check"]["s"] >= 0
+    assert "rollout_routed_experts" not in rollout_data
+    _assert_same([r.top_indices_list for r in replays], _legacy_of())
+    probe._STATE["actor"]._last_rollout_id = 4
+    records, replays, rollout_data, _ = _call_fill_keep(module, seed=5)
+    assert calls == ["iter", "legacy", "iter"] and "check" not in records[0]  # K = 1: no second check
+    assert records[0]["mode"] == "compact" and probe._STATE["fast_off"] is None
+    _assert_same([r.top_indices_list for r in replays], _legacy_of(seed=5))
+
+
+def test_shadow_check_mismatch_puts_legacy_tensors_in_place_and_turns_compact_off(monkeypatch):
+    calls = []
+    module = _fake_module(calls)
+    good = probe.compact_fill_replay_data
+
+    def bad_compact(**kwargs):
+        good(**kwargs)
+        kwargs["replay_list"][1].top_indices_list[2][0, 0] += 1  # one wrong expert id
+
+    monkeypatch.setattr(probe, "compact_fill_replay_data", bad_compact)
+    assert _install(module, {probe.FILL_ENV: "cycle", probe.CHECK_ENV: "5"}, rollout_id=1)
+    records, replays, rollout_data, text = _call_fill_keep(module)
+    check = records[0]["check"]
+    assert records[0]["mode"] == "compact" and check["equal"] is False
+    assert check["mismatch"].startswith("slot 1 micro-batch 2")
+    assert "CHECK MISMATCH" in text and "rollout_routed_experts" not in rollout_data
+    _assert_same([r.top_indices_list for r in replays], _legacy_of())  # training sees legacy values
+    probe._STATE["actor"]._last_rollout_id = 4  # next compact round of cycle
+    records, replays, _, _ = _call_fill_keep(module)
+    assert records[0]["mode"] == "legacy" and "shadow check mismatch" in records[0]["compact_refused"]
+    assert "check" not in records[0]
+    probe._STATE["actor"]._last_rollout_id = 5  # the serial round of cycle is off too
+    records, _, _, _ = _call_fill_keep(module)
+    assert records[0]["mode"] == "legacy" and "shadow check mismatch" in records[0]["serial_refused"]
+
+
+def test_shadow_check_error_keeps_the_compact_result_and_turns_compact_off():
+    calls = []
+    module = _fake_module(calls)
+    inner = module.fill_replay_data
+
+    def fill_replay_data(**kwargs):
+        if kwargs["replay_list"] and isinstance(kwargs["replay_list"][0], probe._ShadowReplay):
+            raise RuntimeError("shadow broke")
+        return inner(**kwargs)
+
+    module.fill_replay_data = fill_replay_data
+    assert _install(module, {probe.FILL_ENV: "compact", probe.CHECK_ENV: "2"}, rollout_id=1)
+    records, replays, rollout_data, _ = _call_fill_keep(module)
+    assert records[0]["mode"] == "compact" and "RuntimeError: shadow broke" in records[0]["check"]["error"]
+    assert probe._STATE["fast_off"] == "shadow check error (RuntimeError)"
+    assert "rollout_routed_experts" not in rollout_data
+    _assert_same([r.top_indices_list for r in replays], _legacy_of())
+
+
+def test_serial_ab_runs_serial_on_odd_rounds():
+    assert [probe.fill_for_round("serial-ab", r) for r in (None, 0, 1, 2, 7)] == [
+        "legacy", "legacy", "serial", "legacy", "serial"]
+    assert probe.fill_mode({probe.FILL_ENV: "Serial-AB"}) == "serial-ab"
+
+
+def test_shadow_check_covers_serial_with_the_calls_own_registration_and_default_threads():
+    calls, seen = [], []
+    module = _fake_module(calls)
+    inner = module.fill_replay_data
+    layers = [4, 0, 2]
+
+    def register_by_layer(replay_list, replay_data, **_kwargs):
+        """Like Miles register_replay_list_moe: slot i records a layer that the model names."""
+        for slot, layer in enumerate(layers):
+            replay_list[slot].record(replay_data[:, layer])
+
+    def fill_replay_data(**kwargs):
+        seen.append(torch.get_num_threads())
+        assert kwargs["register_replay_list_func"] is register_by_layer or \
+            getattr(kwargs["register_replay_list_func"], "inner", None) is register_by_layer
+        return inner(**kwargs)
+
+    module.fill_replay_data = fill_replay_data
+    before = torch.get_num_threads()
+    torch.set_num_threads(2)
+    try:
+        assert _install(module, {probe.FILL_ENV: "serial-ab", probe.CHECK_ENV: "1"}, rollout_id=1)
+        data, chunks = _case(seed=9, samples=7, streams=5, topk=2, micro_batches=3)
+        rollout_data = {k: list(v) for k, v in data.items()}
+        replays = [_Replay(None), _Replay(None), _Replay(None)]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            module.fill_replay_data(args=_args(multiplier=4, sp=False), models=None,
+                                    data_iterator=[_Iterator(rollout_data, chunks)], num_microbatches=[3],
+                                    rollout_data=rollout_data, data_key="rollout_routed_experts",
+                                    replay_list=replays, register_replay_list_func=register_by_layer)
+        (line,) = [x for x in out.getvalue().splitlines() if x.startswith(probe.LOG_PREFIX)]
+        record = json.loads(line[len(probe.LOG_PREFIX):])
+        assert record["mode"] == "serial" and record["check"]["equal"] is True and record["check"]["tensors"] == 9
+        assert seen == [1, 2]  # the serial fill ran on one thread, the shadow on the default threads
+        assert calls == ["legacy", "legacy"] and "rollout_routed_experts" not in rollout_data
+        want = _run(_reference_fill, data=data, chunks=chunks, args=_args(multiplier=4, sp=False),
+                    state=_state(), stream_idx=layers)  # stream_idx = layer id gives the same mapping
+        _assert_same([r.top_indices_list for r in replays], want)
+    finally:
+        torch.set_num_threads(before)
+
+
+def test_shadow_check_mismatch_on_serial_turns_serial_and_compact_off(monkeypatch):
+    calls = []
+    module = _fake_module(calls)
+    good = probe._serial
+
+    def bad_serial(original, **call):
+        good(original, **call)
+        call["replay_list"][0].top_indices_list[0][0, 0] += 1
+
+    monkeypatch.setattr(probe, "_serial", bad_serial)
+    assert _install(module, {probe.FILL_ENV: "serial-ab", probe.CHECK_ENV: "2"}, rollout_id=3)
+    records, replays, _, text = _call_fill_keep(module)
+    assert records[0]["mode"] == "serial" and records[0]["check"]["equal"] is False
+    assert records[0]["check"]["mismatch"].startswith("slot 0 micro-batch 0") and "CHECK MISMATCH" in text
+    _assert_same([r.top_indices_list for r in replays], _legacy_of())
+    probe._STATE["actor"]._last_rollout_id = 5
+    records, _, _, _ = _call_fill_keep(module)
+    assert records[0]["mode"] == "legacy" and "shadow check mismatch" in records[0]["serial_refused"]
+
+
+def test_shadow_check_is_off_by_default_and_needs_the_probe():
+    calls = []
+    module = _fake_module(calls)
+    assert _install(module, {probe.FILL_ENV: "compact"}, rollout_id=1)
+    records, _, _, _ = _call_fill_keep(module)
+    assert calls == ["iter"] and "check" not in records[0]
+    probe._STATE.update(installed=False)
+    module = _fake_module(calls := [])
+    assert _install(module, {probe.FILL_ENV: "compact", probe.CHECK_ENV: "3", probe.PROBE_ENV: "0"}, rollout_id=1)
+    records, _, _, _ = _call_fill_keep(module)
+    assert records == [] and calls == ["iter"]
+
+
 def test_install_off_leaves_miles_untouched_and_is_idempotent():
     calls = []
     module = _fake_module(calls)
     original = module.fill_replay_data
-    assert _install(module, {probe.PROBE_ENV: "0"}, rollout_id=0) is False
+    assert _install(module, {probe.PROBE_ENV: "0", probe.FILL_ENV: "legacy"}, rollout_id=0) is False
     assert module.fill_replay_data is original
     assert _install(module, {}, rollout_id=0) is True
     wrapped = module.fill_replay_data
@@ -400,4 +598,68 @@ def test_compact_equals_miles_fill_replay_data(multiplier, tp_rank, tp_size, sp)
                                        call={"register_replay_list_func": replay_data.register_replay_list_sequential},
                                        sequential=replay_data.register_replay_list_sequential) is None
     finally:
+        parallel.set_parallel_state(None)
+
+
+def test_shadow_check_against_miles_fill_replay_data():
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    parallel = pytest.importorskip("miles.backends.training_utils.parallel")
+    state = _state(tp_rank=1, tp_size=2)
+    parallel.set_parallel_state(state)
+    try:
+        module = SimpleNamespace(get_data_iterator=lambda *a, **k: None,
+                                 fill_replay_data=replay_data.fill_replay_data)
+        with redirect_stdout(io.StringIO()):
+            assert probe.install(SimpleNamespace(_last_rollout_id=1),
+                                 env={probe.FILL_ENV: "compact", probe.CHECK_ENV: "1"},
+                                 targets=lambda: (module, replay_data.register_replay_list_sequential,
+                                                  lambda: state))
+        data, chunks = _case(seed=11, samples=19, streams=52, topk=6, micro_batches=4)
+        rollout_data = {k: list(v) for k, v in data.items()}
+        replays = [_Replay(s) for s in (None, 3, 51, 10)]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            module.fill_replay_data(args=_args(multiplier=8, sp=True), models=None,
+                                    data_iterator=[_Iterator(rollout_data, chunks)], num_microbatches=[4],
+                                    rollout_data=rollout_data, data_key="rollout_routed_experts",
+                                    replay_list=replays,
+                                    register_replay_list_func=replay_data.register_replay_list_sequential)
+        (line,) = [x for x in out.getvalue().splitlines() if x.startswith(probe.LOG_PREFIX)]
+        record = json.loads(line[len(probe.LOG_PREFIX):])
+        assert record["mode"] == "compact" and record["check"] == {**record["check"], "equal": True, "tensors": 16}
+        assert "rollout_routed_experts" not in rollout_data
+    finally:
+        parallel.set_parallel_state(None)
+
+
+def test_serial_equals_multithreaded_miles_fill_on_nano_like_shapes():
+    """The serial fill is Miles' own fill on one thread; with tensors above torch's parallel grain
+    (52 streams x topk 6, hundreds of rows per sample) the multi-threaded run takes the OpenMP
+    paths, and the recorded tensors must not change."""
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    parallel = pytest.importorskip("miles.backends.training_utils.parallel")
+    state = _state()
+    parallel.set_parallel_state(state)
+    before = torch.get_num_threads()
+    try:
+        rng = random.Random(23)
+        lengths = [rng.randint(200, 900) for _ in range(16)]
+        gen = torch.Generator().manual_seed(23)
+        data = {"rollout_routed_experts": [torch.randint(0, 128, (n, 52, 6), generator=gen, dtype=torch.int32)
+                                           for n in lengths],
+                "tokens": [torch.zeros(n + 1, dtype=torch.long) for n in lengths]}
+        chunks = [list(range(i, 16, 4)) for i in range(4)]
+        kwargs = dict(data=data, chunks=chunks, args=_args(multiplier=128, sp=False), state=state,
+                      stream_idx=list(range(0, 52, 2)), register=replay_data.register_replay_list_sequential)
+
+        def miles_fill(*, parallel_state, **call):
+            return replay_data.fill_replay_data(**call)
+
+        torch.set_num_threads(4)
+        threaded = _run(miles_fill, **kwargs)
+        serial = _run(lambda **call: probe._serial(miles_fill, **call), **kwargs)
+        assert torch.get_num_threads() == 4
+        _assert_same(threaded, serial)
+    finally:
+        torch.set_num_threads(before)
         parallel.set_parallel_state(None)

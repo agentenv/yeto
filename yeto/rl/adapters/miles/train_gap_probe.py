@@ -29,7 +29,13 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
 
 ``YETO_REPLAY_FILL`` selects the fill itself:
 
-* ``legacy`` (default): Miles' own ``fill_replay_data``;
+* ``serial`` (default since S27 G-DJ): Miles' own ``fill_replay_data`` with
+  ``torch.set_num_threads(1)`` for the call; the same code as ``legacy``, and
+  the fill is pure fill/cat/slice/copy (no reduction), so the thread count does
+  not change the tensors (a CPU test pins this on Nano-like shapes; on GPU,
+  s27-dj-2 ran 24 shadow checks, ``YETO_REPLAY_FILL_CHECK``, 3 rounds x 8
+  ranks x 184 tensors, all equal);
+* ``legacy``: Miles' own ``fill_replay_data`` on the process's torch threads;
 * ``compact``: :func:`compact_fill_replay_data` -- per micro-batch one
   stream-major buffer (pinned when CUDA is available) with per-stream row
   copies from the source arrays and -1 in the padding rows only; each replay
@@ -39,12 +45,27 @@ round on one 8-GPU trainer).  ``YETO_TRAIN_GAP_PROBE=0`` turns the probe off.
   equal the legacy fill (tests pin this).  Used only for the case it covers
   (THD, context parallel 1, sequential stream registration, routing indices);
   any other call runs the legacy fill;
-* ``serial``: the legacy fill with ``torch.set_num_threads(1)`` for the call
-  (separates the OpenMP cost from the copy and allocation volume);
 * ``ab``: ``compact`` on odd rollout ids, ``legacy`` on even ones;
+* ``serial-ab``: ``serial`` on odd rollout ids, ``legacy`` on even ones;
 * ``cycle``: ``legacy``, ``compact``, ``serial`` by rollout id modulo 3.
 
+On GPU (s27-dj-1 and s27-dj-2, 8 trainer ranks of 64 torch threads each on a
+100-CPU gVisor node) the legacy fill took 12.1 s per round (median of 15
+rounds) and ``serial`` 0.037 s (median of 16 rounds); compact
+was refused there, because Megatron registers the routing streams with
+``register_replay_list_moe`` (layer ids from the model), not with
+``register_replay_list_sequential``.
+
 ``ab`` and ``cycle`` measure the fills in one run under the same host.
+
+``YETO_REPLAY_FILL_CHECK=K`` (default 0, needs the probe): the first K compact
+or serial fills of each process are checked on the real batch.  After the
+timed fill, Miles' own fill (default threads, the call's own stream
+registration) runs on the same micro-batches into scratch replays, and every
+recorded tensor is compared (dtype, shape, contiguity, values).  The result
+goes into the record as ``check``; its time is not in ``fill_s``.  On a
+mismatch (or a check error) the legacy tensors replace the recorded ones for
+that step, and compact and serial are off for the rest of the process.
 """
 
 from __future__ import annotations
@@ -60,14 +81,16 @@ from typing import Any
 
 PROBE_ENV = "YETO_TRAIN_GAP_PROBE"
 FILL_ENV = "YETO_REPLAY_FILL"
-FILL_MODES = ("legacy", "compact", "serial", "ab", "cycle")
+DEFAULT_FILL = "serial"  # S27 G-DJ: the legacy fill spent ~12 s a round on idle OpenMP threads
+CHECK_ENV = "YETO_REPLAY_FILL_CHECK"
+FILL_MODES = ("legacy", "compact", "serial", "ab", "serial-ab", "cycle")
 LOG_PREFIX = "[yeto-train-gap]"
 PAGE_BYTES = 4096
 SOURCE_MAP_EVERY = 25  # rounds between two /proc/self/maps lookups
 
 _OFF = {"0", "false", "no", "off"}
 _STATE: dict[str, Any] = {"installed": False, "actor": None, "mode": "legacy", "probe": True,
-                          "iter_s": None, "fills": 0}
+                          "iter_s": None, "fills": 0, "check": 0, "checked": 0, "fast_off": None}
 
 
 class TrainGapConfigError(ValueError):
@@ -79,17 +102,31 @@ def probe_enabled(env: Mapping[str, str] = os.environ) -> bool:
 
 
 def fill_mode(env: Mapping[str, str] = os.environ) -> str:
-    mode = (env.get(FILL_ENV, "") or "legacy").strip().lower()
+    mode = (env.get(FILL_ENV, "") or DEFAULT_FILL).strip().lower()
     if mode not in FILL_MODES:
         raise TrainGapConfigError(f"{FILL_ENV}={mode!r} is not one of {', '.join(FILL_MODES)}")
     return mode
 
 
+def check_count(env: Mapping[str, str] = os.environ) -> int:
+    """How many compact fills of this process get the shadow check (``YETO_REPLAY_FILL_CHECK``)."""
+    raw = (env.get(CHECK_ENV, "") or "0").strip()
+    try:
+        count = int(raw)
+    except ValueError:
+        count = -1
+    if count < 0:
+        raise TrainGapConfigError(f"{CHECK_ENV}={raw!r} is not a count >= 0")
+    return count
+
+
 def fill_for_round(mode: str, rollout_id: int | None) -> str:
-    """The fill of one call: ``ab`` runs ``compact`` on odd rollout ids;
-    ``cycle`` runs legacy, compact, serial by rollout id modulo 3."""
-    if mode == "ab":
-        return "compact" if rollout_id is not None and rollout_id % 2 == 1 else "legacy"
+    """The fill of one call: ``ab`` runs ``compact`` and ``serial-ab`` runs
+    ``serial`` on odd rollout ids (``legacy`` on even ones); ``cycle`` runs
+    legacy, compact, serial by rollout id modulo 3."""
+    if mode in ("ab", "serial-ab"):
+        odd = "compact" if mode == "ab" else "serial"
+        return odd if rollout_id is not None and rollout_id % 2 == 1 else "legacy"
     if mode == "cycle":
         return ("legacy", "compact", "serial")[rollout_id % 3] if rollout_id is not None else "legacy"
     return mode
@@ -328,6 +365,75 @@ def compact_fill_replay_data(*, args: Any, models: Any, data_iterator: Sequence[
         iterator.reset()
 
 
+class _ShadowReplay:
+    """A scratch replay stream with Miles ``Replay.record`` semantics (pinned copy)."""
+
+    def __init__(self, stream_idx: int | None, pin: bool) -> None:
+        self.stream_idx = stream_idx
+        self.pin = pin
+        self.top_indices_list: list[Any] = []
+
+    def record(self, top_indices: Any) -> None:
+        import torch
+
+        buf = torch.empty_like(top_indices, device="cpu", pin_memory=self.pin)
+        buf.copy_(top_indices)
+        self.top_indices_list.append(buf)
+
+
+def shadow_check(*, original: Callable[..., Any], call: Mapping[str, Any],
+                 before: Sequence[int], value: Any) -> dict[str, Any]:
+    """Run Miles' fill (``original``, the call's own stream registration) on
+    the batch the compact or serial fill just recorded, into scratch replays,
+    and compare every recorded tensor.
+
+    ``before`` is the length of each replay's ``top_indices_list`` before the
+    compact fill; ``value`` is ``rollout_data[data_key]`` before the fill (both
+    fills delete that key; it is put back for the shadow and deleted again).
+    On a mismatch the legacy tensors replace the recorded ones, and compact
+    and serial are turned off for the rest of the process.
+    """
+    import torch
+
+    started = time.perf_counter()
+    replay_list = call["replay_list"]
+    rollout_data, key = call["rollout_data"], call["data_key"]
+    shadows = [_ShadowReplay(getattr(replay, "stream_idx", None), torch.cuda.is_available())
+               for replay in replay_list]
+    rollout_data[key] = value
+    try:
+        original(**dict(call, replay_list=shadows))
+    finally:
+        rollout_data.pop(key, None)
+        for iterator in call["data_iterator"]:
+            iterator.reset()
+    mismatch, compared = None, 0
+    for slot, (replay, shadow) in enumerate(zip(replay_list, shadows, strict=True)):
+        got, want = replay.top_indices_list[before[slot]:], shadow.top_indices_list
+        if len(got) != len(want):
+            mismatch = f"slot {slot}: {len(got)} micro-batches, legacy {len(want)}"
+            break
+        for index, (a, b) in enumerate(zip(got, want, strict=True)):
+            compared += 1
+            if (a.dtype != b.dtype or a.shape != b.shape or a.is_contiguous() != b.is_contiguous()
+                    or not torch.equal(a, b)):
+                mismatch = (f"slot {slot} micro-batch {index}: compact {a.dtype}{tuple(a.shape)} "
+                            f"legacy {b.dtype}{tuple(b.shape)}")
+                break
+        if mismatch is not None:
+            break
+    result: dict[str, Any] = {"equal": mismatch is None, "tensors": compared,
+                              "s": round(time.perf_counter() - started, 3)}
+    if mismatch is not None:
+        result["mismatch"] = mismatch
+        for slot, (replay, shadow) in enumerate(zip(replay_list, shadows, strict=True)):
+            del replay.top_indices_list[before[slot]:]
+            replay.top_indices_list.extend(shadow.top_indices_list)
+        _STATE["fast_off"] = f"shadow check mismatch ({mismatch})"
+        print(f"{LOG_PREFIX} CHECK MISMATCH: {mismatch}; legacy tensors used, compact and serial off", flush=True)
+    return result
+
+
 # --------------------------------------------------------------------------
 # wrappers and install
 # --------------------------------------------------------------------------
@@ -362,22 +468,32 @@ def _probed_fill(original: Callable[..., Any], *, sequential: Callable[..., Any]
         rollout_id = getattr(_STATE["actor"], "_last_rollout_id", None)
         mode = fill_for_round(_STATE["mode"], rollout_id)
         probe = _STATE["probe"]
-        fill, reason = original, None
+        fill, reason, serial_off = original, None, None
         parallel_state = None
         if mode == "serial":
-            fill = functools.partial(_serial, original)
+            serial_off = _STATE["fast_off"]
+            if serial_off is None:
+                fill = functools.partial(_serial, original)
+            else:
+                mode = "legacy"
         elif mode == "compact":
-            parallel_state = parallel_state_fn()
-            reason = compact_supported(args=call["args"], parallel_state=parallel_state,
-                                       call=call, sequential=sequential)
+            reason = _STATE["fast_off"]
+            if reason is None:
+                parallel_state = parallel_state_fn()
+                reason = compact_supported(args=call["args"], parallel_state=parallel_state,
+                                           call=call, sequential=sequential)
             if reason is None:
                 fill = functools.partial(compact_fill_replay_data, parallel_state=parallel_state)
             else:
                 mode = "legacy"
         if not probe:
             return fill(**call)
+        check = None
+        if mode in ("compact", "serial") and _STATE["checked"] < _STATE["check"]:
+            _STATE["checked"] += 1
+            check = functools.partial(shadow_check, original=original)
         return _measured(fill, call, mode=mode, reason=reason, rollout_id=rollout_id,
-                         compact=mode == "compact")
+                         compact=mode == "compact", check=check, serial_off=serial_off)
 
     fill_replay_data.__yeto_train_gap__ = True  # type: ignore[attr-defined]
     return fill_replay_data
@@ -396,8 +512,13 @@ def _serial(original: Callable[..., Any], **call: Any) -> Any:
 
 
 def _measured(fill: Callable[..., Any], call: dict[str, Any], *, mode: str, reason: str | None,
-              rollout_id: int | None, compact: bool) -> Any:
+              rollout_id: int | None, compact: bool, check: Callable[..., Any] | None = None,
+              serial_off: str | None = None) -> Any:
     sources = list(call["rollout_data"].get(call["data_key"]) or ())
+    shadow = None
+    if check is not None:
+        shadow = {"call": dict(call), "value": call["rollout_data"].get(call["data_key"]),
+                  "before": [len(getattr(replay, "top_indices_list", ())) for replay in call["replay_list"]]}
     _STATE["fills"] += 1
     source_map = _source_map(sources) if _STATE["fills"] % SOURCE_MAP_EVERY == 1 else None
     memory = node_memory_gib()
@@ -411,8 +532,11 @@ def _measured(fill: Callable[..., Any], call: dict[str, Any], *, mode: str, reas
     u0, t0 = _usage(), time.perf_counter()
     src_bytes, pages = touch_pages(sources)
     u1, t1 = _usage(), time.perf_counter()
+    failed = True
     try:
-        return fill(**call)
+        result = fill(**call)
+        failed = False
+        return result
     finally:
         u2, t2 = _usage(), time.perf_counter()
         register_s = register.seconds if register is not None else stats.get("register_s", 0.0)
@@ -432,8 +556,16 @@ def _measured(fill: Callable[..., Any], call: dict[str, Any], *, mode: str, reas
         }
         if reason is not None:
             record["compact_refused"] = reason
+        if serial_off is not None:
+            record["serial_refused"] = serial_off
         if source_map is not None:
             record["src_map"] = source_map
+        if shadow is not None and not failed:
+            try:
+                record["check"] = check(**shadow)
+            except Exception as error:  # noqa: BLE001 - compact and serial go off; training goes on
+                _STATE["fast_off"] = f"shadow check error ({type(error).__name__})"
+                record["check"] = {"error": f"{type(error).__name__}: {error}"[:300]}
         print(f"{LOG_PREFIX} {json.dumps(record, sort_keys=True)}", flush=True)
 
 
@@ -453,7 +585,7 @@ def install(actor: Any, *, env: Mapping[str, str] = os.environ,
     :class:`TrainGapConfigError`."""
     mode = fill_mode(env)
     probe = probe_enabled(env)
-    _STATE.update(actor=actor, mode=mode, probe=probe)
+    _STATE.update(actor=actor, mode=mode, probe=probe, check=check_count(env))
     if _STATE["installed"]:
         return True
     if not probe and mode == "legacy":
@@ -468,7 +600,7 @@ def install(actor: Any, *, env: Mapping[str, str] = os.environ,
     if probe:
         from yeto.rl.host_info import print_host_report
 
-        print_host_report(f"actor train-gap rank {_rank()} fill {mode}")
+        print_host_report(f"actor train-gap rank {_rank()} fill {mode} check {_STATE['check']}")
     return True
 
 
