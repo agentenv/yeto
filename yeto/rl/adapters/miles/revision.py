@@ -134,7 +134,7 @@ def verify_miles_revision(
         raise RuntimeError(
             f"Miles revision mismatch: expected {expected.commit}, got {commit}"
         )
-    if origin.removesuffix(".git").rstrip("/") != expected.repository:
+    if not expected.accepts_origin(origin):
         raise RuntimeError(
             f"Miles origin mismatch: expected {expected.repository}, got {origin}"
         )

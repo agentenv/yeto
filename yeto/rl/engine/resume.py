@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
@@ -51,7 +52,14 @@ INCARNATIONS = "incarnations.jsonl"  # under the state dir: one line per launch
 RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
+# rounds between cuts where a fixed interval has no --rl-cut-every (verl; a direct
+# RoundCutCheckpoint). The Miles flags default to a timed interval instead
+# (cut_interval.cut_interval_for, S27 G-AT); the publication checks follow the
+# interval in use (driver.verify_publication).
 DEFAULT_CUT_EVERY = 1
+# E1: next to a store's first round cut while it is written and committed in the
+# background (``round-cuts/<cut_id>`` + this suffix, a file); see discard_unfinished_first_cut
+FIRST_CUT_MARK = ".first-cut-in-progress"
 
 
 class StoreIntegrityError(RuntimeError):
@@ -116,6 +124,14 @@ def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
 # the store interface + backends: local directory (this class), bucket mount,
 # Modal Volume (``yeto.cloud.modal_ckpt_store``), critic (``yeto.rl.critic_state``)
 # ---------------------------------------------------------------------------
+class StoreWriterGuard:
+    """A write in progress on a checkpoint store (``CheckpointStore.hold_writer``).
+    ``release`` is idempotent; the base guard holds nothing."""
+
+    def release(self) -> None:
+        return None
+
+
 class CheckpointStore:
     """The checkpoint store interface, and its local-directory backend.
 
@@ -145,12 +161,68 @@ class CheckpointStore:
     def reload(self) -> None:
         return None
 
+    def hold_writer(self) -> "StoreWriterGuard":
+        """Mark a write in progress until the returned guard is released. A
+        backend whose ``reload`` can drop uncommitted files (a Modal Volume)
+        skips reloads while any guard is held; locally it does nothing."""
+        return StoreWriterGuard()
+
     def describe(self) -> dict[str, Any]:
         return {"kind": self.kind, "root": str(self.root)}
 
     def list(self, sub: str = "") -> list[str]:
         base = self.root / sub
         return sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+
+    # -- publishing whole local directories (policy releases staged on local disk)
+    @property
+    def puts_bypass_mount(self) -> bool:
+        """True when :meth:`put_directory` and :meth:`put_files` write the store
+        without this host's mount: the mount shows them only after a reload."""
+        return False
+
+    def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
+        """Copy the local directory ``local`` to ``relative`` under the root (an
+        existing directory there is replaced) and make it visible to readers: one
+        commit, under the writer guard. The files in ``local`` stay."""
+        source, target = Path(local), self.root / relative
+        guard = self.hold_writer()
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def put_files(self, files: Mapping[str, bytes]) -> None:
+        """Write each ``{relative path: data}`` (tmp + rename, in the given order),
+        then commit once."""
+        guard = self.hold_writer()
+        try:
+            for relative, data in files.items():
+                target = self.root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_name(target.name + ".tmp")
+                tmp.write_bytes(data)
+                _fsync(tmp)
+                os.replace(tmp, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def remove_tree(self, relative: str) -> None:
+        """Delete the directory ``relative`` (no error when it is missing) and commit."""
+        target = self.root / relative
+        if not target.exists():
+            return
+        guard = self.hold_writer()
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+            self.commit()
+        finally:
+            guard.release()
 
 
 class BucketMountStore(CheckpointStore):
@@ -392,6 +464,60 @@ def _cut_rollout(cut_id: str) -> int | None:
     return int(head[1:])
 
 
+def first_cut_mark(store_root: Path, cut_id: str) -> Path:
+    """The "first cut in progress" mark of round cut ``cut_id`` (a file in round-cuts/)."""
+    return Path(store_root) / ROUND_CUTS / f"{cut_id}{FIRST_CUT_MARK}"
+
+
+def mark_first_cut(store_root: Path, cut_id: str) -> Path:
+    """E1: written (fsynced) before the store's first round cut starts its shards, so a
+    run that dies before that cut's LATEST is committed can tell its files from the
+    cuts of an unfinished store (:func:`discard_unfinished_first_cut`)."""
+    mark = first_cut_mark(store_root, cut_id)
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    with open(mark, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cut_id": cut_id}))
+        fh.flush()
+        os.fsync(fh.fileno())
+    return mark
+
+
+def clear_first_cut_marks(store_root: Path) -> list[str]:
+    """Remove every first-cut mark (after a LATEST is committed they mean nothing)."""
+    cuts = Path(store_root) / ROUND_CUTS
+    removed = []
+    if cuts.is_dir():
+        for p in sorted(cuts.glob(f"*{FIRST_CUT_MARK}")):
+            p.unlink(missing_ok=True)
+            removed.append(p.name)
+    return removed
+
+
+def discard_unfinished_first_cut(store_root: Path) -> list[str] | None:
+    """For a store without LATEST that holds round-cut entries: when every cut directory
+    carries a first-cut mark (none was ever committed: the run died while writing its
+    first cut), delete them and the marks and return what was deleted (the run starts
+    at rollout 0). Any unmarked entry (a cut of an unfinished store, or an unknown
+    file) returns None: the caller refuses to start."""
+    root = Path(store_root)
+    if read_latest(root) is not None:
+        raise ValueError(f"{root} has {LATEST}: its first cut is committed")
+    cuts = root / ROUND_CUTS
+    entries = sorted(cuts.iterdir()) if cuts.is_dir() else []
+    marks = {p.name for p in entries if p.is_file() and p.name.endswith(FIRST_CUT_MARK)}
+    others = [p for p in entries if p.name not in marks]
+    if any(not p.is_dir() or f"{p.name}{FIRST_CUT_MARK}" not in marks for p in others):
+        return None
+    deleted = []
+    for p in others:
+        shutil.rmtree(p)
+        deleted.append(f"{ROUND_CUTS}/{p.name}")
+    for name in sorted(marks):
+        (cuts / name).unlink()
+        deleted.append(f"{ROUND_CUTS}/{name}")
+    return deleted
+
+
 def stage_state_dir(state_dir: Path, staged: Path) -> Path:
     """Copy the snapshot files of ``state_dir`` (as :func:`write_snapshot` would take
     them) into a fresh ``staged`` directory; returns it."""
@@ -485,7 +611,9 @@ class ResumeController:
     ``sync_checkpoint_store`` (snapshot + LATEST + commit + prune) and ``_record``.
 
     At construction, a store with ``LATEST`` is restored into the state dir (verified);
-    a store that holds cuts but no ``LATEST`` is refused (never a silent restart at 0)."""
+    a store that holds cuts but no ``LATEST`` is refused (never a silent restart at 0),
+    except when they are all the marked, never committed first cut
+    (:func:`discard_unfinished_first_cut`): those are deleted and the run starts at 0."""
 
     def __init__(self, *, state_dir: str | os.PathLike[str], store: CheckpointStore,
                  runtime_fingerprint: str = "", keep: int = DEFAULT_CUT_KEEP,
@@ -504,6 +632,8 @@ class ResumeController:
         store.root.mkdir(parents=True, exist_ok=True)
         store.reload()
         self.restored: dict[str, Any] | None = None
+        # E1: the files of a first round cut that never committed, deleted at start
+        self.discarded_first_cut: list[str] | None = None
         latest = read_latest(store.root)
         started = time.monotonic()
         if latest is not None:
@@ -511,8 +641,17 @@ class ResumeController:
             self.restored["latest"] = dict(latest)
             self.restored["seconds"] = time.monotonic() - started
         elif (store.root / ROUND_CUTS).is_dir() and any((store.root / ROUND_CUTS).iterdir()):
-            raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
-                                      "start over at rollout 0 on top of an unfinished store")
+            discarded = discard_unfinished_first_cut(store.root)
+            if discarded is None:
+                raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
+                                          "start over at rollout 0 on top of an unfinished store")
+            store.commit()
+            self.discarded_first_cut = discarded
+            # the run starts at 0: a local state dir of the dead run (its pointer may
+            # name the deleted cut) is moved aside, as a restore does
+            if self.state_dir.exists() and any(self.state_dir.iterdir()):
+                self.state_dir.rename(self.state_dir.with_name(
+                    f"{self.state_dir.name}.prev-{int(time.time())}"))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         previous = self._incarnations()
         self.incarnation = {"id": uuid.uuid4().hex[:12], "index": len(previous), "pid": os.getpid(),
@@ -520,6 +659,9 @@ class ResumeController:
         with open(self.state_dir / INCARNATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(self.incarnation, sort_keys=True) + "\n")
         self.previous_incarnations = previous
+        if self.discarded_first_cut is not None:
+            self._record("checkpoint_store", tx_id=None, action="discard_unfinished_first_cut",
+                         deleted=self.discarded_first_cut, store=str(store.root))
         if self.restored is not None:
             self._record("checkpoint_store", tx_id=None, action="restore", **{
                 k: v for k, v in self.restored.items() if k != "latest"},
@@ -596,6 +738,9 @@ class ResumeController:
         return sync
 
     def _prune(self) -> list[str]:
+        """Housekeeping once a new LATEST is committed: old snapshots and cuts, and the
+        first-cut marks (the first cut is committed now; the next commit drops them)."""
+        clear_first_cut_marks(self.store.root)
         deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
         if deleted:
             self.store.commit()
@@ -631,6 +776,58 @@ def write_preempt_marker(store_root: Path, *, signal_name: str, incarnation: Map
         except Exception:  # noqa: BLE001
             pass
     return record
+
+
+PREEMPT_WATCH_THREAD = "preempt-marker-watcher"
+
+
+def watch_preempt_marker(controller: "ResumeController", *, environ: Mapping[str, str] | None = None,
+                         poll_s: float = 0.5, out: Any = None) -> Any:
+    """S26 E9.1: the preemption marker for a driver that never gets the signal.
+
+    Modal sends SIGINT/SIGTERM to the container's main process only. A driver in
+    a Ray actor (verl: the task runner) is neither that process nor its main
+    thread, so :func:`install_preempt_handler` cannot catch it. The Modal runner
+    turns the signal into the reclaim marker file (``YETO_SPOT_RECLAIM_MARKER``,
+    set by the launcher on a resumable island); this daemon thread polls that
+    file in the actor's process and, once it appears, writes the same store
+    preemption marker as the handler (the next launch resumes from LATEST).
+    Returns the started :class:`~.sampler_resume.ReclaimWatcher`, or None when
+    the marker path is not set."""
+    from .sampler_resume import RECLAIM_MARKER_ENV, ReclaimWatcher, reclaim_marker, reclaim_requested
+
+    env = os.environ if environ is None else environ
+    if not env.get(RECLAIM_MARKER_ENV):
+        return None
+    marker = reclaim_marker(env)
+
+    def on_reclaim() -> None:
+        rank = 0
+        try:
+            doc = json.loads(marker.read_text(encoding="utf-8"))
+            name = signal_name(int(doc.get("signal")))
+            rank = int(doc.get("rank") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            name = "unknown"
+        # a multi-node island: the Modal runner of rank>0 relays its signal to rank 0
+        source = "reclaim marker" if rank == 0 else f"reclaim marker, rank {rank}"
+        record = write_preempt_marker(controller.checkpoint_store, signal_name=f"{name} ({source})",
+                                      incarnation=controller.incarnation, rollout_id=None,
+                                      store=controller.store)
+        print(f"[yeto] rl_preempt_notice {json.dumps(record, sort_keys=True)}", file=out or sys.stdout,
+              flush=True)
+
+    return ReclaimWatcher(lambda: reclaim_requested(env), on_reclaim, poll_s=poll_s,
+                          name=PREEMPT_WATCH_THREAD).start()
+
+
+def signal_name(signum: int) -> str:
+    import signal as _signal
+
+    try:
+        return _signal.Signals(int(signum)).name
+    except ValueError:
+        return f"signal {int(signum)}"
 
 
 def install_preempt_handler(controller: "ResumeController", *, emit: Callable[..., Any] | None = None,

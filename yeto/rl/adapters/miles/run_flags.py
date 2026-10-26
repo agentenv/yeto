@@ -9,13 +9,17 @@ neutral flags and the flag machinery live in ``yeto.rl.engine.run_flags``.
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
-from yeto.rl.engine.selection import RL_ENGINES, SYNC_PRESETS, canonical_sync_preset
+from yeto.rl.engine.selection import (
+    FULL_PARAMETER_ROUNDS,
+    RL_ENGINES,
+    SYNC_PRESETS,
+    canonical_sync_preset,
+)
 
 _MODE = (
     cli_flag("--rl-runtime", choices=["miles"], default="miles"),
@@ -247,7 +251,7 @@ _AGENT = (
         "on few-core single-GPU islands to avoid the parallel-import storm "
         "(32 sglang imports can miss the 300 s ready window)",
     ),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-backend-profile",
         default=None,
         help=(
@@ -265,6 +269,10 @@ _AGENT = (
 )
 
 _ISLAND = (
+    # Set by the launcher when any island pool option is given (dynamic membership).
+    island_flag("--rl-island-pool", action="store_true",
+                help="this island joins a dynamic island pool on the syncer: it heartbeats "
+                "its lease, re-JOINs after an expiry and may see the outer version jump"),
     island_flag("--model", required=True),
     island_flag("--model-revision", required=True),
     island_flag("--data", required=True),
@@ -320,16 +328,90 @@ _ISLAND = (
     island_flag("--fragments", type=int, default=1),
     island_flag("--parameter-layout-sha256", default=None),
     island_flag(
+        "--full-parameter-rounds",
+        choices=FULL_PARAMETER_ROUNDS,
+        default="sweep",
+        help="full-parameter preset: sweep = strict policy sweeps; async = "
+        "asynchronous sharded rounds (H = --local-horizon, a quorum below the "
+        "island count may close a round without this island)",
+    ),
+    island_flag(
+        "--init-mode",
+        choices=("auto", "local", "upload"),
+        default="auto",
+        help="full-parameter: local = keep the loaded base weights as version 0 "
+        "after the syncer confirms every island's fragment digests agree; upload "
+        "= wait for the syncer's initial broadcast; auto = local for async rounds",
+    ),
+    island_flag(
         "--sweep-push-dtype",
-        choices=("f32", "bf16", "int8"),
+        choices=("f32", "bf16", "int8", "int4", "int4-log"),
         default="f32",
         help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
+    ),
+    island_flag(
+        "--sweep-fragment-max-bytes",
+        type=int,
+        default=2 << 30,
+        help="full-parameter: f32 byte bound of one sync fragment; a larger "
+        "parameter spans several fragments as dimension-0 row slices",
+    ),
+    island_flag(
+        "--sweep-max-local-rounds-ahead",
+        type=int,
+        default=None,
+        help="full-parameter async rounds: lead cap K >= 1, wait at a boundary instead of "
+        "training a K-th local round on top of an unmerged push (default off)",
+    ),
+    island_flag(
+        "--sweep-wait-timeout-s",
+        type=float,
+        default=900.0,
+        help="full-parameter sync: seconds to wait for a paired broadcast after its "
+        "last push, for the terminal barrier and for the FINAL cut",
     ),
     island_flag(
         "--sweep-push-int8-block",
         type=int,
         default=128,
         help="full-parameter sweep, int8 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-push-int4-block",
+        type=int,
+        default=128,
+        help="full-parameter sweep, int4 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-push-no-tensor-blocks",
+        action="store_true",
+        help="full-parameter sweep, int8/int4/int4-log pushes: blocks run across the whole fragment",
+    ),
+    island_flag(
+        "--sweep-push-int4-stochastic",
+        action="store_true",
+        help="full-parameter sweep, int4 pushes: stochastic instead of nearest rounding",
+    ),
+    island_flag(
+        "--sweep-push-int4-error-feedback",
+        choices=("off", "bf16", "f32"),
+        default="off",
+        help="full-parameter sweep, int4 pushes: residual dtype of island-side error feedback",
+    ),
+    island_flag(
+        "--sweep-final-cut",
+        choices=("download", "ack"),
+        default="download",
+        help="dense full-parameter sweep: download = receive every final f32 fragment and "
+        "apply it before the final ACK; ack = receive the final version manifest only and ACK "
+        "once the pushes drained (the syncer runs --final-cut-payload manifest and keeps the "
+        "final parameters)",
+    ),
+    island_flag(
+        "--sweep-expert-token-weights",
+        action="store_true",
+        help="full-parameter async, MoE: count the tokens each router sends to each "
+        "expert and send them with every push (the syncer runs --expert-token-weights)",
     ),
     island_flag(
         "--sweep-overlap",
@@ -367,7 +449,6 @@ _ISLAND = (
     island_flag("--groups-per-round", type=int, required=True),
     island_flag("--samples-per-group", type=int, required=True),
     island_flag("--optimizer-steps", type=int, required=True),
-    island_flag("--codex-harness-contract", type=json.loads, default=None),
     island_flag("--completed-groups-path", required=True),
     island_flag("--event-tape", required=True),
     island_flag("--audit-dir", default=None),
@@ -376,6 +457,7 @@ _ISLAND = (
     island_flag("--tensor-parallel", type=int, default=1),
     island_flag("--pipeline-parallel", type=int, default=1),
     island_flag("--expert-parallel", type=int, default=None),
+    island_flag("--context-parallel", type=int, default=1),
     island_flag("--rollout-num-gpus", type=int, default=None),
     # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
     # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
@@ -402,6 +484,18 @@ _ISLAND = (
     # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
     island_flag("--rl-resume-store", default=None, metavar="PATH"),
     island_flag("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH"),
+    # S27 R-2: round cuts of a synced island (strict / decoupled outer sync), written only
+    # (the syncer stays authoritative at start): the island's cuts go to
+    # <PATH>/island<learner id>; the launcher forwards it from --rl-checkpoint-store
+    island_flag("--rl-island-cut-store", default=None, metavar="PATH"),
+    # --rl-export-hf-rounds (yeto.rl.engine.hf_export): <--rl-checkpoint-store>/hf on the
+    # island; the island exports to <PATH>/island<learner id>/round-<r>
+    island_flag("--rl-export-hf-store", default=None, metavar="PATH"),
+    # S27 E-3: this trainer lost its state and recovers from a peer snapshot (the
+    # launcher sets YETO_RL_PEER_RECOVER=1 on a relaunch instead); local staging
+    # directory of object-store snapshot transfers (node-shared on a multi-node island)
+    island_flag("--rl-peer-recover", action="store_true", default=False),
+    island_flag("--rl-peer-recovery-staging", default=None, metavar="PATH"),
     # S25 C3: a synced trainer island (--rl-sample-role trainer with a syncer): the
     # store of the sample buffer and the policy releases (no round cuts), and the
     # number of synced trainers (its buffer lane is learner id of that count)

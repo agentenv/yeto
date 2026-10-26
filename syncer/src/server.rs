@@ -2,9 +2,8 @@
 //! per-learner connection groups (control stream + striped data streams),
 //! chunk reassembly, and the pull-driven quorum/grace merge scheduler
 //! at the core of the training loop. Rounds are pipelined: up to
-//! `Config::pipeline` fragments are in flight at once (arXiv 2604.21428's
-//! "two fragments in flight"), so a slow quorum on one fragment never
-//! delays pulling the next.
+//! `Config::pipeline` fragments are in flight at once (two by default), so
+//! a slow quorum on one fragment never delays pulling the next.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -20,7 +19,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::local_init::{InitDigests, LocalInit};
+use crate::recovery::{self, HelloExt, PeerRecovery};
+use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
+use crate::fold::{FragmentFold, RoundFold, StreamingFold, WeightedFoldMode};
 use crate::state::{
     remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
 };
@@ -37,6 +40,16 @@ pub enum LearnerWeight {
     Equal,
 }
 
+impl LearnerWeight {
+    /// The merge weight as a function of a push's (c_tokens, c_steps).
+    pub fn function(self) -> fn(u64, u64) -> f64 {
+        match self {
+            Self::Tokens2OverSteps => crate::merge::learner_weight,
+            Self::Equal => |_, _| 1.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -49,8 +62,8 @@ pub struct Config {
     pub grace_gamma: f64,
     /// Compute-overlap budget τ, in learner inner steps.
     pub grace_tau: f64,
-    /// Fragment rounds in flight at once (the paper's "two fragments in
-    /// flight" at τ=2). While one round sits in its quorum/grace window,
+    /// Fragment rounds in flight at once (two by default, matching the
+    /// default overlap budget τ=2). While one round sits in its quorum/grace window,
     /// the next fragment's pull is already out — sync latency overlaps
     /// learner compute instead of serializing with it. 1 = serial rounds.
     /// Clamped to the fragment count so concurrent rounds always target
@@ -69,7 +82,7 @@ pub struct Config {
     /// the slowest learner. Inactive until a step-time estimate exists and
     /// wherever natural round latency already exceeds it (any real WAN);
     /// measured on gemma4/Lean: H≈2 costs ~+9% eval loss vs synchronous,
-    /// H≈24 (the paper's design point) matches it. 0 disables; the manual
+    /// H≈24 (the default) matches it. 0 disables; the manual
     /// min_round_interval_ms floor applies on top.
     pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
@@ -84,6 +97,9 @@ pub struct Config {
     pub policy_sweep_fragments: Option<u32>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
+    /// Delayed Nesterov period N >= 2 (momentum applied every N outer
+    /// steps); None keeps plain Nesterov and the old profile hash.
+    pub outer_delayed_nesterov_period: Option<u32>,
     /// Spectrum-flattening backend for MERGE_ISO tensors.
     pub iso_backend: crate::iso_worker::IsoBackendConfig,
     pub final_state: Option<std::path::PathBuf>,
@@ -104,6 +120,9 @@ pub struct Config {
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
+    /// `--resume` refuses a checkpoint whose `.profile` record is missing or
+    /// differs from this syncer's semantic profile. Not in the profile hash.
+    pub require_profile_record: bool,
     /// Benchmark-only exact local optimizer-step target for every learner.
     pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: merge records plus sweep ledger reconciliation cuts.
@@ -115,31 +134,54 @@ pub struct Config {
     /// Fail closed unless HELLO carries and matches this Config's canonical
     /// semantic profile hash. Disabled by default for legacy/non-SAO clients.
     pub require_profile_binding: bool,
-    /// Inter-island scheduling mode. Legacy (default) adds nothing to the
-    /// semantic profile hash and changes no server behavior.
-    pub island_scheduling: crate::elastic::IslandSchedulingMode,
-    /// HMAC-SHA256 key (never hashed into the profile). elastic: signs the
-    /// elastic message types. legacy (secret-handling-hardening): every HELLO
-    /// must carry a trailing HMAC under this key.
+    /// HMAC-SHA256 key (never hashed into the profile): every HELLO must
+    /// carry a trailing HMAC under this key.
     pub island_hmac_key: Option<Vec<u8>>,
     /// secret-handling-hardening: island contract (backend identity bound to
-    /// the LR schedule, 32 bytes) pinned by the head's launch config. legacy:
-    /// a HELLO whose session_contract_hash is not
+    /// the LR schedule, 32 bytes) pinned by the head's launch config.
+    /// A HELLO whose session_contract_hash is not
     /// sha256(domain || layout_fingerprint || pinned) is refused, so the first
-    /// island to connect no longer decides the contract. elastic: pins the
-    /// JOIN backend identity before the first JOIN. None keeps first-wins.
+    /// island to connect no longer decides the contract. None keeps first-wins.
     pub expected_island_contract: Option<[u8; 32]>,
-    /// elastic: membership lease (seconds without heartbeat before removal).
-    pub island_lease_s: f64,
-    /// elastic: fencing token of this coordinator incarnation.
+    /// Fencing token of this syncer incarnation: a HELLO that carries a
+    /// lower epoch is refused; the epoch is persisted next to the checkpoint
+    /// and never lowered on resume.
     pub syncer_epoch: u64,
-    /// elastic: final grace window after total_steps; None = soft deadline.
-    pub elastic_final_grace_s: Option<u64>,
+    /// Dynamic membership of the fragment-round server (leases, re-JOIN,
+    /// fencing, capacity quorum, soft deadline, carry discount). The default
+    /// keeps the fixed-membership behavior.
+    pub membership: crate::membership::MembershipConfig,
+    /// Peer recovery of an island that lost its trainer state (HELLO with
+    /// the recover flag). Bound, donor tries and donor timeout only: it never
+    /// changes a merge, so it is not in the semantic profile hash.
+    pub recovery: crate::recovery::RecoveryConfig,
+    /// S27 P4b: how rounds that the exact fold cannot reproduce (partial
+    /// quorum, token weights) reduce pushes.  Numerics only (the result is
+    /// within f32 rounding of the buffered merge), so not in the profile
+    /// hash; Buffered keeps the historical bits.
+    pub weighted_fold: crate::fold::WeightedFoldMode,
+    /// S27 P4b: this process's slice of a fragment-sharded head.  Default is
+    /// unsharded and changes nothing.
+    pub shard: crate::shard::ShardPlan,
+    /// MoE: weight each expert tensor of a push by the tokens the island
+    /// routed to that expert during the outer interval (see
+    /// `protocol::decode_expert_tags`). Every HELLO must declare the matching
+    /// session flag. Off keeps the wire bytes and the merge unchanged.
+    pub expert_token_weights: bool,
+    /// The final cut carries the version manifest only (no f32 fragments):
+    /// an island acknowledges once it has the final versions, and the final
+    /// parameters stay in this syncer's checkpoint / final state. Islands
+    /// must expect it, so it is in the semantic profile hash (appended only
+    /// when on). Off sends every final fragment to every island.
+    pub final_cut_manifest_only: bool,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
 // restarted syncer keeps the hash every island already carries in HELLO.
 const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
+const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
+const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
+const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -173,7 +215,19 @@ impl Config {
             LearnerWeight::Equal => 1,
         });
         encoded.push(u8::from(self.require_profile_binding));
-        self.island_scheduling.encode_contract(&mut encoded);
+        // Appended only when set, so plain-Nesterov hashes stay unchanged.
+        if let Some(period) = self.outer_delayed_nesterov_period {
+            encoded.extend_from_slice(DELAYED_NESTEROV_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&period.to_le_bytes());
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.expert_token_weights {
+            encoded.extend_from_slice(EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN);
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.final_cut_manifest_only {
+            encoded.extend_from_slice(FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN);
+        }
         Sha256::digest(encoded).into()
     }
 }
@@ -228,15 +282,12 @@ struct PartialMsg {
     ranges: Vec<(usize, usize)>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Member {
-    learner_id: u32,
-    generation: u64,
-}
 
 struct Group {
     member: Member,
     dtype: u8,
+    /// PUSH_FRAGMENT carries the routed-token tag block (HELLO flag).
+    expert_tokens: bool,
     layout: Layout,
     layout_fingerprint: [u8; 32],
     session_contract_hash: [u8; 32],
@@ -431,6 +482,13 @@ enum Event {
         member: Member,
         fragment_id: u32,
         values: Vec<f32>,
+        /// SHA-256 of the INIT_PARAMS tensor bytes as received.
+        sha256: [u8; 32],
+    },
+    /// Local-init startup: the island's per-fragment INIT digests.
+    InitDigest {
+        member: Member,
+        digests: InitDigests,
     },
     Push {
         member: Member,
@@ -451,6 +509,25 @@ enum Event {
     Disconnected {
         member: Member,
     },
+    /// The island announced why it leaves; its disconnect follows.
+    Leave {
+        member: Member,
+        reason: u8,
+    },
+    /// A peer-recovery control message (`recovery.rs`).
+    Recovery {
+        member: Member,
+        msg: RecoveryMsg,
+    },
+}
+
+enum RecoveryMsg {
+    /// Donor -> syncer.
+    SnapshotReady(recovery::SnapshotReady),
+    /// Recovering island -> syncer: versions held after the restore.
+    Restored(Option<Vec<u64>>),
+    /// Recovering island -> syncer: the named source did not work.
+    Failed(String),
 }
 
 struct Push {
@@ -465,6 +542,9 @@ struct Push {
     /// Signed outer gradient `raw_anchor - local`, converted exactly once
     /// from the learner's wire delta `local - raw_anchor`.
     outer_gradient: Vec<f32>,
+    /// Expert token weights: the per-tensor merge scale of this push (see
+    /// `protocol::decode_expert_tags`); `None` when the option is off.
+    tensor_scales: Option<Vec<f64>>,
     transfer: PushTransfer,
 }
 
@@ -507,6 +587,8 @@ struct ParsedHello {
     max_init_payload: u64,
     max_push_payload: u64,
     compat_group: String,
+    /// Optional trailer: syncer-epoch fence and the recover flag.
+    ext: HelloExt,
 }
 
 #[derive(Default)]
@@ -516,24 +598,166 @@ struct RegistryState {
     /// Every still-connected generation, including one retained solely for
     /// a round that captured it before a reconnect or duplicate HELLO.
     groups: HashMap<Member, Arc<Group>>,
+    /// Leases and fencing; admission runs under this registry lock.
+    membership: Membership,
+    /// Islands under peer recovery: registered (in `groups`) but kept out of
+    /// `current`, so they get no pulls and no broadcasts until READY.
+    recovering: HashMap<u32, Member>,
+    /// Where the membership record (syncer epoch, retired generations) is
+    /// persisted next to the checkpoint; None: not persisted.
+    membership_record: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RegisterError {
+    /// This exact generation is still connected.
+    Duplicate,
+    Fenced(AdmitError),
 }
 
 impl RegistryState {
+    fn new(membership: Membership) -> Self {
+        Self { membership, ..Self::default() }
+    }
+
     /// Atomically register one control connection generation. Returning an
-    /// error leaves both maps untouched, so an identical concurrent HELLO
-    /// cannot replace a live group and later remove it on disconnect.
-    fn register_group(&mut self, group: Arc<Group>) -> std::result::Result<Option<Member>, ()> {
+    /// error leaves every map untouched, so an identical concurrent HELLO
+    /// cannot replace a live group and later remove it on disconnect, and a
+    /// retired generation cannot come back.
+    #[cfg(test)]
+    fn register_group(
+        &mut self,
+        group: Arc<Group>,
+        now: Instant,
+    ) -> std::result::Result<(Option<Member>, Admission), RegisterError> {
+        self.register_group_with(group, now, HelloExt::default())
+    }
+
+    /// `register_group` for a HELLO with its extension: the syncer-epoch
+    /// fence runs first, and a recovering island is registered without
+    /// joining `current` (the previous generation still leaves it).
+    fn register_group_with(
+        &mut self,
+        group: Arc<Group>,
+        now: Instant,
+        ext: HelloExt,
+    ) -> std::result::Result<(Option<Member>, Admission), RegisterError> {
         let member = group.member;
         if self.groups.contains_key(&member) {
-            return Err(());
+            return Err(RegisterError::Duplicate);
         }
+        self.membership.check_syncer_epoch(ext.syncer_epoch).map_err(RegisterError::Fenced)?;
+        let admission = self.membership.admit(member, now).map_err(RegisterError::Fenced)?;
         self.groups.insert(member, group);
-        Ok(self.current.insert(member.learner_id, member))
+        let replaced = if ext.recover {
+            self.recovering.insert(member.learner_id, member);
+            self.current.remove(&member.learner_id)
+        } else {
+            self.recovering.remove(&member.learner_id);
+            self.current.insert(member.learner_id, member)
+        };
+        self.persist_membership();
+        Ok((replaced, admission))
+    }
+
+    /// The control connection of `member` closed.
+    fn unregister(&mut self, member: Member) {
+        self.groups.remove(&member);
+        if self.current.get(&member.learner_id) == Some(&member) {
+            self.current.remove(&member.learner_id);
+        }
+        if self.recovering.get(&member.learner_id) == Some(&member) {
+            self.recovering.remove(&member.learner_id);
+        }
+        self.membership.depart(member);
+        self.persist_membership();
+    }
+
+    fn is_recovering(&self, member: Member) -> bool {
+        self.recovering.get(&member.learner_id) == Some(&member)
+    }
+
+    /// Move a recovered island onto the roster. False if `member` is no
+    /// longer the recovering generation.
+    fn promote_recovered(&mut self, member: Member) -> bool {
+        if !self.is_recovering(member) {
+            return false;
+        }
+        self.recovering.remove(&member.learner_id);
+        self.current.insert(member.learner_id, member);
+        true
+    }
+
+    /// Write the membership record if its persisted part changed. A failed
+    /// write only weakens fencing across a restart, so it is logged.
+    fn persist_membership(&mut self) {
+        if !self.membership.take_dirty() {
+            return;
+        }
+        if let Some(path) = &self.membership_record {
+            if let Err(error) = write_membership_record(path, &self.membership.encode_persisted()) {
+                warn!(path = %path.display(), "membership record write failed: {error:#}");
+            }
+        }
+    }
+
+    /// Remove members whose lease expired from future rounds. Their
+    /// connections stay registered until they close, so rounds that already
+    /// captured them keep a valid group, but they can no longer renew.
+    fn expire_leases(&mut self, now: Instant) -> Vec<(Member, Option<Arc<Group>>)> {
+        let expired = self.membership.expire(now);
+        let expired = expired
+            .into_iter()
+            .map(|member| {
+                if self.current.get(&member.learner_id) == Some(&member) {
+                    self.current.remove(&member.learner_id);
+                }
+                if self.recovering.get(&member.learner_id) == Some(&member) {
+                    self.recovering.remove(&member.learner_id);
+                }
+                (member, self.groups.get(&member).cloned())
+            })
+            .collect();
+        self.persist_membership();
+        expired
     }
 }
 
-/// Decoupled DiLoCo's adaptive grace window (arXiv 2604.21428 Eq. 3): after
-/// quorum, wait for stragglers only within the slack the learners' compute
+/// The membership record lives next to the checkpoint.
+fn membership_record_path(checkpoint: &std::path::Path) -> std::path::PathBuf {
+    let mut name = checkpoint.as_os_str().to_owned();
+    name.push(".membership");
+    std::path::PathBuf::from(name)
+}
+
+fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Registry membership for `cfg`: on resume the persisted record restores
+/// the syncer epoch and the retired generations; the configured epoch only
+/// raises the restored one.
+fn initial_membership(cfg: &Config, id_limit: u32) -> Result<(Membership, Option<std::path::PathBuf>)> {
+    let mut membership = Membership::new(cfg.membership.clone(), id_limit);
+    let record = cfg.checkpoint_path.as_deref().map(membership_record_path);
+    if let Some(path) = record.as_deref().filter(|p| cfg.resume && p.exists()) {
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        membership
+            .restore_persisted(&bytes)
+            .with_context(|| format!("restore membership record {}", path.display()))?;
+        info!(path = %path.display(), syncer_epoch = membership.syncer_epoch(), "membership record restored");
+    }
+    membership.raise_syncer_epoch(cfg.syncer_epoch);
+    Ok((membership, record))
+}
+
+/// Adaptive grace window: after quorum, wait for stragglers only within the
+/// slack the learners' compute
 /// overlap leaves free — γ · (τ·ξ_step − ξ_quorum − ξ_sync), clamped to
 /// [0, cap]. With no step-time estimate yet, fall back to the full cap.
 fn adaptive_grace(
@@ -569,11 +793,9 @@ fn launch_interval(
 }
 
 /// Per-learner inner-step duration estimated from consecutive pushes
-/// (each push carries the learner's local_step), smoothed with an EMA as
-/// the paper prescribes for the grace-window inputs (arXiv 2604.21428,
-/// "ξ_step, ξ_quorum, ξ_sync can be tracked via exponential moving
-/// averages") — a single push interval is too noisy to size the grace
-/// window on its own.
+/// (each push carries the learner's local_step), smoothed with an EMA like
+/// the other grace-window inputs (ξ_quorum, ξ_sync) — a single push
+/// interval is too noisy to size the grace window on its own.
 #[derive(Default)]
 struct StepRates(HashMap<Member, (Option<Instant>, u64, Option<f64>)>);
 
@@ -583,16 +805,25 @@ const STEP_EMA_ALPHA: f64 = 0.5;
 impl StepRates {
     fn note(&mut self, member: Member, local_step: u64, now: Instant) {
         let entry = self.0.entry(member).or_insert((None, 0, None));
-        if let Some(prev) = entry.0 {
-            if local_step > entry.1 {
+        // One local step produces a push per fragment (and heartbeats): only
+        // the first report of a new step marks its start. Re-stamping on
+        // every report of the same step would measure only the gap between
+        // the last report of one step and the first of the next.
+        match entry.0 {
+            Some(prev) if local_step > entry.1 => {
                 let secs = now.duration_since(prev).as_secs_f64() / (local_step - entry.1) as f64;
                 entry.2 = Some(match entry.2 {
                     Some(ema) => STEP_EMA_ALPHA * secs + (1.0 - STEP_EMA_ALPHA) * ema,
                     None => secs, // first sample seeds the EMA
                 });
+                *entry = (Some(now), local_step, entry.2);
             }
+            // A step counter that went backwards (a restarted learner)
+            // starts a new baseline; a repeat of the current step keeps it.
+            Some(_) if local_step < entry.1 => *entry = (Some(now), local_step, entry.2),
+            Some(_) => {}
+            None => *entry = (Some(now), local_step, None),
         }
-        *entry = (Some(now), local_step, entry.2);
     }
 
     /// Slowest estimated step time among one frozen/current member set.
@@ -705,6 +936,22 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
+    cfg.membership.validate(cfg.learners, cfg.quorum)?;
+    if !cfg.membership.is_static() {
+        // Dynamic membership needs rounds that may merge without some island.
+        let fixed_roster =
+            cfg.max_base_lag == Some(0) && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+        if fixed_roster
+            || cfg.policy_sweep_fragments.is_some()
+            || cfg.learner_budget_steps.is_some()
+        {
+            bail!(
+                "dynamic membership options (lease, soft deadline, capacity quorum, carry \
+                 discount, max learners) need non-fixed rounds: not with a strict fixed roster, \
+                 --policy-sweep-fragments, or --learner-budget-steps"
+            );
+        }
+    }
     if let Some(fragments) = cfg.policy_sweep_fragments {
         if fragments == 0 {
             bail!("--policy-sweep-fragments must be positive");
@@ -733,8 +980,14 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.outer_lr != 1.0 || cfg.outer_momentum != 0.0 {
             bail!("--policy-sweep-fragments requires --outer-lr 1 and --outer-momentum 0");
         }
+        if cfg.outer_delayed_nesterov_period.is_some() {
+            bail!("--policy-sweep-fragments does not support --outer-delayed-nesterov-period");
+        }
         if cfg.learner_weight != LearnerWeight::Equal {
             bail!("--policy-sweep-fragments requires --learner-weight equal");
+        }
+        if cfg.expert_token_weights {
+            bail!("--policy-sweep-fragments does not support --expert-token-weights");
         }
         // --resume is not required here: a fresh sweep has no checkpoint yet and
         // --resume refuses a missing file (see check_resume_checkpoint). The
@@ -750,6 +1003,7 @@ fn validate_config(cfg: &Config) -> Result<()> {
             );
         }
     }
+    validate_shard_config(cfg)?;
     if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
         bail!("--bcast-delta-full-every must be at least 2");
     }
@@ -761,6 +1015,26 @@ fn validate_config(cfg: &Config) -> Result<()> {
             bail!("--async-checkpoint does not support --learner-budget-steps");
         }
     }
+    Ok(())
+}
+
+/// A sharded head runs independent generic fragment rounds per shard.  Modes
+/// whose semantics span all fragments (strict policy sweeps) or all shards (learner-budget cutoff) are refused.
+fn validate_shard_config(cfg: &Config) -> Result<()> {
+    if !cfg.shard.is_sharded() {
+        return Ok(());
+    }
+    if cfg.policy_sweep_fragments.is_some() {
+        bail!("--shard-count > 1 does not support --policy-sweep-fragments");
+    }
+    if cfg.learner_budget_steps.is_some() {
+        bail!("--shard-count > 1 does not support --learner-budget-steps");
+    }
+    // Membership (leases, re-JOIN, capacity quorum, soft deadline, carry
+    // discount) is per shard: every shard keeps its own view of the same
+    // islands, each island holds one connection per shard and re-JOINs each
+    // shard on its own.  No decision needs another shard's view, because a
+    // round touches one fragment and that fragment has one owner.
     Ok(())
 }
 
@@ -897,46 +1171,63 @@ fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn profile_record_path(checkpoint: &std::path::Path) -> std::path::PathBuf {
+    let mut name = checkpoint.as_os_str().to_owned();
+    name.push(".profile");
+    std::path::PathBuf::from(name)
+}
+
+/// Every start with a checkpoint path records this syncer's semantic profile
+/// hash next to the checkpoint. With `--require-profile-record`, `--resume`
+/// refuses a checkpoint whose record differs (the merge settings of a session
+/// may not change under it) or is missing (written before the record
+/// existed). Without the flag nothing is checked: some restarts change the
+/// profile on purpose (the learner-budget consolidation restart).
+fn check_and_record_profile(cfg: &Config, profile: &[u8; 32]) -> Result<()> {
+    let Some(checkpoint) = cfg.checkpoint_path.as_ref() else {
+        return Ok(());
+    };
+    let record = profile_record_path(checkpoint);
+    let ours = hex32(profile);
+    if cfg.resume {
+        match std::fs::read_to_string(&record) {
+            Ok(recorded) if recorded.trim() == ours || !cfg.require_profile_record => {}
+            Ok(recorded) => bail!(
+                "cannot resume {}: the session was started with other sync settings \
+                 (semantic profile {}, this syncer {ours}); relaunch with the session's \
+                 original sync options (a session started before the async defaults: \
+                 --rl-sync-mode strict)",
+                checkpoint.display(),
+                recorded.trim()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if cfg.require_profile_record {
+                    bail!(
+                        "cannot resume {}: the checkpoint has no semantic profile record, so it \
+                         was written by an older syncer under the strict defaults; relaunch \
+                         with --rl-sync-mode strict (or the session's original explicit sync \
+                         options)",
+                        checkpoint.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", record.display()));
+            }
+        }
+    }
+    let partial = profile_record_path(&checkpoint.with_extension("profile-tmp"));
+    std::fs::write(&partial, format!("{ours}\n"))
+        .with_context(|| format!("write {}", partial.display()))?;
+    std::fs::rename(&partial, &record).with_context(|| format!("write {}", record.display()))?;
+    Ok(())
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
-    if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
-        // Elastic control plane (membership, capacity-weighted stepping,
-        // soft deadline, leases, tape). Tensor merge for elastic rounds is
-        // not wired yet; legacy never reaches this branch.
-        let listener = TcpListener::bind(("0.0.0.0", cfg.port))
-            .await
-            .with_context(|| format!("bind elastic syncer port {}", cfg.port))?;
-        let version = crate::elastic_server::run(
-            listener,
-            crate::elastic_server::ElasticServerConfig {
-                params,
-                expected_backend_identity: cfg.expected_island_contract,
-                key: cfg
-                    .island_hmac_key
-                    .clone()
-                    .context("elastic mode requires an island HMAC key")?,
-                syncer_epoch: cfg.syncer_epoch,
-                lease_s: cfg.island_lease_s,
-                total_steps: cfg.total_steps,
-                event_tape: cfg.event_tape.clone(),
-                tick: std::time::Duration::from_millis(50),
-                outer_lr: cfg.outer_lr,
-                outer_momentum: cfg.outer_momentum,
-                final_grace: std::time::Duration::from_secs(
-                    cfg.elastic_final_grace_s.unwrap_or(params.soft_deadline_s),
-                ),
-                checkpoint_path: cfg.checkpoint_path.clone(),
-                checkpoint_every: cfg.checkpoint_every,
-                resume: cfg.resume,
-            },
-        )
-        .await?
-        .0;
-        info!(outer_version = version, "elastic syncer finished");
-        return Ok(());
-    }
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
+    check_and_record_profile(&cfg, &semantic_profile_hash)?;
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
             bail!("--learner-budget-steps must fit a positive u32");
@@ -962,7 +1253,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         "syncer listening"
     );
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
-    let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+    let expected_learners = cfg.membership.id_limit(cfg.learners);
+    let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
+    let registry: Registry = Arc::new(Mutex::new(RegistryState {
+        membership_record,
+        ..RegistryState::new(membership)
+    }));
+    registry.lock().unwrap().persist_membership();
     let session: Session = Arc::new(Mutex::new(None));
     let budget_cutoff = Arc::new(BudgetCutoff::new(
         cfg.learner_budget_steps.is_some(),
@@ -972,14 +1269,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_registry = registry.clone();
     let accept_session = session.clone();
     let accept_budget_cutoff = budget_cutoff.clone();
-    let expected_learners = cfg.learners;
     let require_profile_binding = cfg.require_profile_binding;
+    let expert_token_weights = cfg.expert_token_weights;
     let hello_auth = Arc::new(HelloAuth {
         key: cfg.island_hmac_key.clone(),
         expected_contract: cfg.expected_island_contract,
     });
     if hello_auth.key.is_none() {
-        warn!("legacy syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
+        warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
     tokio::spawn(async move {
         loop {
@@ -998,6 +1295,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             expected_learners,
                             semantic_profile_hash,
                             require_profile_binding,
+                            expert_token_weights,
                             tx,
                             budget_cutoff,
                             hello_auth,
@@ -1016,13 +1314,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     scheduler(cfg, event_rx, registry, budget_cutoff).await
 }
 
-fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
+fn negotiated_payload_limits(layout: &Layout, dtype: u8, expert_tags: bool) -> Result<(u64, u64)> {
     let mut max_init = 0u64;
     let mut max_push = 0u64;
     for fragment in &layout.fragments {
         let numel = fragment.numel()?;
         let init_bytes = tensor_nbytes(bulk_dtype(dtype), numel)? as u64;
-        let delta_bytes = max_push_nbytes(dtype, numel)? as u64;
+        let segments = push_segments(dtype, numel, &fragment.tensor_numels)?;
+        let mut delta_bytes = max_push_nbytes_segments(dtype, &segments)? as u64;
+        if expert_tags {
+            delta_bytes += expert_tags_nbytes(fragment.tensor_numels.len())? as u64;
+        }
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
                 .context("INIT_PARAMS payload limit overflow")?,
@@ -1051,7 +1353,7 @@ pub struct HelloAuth {
     pub expected_contract: Option<[u8; 32]>,
 }
 
-/// Domain of the legacy HELLO MAC: HMAC-SHA256(key, domain || hello_body).
+/// Domain of the HELLO MAC: HMAC-SHA256(key, domain || hello_body).
 pub const HELLO_MAC_DOMAIN: &[u8] = b"yeto-hello-mac-v1\0";
 /// Domain of the RL session contract (yeto.rl.engine.backend_identity).
 pub const SESSION_CONTRACT_DOMAIN: &[u8] = b"yeto-rl-session-contract-v2\0";
@@ -1061,14 +1363,13 @@ pub const SESSION_CONTRACT_DOMAIN: &[u8] = b"yeto-rl-session-contract-v2\0";
 fn open_hello<'a>(key: Option<&[u8]>, payload: &'a [u8]) -> Result<&'a [u8]> {
     let Some(key) = key else { return Ok(payload) };
     let mut framed = Vec::with_capacity(payload.len() + 1);
-    // elastic::open MACs msg_type || body; HELLO uses its own domain instead.
-    if payload.len() < crate::elastic::HMAC_LEN {
+    if payload.len() < crate::hmac::HMAC_LEN {
         bail!("HELLO shorter than its HMAC (island has no YETO_ISLAND_HMAC_KEY?)");
     }
-    let (body, mac) = payload.split_at(payload.len() - crate::elastic::HMAC_LEN);
+    let (body, mac) = payload.split_at(payload.len() - crate::hmac::HMAC_LEN);
     framed.extend_from_slice(HELLO_MAC_DOMAIN);
     framed.extend_from_slice(body);
-    let expected = crate::elastic::hmac_sha256(key, &framed);
+    let expected = crate::hmac::hmac_sha256(key, &framed);
     let diff = expected.iter().zip(mac).fold(0u8, |acc, (x, y)| acc | (x ^ y));
     if diff != 0 {
         bail!("HELLO HMAC mismatch (wrong or missing island HMAC key)");
@@ -1152,7 +1453,22 @@ fn hello_compat_trailer_len(rest: &[u8]) -> usize {
     0
 }
 
+/// Parse a HELLO with its optional extension trailer. A body that only
+/// looks like it ends in a trailer is parsed whole as a legacy HELLO.
 fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
+    let (body, ext) = HelloExt::split(payload);
+    let Some(ext) = ext else { return parse_hello_body(payload, expected_learners) };
+    match parse_hello_body(body, expected_learners) {
+        Ok(parsed) if ext.expert_tokens => {
+            let (_, max_push_payload) = negotiated_payload_limits(&parsed.layout, parsed.dtype, true)?;
+            Ok(ParsedHello { ext, max_push_payload, ..parsed })
+        }
+        Ok(parsed) => Ok(ParsedHello { ext, ..parsed }),
+        Err(error) => parse_hello_body(payload, expected_learners).map_err(|_| error),
+    }
+}
+
+fn parse_hello_body(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     let mut r = Reader(payload);
     let version = r.u16()?;
     if version != PROTOCOL_VERSION {
@@ -1210,7 +1526,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     if num_streams > 256 {
         bail!("num_streams {num_streams} exceeds limit 256");
     }
-    let (max_init_payload, max_push_payload) = negotiated_payload_limits(&layout, dtype)?;
+    let (max_init_payload, max_push_payload) = negotiated_payload_limits(&layout, dtype, false)?;
     Ok(ParsedHello {
         learner_id,
         generation,
@@ -1223,6 +1539,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         max_init_payload,
         max_push_payload,
         compat_group,
+        ext: HelloExt::default(),
     })
 }
 
@@ -1253,6 +1570,7 @@ async fn handle_connection(
     expected_learners: u32,
     semantic_profile_hash: [u8; 32],
     require_profile_binding: bool,
+    expert_token_weights: bool,
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
@@ -1308,6 +1626,7 @@ async fn handle_connection(
                 max_init_payload,
                 max_push_payload,
                 compat_group,
+                ext,
             } = parsed;
             let profile_error = match syncer_profile_hash {
                 Some(offered) if offered != semantic_profile_hash => {
@@ -1316,6 +1635,11 @@ async fn handle_connection(
                 None if require_profile_binding => {
                     Some("HELLO is missing the required syncer semantic profile binding")
                 }
+                _ if ext.expert_tokens != expert_token_weights => Some(if expert_token_weights {
+                    "the syncer weights experts by routed tokens; this HELLO does not send expert token counts"
+                } else {
+                    "this HELLO sends expert token counts; the syncer runs without expert token weights"
+                }),
                 _ => None,
             };
             if let Some(message) = profile_error {
@@ -1333,7 +1657,7 @@ async fn handle_connection(
                 syncer_profile_hash,
                 compat_group,
             };
-            // Strict and elastic alike: a HELLO whose contract differs from the
+            // A HELLO whose contract differs from the
             // established session is refused on this connection only (MSG_ERROR
             // naming both hashes). The syncer and the islands already admitted
             // keep running; one mis-wired island (e.g. a Miles island in a verl
@@ -1360,6 +1684,7 @@ async fn handle_connection(
             let group = Arc::new(Group {
                 member,
                 dtype,
+                expert_tokens: ext.expert_tokens,
                 layout,
                 layout_fingerprint,
                 session_contract_hash,
@@ -1373,13 +1698,32 @@ async fn handle_connection(
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
             });
-            let registration = { registry.lock().unwrap().register_group(group.clone()) };
+            let registration =
+                { registry.lock().unwrap().register_group_with(group.clone(), Instant::now(), ext) };
             let replaced = match registration {
-                Ok(replaced) => replaced,
-                Err(()) => {
-                    let message = format!(
-                        "duplicate connection generation {generation} for learner {learner_id}"
-                    );
+                Ok((replaced, admission)) => {
+                    if admission == Admission::Rejoin {
+                        info!(learner_id, generation, "island re-joined after lease expiry");
+                    }
+                    if ext.recover {
+                        info!(learner_id, generation, "island asks for peer recovery");
+                    }
+                    replaced
+                }
+                Err(error) => {
+                    let message = match error {
+                        RegisterError::Duplicate => format!(
+                            "duplicate connection generation {generation} for learner {learner_id}"
+                        ),
+                        // Starts with the fence prefix so the client stops
+                        // instead of redialing the same stale epoch.
+                        RegisterError::Fenced(reason @ AdmitError::StaleSyncerEpoch { .. }) => format!(
+                            "{reason} (learner {learner_id} generation {generation}); relaunch the island for this syncer"
+                        ),
+                        RegisterError::Fenced(reason) => format!(
+                            "refused generation {generation} for learner {learner_id}: {reason}"
+                        ),
+                    };
                     send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                     bail!(message);
                 }
@@ -1404,13 +1748,7 @@ async fn handle_connection(
                 .await
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
-            {
-                let mut registry = registry.lock().unwrap();
-                registry.groups.remove(&member);
-                if registry.current.get(&learner_id) == Some(&member) {
-                    registry.current.remove(&learner_id);
-                }
-            }
+            registry.lock().unwrap().unregister(member);
             event_tx.send(Event::Disconnected { member }).await.ok();
             res
         }
@@ -1610,11 +1948,16 @@ async fn read_loop(
             header_at = Some(Instant::now());
             match msg_type {
                 MSG_INIT_PARAMS => Ok(group.max_init_payload),
+                MSG_INIT_DIGEST => Ok(init_digest_payload_len(group.layout.fragments.len())),
                 MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
                 MSG_HEARTBEAT => Ok(12),
+                MSG_LEAVE => Ok(5),
                 MSG_FINAL_ACK => Ok(10),
                 MSG_BUDGET_DONE => Ok(8),
                 MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
+                recovery::MSG_PEER_SNAPSHOT_READY
+                | recovery::MSG_RECOVERY_RESTORED
+                | recovery::MSG_RECOVERY_FAILED => Ok(recovery::MAX_RECOVERY_FRAME),
                 other => bail!(
                     "unexpected direct message type {other} from learner {} generation {}",
                     group.member.learner_id,
@@ -1788,6 +2131,7 @@ async fn dispatch_inner(
                     bytes.len()
                 );
             }
+            let sha256: [u8; 32] = Sha256::digest(bytes).into();
             let mut values = Vec::new();
             decode_tensor(bulk_dtype(group.dtype), bytes, &mut values)?;
             event_tx
@@ -1795,6 +2139,28 @@ async fn dispatch_inner(
                     member: group.member,
                     fragment_id,
                     values,
+                    sha256,
+                })
+                .await
+                .ok();
+        }
+        MSG_INIT_DIGEST => {
+            if bulk_dtype(group.dtype) != DTYPE_F32 {
+                bail!("INIT_DIGEST needs an f32-bulk session (dtype {})", group.dtype);
+            }
+            let digests = InitDigests::decode(payload, group.member.learner_id)?;
+            if digests.first as usize + digests.digests.len() > group.layout.fragments.len() {
+                bail!(
+                    "INIT_DIGEST covers fragments {}..{}, layout has {}",
+                    digests.first,
+                    digests.first as usize + digests.digests.len(),
+                    group.layout.fragments.len()
+                );
+            }
+            event_tx
+                .send(Event::InitDigest {
+                    member: group.member,
+                    digests,
                 })
                 .await
                 .ok();
@@ -1827,9 +2193,18 @@ async fn dispatch_inner(
                 .get(fragment_id as usize)
                 .with_context(|| format!("PUSH_FRAGMENT for unknown fragment {fragment_id}"))?;
             let numel = fragment.numel()?;
+            let tensor_scales = if group.expert_tokens {
+                Some(
+                    decode_expert_tags(&mut r, fragment.tensor_numels.len())
+                        .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?,
+                )
+            } else {
+                None
+            };
             let bytes = r.rest();
             let mut outer_gradient = Vec::new();
-            decode_push(group.dtype, bytes, numel, &mut outer_gradient)
+            let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
+            decode_push_segments(group.dtype, bytes, &segments, &mut outer_gradient)
                 .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
             // Every wire dtype carries learner_delta = local - raw_anchor.
             // Merge math consumes the corresponding outer gradient with the
@@ -1850,6 +2225,7 @@ async fn dispatch_inner(
                         c_steps,
                         c_tokens,
                         outer_gradient,
+                        tensor_scales,
                         transfer: PushTransfer {
                             recv_seconds,
                             arrived_unix: unix_now(),
@@ -1876,6 +2252,27 @@ async fn dispatch_inner(
                 .send(Event::Heartbeat {
                     member: group.member,
                     local_step,
+                })
+                .await
+                .ok();
+        }
+        MSG_LEAVE => {
+            let mut r = Reader(payload);
+            let learner_id = r.u32()?;
+            let reason = r.u8()?;
+            if learner_id != group.member.learner_id {
+                bail!(
+                    "LEAVE learner id {learner_id} does not match connected group {}",
+                    group.member.learner_id
+                );
+            }
+            if r.remaining() != 0 {
+                bail!("trailing bytes in LEAVE");
+            }
+            event_tx
+                .send(Event::Leave {
+                    member: group.member,
+                    reason,
                 })
                 .await
                 .ok();
@@ -1910,6 +2307,19 @@ async fn dispatch_inner(
             .await
             .context("timed out queueing BUDGET_DONE")?
             .context("event channel closed while queueing BUDGET_DONE")?;
+        }
+        recovery::MSG_PEER_SNAPSHOT_READY | recovery::MSG_RECOVERY_RESTORED | recovery::MSG_RECOVERY_FAILED => {
+            let fragments = group.layout.fragments.len();
+            let msg = match msg_type {
+                recovery::MSG_PEER_SNAPSHOT_READY => {
+                    RecoveryMsg::SnapshotReady(recovery::SnapshotReady::decode(payload, fragments)?)
+                }
+                recovery::MSG_RECOVERY_RESTORED => {
+                    RecoveryMsg::Restored(recovery::decode_restored(payload, fragments)?)
+                }
+                _ => RecoveryMsg::Failed(recovery::decode_failed(payload)?),
+            };
+            event_tx.send(Event::Recovery { member: group.member, msg }).await.ok();
         }
         t => bail!(
             "unexpected message type {t} from learner {} generation {}",
@@ -2045,6 +2455,27 @@ async fn recv_init_event(
     event.context("event channel closed")
 }
 
+/// The islands did not start from the same weights: record the strict
+/// failure, tell every connected island why, and stop the syncer.
+async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
+    let message = format!("{error:#}");
+    append_strict_failure(cfg.event_tape.as_deref(), "init_digest_mismatch", &message);
+    for group in current_groups(registry) {
+        let _ = group.send_small(MSG_ERROR, message.clone().into()).await;
+    }
+    bail!("RL strict failure init_digest_mismatch: {message}");
+}
+
+/// Connected learners the scheduler waits for before the first round: every
+/// learner with static membership, the launch quorum with dynamic membership.
+fn startup_members(cfg: &Config) -> u32 {
+    if cfg.membership.is_static() {
+        cfg.learners
+    } else {
+        (cfg.membership.min_launch_members(cfg.quorum) as u32).clamp(1, cfg.learners)
+    }
+}
+
 async fn scheduler(
     cfg: Config,
     mut events: mpsc::Receiver<Event>,
@@ -2055,21 +2486,31 @@ async fn scheduler(
     let mut budget_reports: HashSet<u32> = HashSet::new();
     let strict_exact = cfg.max_base_lag == Some(0);
     let fixed_roster = strict_exact && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+    // Dynamic membership writes island-pool records next to the merge records.
+    let dynamic = !cfg.membership.is_static();
+    let mut lease_expired: HashSet<Member> = HashSet::new();
+    // LEAVE reasons of islands whose disconnect has not arrived yet.
+    let mut leave_reasons: HashMap<Member, u8> = HashMap::new();
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
+    // Local-init digests (`local_init`); created with the state.
+    let mut local_init: Option<LocalInit> = None;
+    let mut resumed = false;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
-    // a resumed checkpoint) and all expected learners have connected (late
-    // joiners are still served afterwards).
+    // a resumed checkpoint) and the expected learners have connected (late
+    // joiners are still served afterwards). Static membership waits for all
+    // learners; dynamic membership starts once a round could launch.
+    let start_members = startup_members(&cfg);
     info!(
         expected = cfg.learners,
-        "waiting for learners and INIT_PARAMS"
+        start_members, "waiting for learners and INIT_PARAMS"
     );
     loop {
         let connected = registry.lock().unwrap().current.len() as u32;
         if let Some(st) = &state {
             let budget_ready =
                 budget_reports.is_empty() || budget_reports.len() == cfg.learners as usize;
-            if st.all_initialized() && connected >= cfg.learners && budget_ready {
+            if st.all_initialized() && connected >= start_members && budget_ready {
                 break;
             }
         }
@@ -2086,6 +2527,18 @@ async fn scheduler(
                 bail!("RL strict failure {metric}: {message}");
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(&registry, &group, "initialization").await;
+                if dynamic {
+                    append_pool_record(
+                        cfg.event_tape.as_deref(),
+                        "pool_join",
+                        cfg.syncer_epoch,
+                        &format!(
+                            "\"island_id\":{},\"generation\":{},\"catch_up\":false,\"base_version\":0",
+                            group.member.learner_id, group.member.generation
+                        ),
+                    );
+                }
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
@@ -2131,15 +2584,33 @@ async fn scheduler(
                                 }
                             }
                             info!(step = st.global_step, "resumed from checkpoint");
+                            resumed = true;
                         }
                     }
+                    local_init = Some(LocalInit::new(
+                        st.owned_fragments(),
+                        st.layout.fragments.len(),
+                    ));
                     state = Some(st);
+                }
+            }
+            Event::InitDigest { member, digests } => {
+                if !is_current_member(&registry, member) {
+                    continue;
+                }
+                let checked = local_init
+                    .as_mut()
+                    .context("INIT_DIGEST before HELLO")?
+                    .on_digests(digests);
+                if let Err(error) = checked {
+                    refuse_local_init(&cfg, &registry, error).await?;
                 }
             }
             Event::Init {
                 member,
                 fragment_id,
                 values,
+                sha256,
             } => {
                 if !is_current_member(&registry, member) {
                     warn!(
@@ -2150,13 +2621,28 @@ async fn scheduler(
                     continue;
                 }
                 let st = state.as_mut().context("INIT before HELLO")?;
+                if !st.initialized[fragment_id as usize] {
+                    let checked = local_init.as_mut().unwrap().on_init(
+                        fragment_id as usize,
+                        member.learner_id,
+                        sha256,
+                    );
+                    if let Err(error) = checked {
+                        refuse_local_init(&cfg, &registry, error).await?;
+                    }
+                }
                 st.init_fragment(fragment_id as usize, values)?;
                 if st.all_initialized() {
                     info!("global parameters initialized");
                 }
             }
             Event::Push { .. } => warn!("push before initialization; dropped"),
-            Event::Heartbeat { .. } => {}
+            // The lease runs from HELLO: an island that waits for the other
+            // islands' INIT (or warms up its engine) keeps it by heartbeat.
+            Event::Heartbeat { member, .. } => {
+                registry.lock().unwrap().membership.renew(member, Instant::now());
+            }
+            Event::Leave { .. } => {}
             Event::FinalAck { member, .. } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
@@ -2179,6 +2665,7 @@ async fn scheduler(
                 generation = member.generation,
                 "disconnected during init"
             ),
+            Event::Recovery { member, .. } => ignore_recovery_message(member, "initialization"),
         }
     }
     let mut st = state.unwrap();
@@ -2209,13 +2696,18 @@ async fn scheduler(
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
     }
-    let num_fragments = st.layout.fragments.len() as u64;
+    // A sharded head schedules only its own fragments and global steps
+    // (crate::shard); unsharded, `owned` is every fragment and the steps
+    // are 1..=total_steps.
+    let schedule = st.schedule().clone();
+    let num_fragments = schedule.owned().len() as u64;
+    let last_step = schedule.last_step(cfg.total_steps);
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
     // Once a marked run is actually going to make more progress, the old
     // marker must stop being publishable before any new round can commit.
-    if cfg.mark_final_checkpoint && st.global_step < cfg.total_steps {
+    if cfg.mark_final_checkpoint && st.global_step < last_step {
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
 
@@ -2233,8 +2725,32 @@ async fn scheduler(
     // learners start bit-identical (also serves recovery for late joiners).
     // A checkpoint already at the terminal cut goes straight to lossless
     // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
-    if st.global_step < cfg.total_steps {
-        broadcast_all_fragments(&st, &registry, &budget_cutoff).await;
+    // Local init: islands whose digests agree with the applied INIT already
+    // hold version 0 and only get INIT_CONFIRM. A resumed cut is not the
+    // base checkpoint, so it is always broadcast.
+    if st.global_step < last_step {
+        let confirm = local_init
+            .as_ref()
+            .filter(|_| !resumed)
+            .and_then(|init| init.confirm().map(|digest| (init, digest)));
+        let groups = current_groups(&registry);
+        let (confirmed, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|group| {
+            confirm.is_some_and(|(init, _)| init.holds(group.member.learner_id))
+        });
+        if let Some((_, digest)) = confirm {
+            for group in &confirmed {
+                let payload = bytes::Bytes::copy_from_slice(&digest);
+                if !send_small_until_cutoff(group, MSG_INIT_CONFIRM, payload, &budget_cutoff).await {
+                    break;
+                }
+            }
+            info!(
+                confirmed = confirmed.len(),
+                broadcast = rest.len(),
+                "local init: islands kept their own version-0 weights"
+            );
+        }
+        broadcast_all_fragments(&st, &rest, &budget_cutoff).await;
     }
 
     // Phase 2: gather, compute, and commit are separate stages.  Torch SVD
@@ -2246,17 +2762,23 @@ async fn scheduler(
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
-    let mut next_t = st.global_step + 1;
-    let mut next_commit_t = st.global_step + 1;
+    let mut next_t = schedule.step_after(st.global_step);
+    let mut next_commit_t = schedule.step_after(st.global_step);
     let mut inflight: Vec<Round> = Vec::new();
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
+    let mut late_carry = LateCarry::new(cfg.max_base_lag, fixed_roster);
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
-    'outer: while next_t <= cfg.total_steps
+    let mut recovery = PeerRecovery::new(cfg.recovery.clone());
+    let mut catch_ups: CatchUps<Arc<Group>> = CatchUps::new();
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "running");
+    }
+    'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
         || !ready.is_empty()
@@ -2265,6 +2787,29 @@ async fn scheduler(
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
             break 'outer;
+        }
+        let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
+        for member in &expired {
+            lease_expired.insert(*member);
+            append_pool_record(
+                cfg.event_tape.as_deref(),
+                "pool_leave",
+                cfg.syncer_epoch,
+                &format!(
+                    "\"island_id\":{},\"generation\":{},\"reason\":\"lease_expired\"",
+                    member.learner_id, member.generation
+                ),
+            );
+        }
+        if !recovery.is_empty() {
+            let now = Instant::now();
+            let candidates = recovery_candidates(&registry, &inflight);
+            let mut out = Vec::new();
+            for member in expired {
+                out.extend(recovery.on_gone(member, &candidates, now));
+            }
+            out.extend(recovery.on_tick(&candidates, now));
+            send_recovery(&registry, out).await;
         }
         // Commit only the contiguous prefix.  A faster cuda:N worker can put
         // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
@@ -2325,31 +2870,33 @@ async fn scheduler(
                     bail!("fragment {p} lost its busy ownership at commit");
                 }
             }
-            next_commit_t = next_commit_t
-                .checked_add(1)
-                .context("commit step overflow")?;
+            next_commit_t = schedule.step_after(next_commit_t);
+            if dynamic {
+                write_pool_status(&cfg, &registry, st.global_step, "running");
+            }
         }
 
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() + computing.len() + ready.len() < depth
-            && next_t <= cfg.total_steps
+            && next_t <= last_step
             && Instant::now() >= next_launch
         {
             if !budget_cutoff.try_linearize_work() {
                 cutoff_established = true;
                 break 'outer;
             }
-            let p = ((next_t - 1) % num_fragments) as usize;
+            let p = schedule.fragment_for_step(next_t);
             if busy_fragments.contains(&p) {
                 break;
             }
-            let groups = current_groups(&registry);
+            let mut groups = current_groups(&registry);
+            groups.retain(|group| !catch_ups.holds(group.member));
             if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
             }
             let t = next_t;
-            next_t += 1;
+            next_t = schedule.step_after(t);
             let pull = encode_pull(p, t, 1);
             let mut expected_members: Vec<Member> =
                 groups.iter().map(|group| group.member).collect();
@@ -2369,6 +2916,7 @@ async fn scheduler(
             if !busy_fragments.insert(p) {
                 bail!("fragment {p} acquired twice");
             }
+            let fold = round_fold(&cfg, &st, p, &expected_members, launch_quorum);
             inflight.push(Round {
                 t,
                 p,
@@ -2380,24 +2928,53 @@ async fn scheduler(
                 quorum_deadline: Instant::now() + Duration::from_secs(cfg.quorum_timeout_s),
                 grace_deadline: None,
                 quorum_size: launch_quorum,
+                capacity_quorum: cfg.membership.round_quorum(),
+                soft_deadline: cfg.membership.soft_deadline.map(|soft| Instant::now() + soft),
+                soft_min: cfg.membership.soft_min_arrivals(),
                 quorum_ms: None,
                 grace_ms: None,
+                fold,
                 pushes: HashMap::new(),
+                carried: Vec::new(),
             });
+            if let Some(carry) = late_carry.as_mut() {
+                let round = inflight.last_mut().expect("round just launched");
+                for (member, missed, outcome) in carry.attach_queued(round) {
+                    log_carry(&cfg, dynamic, member, missed, t, outcome);
+                }
+            }
         }
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
-            if r.pushes.len() >= r.quorum_size && r.grace_deadline.is_none() {
+            if r.grace_deadline.is_none() && r.quorum_reached() {
+                let step_secs = step_rates.max_step_secs_for(&r.expected_members);
+                let quorum_secs = r.started.elapsed().as_secs_f64();
                 let grace = adaptive_grace(
                     cfg.grace_tau,
                     cfg.grace_gamma,
-                    step_rates.max_step_secs_for(&r.expected_members),
-                    r.started.elapsed().as_secs_f64(),
+                    step_secs,
+                    quorum_secs,
                     last_sync_secs,
                     Duration::from_millis(cfg.grace_ms),
                 );
-                r.grace_deadline = Some(Instant::now() + grace);
+                if r.pushes.len() < r.expected_members.len() {
+                    info!(
+                        step = r.t,
+                        fragment = r.p,
+                        step_secs = ?step_secs,
+                        quorum_secs,
+                        sync_secs = last_sync_secs,
+                        grace_ms = grace.as_millis() as u64,
+                        "grace window armed"
+                    );
+                }
+                // The soft deadline is an upper bound on the grace window too.
+                let now = Instant::now();
+                let grace = r
+                    .soft_deadline
+                    .map_or(grace, |soft| grace.min(soft.saturating_duration_since(now)));
+                r.grace_deadline = Some(now + grace);
                 r.quorum_ms = Some(r.started.elapsed().as_millis() as u64);
                 r.grace_ms = Some(grace.as_millis() as u64);
             }
@@ -2412,8 +2989,8 @@ async fn scheduler(
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
                 RoundAction::Complete => {
-                    let round = inflight.remove(i);
-                    let prepared = prepare_round_compute(&cfg, &st, &round)?;
+                    let mut round = inflight.remove(i);
+                    let prepared = prepare_round_compute(&cfg, &st, &mut round)?;
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
                         break 'outer;
@@ -2471,11 +3048,12 @@ async fn scheduler(
                         quorum = r.quorum_size,
                         "quorum timeout below K; launching a new frozen-membership attempt"
                     );
-                    if groups.len() < cfg.quorum as usize {
+                    let required = cfg.membership.min_launch_members(cfg.quorum);
+                    if groups.len() < required {
                         warn!(
                             step = r.t,
                             connected = groups.len(),
-                            required = cfg.quorum,
+                            required,
                             "fixed quorum unavailable; deferring retry"
                         );
                         r.quorum_deadline = Instant::now() + Duration::from_secs(1);
@@ -2488,8 +3066,15 @@ async fn scheduler(
                     r.base_version = st.versions[r.p];
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
+                    if let Some(carry) = late_carry.as_mut() {
+                        for (member, push) in &r.pushes {
+                            carry.release_anchor(*member, push);
+                        }
+                    }
                     r.pushes.clear();
+                    r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
+                    r.soft_deadline = cfg.membership.soft_deadline.map(|soft| r.started + soft);
                     r.grace_deadline = None;
                     r.quorum_ms = None;
                     r.grace_ms = None;
@@ -2503,8 +3088,113 @@ async fn scheduler(
             }
             i += 1;
         }
+        // Advance one rejoin catch-up by one fragment (or run its tail).
+        // The round deadlines above were served first, so a long catch-up
+        // never holds a grace window open.
+        for member in catch_ups.drop_superseded(|member| is_current_member(&registry, member)) {
+            warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                "superseded learner catch-up dropped"
+            );
+        }
+        match catch_ups.next_step() {
+            None => {}
+            Some(CatchUpStep::Send(member, group, p)) => {
+                // Catch-up must never expose a round whose checkpoint is not
+                // yet durable.
+                if let Some(pending) = publishing.take() {
+                    settle_pending_publish(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        pending,
+                        &budget_cutoff,
+                        &mut busy_fragments,
+                    )
+                    .await?;
+                }
+                let dtype = bulk_dtype(st.wire_dtype);
+                match send_fragment_until_cutoff(&st, &group, p, MSG_BCAST_FRAGMENT, dtype, &budget_cutoff)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                    Err(error) => {
+                        warn!(
+                            learner_id = member.learner_id,
+                            generation = member.generation,
+                            fragment = p,
+                            %error,
+                            "recovery fragment encode failed"
+                        );
+                        catch_ups.abandon(member);
+                    }
+                }
+            }
+            Some(CatchUpStep::Done(done)) => {
+                let group = done.group;
+                if done.tail.rejoin {
+                    registry
+                        .lock()
+                        .unwrap()
+                        .membership
+                        .record_catch_up(group.member, &st.versions);
+                    if dynamic {
+                        append_pool_record(
+                            cfg.event_tape.as_deref(),
+                            "pool_join",
+                            cfg.syncer_epoch,
+                            &format!(
+                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
+                                group.member.learner_id, group.member.generation, st.global_step
+                            ),
+                        );
+                        write_pool_status(&cfg, &registry, st.global_step, "running");
+                    }
+                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                }
+                if done.tail.rebind {
+                    let repulls = rebind_current_unanswered_rounds(&registry, &mut inflight, group.member);
+                    for repull in repulls {
+                        if !send_small_until_cutoff(&group, MSG_PULL_REQ, repull.pull, &budget_cutoff).await {
+                            cutoff_established = true;
+                            break 'outer;
+                        }
+                        info!(
+                            learner_id = group.member.learner_id,
+                            old_generation = repull.old_generation,
+                            generation = group.member.generation,
+                            step = repull.t,
+                            fragment = repull.p,
+                            attempt = repull.attempt,
+                            base_version = repull.base_version,
+                            "rebound outstanding pull after captured generation disconnected"
+                        );
+                    }
+                }
+            }
+        }
         if submitted_any {
             continue; // refill the pipeline before waiting again
+        }
+        // The commit above may have drained the last round. Re-check the loop
+        // condition now: waiting here would sleep until the next lease expiry,
+        // and the leases of idle learners then lapse before the final cut.
+        if next_t > last_step
+            && inflight.is_empty()
+            && computing.is_empty()
+            && ready.is_empty()
+            && publishing.is_none()
+        {
+            continue;
         }
         // Wait for the next event, the earliest in-flight deadline, or the
         // launch throttle opening (whichever comes first). Without the
@@ -2514,15 +3204,24 @@ async fn scheduler(
         let mut earliest = inflight
             .iter()
             .filter_map(|r| {
-                (round_action(r, deadline_now) != RoundAction::Complete)
-                    .then_some(r.grace_deadline.unwrap_or(r.quorum_deadline))
+                (round_action(r, deadline_now) != RoundAction::Complete).then_some(
+                    r.soft_deadline.map_or(r.grace_deadline.unwrap_or(r.quorum_deadline), |soft| {
+                        soft.min(r.grace_deadline.unwrap_or(r.quorum_deadline))
+                    }),
+                )
             })
+            .chain(registry.lock().unwrap().membership.next_expiry())
+            .chain(recovery.next_deadline())
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
-            && next_t <= cfg.total_steps
-            && !busy_fragments.contains(&(((next_t - 1) % num_fragments) as usize));
+            && next_t <= last_step
+            && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
+        }
+        if !catch_ups.is_empty() {
+            // Poll events without sleeping, then send the next fragment.
+            earliest = Some(deadline_now);
         }
         let wake = if let Some(pending) = publishing.as_mut() {
             // Same event-first bias; a durable checkpoint outranks compute
@@ -2619,11 +3318,110 @@ async fn scheduler(
                     let local_step = push.local_step;
                     let global_step = push.global_step;
                     let fragment_id = push.fragment_id;
+                    let fenced = {
+                        let mut registry = registry.lock().unwrap();
+                        registry.membership.renew(member, Instant::now());
+                        registry.membership.check_push_base(
+                            member,
+                            fragment_id as usize,
+                            push.base_version,
+                        )
+                    };
+                    let pool = |kind: &str, fields: String| {
+                        if dynamic {
+                            append_pool_record(cfg.event_tape.as_deref(), kind, cfg.syncer_epoch, &fields);
+                        }
+                    };
+                    let rejected = |reason: &str| {
+                        pool("delta_rejected", format!("\"island_id\":{learner_id},\"reason\":\"{reason}\""));
+                    };
+                    if let Err(reason) = fenced {
+                        warn!(
+                            learner_id,
+                            generation,
+                            step = global_step,
+                            fragment = fragment_id,
+                            "push fenced: {reason:#}"
+                        );
+                        rejected("fenced");
+                        continue;
+                    }
+                    // Pace from every unfenced push, refused ones included: a
+                    // peer whose pushes keep missing their round is exactly
+                    // the one the grace window must be sized for.
+                    step_rates.note(member, local_step, Instant::now());
+                    let base_version = push.base_version;
+                    if let Some(carry) = late_carry.as_mut() {
+                        if carry.reuses_anchor(member, &push) {
+                            warn!(
+                                learner_id,
+                                generation,
+                                step = global_step,
+                                fragment = fragment_id,
+                                base = base_version,
+                                "push reuses an anchor whose delta was already taken"
+                            );
+                            rejected("anchor_reused");
+                            continue;
+                        }
+                        let open = inflight.iter().any(|round| {
+                            round.t == global_step
+                                && round.p == fragment_id as usize
+                                && round.attempt == push.round_attempt
+                        });
+                        if !open {
+                            let current = st.versions[fragment_id as usize];
+                            let outcome = carry.carry(&mut inflight, member, push, next_t, current);
+                            if !matches!(outcome, CarryOutcome::Rejected(_)) {
+                                carry.spend_anchor(member, fragment_id as usize, base_version);
+                            }
+                            match outcome {
+                                CarryOutcome::Attached { step, lag } => {
+                                    log_carry(&cfg, dynamic, member, global_step, step, Ok(lag))
+                                }
+                                CarryOutcome::Queued => info!(
+                                    learner_id,
+                                    generation,
+                                    step = global_step,
+                                    fragment = fragment_id,
+                                    base = base_version,
+                                    "late push queued for the fragment's next round"
+                                ),
+                                CarryOutcome::Rejected(disposition) => log_carry(
+                                    &cfg,
+                                    dynamic,
+                                    member,
+                                    global_step,
+                                    global_step,
+                                    Err(disposition),
+                                ),
+                            }
+                            continue;
+                        }
+                    }
+                    let round_base = inflight
+                        .iter()
+                        .find(|round| round.t == global_step && round.p == fragment_id as usize)
+                        .map(|round| round.base_version);
                     let disposition =
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
                         PushDisposition::Accepted => {
-                            step_rates.note(member, local_step, Instant::now());
+                            if let Some(carry) = late_carry.as_mut() {
+                                carry.note_gathered(member, fragment_id as usize, base_version);
+                            }
+                            let lag = round_base.map_or(0, |base| base.saturating_sub(base_version));
+                            if lag == 0 {
+                                pool("delta_accepted", format!("\"island_id\":{learner_id}"));
+                            } else {
+                                pool(
+                                    "delta_carried_over",
+                                    format!(
+                                        "\"island_id\":{learner_id},\"base\":{base_version},\"lag\":{lag},\"discount\":{:?}",
+                                        cfg.membership.carry_discount(lag)
+                                    ),
+                                );
+                            }
                         }
                         PushDisposition::Duplicate => warn!(
                             learner_id,
@@ -2632,7 +3430,9 @@ async fn scheduler(
                             fragment = fragment_id,
                             "duplicate push rejected"
                         ),
-                        PushDisposition::StaleBase if strict_exact => {
+                        // Fixed roster: a stale base is a strict failure. In an island
+                        // pool a late island is only refused (delta_rejected record).
+                        PushDisposition::StaleBase if strict_exact && !dynamic => {
                             let metric = "rejected_stale_updates";
                             let message = format!(
                                 "learner {learner_id} generation {generation} step {global_step} fragment {fragment_id}: {disposition:?}"
@@ -2640,22 +3440,65 @@ async fn scheduler(
                             append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                             bail!("RL strict failure {metric}: {message}");
                         }
-                        disposition => warn!(
-                            learner_id,
-                            generation,
-                            step = global_step,
-                            fragment = fragment_id,
-                            reason = ?disposition,
-                            "push rejected"
-                        ),
+                        disposition => {
+                            warn!(
+                                learner_id,
+                                generation,
+                                step = global_step,
+                                fragment = fragment_id,
+                                reason = ?disposition,
+                                "push rejected"
+                            );
+                            rejected(match disposition {
+                                PushDisposition::StaleBase => "carry_lag_exceeded",
+                                PushDisposition::OutOfRound => "out_of_round",
+                                PushDisposition::FutureBase => "future_base",
+                                _ => "unexpected_member",
+                            });
+                        }
                     }
                 }
+                Event::Leave { member, reason } => {
+                    info!(
+                        learner_id = member.learner_id,
+                        generation = member.generation,
+                        reason = %leave_reason_name(reason),
+                        "island leaves the pool"
+                    );
+                    leave_reasons.insert(member, reason);
+                }
                 Event::Heartbeat { member, local_step } => {
+                    registry.lock().unwrap().membership.renew(member, Instant::now());
                     if is_current_member(&registry, member) {
                         step_rates.note(member, local_step, Instant::now());
                     }
                 }
                 Event::Hello { group } => {
+                    if registry.lock().unwrap().is_recovering(group.member) {
+                        // Peer recovery reads the clock only from durable rounds.
+                        if let Some(pending) = publishing.take() {
+                            settle_pending_publish(
+                                &cfg,
+                                &st,
+                                &registry,
+                                &mut last_sync_secs,
+                                pending,
+                                &budget_cutoff,
+                                &mut busy_fragments,
+                            )
+                            .await?;
+                        }
+                        let candidates = recovery_candidates(&registry, &inflight);
+                        let out = recovery.begin(group.member, st.global_step, &st.versions, &candidates, Instant::now());
+                        info!(
+                            learner_id = group.member.learner_id,
+                            generation = group.member.generation,
+                            t_s = st.global_step,
+                            "peer recovery started"
+                        );
+                        send_recovery(&registry, out).await;
+                        continue;
+                    }
                     // A queued HELLO may already have been superseded by a
                     // newer connection generation. Never catch up or rebind
                     // rounds to anything except the registry's current
@@ -2669,13 +3512,39 @@ async fn scheduler(
                         continue;
                     }
 
-                    // Rejoining learner: first catch it up to the current
+                    // Rejoining learner: catch it up to the current
                     // parameters, then atomically rebind only its unanswered
-                    // slots in existing rounds. The helper revalidates the
-                    // generation because catch-up awaits socket writers and
-                    // a newer HELLO may supersede this one meanwhile.
-                    // Catch-up must never expose a round whose checkpoint
-                    // is not yet durable.
+                    // slots in existing rounds. The scheduler sends the
+                    // catch-up one fragment per pass (see `CatchUps`) and
+                    // revalidates the generation before each send, because a
+                    // newer HELLO may supersede this one meanwhile.
+                    let fragments = if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
+                    catch_ups.enqueue(group.member, group, fragments, CatchUpTail::REJOIN);
+                }
+                Event::Recovery { member, msg } => {
+                    let restored = match msg {
+                        RecoveryMsg::SnapshotReady(ready) => {
+                            let candidates = recovery_candidates(&registry, &inflight);
+                            let out = recovery.on_snapshot_ready(member, ready, &candidates, Instant::now());
+                            send_recovery(&registry, out).await;
+                            continue;
+                        }
+                        RecoveryMsg::Failed(reason) => {
+                            warn!(learner_id = member.learner_id, generation = member.generation, %reason, "recovery source refused by island");
+                            let candidates = recovery_candidates(&registry, &inflight);
+                            let out = recovery.on_failed(member, reason, &candidates, Instant::now());
+                            send_recovery(&registry, out).await;
+                            continue;
+                        }
+                        RecoveryMsg::Restored(held) => held,
+                    };
+                    if !recovery.is_pending(member) {
+                        // E.g. an island recovered on the degraded path during
+                        // initialization reports its restore late.
+                        ignore_recovery_message(member, "training");
+                        continue;
+                    }
+                    // Replay against durable versions only.
                     if let Some(pending) = publishing.take() {
                         settle_pending_publish(
                             &cfg,
@@ -2688,39 +3557,69 @@ async fn scheduler(
                         )
                         .await?;
                     }
-                    if st.global_step < cfg.total_steps {
-                        send_all_fragments(&st, &group, &budget_cutoff).await;
-                    }
-                    let repulls = if fixed_roster {
-                        fixed_roster_repulls(&inflight, group.member)
-                    } else {
-                        rebind_current_unanswered_rounds(&registry, &mut inflight, group.member)
-                    };
-                    for repull in repulls {
-                        if !send_small_until_cutoff(
-                            &group,
-                            MSG_PULL_REQ,
-                            repull.pull,
-                            &budget_cutoff,
-                        )
-                        .await
-                        {
-                            cutoff_established = true;
-                            break 'outer;
+                    let group = registry.lock().unwrap().groups.get(&member).cloned();
+                    let Some(group) = group else { continue };
+                    let replay = match recovery.on_restored(member, restored.as_deref(), &st.versions) {
+                        Ok(replay) => replay,
+                        Err(error) => {
+                            warn!(learner_id = member.learner_id, generation = member.generation, "recovery refused: {error:#}");
+                            let _ = group.send_small(MSG_ERROR, format!("recovery refused: {error:#}").into()).await;
+                            continue;
                         }
-                        info!(
-                            learner_id = group.member.learner_id,
-                            old_generation = repull.old_generation,
-                            generation = group.member.generation,
-                            step = repull.t,
-                            fragment = repull.p,
-                            attempt = repull.attempt,
-                            base_version = repull.base_version,
-                            "rebound outstanding pull to reconnected learner generation"
+                    };
+                    // Resend the newest value of each newer fragment; no
+                    // broadcast can interleave until the island is promoted.
+                    for &p in &replay {
+                        match send_fragment_until_cutoff(&st, &group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype), &budget_cutoff).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                cutoff_established = true;
+                                break 'outer;
+                            }
+                            Err(error) => warn!(learner_id = member.learner_id, fragment = p, %error, "recovery replay encode failed"),
+                        }
+                    }
+                    let promoted = {
+                        let mut registry = registry.lock().unwrap();
+                        let promoted = registry.promote_recovered(member);
+                        if promoted {
+                            registry.membership.record_catch_up(member, &st.versions);
+                        }
+                        promoted
+                    };
+                    let Some((record, done)) = recovery.finish(member, st.global_step, &st.versions, replay.len(), Instant::now()) else {
+                        continue;
+                    };
+                    if !promoted {
+                        continue;
+                    }
+                    append_recovery_record(cfg.event_tape.as_deref(), &record);
+                    if record.missed {
+                        warn!(learner_id = member.learner_id, steps = record.steps, bound = ?record.bound_steps, "peer recovery missed its bound");
+                    } else {
+                        info!(learner_id = member.learner_id, steps = record.steps, path = ?record.source, "peer recovery done");
+                    }
+                    send_recovery(&registry, vec![done]).await;
+                    if dynamic {
+                        // The pool took the island back with recovered state; its
+                        // pushes are fenced at the versions it now holds.
+                        append_pool_record(
+                            cfg.event_tape.as_deref(),
+                            "pool_join",
+                            cfg.syncer_epoch,
+                            &format!(
+                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"recovered\":true,\"base_version\":{}",
+                                member.learner_id, member.generation, st.global_step
+                            ),
                         );
+                        write_pool_status(&cfg, &registry, st.global_step, "running");
+                    }
+                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
                     }
                 }
-                Event::Init { .. } => {} // already initialized; ignore
+                Event::Init { .. } | Event::InitDigest { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
                     warn!(
                         learner_id = member.learner_id,
@@ -2752,7 +3651,31 @@ async fn scheduler(
                         generation = member.generation,
                         "learner connection generation disconnected"
                     );
+                    if dynamic && !lease_expired.contains(&member) {
+                        // Only a departure without a newer generation leaves the
+                        // pool; an expired lease already wrote its pool_leave.
+                        let replaced = registry.lock().unwrap().current.contains_key(&member.learner_id);
+                        if !replaced {
+                            append_pool_record(
+                                cfg.event_tape.as_deref(),
+                                "pool_leave",
+                                cfg.syncer_epoch,
+                                &format!(
+                                    "\"island_id\":{},\"generation\":{},\"reason\":\"{}\"",
+                                    member.learner_id,
+                                    member.generation,
+                                    leave_reasons
+                                        .get(&member)
+                                        .map_or_else(|| "disconnected".to_string(), |r| leave_reason_name(*r))
+                                ),
+                            );
+                        }
+                    }
+                    leave_reasons.remove(&member);
                     step_rates.remove(member);
+                    let candidates = recovery_candidates(&registry, &inflight);
+                    let out = recovery.on_gone(member, &candidates, Instant::now());
+                    send_recovery(&registry, out).await;
 
                     let replacement = {
                         let registry = registry.lock().unwrap();
@@ -2771,50 +3694,11 @@ async fn scheduler(
                             if let Some(group) = group {
                                 // Catch-up must precede a replay even when the
                                 // disconnect event wins the race with the queued
-                                // replacement HELLO.
-                                if let Some(pending) = publishing.take() {
-                                    settle_pending_publish(
-                                        &cfg,
-                                        &st,
-                                        &registry,
-                                        &mut last_sync_secs,
-                                        pending,
-                                        &budget_cutoff,
-                                        &mut busy_fragments,
-                                    )
-                                    .await?;
-                                }
-                                if st.global_step < cfg.total_steps {
-                                    send_all_fragments(&st, &group, &budget_cutoff).await;
-                                }
-                                let repulls = rebind_current_unanswered_rounds(
-                                    &registry,
-                                    &mut inflight,
-                                    replacement,
-                                );
-                                for repull in repulls {
-                                    if !send_small_until_cutoff(
-                                        &group,
-                                        MSG_PULL_REQ,
-                                        repull.pull,
-                                        &budget_cutoff,
-                                    )
-                                    .await
-                                    {
-                                        cutoff_established = true;
-                                        break 'outer;
-                                    }
-                                    info!(
-                                        learner_id = replacement.learner_id,
-                                        old_generation = repull.old_generation,
-                                        generation = replacement.generation,
-                                        step = repull.t,
-                                        fragment = repull.p,
-                                        attempt = repull.attempt,
-                                        base_version = repull.base_version,
-                                        "rebound outstanding pull after captured generation disconnected"
-                                    );
-                                }
+                                // replacement HELLO: the rebind runs only once
+                                // the catch-up has finished.
+                                let fragments =
+                                    if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
+                                catch_ups.enqueue(replacement, group, fragments, CatchUpTail::REBIND);
                             }
                         }
                     }
@@ -2868,8 +3752,8 @@ async fn scheduler(
         return Ok(());
     }
 
-    if next_commit_t != cfg.total_steps.saturating_add(1)
-        || st.global_step != cfg.total_steps
+    if next_commit_t != schedule.step_after(last_step)
+        || st.global_step != last_step
         || !busy_fragments.is_empty()
         || publishing.is_some()
     {
@@ -2913,6 +3797,15 @@ async fn scheduler(
         dump_state(&st, path)?;
         info!(path = %path.display(), "final global state written");
     }
+    // An island still under peer recovery takes the final cut like any
+    // member: it is promoted with the degraded source first.
+    let recovering: Vec<Arc<Group>> = {
+        let registry = registry.lock().unwrap();
+        registry.recovering.values().filter_map(|member| registry.groups.get(member).cloned()).collect()
+    };
+    for group in recovering {
+        admit_recovering_outside_training(&registry, &group, "finalization").await;
+    }
     // Freeze terminal membership to the live groups at the final cut.
     // Learners already abandoned by fleet recovery are not valid artifact
     // producers and must not prevent surviving learners from finalizing.
@@ -2924,7 +3817,13 @@ async fn scheduler(
             .map(|group| group.member.learner_id)
             .collect()
     };
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "finishing");
+    }
     finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "finished");
+    }
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -3112,6 +4011,7 @@ async fn collect_budget_reports(
                 }
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(registry, &group, "the budget cutoff").await;
                 let learner_id = group.member.learner_id;
                 if is_current_member(registry, group.member) && !reports.contains(&learner_id) {
                     progress_deadlines
@@ -3123,7 +4023,8 @@ async fn collect_budget_reports(
                 generation = member.generation,
                 "disconnected while waiting for learner-budget cutoff"
             ),
-            Event::Init { .. } | Event::FinalAck { .. } => {}
+            Event::Init { .. } | Event::InitDigest { .. } | Event::FinalAck { .. } | Event::Leave { .. } => {}
+            Event::Recovery { member, .. } => ignore_recovery_message(member, "the budget cutoff"),
         }
     }
     Ok(())
@@ -3142,9 +4043,42 @@ struct Round {
     quorum_deadline: Instant,
     grace_deadline: Option<Instant>,
     quorum_size: usize,
+    /// Capacity quorum θ frozen at launch; None = count quorum `quorum_size`.
+    capacity_quorum: Option<CapacityQuorum>,
+    /// Soft deadline: merge what arrived (at least `soft_min`) even below
+    /// quorum once it passes. None = off.
+    soft_deadline: Option<Instant>,
+    soft_min: usize,
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
+    /// Streaming reduction of accepted pushes (see `round_fold`); `None`
+    /// keeps every push's gradient until the buffered merge.
+    fold: Option<RoundFold>,
     pushes: HashMap<Member, Push>,
+    /// Late deltas of earlier rounds of this fragment (async rounds, see
+    /// `LateCarry`): merged here against their own base, in arrival order.
+    /// They never count toward quorum and stay buffered until the merge.
+    carried: Vec<(Member, Push)>,
+}
+
+impl Round {
+    fn quorum_reached(&self) -> bool {
+        match &self.capacity_quorum {
+            Some(quorum) => quorum.reached(&self.expected_members, self.pushes.keys()),
+            None => self.pushes.len() >= self.quorum_size,
+        }
+    }
+
+    /// Drop an expired member from the islands this round still waits for.
+    /// An accepted push is permanent and keeps its slot.
+    fn forget_unanswered(&mut self, member: Member) -> bool {
+        if self.pushes.contains_key(&member) {
+            return false;
+        }
+        let before = self.expected_members.len();
+        self.expected_members.retain(|expected| *expected != member);
+        before != self.expected_members.len()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3220,14 +4154,21 @@ enum RoundAction {
 }
 
 fn round_action(round: &Round, now: Instant) -> RoundAction {
-    if round.pushes.len() >= round.expected_members.len() {
+    // A round never merges nothing: if lease expiry emptied its expected
+    // set, it waits for the quorum timeout and relaunches.
+    if !round.pushes.is_empty() && round.pushes.len() >= round.expected_members.len() {
         return RoundAction::Complete;
     }
-    if round.pushes.len() >= round.quorum_size {
+    if round.quorum_reached() {
         return match round.grace_deadline {
             Some(deadline) if now >= deadline => RoundAction::Complete,
             _ => RoundAction::Wait,
         };
+    }
+    if round.soft_deadline.is_some_and(|deadline| now >= deadline)
+        && round.pushes.len() >= round.soft_min.max(1)
+    {
+        return RoundAction::Complete;
     }
     if now >= round.quorum_deadline {
         RoundAction::Restart
@@ -3388,12 +4329,301 @@ fn route_push(
         return PushDisposition::Duplicate;
     }
     round.pushes.insert(member, push);
+    advance_fold(round, member);
     PushDisposition::Accepted
+}
+
+/// Late-push carry for asynchronous rounds.
+///
+/// A push that reaches the syncer after its round closed still holds the
+/// island's work since its anchor (`local - raw anchor at base_version`).
+/// Instead of dropping it, the syncer merges it into the next round of the
+/// same fragment against its own base, weighted by its counters (and the
+/// carry discount), as long as its base lag stays within `--max-base-lag`.
+///
+/// A carried delta counts once: after the syncer carries a delta from an
+/// anchor (fragment version), a later push of that island connection from
+/// the same or an older anchor of that fragment is refused
+/// (`anchor_reused`), and a late push from an anchor whose delta was
+/// already merged is not carried. Pushes that never involve a carry keep
+/// the existing stale-base rules.
+struct LateCarry {
+    limit: u64,
+    /// Late pushes waiting for their fragment's next round.
+    queued: HashMap<usize, Vec<(Member, Push)>>,
+    /// Newest base version of a carried delta per island connection and
+    /// fragment.
+    anchors: HashMap<(Member, usize), u64>,
+    /// Newest base version of a delta gathered by its own round.
+    gathered: HashMap<(Member, usize), u64>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CarryOutcome {
+    /// Added to the open round of this fragment launched at `step`.
+    Attached { step: u64, lag: u64 },
+    /// Held until the fragment's next round launches.
+    Queued,
+    Rejected(PushDisposition),
+}
+
+impl LateCarry {
+    /// Carry is on for asynchronous rounds only: a positive base-lag bound
+    /// and no fixed roster. Strict (`--max-base-lag 0`) and unbounded runs
+    /// keep refusing late pushes.
+    fn new(max_base_lag: Option<u64>, fixed_roster: bool) -> Option<Self> {
+        match max_base_lag {
+            Some(limit) if limit > 0 && !fixed_roster => Some(Self {
+                limit,
+                queued: HashMap::new(),
+                anchors: HashMap::new(),
+                gathered: HashMap::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// True when `push` reuses an anchor this connection already spent.
+    fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
+        self.anchors
+            .get(&(member, push.fragment_id as usize))
+            .is_some_and(|&spent| push.base_version <= spent)
+    }
+
+    fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
+        let spent = self.anchors.entry((member, fragment)).or_insert(0);
+        *spent = (*spent).max(base_version);
+    }
+
+    fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
+        let taken = self.gathered.entry((member, fragment)).or_insert(0);
+        *taken = (*taken).max(base_version);
+    }
+
+    /// A restarted round drops its gathered pushes; their islands answer the
+    /// new attempt from the same anchor, so the anchor is free again.
+    fn release_anchor(&mut self, member: Member, push: &Push) {
+        let key = (member, push.fragment_id as usize);
+        if self.gathered.get(&key) == Some(&push.base_version) {
+            if push.base_version == 0 {
+                self.gathered.remove(&key);
+            } else {
+                self.gathered.insert(key, push.base_version - 1);
+            }
+        }
+    }
+
+    /// Route a push that `route_push` found no open round for.
+    /// `next_t` is the next step to launch; `current_version` the fragment's
+    /// committed version.
+    fn carry(
+        &mut self,
+        rounds: &mut [Round],
+        member: Member,
+        push: Push,
+        next_t: u64,
+        current_version: u64,
+    ) -> CarryOutcome {
+        let p = push.fragment_id as usize;
+        // A push for a round still open under another attempt, or for a
+        // round never launched, is not late.
+        if push.global_step >= next_t
+            || rounds.iter().any(|round| round.t == push.global_step && round.p == p)
+        {
+            return CarryOutcome::Rejected(PushDisposition::OutOfRound);
+        }
+        if push.base_version > current_version {
+            return CarryOutcome::Rejected(PushDisposition::FutureBase);
+        }
+        if self
+            .gathered
+            .get(&(member, p))
+            .is_some_and(|&taken| push.base_version <= taken)
+        {
+            return CarryOutcome::Rejected(PushDisposition::Duplicate);
+        }
+        if current_version - push.base_version > self.limit {
+            return CarryOutcome::Rejected(PushDisposition::StaleBase);
+        }
+        if let Some(round) = rounds
+            .iter_mut()
+            .find(|round| round.p == p && round.t > push.global_step)
+        {
+            return match attach_carry(round, member, push, self.limit) {
+                Ok(lag) => CarryOutcome::Attached { step: round.t, lag },
+                Err(disposition) => CarryOutcome::Rejected(disposition),
+            };
+        }
+        self.queued.entry(p).or_default().push((member, push));
+        CarryOutcome::Queued
+    }
+
+    /// Move the late pushes queued for `round`'s fragment into it.
+    fn attach_queued(&mut self, round: &mut Round) -> Vec<(Member, u64, Result<u64, PushDisposition>)> {
+        let Some(queued) = self.queued.remove(&round.p) else {
+            return Vec::new();
+        };
+        queued
+            .into_iter()
+            .map(|(member, push)| {
+                let missed = push.global_step;
+                (member, missed, attach_carry(round, member, push, self.limit))
+            })
+            .collect()
+    }
+}
+
+/// Log (and with dynamic membership, tape) the outcome of a late push.
+fn log_carry(
+    cfg: &Config,
+    dynamic: bool,
+    member: Member,
+    missed_step: u64,
+    into_step: u64,
+    outcome: Result<u64, PushDisposition>,
+) {
+    let island = member.learner_id;
+    match outcome {
+        Ok(lag) => {
+            info!(island, missed_step, into_step, lag, "late push carried into a later round");
+            if dynamic {
+                append_pool_record(
+                    cfg.event_tape.as_deref(),
+                    "delta_carried_over",
+                    cfg.syncer_epoch,
+                    &format!(
+                        "\"island_id\":{island},\"missed_step\":{missed_step},\"step\":{into_step},\"lag\":{lag},\"discount\":{:?}",
+                        cfg.membership.carry_discount(lag)
+                    ),
+                );
+            }
+        }
+        Err(disposition) => {
+            warn!(island, missed_step, reason = ?disposition, "late push not carried");
+            if dynamic {
+                let reason = match disposition {
+                    PushDisposition::StaleBase => "carry_lag_exceeded",
+                    PushDisposition::FutureBase => "future_base",
+                    PushDisposition::Duplicate => "anchor_reused",
+                    _ => "out_of_round",
+                };
+                append_pool_record(
+                    cfg.event_tape.as_deref(),
+                    "delta_rejected",
+                    cfg.syncer_epoch,
+                    &format!("\"island_id\":{island},\"reason\":\"{reason}\""),
+                );
+            }
+        }
+    }
+}
+
+/// Add a late delta to an open round; returns its base lag.
+fn attach_carry(
+    round: &mut Round,
+    member: Member,
+    push: Push,
+    limit: u64,
+) -> Result<u64, PushDisposition> {
+    // The exact fold reproduces a fixed responder set bit for bit.
+    if matches!(round.fold, Some(RoundFold::Exact(_))) {
+        return Err(PushDisposition::OutOfRound);
+    }
+    if push.base_version > round.base_version {
+        return Err(PushDisposition::FutureBase);
+    }
+    let lag = round.base_version - push.base_version;
+    if lag > limit {
+        return Err(PushDisposition::StaleBase);
+    }
+    round.carried.push((member, push));
+    Ok(lag)
+}
+
+/// The streaming reduction for a new round attempt, or `None` to keep every
+/// push's gradient until the buffered merge.
+///
+/// * Exact (bit-identical, see `fold.rs`): every expected learner must
+///   answer (quorum covers the roster) and weights are equal.
+/// * Streaming (`--weighted-fold streaming`): any other quorum or weight;
+///   pushes fold in arrival order and normalise at close.
+///
+/// HeLoCo corrects each push against momentum and always stays buffered;
+/// so do expert token weights, which weight each tensor separately.
+///
+/// Dynamic membership stays buffered: a lease expiry or soft deadline can
+/// drop a push that was already folded, and a carry discount changes
+/// per-push weights.
+fn round_fold(
+    cfg: &Config,
+    st: &GlobalState,
+    p: usize,
+    expected_members: &[Member],
+    quorum_size: usize,
+) -> Option<RoundFold> {
+    if st.delta_correction.is_some() || !cfg.membership.is_static() || cfg.expert_token_weights {
+        return None;
+    }
+    let fragment = st.layout.fragments.get(p)?;
+    if quorum_size >= expected_members.len() && cfg.learner_weight == LearnerWeight::Equal {
+        let roster: Vec<u32> = expected_members.iter().map(|m| m.learner_id).collect();
+        if let Some(fold) = FragmentFold::for_equal_full_roster(fragment, &roster) {
+            return Some(RoundFold::Exact(fold));
+        }
+    }
+    match cfg.weighted_fold {
+        WeightedFoldMode::Buffered => None,
+        WeightedFoldMode::Streaming => {
+            StreamingFold::new(fragment, cfg.learner_weight.function()).map(RoundFold::Streaming)
+        }
+    }
+}
+
+/// Fold what the round's fold can take now and release those gradient
+/// buffers.  The exact fold takes pushes in canonical learner order (later
+/// ones wait in `round.pushes`); the streaming fold takes `member`'s push.
+fn advance_fold(round: &mut Round, member: Member) {
+    match round.fold.as_mut() {
+        None => {}
+        Some(RoundFold::Exact(fold)) => {
+            while let Some(next) = fold.next_learner() {
+                let Some(push) = round
+                    .pushes
+                    .iter_mut()
+                    .find_map(|(member, push)| (member.learner_id == next).then_some(push))
+                else {
+                    break;
+                };
+                let gradient = std::mem::take(&mut push.outer_gradient);
+                if let Err(error) = fold.fold_next(next, gradient) {
+                    fold.poison(error);
+                    break;
+                }
+            }
+        }
+        Some(RoundFold::Streaming(fold)) => {
+            if fold.is_poisoned() {
+                return;
+            }
+            let Some(push) = round.pushes.get_mut(&member) else {
+                return;
+            };
+            let weight = fold.weight_of(push.c_tokens, u64::from(push.c_steps));
+            let gradient = std::mem::take(&mut push.outer_gradient);
+            if let Err(error) = fold.fold(member.learner_id, gradient, weight) {
+                fold.poison(error);
+            }
+        }
+    }
 }
 
 /// Fix learner order and prepare owned matrix jobs without mutating global
 /// optimizer state. This exact order is the reduction order on every run.
-fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Result<PreparedMerge> {
+fn prepare_round_compute(
+    cfg: &Config,
+    st: &GlobalState,
+    round: &mut Round,
+) -> Result<PreparedMerge> {
     if st.versions.get(round.p).copied() != Some(round.base_version) {
         bail!(
             "round t={} fragment {} base version {} != current {:?}",
@@ -3405,9 +4635,13 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
     }
     let mut ordered_pushes: Vec<_> = round.pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let responders = ordered_pushes.len();
+    // Carried late deltas follow this round's own pushes, in arrival order.
+    ordered_pushes.extend(round.carried.iter().map(|(member, push)| (member, push)));
     let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
     let mut weights = Vec::with_capacity(ordered_pushes.len());
-    for (member, push) in ordered_pushes {
+    let mut tensor_scales = Vec::with_capacity(ordered_pushes.len());
+    for (member, push) in &ordered_pushes {
         if push.base_version < round.base_version {
             warn!(
                 learner_id = member.learner_id,
@@ -3419,14 +4653,60 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
             );
         }
         outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(match cfg.learner_weight {
-            LearnerWeight::Tokens2OverSteps => {
-                crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
-            }
-            LearnerWeight::Equal => 1.0,
-        });
+        let weight = cfg.learner_weight.function()(push.c_tokens, u64::from(push.c_steps));
+        // Carry discount γ^lag per fragment version (1 when off: exact).
+        weights.push(weight * cfg.membership.carry_discount(round.base_version - push.base_version));
+        if cfg.expert_token_weights {
+            let scales = push.tensor_scales.as_deref().with_context(|| {
+                format!("round t={} fragment {}: push without expert token tags", round.t, round.p)
+            })?;
+            tensor_scales.push(scales);
+        }
     }
-    st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
+    if !cfg.membership.is_static() {
+        append_outer_step_record(cfg, round, &ordered_pushes, &weights);
+    }
+    let Some(mut fold) = round.fold.take() else {
+        let tensor_scales = cfg.expert_token_weights.then_some(tensor_scales.as_slice());
+        return st.prepare_merge_scaled(
+            round.p,
+            round.base_version,
+            &outer_gradients,
+            &weights,
+            tensor_scales,
+        );
+    };
+    // Every responder must have been folded exactly once.  The exact fold
+    // reduced in learner-id order, which equals the buffered merge's Member
+    // order when ids are unique; the streaming fold in arrival order.
+    let responders: Vec<u32> =
+        ordered_pushes[..responders].iter().map(|(m, _)| m.learner_id).collect();
+    let mut folded = fold.folded_learners().to_vec();
+    folded.sort_unstable();
+    if folded != responders {
+        bail!(
+            "round t={} fragment {}: streaming fold covered learners {:?}, responders {:?}",
+            round.t,
+            round.p,
+            fold.folded_learners(),
+            responders
+        );
+    }
+    // Carried deltas stay buffered until now (only a streaming fold admits
+    // them, see `attach_carry`).
+    if !round.carried.is_empty() {
+        let RoundFold::Streaming(streaming) = &mut fold else {
+            bail!("round t={} fragment {}: carried deltas need a streaming fold", round.t, round.p);
+        };
+        for (index, (member, push)) in round.carried.iter_mut().enumerate() {
+            let weight = weights[responders.len() + index];
+            streaming.fold(member.learner_id, std::mem::take(&mut push.outer_gradient), weight)?;
+        }
+    }
+    let delta = fold
+        .finish()
+        .with_context(|| format!("round t={} fragment {}", round.t, round.p))?;
+    st.prepare_reduced_merge(round.p, round.base_version, delta)
 }
 
 /// A round whose merge is applied to `GlobalState` but not yet externally
@@ -3442,6 +4722,7 @@ struct CommittedRound {
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     pushes: HashMap<Member, Push>,
+    carried: Vec<(Member, Push)>,
     gnorm: f64,
     compute_secs: f64,
     sync_start: Instant,
@@ -3494,12 +4775,10 @@ fn apply_round_commit(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         ..
     } = round;
-    let expected_t = st
-        .global_step
-        .checked_add(1)
-        .context("global step overflow before round commit")?;
+    let expected_t = st.schedule().step_after(st.global_step);
     if t != expected_t {
         bail!("refusing non-contiguous round commit: got step {t}, expected {expected_t}");
     }
@@ -3515,7 +4794,9 @@ fn apply_round_commit(
     st.global_step = t;
     let mut ordered_pushes: Vec<_> = pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
-    for (_, push) in ordered_pushes {
+    // A carried delta was never counted by the round it missed.
+    let merged = ordered_pushes.into_iter().chain(carried.iter().map(|(member, push)| (member, push)));
+    for (_, push) in merged {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
                 push.learner_id,
@@ -3540,6 +4821,7 @@ fn apply_round_commit(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         gnorm,
         compute_secs,
         sync_start,
@@ -3569,6 +4851,7 @@ async fn publish_round(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         gnorm,
         compute_secs,
         sync_start,
@@ -3580,7 +4863,7 @@ async fn publish_round(
     // instead of silently committing a cut that was never broadcastable.
     // The terminal round is the sole exception: finalize_learners publishes
     // its exact f32 cut immediately after the scheduler reaches quiescence.
-    if t < cfg.total_steps {
+    if t < st.schedule().last_step(cfg.total_steps) {
         let dtype = bulk_dtype(st.wire_dtype);
         // bf16 downlink: encode this version once (advancing the shared
         // anchor) and send the same bytes to every learner.
@@ -3590,7 +4873,7 @@ async fn publish_round(
                 // Islands key stored fragments by (fragment, version) and
                 // refuse a second copy with other bytes, so that broadcast
                 // must carry the exact f32 masters (FULL), not a bf16 delta.
-                let last_version = t + st.params.len() as u64 > cfg.total_steps;
+                let last_version = st.schedule().next_merge_of_fragment(t) > cfg.total_steps;
                 let mut anchors = anchors.lock().unwrap();
                 Some(if last_version {
                     anchors.publish_full(p, st.versions[p], &st.params[p])
@@ -3661,6 +4944,7 @@ async fn publish_round(
             sync_ms,
             checkpoint_ms,
             &pushes,
+            &carried,
             gnorm,
             ms,
             &st.layout_fingerprint,
@@ -3675,7 +4959,7 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+            if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
                 info!(step = t, path = %path.display(), "checkpoint written");
             }
@@ -3706,10 +4990,9 @@ fn start_async_checkpoint(
         .clone()
         .context("--async-checkpoint requires --checkpoint-path")?;
     let write_started = Instant::now();
-    let bytes = st.encode_checkpoint()?;
-    let write = tokio::task::spawn_blocking(move || {
-        crate::state::write_checkpoint_bytes(&path, &bytes)
-    });
+    // Shares fragment buffers with `st`; no model-sized copy is made here.
+    let snapshot = st.checkpoint_snapshot()?;
+    let write = tokio::task::spawn_blocking(move || snapshot.save(&path));
     Ok(PendingPublish {
         committed,
         write_started,
@@ -3781,9 +5064,9 @@ async fn complete_round(
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    mut round: Round,
 ) -> Result<()> {
-    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let prepared = prepare_round_compute(cfg, st, &mut round)?;
     let compute_start = Instant::now();
     let merge = prepared.compute().await?;
     let completed = ComputedRound {
@@ -3802,9 +5085,9 @@ async fn complete_round_async(
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    mut round: Round,
 ) -> Result<()> {
-    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let prepared = prepare_round_compute(cfg, st, &mut round)?;
     let compute_start = Instant::now();
     let merge = prepared.compute().await?;
     let completed = ComputedRound {
@@ -3845,6 +5128,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
     st.session_contract_hash = Some(group.session_contract_hash);
+    st.set_shard(cfg.shard)?;
     match (bcast_delta(group.dtype), cfg.bcast_delta_full_every) {
         (true, Some(full_every)) => {
             st.downlink = Some(Mutex::new(crate::downlink::DownlinkAnchors::new(
@@ -3859,11 +5143,151 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
+    st.set_delayed_nesterov_period(cfg.outer_delayed_nesterov_period)?;
     info!(
         iso_backend = %st.iso_backend_kind(),
         "initialized global state"
     );
     Ok(st)
+}
+
+/// Apply lease expiry: expired members leave the pool, stop counting toward
+/// any round they have not answered, and are told to re-JOIN.
+/// Returns the expired members.
+async fn expire_member_leases(
+    registry: &Registry,
+    inflight: &mut [Round],
+    step_rates: &mut StepRates,
+) -> Vec<Member> {
+    let expired = registry.lock().unwrap().expire_leases(Instant::now());
+    let members = expired.iter().map(|(member, _)| *member).collect();
+    for (member, group) in expired {
+        let rounds = inflight
+            .iter_mut()
+            .map(|r| r.forget_unanswered(member))
+            .filter(|&forgot| forgot)
+            .count();
+        step_rates.remove(member);
+        warn!(
+            learner_id = member.learner_id,
+            generation = member.generation,
+            rounds,
+            "island lease expired; removed from membership"
+        );
+        if let Some(group) = group {
+            let message = bytes::Bytes::from_static(LEASE_EXPIRED_MESSAGE.as_bytes());
+            let _ = group.send_small(MSG_ERROR, message).await;
+        }
+    }
+    members
+}
+
+/// MSG_ERROR text of a lease expiry; the Python client redials with a new
+/// generation on it (`yeto/protocol.py` LEASE_EXPIRED_PREFIX).
+const LEASE_EXPIRED_MESSAGE: &str = "island lease expired: re-JOIN required";
+
+// --- peer recovery wiring (state machine in recovery.rs) -------------------
+
+/// Current members as donor candidates with their unanswered pull count.
+fn recovery_candidates(registry: &Registry, inflight: &[Round]) -> Vec<recovery::Candidate> {
+    let members: Vec<Member> = registry.lock().unwrap().current.values().copied().collect();
+    members
+        .into_iter()
+        .map(|member| recovery::Candidate {
+            member,
+            outstanding: inflight
+                .iter()
+                .filter(|r| r.expected_members.contains(&member) && !r.pushes.contains_key(&member))
+                .count(),
+        })
+        .collect()
+}
+
+/// Send recovery control messages. A target that is gone is skipped: its
+/// Disconnected event moves the recovery on.
+async fn send_recovery(registry: &Registry, out: Vec<recovery::Outbound>) {
+    for msg in out {
+        let group = registry.lock().unwrap().groups.get(&msg.to).cloned();
+        let sent = match group {
+            Some(group) => group.send_small(msg.msg_type, msg.payload.into()).await,
+            None => Err(anyhow::anyhow!("connection is gone")),
+        };
+        if let Err(error) = sent {
+            warn!(learner_id = msg.to.learner_id, generation = msg.to.generation, msg_type = msg.msg_type, "recovery message not sent: {error:#}");
+        }
+    }
+}
+
+/// Outside the training loop (init, budget cutoff, finalization) there is
+/// no round clock to recover against: the island is put on the roster at
+/// once with the degraded source, and the phase's own catch-up follows.
+async fn admit_recovering_outside_training(registry: &Registry, group: &Arc<Group>, phase: &str) {
+    if !registry.lock().unwrap().promote_recovered(group.member) {
+        return;
+    }
+    warn!(
+        learner_id = group.member.learner_id,
+        generation = group.member.generation,
+        "peer recovery is not available during {phase}; degraded path"
+    );
+    let reason = format!("syncer is in {phase}, not training");
+    let out = recovery::degraded_outside_training(group.member, group.layout.fragments.len(), &reason);
+    send_recovery(registry, out).await;
+}
+
+/// Rebind the unanswered pulls of existing rounds to `group` (a reconnected
+/// or recovered generation). False when the budget cutoff closed the gate.
+async fn repull_rounds_for(
+    group: &Arc<Group>,
+    registry: &Registry,
+    inflight: &mut [Round],
+    fixed_roster: bool,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    let repulls = if fixed_roster {
+        fixed_roster_repulls(inflight, group.member)
+    } else {
+        rebind_current_unanswered_rounds(registry, inflight, group.member)
+    };
+    for repull in repulls {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, repull.pull, budget_cutoff).await {
+            return false;
+        }
+        info!(
+            learner_id = group.member.learner_id,
+            old_generation = repull.old_generation,
+            generation = group.member.generation,
+            step = repull.t,
+            fragment = repull.p,
+            attempt = repull.attempt,
+            base_version = repull.base_version,
+            "rebound outstanding pull to reconnected learner generation"
+        );
+    }
+    true
+}
+
+fn ignore_recovery_message(member: Member, phase: &str) {
+    warn!(
+        learner_id = member.learner_id,
+        generation = member.generation,
+        "recovery message during {phase} dropped (no recovery in progress)"
+    );
+}
+
+fn append_recovery_record(path: Option<&std::path::Path>, record: &recovery::RecoveryRecord) {
+    use std::io::Write;
+
+    let Some(path) = path else { return };
+    let line = format!("{}\n", record.to_json());
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
@@ -3883,18 +5307,17 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
 
 async fn broadcast_all_fragments(
     st: &GlobalState,
-    registry: &Registry,
+    groups: &[Arc<Group>],
     budget_cutoff: &BudgetCutoff,
 ) {
-    let groups = current_groups(registry);
     // Fan each fragment out to every learner before moving to the next one.
     // Each learner has independent socket-writer queues, so this keeps all
     // links busy concurrently.  Iterating learner-by-learner here serializes
     // one full model transfer per learner (tens of GiB for large models).
     // The current streaming encoder keeps peak host memory bounded while the
     // per-learner socket queues provide link concurrency.
-    for p in 0..st.layout.fragments.len() {
-        for group in &groups {
+    for p in st.owned_fragments() {
+        for group in groups {
             match send_fragment_until_cutoff(
                 st,
                 group,
@@ -3922,10 +5345,13 @@ async fn broadcast_all_fragments(
 /// Send every authoritative f32 fragment, then publish the version manifest
 /// on the control stream. Data/control streams may reorder; learners cache
 /// terminal fragments and use the manifest to decide when the complete cut
-/// is locally available.
-async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
-    for p in 0..st.layout.fragments.len() {
-        send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
+/// is locally available. `manifest_only`: the manifest alone (islands that
+/// acknowledge without holding the final parameters).
+async fn send_final_cut(st: &GlobalState, group: &Arc<Group>, manifest_only: bool) -> Result<()> {
+    if !manifest_only {
+        for p in st.owned_fragments() {
+            send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
+        }
     }
     group
         .send_small(
@@ -3988,10 +5414,16 @@ async fn finalize_learners(
     if expected.is_empty() {
         bail!("cannot finalize: no live learner groups at the final cut");
     }
+    // Dynamic membership: the final cut goes to every island that is (or
+    // becomes) connected, the wait is bounded by the final grace window and
+    // an island that left or never answered does not fail the run.
+    let final_grace = cfg.membership.final_grace;
+    let mut expected = expected.clone();
+    let expected = &mut expected;
     let mut eligible: HashMap<u32, HashSet<Member>> = HashMap::new();
     for group in current_groups(registry) {
         if expected.contains(&group.member.learner_id) {
-            match send_final_cut(st, &group).await {
+            match send_final_cut(st, &group, cfg.final_cut_manifest_only).await {
                 Ok(()) => {
                     eligible
                         .entry(group.member.learner_id)
@@ -4010,26 +5442,53 @@ async fn finalize_learners(
         }
     }
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.final_ack_timeout_s);
+    let wait = final_grace.unwrap_or(Duration::from_secs(cfg.final_ack_timeout_s));
+    let deadline = Instant::now() + wait;
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
-    while acknowledged.len() < expected.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, events.recv())
-            .await
-            .map_err(|_| {
-                let mut missing: Vec<u32> = expected
-                    .iter()
-                    .copied()
-                    .filter(|id| !acknowledged.contains_key(id))
-                    .collect();
+    // With dynamic membership, an island whose lease runs out during
+    // finalization is absent: the final cut no longer waits for its ACK.
+    let mut absence = FinalAbsence::new(cfg, expected, registry);
+    while !absence.pending(expected, &acknowledged).is_empty() {
+        let now = Instant::now();
+        let wake = absence.next_deadline(registry).map_or(deadline, |at| at.min(deadline));
+        let event = match tokio::time::timeout(wake.saturating_duration_since(now), events.recv()).await {
+            Ok(event) => event.context("event channel closed during finalization")?,
+            Err(_) if Instant::now() < deadline => {
+                for learner_id in absence.drop_expired(registry, expected, Instant::now()) {
+                    warn!(learner_id, "lease expired during finalization; final ACK no longer required");
+                }
+                if absence.pending(expected, &acknowledged).is_empty() && acknowledged.is_empty() {
+                    bail!("cannot finalize: every learner's lease expired before it acknowledged the final cut");
+                }
+                continue;
+            }
+            Err(_) => {
+                let mut missing: Vec<u32> = absence.pending(expected, &acknowledged).into_iter().collect();
                 missing.sort_unstable();
-                anyhow::anyhow!(
+                if final_grace.is_some() {
+                    warn!(?missing, "final grace window ended; finishing without these islands");
+                    let acked: Vec<u32> = acknowledged.keys().copied().collect();
+                    append_pool_record(
+                        cfg.event_tape.as_deref(),
+                        "final_grace_expired",
+                        cfg.syncer_epoch,
+                        &format!(
+                            "\"final_step\":{},\"acknowledged\":{},\"missing\":{}",
+                            st.global_step,
+                            json_ids(&acked),
+                            json_ids(&missing)
+                        ),
+                    );
+                    break;
+                }
+                bail!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
                     cfg.final_ack_timeout_s,
                     missing
-                )
-            })?
-            .context("event channel closed during finalization")?;
+                );
+            }
+        };
+        absence.observe(registry, &event);
         match event {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
@@ -4041,7 +5500,7 @@ async fn finalize_learners(
             } => {
                 let learner_id = member.learner_id;
                 match record_final_ack(
-                    expected,
+                    &*expected,
                     &eligible,
                     &mut acknowledged,
                     member,
@@ -4076,12 +5535,18 @@ async fn finalize_learners(
                 }
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(registry, &group, "finalization").await;
                 let member = group.member;
+                if final_grace.is_some() && is_current_member(registry, member) {
+                    // A late (re-)JOIN still gets the final cut and may
+                    // acknowledge it within the grace window.
+                    expected.insert(member.learner_id);
+                }
                 if expected.contains(&member.learner_id)
                     && !acknowledged.contains_key(&member.learner_id)
                     && is_current_member(registry, member)
                 {
-                    match send_final_cut(st, &group).await {
+                    match send_final_cut(st, &group, cfg.final_cut_manifest_only).await {
                         Ok(()) => {
                             eligible
                                 .entry(member.learner_id)
@@ -4106,6 +5571,20 @@ async fn finalize_learners(
                 }
             }
             Event::Disconnected { member } => {
+                if final_grace.is_some()
+                    && !acknowledged.contains_key(&member.learner_id)
+                    && !current_groups(registry)
+                        .iter()
+                        .any(|group| group.member.learner_id == member.learner_id)
+                {
+                    // The island left: stop waiting for it unless it re-JOINs.
+                    expected.remove(&member.learner_id);
+                    info!(
+                        learner_id = member.learner_id,
+                        "island left during the final grace window"
+                    );
+                    continue;
+                }
                 warn!(
                     learner_id = member.learner_id,
                     generation = member.generation,
@@ -4114,7 +5593,10 @@ async fn finalize_learners(
             }
             Event::Push { .. }
             | Event::Heartbeat { .. }
+            | Event::Leave { .. }
             | Event::Init { .. }
+            | Event::InitDigest { .. }
+            | Event::Recovery { .. }
             | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is
                 // intentionally ignored while learners finalize.
@@ -4134,35 +5616,203 @@ async fn finalize_learners(
     }
     info!(
         learners = acknowledged.len(),
+        absent = absence.dropped.len(),
         "all learners acknowledged final cut"
     );
     Ok(())
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
-    for p in 0..st.layout.fragments.len() {
-        match send_fragment_until_cutoff(
-            st,
-            group,
-            p,
-            MSG_BCAST_FRAGMENT,
-            bulk_dtype(st.wire_dtype),
-            budget_cutoff,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                warn!(
-                    learner_id = group.member.learner_id,
-                    generation = group.member.generation,
-                    fragment = p,
-                    %error,
-                    "recovery fragment encode failed"
-                );
-                return;
+/// Which expected learners the final cut still waits for. With static
+/// membership (or no lease) it waits for every expected learner until the
+/// final ACK timeout, as before. With a membership lease, a learner is dropped
+/// from the wait when its lease expires, or when it stays disconnected for one
+/// lease without a new generation saying HELLO.
+struct FinalAbsence {
+    lease: Option<Duration>,
+    disconnected_since: HashMap<u32, Instant>,
+    dropped: HashSet<u32>,
+}
+
+impl FinalAbsence {
+    fn new(cfg: &Config, expected: &HashSet<u32>, registry: &Registry) -> Self {
+        let lease = if cfg.membership.is_static() { None } else { cfg.membership.lease };
+        let mut disconnected_since = HashMap::new();
+        if lease.is_some() {
+            let now = Instant::now();
+            let registry = registry.lock().unwrap();
+            for id in expected.iter().filter(|id| !registry.current.contains_key(*id)) {
+                disconnected_since.insert(*id, now);
             }
+        }
+        Self { lease, disconnected_since, dropped: HashSet::new() }
+    }
+
+    /// `expected` is the finalization's live set (a late JOIN adds to it).
+    fn pending(&self, expected: &HashSet<u32>, acknowledged: &HashMap<u32, Member>) -> HashSet<u32> {
+        expected
+            .iter()
+            .copied()
+            .filter(|id| !acknowledged.contains_key(id) && !self.dropped.contains(id))
+            .collect()
+    }
+
+    /// Renew leases on traffic and track disconnects of the current generation.
+    fn observe(&mut self, registry: &Registry, event: &Event) {
+        if self.lease.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        match event {
+            Event::Heartbeat { member, .. } | Event::Push { member, .. } | Event::FinalAck { member, .. } => {
+                registry.lock().unwrap().membership.renew(*member, now);
+            }
+            Event::Hello { group } => {
+                self.disconnected_since.remove(&group.member.learner_id);
+            }
+            Event::Disconnected { member } => {
+                let current = registry.lock().unwrap().current.get(&member.learner_id).copied();
+                if current.is_none() || current == Some(*member) {
+                    self.disconnected_since.entry(member.learner_id).or_insert(now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn next_deadline(&self, registry: &Registry) -> Option<Instant> {
+        let lease = self.lease?;
+        let expiry = registry.lock().unwrap().membership.next_expiry();
+        self.disconnected_since.values().map(|since| *since + lease).chain(expiry).min()
+    }
+
+    /// Drop every pending learner whose lease expired; returns them in id order.
+    fn drop_expired(&mut self, registry: &Registry, expected: &HashSet<u32>, now: Instant) -> Vec<u32> {
+        let Some(lease) = self.lease else { return Vec::new() };
+        let mut gone: Vec<u32> = registry
+            .lock()
+            .unwrap()
+            .expire_leases(now)
+            .into_iter()
+            .map(|(member, _)| member.learner_id)
+            .collect();
+        gone.extend(
+            self.disconnected_since
+                .iter()
+                .filter(|(_, since)| now.saturating_duration_since(**since) >= lease)
+                .map(|(id, _)| *id),
+        );
+        gone.retain(|id| expected.contains(id) && self.dropped.insert(*id));
+        for id in &gone {
+            self.disconnected_since.remove(id);
+        }
+        gone.sort_unstable();
+        gone
+    }
+}
+
+/// What a finished catch-up still owes its learner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CatchUpTail {
+    /// HELLO path: record the catch-up and repull the learner's open rounds.
+    rejoin: bool,
+    /// Disconnect path: move the captured generation's unanswered slots to
+    /// the already-current replacement.
+    rebind: bool,
+}
+
+impl CatchUpTail {
+    const REJOIN: Self = Self { rejoin: true, rebind: false };
+    const REBIND: Self = Self { rejoin: false, rebind: true };
+}
+
+/// One rejoined learner's catch-up: the current value of every owned fragment.
+struct CatchUp<G> {
+    member: Member,
+    group: G,
+    remaining: std::collections::VecDeque<usize>,
+    tail: CatchUpTail,
+}
+
+enum CatchUpStep<G> {
+    /// Send this fragment's current value to the learner.
+    Send(Member, G, usize),
+    /// Every fragment went out (or the stream failed); run the tail.
+    Done(CatchUp<G>),
+}
+
+/// Rejoin catch-ups owned by the scheduler.
+///
+/// A catch-up is the whole model (about 110 GB of f32 for a 27B model). The
+/// scheduler sends one fragment per pass and then serves events and round
+/// deadlines again, so a catch-up delays a grace or quorum deadline by at
+/// most one fragment transfer instead of by the whole model (s27-gh-a: a
+/// 300 s grace window committed after 14 min). A learner does not join new
+/// rounds before its catch-up is done: its pushes would be against stale
+/// bases.
+struct CatchUps<G> {
+    queue: std::collections::VecDeque<CatchUp<G>>,
+}
+
+impl<G: Clone> CatchUps<G> {
+    fn new() -> Self {
+        Self { queue: std::collections::VecDeque::new() }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn holds(&self, member: Member) -> bool {
+        self.queue.iter().any(|catch_up| catch_up.member == member)
+    }
+
+    /// Queue a catch-up; a second request for the same generation only adds
+    /// its tail, because the fragments already sent are current.
+    fn enqueue(
+        &mut self,
+        member: Member,
+        group: G,
+        fragments: impl IntoIterator<Item = usize>,
+        tail: CatchUpTail,
+    ) {
+        if let Some(existing) = self.queue.iter_mut().find(|catch_up| catch_up.member == member) {
+            existing.tail.rejoin |= tail.rejoin;
+            existing.tail.rebind |= tail.rebind;
+            return;
+        }
+        self.queue.push_back(CatchUp { member, group, remaining: fragments.into_iter().collect(), tail });
+    }
+
+    /// Remove catch-ups whose generation is no longer current.
+    fn drop_superseded(&mut self, is_current: impl Fn(Member) -> bool) -> Vec<Member> {
+        let mut dropped = Vec::new();
+        self.queue.retain(|catch_up| {
+            let keep = is_current(catch_up.member);
+            if !keep {
+                dropped.push(catch_up.member);
+            }
+            keep
+        });
+        dropped
+    }
+
+    /// Stop sending to `member` (its stream failed); the tail still runs.
+    fn abandon(&mut self, member: Member) {
+        if let Some(catch_up) = self.queue.iter_mut().find(|catch_up| catch_up.member == member) {
+            catch_up.remaining.clear();
+        }
+    }
+
+    /// The next step, round-robin over the queued learners.
+    fn next_step(&mut self) -> Option<CatchUpStep<G>> {
+        let mut catch_up = self.queue.pop_front()?;
+        match catch_up.remaining.pop_front() {
+            Some(p) => {
+                let step = CatchUpStep::Send(catch_up.member, catch_up.group.clone(), p);
+                self.queue.push_back(catch_up);
+                Some(step)
+            }
+            None => Some(CatchUpStep::Done(catch_up)),
         }
     }
 }
@@ -4208,6 +5858,119 @@ async fn send_fragment(
 }
 
 /// One JSONL record per merge: the event tape.
+/// One island-pool record on the event tape: `{"kind":..,"syncer_epoch":..,
+/// <fields>,"time_unix":..}`. Written only with dynamic membership; the
+/// kinds (`pool_join`, `pool_leave`, `delta_carried_over`, `delta_rejected`,
+/// `outer_step`, `final_grace_expired`) are what the merge-metrics folder
+/// and the launcher's pool reader consume.
+fn append_pool_record(path: Option<&std::path::Path>, kind: &str, syncer_epoch: u64, fields: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let sep = if fields.is_empty() { "" } else { "," };
+    let line = format!(
+        "{{\"kind\":\"{kind}\",\"syncer_epoch\":{syncer_epoch}{sep}{fields},\"time_unix\":{:?}}}\n",
+        unix_now()
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
+/// The `outer_step` pool record of one merged round: who arrived, each
+/// push's normalized merge weight (`[island, base_version, weight]`), and
+/// which expected islands are absent. `timed_out` marks a soft-deadline
+/// merge below quorum.
+fn append_outer_step_record(
+    cfg: &Config,
+    round: &Round,
+    ordered_pushes: &[(&Member, &Push)],
+    weights: &[f64],
+) {
+    let capacity = |members: &mut dyn Iterator<Item = &Member>| -> f64 {
+        members.map(|member| cfg.membership.capacity(member.learner_id)).sum()
+    };
+    let cap_arrived = capacity(&mut round.pushes.keys());
+    let cap_total = capacity(&mut round.expected_members.iter());
+    let total: f64 = weights.iter().sum();
+    let entry = |(member, push): &(&Member, &Push), weight: f64| {
+        format!("[{},{},{:?}]", member.learner_id, push.base_version, weight)
+    };
+    let raw: Vec<String> = ordered_pushes.iter().zip(weights).map(|(p, w)| entry(p, *w)).collect();
+    let normalized: Vec<String> = ordered_pushes
+        .iter()
+        .zip(weights)
+        .map(|(p, w)| entry(p, if total > 0.0 { w / total } else { 0.0 }))
+        .collect();
+    let absent: Vec<u32> = round
+        .expected_members
+        .iter()
+        .filter(|member| !round.pushes.contains_key(member))
+        .map(|member| member.learner_id)
+        .collect();
+    append_pool_record(
+        cfg.event_tape.as_deref(),
+        "outer_step",
+        cfg.syncer_epoch,
+        &format!(
+            "\"step\":{},\"fragment\":{},\"base_version\":{},\"arrived\":{},\"cap_arrived\":{:?},\"cap_total\":{:?},\"timed_out\":{},\"raw_weights\":[{}],\"weights\":[{}],\"absent\":{},\"step_seconds\":{:?}",
+            round.t,
+            round.p,
+            round.base_version,
+            round.pushes.len(),
+            cap_arrived,
+            cap_total,
+            !round.quorum_reached(),
+            raw.join(","),
+            normalized.join(","),
+            json_ids(&absent),
+            round.started.elapsed().as_secs_f64(),
+        ),
+    );
+}
+
+/// Schema of `status.json`, written next to the event tape with dynamic
+/// membership (read by `yeto.rl.engine.island_status`).
+const POOL_STATUS_SCHEMA: &str = "yeto.syncer.elastic-status/v1";
+
+/// Atomically rewrite `status.json` beside the event tape: run state, syncer
+/// epoch, committed step and the live islands. Best effort (a write failure
+/// is logged, never fatal).
+fn write_pool_status(cfg: &Config, registry: &Registry, outer_version: u64, state: &str) {
+    let Some(tape) = cfg.event_tape.as_deref() else {
+        return;
+    };
+    let (syncer_epoch, membership_epoch, live) = {
+        let registry = registry.lock().unwrap();
+        let membership = &registry.membership;
+        (membership.syncer_epoch(), membership.epoch, membership.live_status(Instant::now()))
+    };
+    let cap_total: f64 = live.iter().map(|(_, capacity, _)| capacity).sum();
+    let islands: Vec<String> = live
+        .iter()
+        .map(|(id, capacity, lease)| {
+            let lease = lease.map_or_else(|| "null".to_string(), |d| format!("{:?}", d.as_secs_f64()));
+            format!("\"{id}\":{{\"capacity\":{capacity:?},\"lease_remaining_s\":{lease}}}")
+        })
+        .collect();
+    let body = format!(
+        "{{\"schema\":\"{POOL_STATUS_SCHEMA}\",\"state\":\"{state}\",\"syncer_epoch\":{syncer_epoch},\"membership_epoch\":{membership_epoch},\"outer_version\":{outer_version},\"cap_total\":{cap_total:?},\"islands\":{{{}}}}}",
+        islands.join(",")
+    );
+    let path = tape.with_file_name("status.json");
+    let temporary = tape.with_file_name(".status.json.tmp");
+    if let Err(error) = std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, &path)) {
+        warn!(path = %path.display(), "status write failed: {error}");
+    }
+}
+
 fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: &str) {
     use std::io::Write;
 
@@ -4336,6 +6099,7 @@ fn append_tape(
     sync_ms: u64,
     checkpoint_ms: Option<u64>,
     pushes: &HashMap<Member, Push>,
+    carried: &[(Member, Push)],
     gnorm: f64,
     ms: u64,
     layout_fingerprint: &[u8; 32],
@@ -4370,7 +6134,37 @@ fn append_tape(
             crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
         }
     };
-    let weight_sum: f64 = pushes.values().map(event_weight).sum();
+    let weight_sum: f64 = pushes
+        .values()
+        .chain(carried.iter().map(|(_, push)| push))
+        .map(event_weight)
+        .sum();
+    // Late deltas of earlier rounds merged here (async rounds only; the field
+    // is absent when there are none).
+    let carried_field = if carried.is_empty() {
+        String::new()
+    } else {
+        let entries: Vec<String> = carried
+            .iter()
+            .map(|(member, p)| {
+                let weight = event_weight(p);
+                let contribution = if weight_sum > 0.0 { weight / weight_sum } else { 0.0 };
+                format!(
+                    "{{\"id\":{},\"generation\":{},\"missed_step\":{},\"base_version\":{},\"lag\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{},\"contribution\":{}}}",
+                    p.learner_id,
+                    member.generation,
+                    p.global_step,
+                    p.base_version,
+                    launch_base_version.saturating_sub(p.base_version),
+                    p.c_steps,
+                    p.c_tokens,
+                    weight,
+                    contribution
+                )
+            })
+            .collect();
+        format!(",\"carried\":[{}]", entries.join(","))
+    };
     let mut responders: Vec<String> = pushes
         .iter()
         .map(|(member, p)| {
@@ -4414,7 +6208,7 @@ fn append_tape(
     let checkpoint_field = checkpoint_tape_field(checkpoint_ms);
     let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field}{carried_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -4481,7 +6275,7 @@ fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
     f.write_all(&(st.layout.fragments.len() as u32).to_le_bytes())?;
     for p in &st.params {
         f.write_all(&(p.len() as u64).to_le_bytes())?;
-        for v in p {
+        for v in p.iter() {
             f.write_all(&v.to_le_bytes())?;
         }
     }
@@ -4496,7 +6290,7 @@ mod hello_auth_tests {
         let mut input = HELLO_MAC_DOMAIN.to_vec();
         input.extend_from_slice(body);
         let mut out = body.to_vec();
-        out.extend_from_slice(&crate::elastic::hmac_sha256(key, &input));
+        out.extend_from_slice(&crate::hmac::hmac_sha256(key, &input));
         out
     }
 
@@ -4681,6 +6475,7 @@ mod tests {
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: 13,
             control,
             data: Mutex::new(HashMap::new()),
@@ -4702,6 +6497,7 @@ mod tests {
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: 13,
             control,
             data: Mutex::new(HashMap::new()),
@@ -4732,6 +6528,7 @@ mod tests {
             num_streams: u16::from(data_stream),
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: u64::MAX,
             control,
             data: Mutex::new(streams),
@@ -4836,8 +6633,41 @@ mod tests {
 
     fn registry_with_group(group: Arc<Group>) -> Registry {
         let registry = Arc::new(Mutex::new(RegistryState::default()));
-        registry.lock().unwrap().register_group(group).unwrap();
+        registry.lock().unwrap().register_group(group, Instant::now()).unwrap();
         registry
+    }
+
+    #[test]
+    fn resume_refuses_a_changed_or_missing_profile_record() {
+        let dir = std::env::temp_dir().join(format!("yeto-profile-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("actor.ckpt");
+        std::fs::write(&checkpoint, b"x").unwrap();
+        let record = profile_record_path(&checkpoint);
+        let _ = std::fs::remove_file(&record);
+        let mut config = round_test_config(4);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.resume = true;
+        // No requirement: nothing is checked, the record is (re)written.
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), hex32(&[1; 32]));
+        check_and_record_profile(&config, &[2; 32]).unwrap();
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        // Required: the same profile resumes; another one is refused with the remedy.
+        config.require_profile_record = true;
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        let error = check_and_record_profile(&config, &[2; 32]).unwrap_err().to_string();
+        assert!(error.contains("other sync settings"), "{error}");
+        assert!(error.contains("--rl-sync-mode strict"), "{error}");
+        // A missing record is refused when the launcher requires one.
+        std::fs::remove_file(&record).unwrap();
+        let error = check_and_record_profile(&config, &[1; 32]).unwrap_err().to_string();
+        assert!(error.contains("no semantic profile record"), "{error}");
+        // A fresh start always (re)writes the record.
+        config.resume = false;
+        check_and_record_profile(&config, &[3; 32]).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), hex32(&[3; 32]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn round_test_config(total_steps: u64) -> Config {
@@ -4858,6 +6688,7 @@ mod tests {
             policy_sweep_fragments: None,
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            outer_delayed_nesterov_period: None,
             iso_backend: crate::iso_worker::IsoBackendConfig::default(),
             final_state: None,
             checkpoint_path: None,
@@ -4866,19 +6697,25 @@ mod tests {
             bcast_delta_full_every: None,
             resume: false,
             mark_final_checkpoint: false,
+            require_profile_record: false,
             learner_budget_steps: None,
             event_tape: None,
             max_base_lag: Some(0),
             learner_weight: LearnerWeight::Equal,
             require_profile_binding: false,
-            island_scheduling: Default::default(),
             island_hmac_key: None,
             expected_island_contract: None,
-            island_lease_s: 30.0,
             syncer_epoch: 0,
-            elastic_final_grace_s: None,
+            membership: Default::default(),
+            recovery: Default::default(),
+            weighted_fold: Default::default(),
+            expert_token_weights: false,
+            final_cut_manifest_only: false,
+            shard: Default::default(),
         }
     }
+
+    const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
 
     #[test]
     fn semantic_profile_hash_matches_the_python_canonical_vector() {
@@ -4917,12 +6754,26 @@ mod tests {
         assert_eq!(config.semantic_profile_hash(), original);
         config.pipeline = 3;
         assert_ne!(config.semantic_profile_hash(), original);
+        // Expert token weights append a domain; Python vector in
+        // tests/test_rl_moe_expert_token_weights.py.
+        config.pipeline = 2;
+        config.expert_token_weights = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, "f51de8a095c0fa428c5483c7921da805bb8b3cd2736fe19fdd03f47e4f733913");
+        // A manifest-only final cut appends its own domain; Python vector in
+        // tests/test_s27_final_cut_ack.py.
+        config.expert_token_weights = false;
+        config.final_cut_manifest_only = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_ne!(config.semantic_profile_hash(), original);
+        assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
     }
 
     #[test]
-    fn elastic_profile_hash_matches_the_python_canonical_vector() {
-        // Same inputs as semantic_profile_hash_matches_the_python_canonical_vector
-        // plus elastic defaults; Python: tests/test_rl_inter_island_contract.py.
+    fn delayed_nesterov_profile_hash_matches_the_python_canonical_vector() {
+        // Python: tests/test_rl_inter_island_contract.py (DELAYED_NESTEROV_4).
         let mut config = round_test_config(8);
         config.learners = 2;
         config.quorum = 2;
@@ -4936,18 +6787,9 @@ mod tests {
         config.outer_momentum = 0.9;
         config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
         config.checkpoint_every = 1;
-        config.resume = true;
         config.mark_final_checkpoint = true;
         config.require_profile_binding = true;
-        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
-            crate::elastic::ElasticParams {
-                quorum_theta: 0.75,
-                carry_gamma: 0.5,
-                soft_deadline_s: 900,
-                q_min: 1,
-                max_carry_lag: 2,
-            },
-        );
+        config.outer_delayed_nesterov_period = Some(4);
         let digest = config
             .semantic_profile_hash()
             .iter()
@@ -4955,58 +6797,13 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             digest,
-            "c677c127b1ad3e1da179863ee02b6b2e1bc232edb03b088bad62251e5d8d9ba5"
+            "2bf20f25b4d40d6d3db1d91e38d199e0347f9dace3fc481a2948fa7f1c99f126"
         );
     }
 
     #[test]
-    fn island_scheduling_mode_is_bound_into_the_profile_hash() {
-        use crate::elastic::{ElasticParams, IslandSchedulingMode};
-        let mut config = round_test_config(8);
-        let legacy = config.semantic_profile_hash();
-        // An explicit legacy mode and an HMAC key leave the hash untouched.
-        config.island_scheduling = IslandSchedulingMode::Legacy;
-        config.island_hmac_key = Some(b"secret".to_vec());
-        assert_eq!(config.semantic_profile_hash(), legacy);
-        let base = ElasticParams {
-            quorum_theta: 0.75,
-            carry_gamma: 0.5,
-            soft_deadline_s: 900,
-            q_min: 1,
-            max_carry_lag: 2,
-        };
-        config.island_scheduling = IslandSchedulingMode::Elastic(base);
-        let elastic = config.semantic_profile_hash();
-        assert_ne!(elastic, legacy, "legacy HELLO must not match an elastic server");
-        let variants = [
-            ElasticParams { quorum_theta: 0.5, ..base },
-            ElasticParams { carry_gamma: 0.25, ..base },
-            ElasticParams { soft_deadline_s: 60, ..base },
-            ElasticParams { q_min: 2, ..base },
-            ElasticParams { max_carry_lag: 3, ..base },
-        ];
-        for v in variants {
-            config.island_scheduling = IslandSchedulingMode::Elastic(v);
-            assert_ne!(config.semantic_profile_hash(), elastic, "{v:?}");
-        }
-    }
-
-    // --- 0.8a: legacy equivalence (strict synchronous rounds) ---------------
-
-    #[test]
-    fn legacy_contract_encoding_appends_nothing() {
-        let mut encoded = vec![1, 2, 3];
-        crate::elastic::IslandSchedulingMode::Legacy.encode_contract(&mut encoded);
-        assert_eq!(encoded, vec![1, 2, 3]);
-        assert_eq!(
-            round_test_config(8).island_scheduling,
-            crate::elastic::IslandSchedulingMode::Legacy
-        );
-    }
-
-    #[test]
-    fn legacy_round_needs_every_learner_and_adds_no_extra_wait() {
-        // Strict legacy: quorum == learners, grace 0.
+    fn fixed_roster_round_needs_every_learner_and_adds_no_extra_wait() {
+        // Strict fixed roster: quorum == learners, grace 0.
         let first = member(0, 10);
         let second = member(1, 20);
         let mut round = test_round(vec![first, second]);
@@ -5021,7 +6818,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_round_timeout_never_merges_a_partial_quorum() {
+    fn fixed_roster_round_timeout_never_merges_a_partial_quorum() {
         let first = member(0, 10);
         let mut round = test_round(vec![first, member(1, 20)]);
         round.quorum_size = 2;
@@ -5032,7 +6829,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_strict_round_rejects_a_late_delta_without_carrying_it() {
+    fn fixed_roster_round_rejects_a_late_delta_without_carrying_it() {
         let only = member(0, 10);
         let mut rounds = vec![test_round(vec![only])];
         assert_eq!(
@@ -5042,69 +6839,6 @@ mod tests {
         assert!(rounds[0].pushes.is_empty());
     }
 
-    #[tokio::test]
-    async fn legacy_server_rejects_every_elastic_frame_type() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let key = b"k".to_vec();
-        for msg_type in [MSG_JOIN, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX,
-                         MSG_DELTA_READY, MSG_ELASTIC_INIT, MSG_DELTA_TENSOR] {
-            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-            let mut config = round_test_config(1);
-            config.port = port;
-            config.island_hmac_key = Some(key.clone());
-            let server = tokio::spawn(run(config));
-            let mut stream = None;
-            for _ in 0..100 {
-                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                    stream = Some(s);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let mut stream = stream.expect("legacy syncer did not start");
-            // A correctly sealed elastic payload (epoch 0) still must not be
-            // accepted: legacy only knows HELLO/DATA_HELLO/BW_PROBE as a first frame.
-            let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
-            let mut frame = MAGIC.to_le_bytes().to_vec();
-            frame.push(msg_type);
-            frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-            frame.extend_from_slice(&payload);
-            stream.write_all(&frame).await.unwrap();
-            // Legacy answers with one MSG_ERROR naming the bad first frame
-            // and then closes the connection.
-            let mut reply = Vec::new();
-            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut reply))
-                .await
-                .expect("legacy syncer kept the connection open")
-                .ok();
-            assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
-            let text = String::from_utf8_lossy(&reply[13..]);
-            assert!(
-                text.contains(&format!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {msg_type}")),
-                "type {msg_type}: {text}"
-            );
-            assert!(!server.is_finished(), "type {msg_type}: server exited");
-            server.abort();
-        }
-    }
-
-    #[tokio::test]
-    async fn elastic_mode_requires_an_hmac_key() {
-        let mut config = round_test_config(1);
-        config.port = 0;
-        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
-            crate::elastic::ElasticParams {
-                quorum_theta: 0.75,
-                carry_gamma: 0.5,
-                soft_deadline_s: 900,
-                q_min: 1,
-                max_carry_lag: 2,
-            },
-        );
-        let err = run(config).await.unwrap_err();
-        assert!(format!("{err:#}").contains("HMAC key"));
-    }
-
     fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {
         let mut config = round_test_config(total_steps);
         config.policy_sweep_fragments = Some(fragments);
@@ -5112,6 +6846,24 @@ mod tests {
         config.checkpoint_every = 1;
         config.resume = true;
         config
+    }
+
+    #[test]
+    fn sharded_head_takes_membership_and_delayed_nesterov_but_not_sweeps() {
+        let mut sharded = round_test_config(8);
+        sharded.shard = crate::shard::ShardPlan::new(1, 2).unwrap();
+        assert!(validate_config(&sharded).is_ok());
+        sharded.learners = 2;
+        sharded.membership.lease = Some(Duration::from_secs(5));
+        sharded.membership.soft_deadline = Some(Duration::from_secs(30));
+        sharded.membership.quorum_rule =
+            crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        sharded.outer_delayed_nesterov_period = Some(4);
+        assert!(validate_config(&sharded).is_ok());
+        let mut sweep = sweep_test_config(2, 4);
+        sweep.shard = sharded.shard;
+        assert!(format!("{:#}", validate_config(&sweep).unwrap_err())
+            .contains("does not support --policy-sweep-fragments"));
     }
 
     #[test]
@@ -5323,6 +7075,7 @@ mod tests {
                 c_steps: 1,
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
+                tensor_scales: None,
                 transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
@@ -5413,8 +7166,13 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
+            carried: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -5427,6 +7185,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -5490,8 +7249,13 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
+            carried: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -5504,6 +7268,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens,
                     outer_gradient: vec![0.25],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -5530,6 +7295,7 @@ mod tests {
                         c_steps: 1,
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
+                        tensor_scales: None,
                         transfer: PushTransfer::default(),
                     },
                 )
@@ -5546,8 +7312,13 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 2,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
+            carried: Vec::new(),
             pushes,
         }
     }
@@ -5633,11 +7404,21 @@ mod tests {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
-        send_final_cut(&terminal_state, &terminal_group)
+        send_final_cut(&terminal_state, &terminal_group, false)
             .await
             .unwrap();
         let final_fragment = terminal_rx.try_recv().unwrap();
         assert_eq!(chunked_inner_type(&final_fragment), MSG_FINAL_FRAGMENT);
+        assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        // A manifest-only final cut sends the version manifest alone.
+        send_final_cut(&terminal_state, &terminal_group, true)
+            .await
+            .unwrap();
         assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
         assert!(matches!(
             terminal_rx.try_recv(),
@@ -6083,7 +7864,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(uninterrupted.versions, vec![4, 5, 6]);
-        assert_eq!(uninterrupted.params, vec![vec![-5.0]; 3]);
+        assert!(uninterrupted.params.iter().all(|p| p.as_slice() == [-5.0]));
         for learner_id in 0..2 {
             let ledger = uninterrupted.ledger.get(&learner_id).unwrap();
             assert_eq!(ledger.merges, 6);
@@ -6163,14 +7944,18 @@ mod tests {
         let first_group = test_group(first);
         let mut registry = RegistryState::default();
 
-        assert_eq!(registry.register_group(first_group.clone()), Ok(None));
-        assert_eq!(registry.register_group(test_group(first)), Err(()));
+        let now = Instant::now();
+        assert_eq!(registry.register_group(first_group.clone(), now).map(|r| r.0), Ok(None));
+        assert_eq!(
+            registry.register_group(test_group(first), now).map(|r| r.0),
+            Err(RegisterError::Duplicate)
+        );
         assert!(Arc::ptr_eq(
             registry.groups.get(&first).unwrap(),
             &first_group
         ));
         assert_eq!(
-            registry.register_group(test_group(replacement)),
+            registry.register_group(test_group(replacement), now).map(|r| r.0),
             Ok(Some(first))
         );
         assert_eq!(registry.current.get(&0), Some(&replacement));
@@ -6424,6 +8209,135 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    #[tokio::test]
+    async fn final_grace_finishes_without_a_silent_island_and_tapes_it() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+        let dir = std::env::temp_dir().join(format!("yeto-final-grace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape_path = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape_path);
+        let mut cfg = round_test_config(0);
+        cfg.final_ack_timeout_s = 30;
+        cfg.membership.final_grace = Some(Duration::from_millis(300));
+        cfg.event_tape = Some(tape_path.clone());
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .expect("the grace window ends the run without the silent island");
+
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(5), "bounded by the grace, not the ack timeout");
+        let tape = std::fs::read_to_string(&tape_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(tape.contains("\"kind\":\"final_grace_expired\""), "{tape}");
+        assert!(tape.contains("\"missing\":[0]") && tape.contains("\"acknowledged\":[]"), "{tape}");
+    }
+
+    #[tokio::test]
+    async fn final_grace_stops_waiting_for_an_island_that_left() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (event_sender, mut events) = mpsc::channel(1);
+        let member = group.member;
+        registry.lock().unwrap().unregister(member);
+        event_sender.send(Event::Disconnected { member }).await.unwrap();
+        let mut cfg = round_test_config(0);
+        cfg.membership.final_grace = Some(Duration::from_secs(30));
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(5), "a departed island is not waited for");
+    }
+
+    fn final_leased_registry(group: Arc<Group>, lease: Duration) -> (Registry, Config) {
+        let mut cfg = round_test_config(0);
+        cfg.learners = 2;
+        cfg.membership.lease = Some(lease);
+        let membership = Membership::new(cfg.membership.clone(), 2);
+        let registry = Arc::new(Mutex::new(RegistryState::new(membership)));
+        registry.lock().unwrap().register_group(group, Instant::now()).unwrap();
+        (registry, cfg)
+    }
+
+    #[tokio::test]
+    async fn final_cut_does_not_wait_for_an_absent_leased_learner() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        // Learner 1 is expected but never connects; learner 0 acknowledges.
+        let expected = HashSet::from([0, 1]);
+        let (event_sender, mut events) = mpsc::channel(4);
+        event_sender
+            .send(Event::FinalAck { member: group.member, global_step: state.global_step })
+            .await
+            .unwrap();
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn final_cut_drops_a_learner_whose_lease_expires() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        let expected = HashSet::from([0]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+
+        let error = finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("every learner's lease expired"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn final_cut_heartbeats_keep_a_slow_learner_expected() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        let expected = HashSet::from([0]);
+        let (event_sender, mut events) = mpsc::channel(4);
+        let member = group.member;
+        let step = state.global_step;
+        let sender = tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                event_sender.send(Event::Heartbeat { member, local_step: 0 }).await.unwrap();
+            }
+            event_sender.send(Event::FinalAck { member, global_step: step }).await.unwrap();
+        });
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+        sender.await.unwrap();
+    }
+
+    #[test]
+    fn startup_waits_for_all_learners_only_with_static_membership() {
+        let mut cfg = round_test_config(0);
+        cfg.learners = 4;
+        cfg.quorum = 2;
+        assert_eq!(startup_members(&cfg), 4);
+        cfg.membership.lease = Some(Duration::from_secs(30));
+        assert_eq!(startup_members(&cfg), 2);
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 3 };
+        assert_eq!(startup_members(&cfg), 3);
+    }
+
     #[test]
     fn grace_falls_back_to_cap_without_estimate() {
         assert_eq!(adaptive_grace(2.0, 0.8, None, 0.1, 0.1, CAP), CAP);
@@ -6485,6 +8399,174 @@ mod tests {
     }
 
     #[test]
+    fn late_carry_is_off_for_strict_unbounded_and_fixed_roster_runs() {
+        assert!(LateCarry::new(Some(0), false).is_none());
+        assert!(LateCarry::new(None, false).is_none());
+        assert!(LateCarry::new(Some(2), true).is_none());
+        assert!(LateCarry::new(Some(2), false).is_some());
+    }
+
+    #[test]
+    fn late_push_queues_then_joins_the_next_round_of_its_fragment() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        // Round t=7 of fragment 1 (base 5) closed without island 1; the
+        // fragment is now at version 7 and its next round is not open yet.
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        let mut rounds: Vec<Round> = Vec::new();
+        assert_eq!(carry.carry(&mut rounds, island, late, 8, 7), CarryOutcome::Queued);
+        let mut next = test_round(vec![member(0, 10), island]);
+        next.t = 9;
+        next.base_version = 7;
+        let attached = carry.attach_queued(&mut next);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].2, Ok(2));
+        assert_eq!(next.carried.len(), 1);
+        assert!(next.pushes.is_empty(), "a carried delta takes no quorum slot");
+        // The island still answers the new round from its new anchor.
+        let mut fresh = test_push_for(1, 7);
+        fresh.global_step = 9;
+        assert_eq!(
+            route_push(&mut [next], island, fresh, Some(2), false),
+            PushDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn late_push_joins_an_already_open_later_round() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let mut open = test_round(vec![member(0, 10)]);
+        open.t = 9;
+        open.base_version = 7;
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        let mut rounds = vec![open];
+        assert_eq!(
+            carry.carry(&mut rounds, member(1, 10), late, 10, 7),
+            CarryOutcome::Attached { step: 9, lag: 2 }
+        );
+        assert_eq!(rounds[0].carried.len(), 1);
+    }
+
+    #[test]
+    fn late_push_beyond_the_lag_bound_or_for_an_open_attempt_is_refused() {
+        let mut carry = LateCarry::new(Some(1), false).unwrap();
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), member(1, 10), late, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::StaleBase)
+        );
+        // Same step and fragment still open under attempt 2: not late.
+        let mut retried = test_round(vec![member(1, 10)]);
+        retried.attempt = 2;
+        let mut stale_attempt = test_push_for(1, 5);
+        stale_attempt.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut vec![retried], member(1, 10), stale_attempt, 8, 5),
+            CarryOutcome::Rejected(PushDisposition::OutOfRound)
+        );
+        // A never-launched step is not late either.
+        let mut future = test_push_for(1, 5);
+        future.global_step = 9;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), member(1, 10), future, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::OutOfRound)
+        );
+        assert!(carry.queued.is_empty());
+    }
+
+    #[test]
+    fn a_carried_anchor_yields_one_delta() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        let push = test_push_for(1, 5);
+        assert!(!carry.reuses_anchor(island, &push));
+        carry.spend_anchor(island, 1, 5);
+        assert!(carry.reuses_anchor(island, &push));
+        assert!(carry.reuses_anchor(island, &test_push_for(1, 3)));
+        assert!(!carry.reuses_anchor(island, &test_push_for(1, 7)));
+        // Another connection or fragment is unaffected.
+        assert!(!carry.reuses_anchor(member(1, 11), &push));
+        // A late push from an anchor already merged by its own round is not
+        // carried; a restart clears the gathered push and frees the anchor.
+        let other = member(2, 10);
+        carry.note_gathered(other, 1, 5);
+        let mut late = test_push_for(2, 5);
+        late.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), other, late, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::Duplicate)
+        );
+        carry.release_anchor(other, &test_push_for(2, 5));
+        let mut late = test_push_for(2, 5);
+        late.global_step = 7;
+        assert_eq!(carry.carry(&mut Vec::new(), other, late, 8, 7), CarryOutcome::Queued);
+    }
+
+    fn carried_merge(cfg: &Config) -> f32 {
+        let mut st = two_fragment_streaming_state();
+        st.versions[0] = 4;
+        let island = member(0, 1);
+        let late = member(1, 1);
+        let mut round = test_round(vec![island, late]);
+        round.p = 0;
+        round.t = 6;
+        round.base_version = 4;
+        round.fold = round_fold(cfg, &st, 0, &round.expected_members, 1);
+        let mut own = test_push_for(0, 4);
+        own.fragment_id = 0;
+        own.global_step = 6;
+        own.outer_gradient = vec![1.0];
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), island, own, Some(2), false),
+            PushDisposition::Accepted
+        );
+        let mut carried = test_push_for(1, 2);
+        carried.fragment_id = 0;
+        carried.c_tokens = 40; // tokens^2/steps: 4x the own push's weight
+        carried.outer_gradient = vec![3.0];
+        assert_eq!(attach_carry(&mut round, late, carried, 2), Ok(2));
+        let merge = prepare_round_compute(cfg, &st, &mut round).unwrap().finish_inline().unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0][0]
+    }
+
+    #[test]
+    fn carried_delta_merges_against_its_own_base_with_its_token_weight() {
+        // Outer lr 1, no momentum: the fragment moves by minus the weighted
+        // mean outer gradient, (1·1 + 4·3) / 5 = 2.6.
+        let mut cfg = round_test_config(1);
+        cfg.max_base_lag = Some(2);
+        cfg.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!((carried_merge(&cfg) + 2.6).abs() < 1e-6);
+        let mut streaming = cfg.clone();
+        streaming.weighted_fold = WeightedFoldMode::Streaming;
+        assert!((carried_merge(&streaming) + 2.6).abs() < 1e-6);
+        // Carry discount 0.5 per version, lag 2: weight 4 · 0.25 = 1.
+        let mut discounted = cfg.clone();
+        discounted.membership.carry_gamma = 0.5;
+        assert!((carried_merge(&discounted) + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_rates_time_a_step_from_its_first_fragment_push() {
+        // One local step pushes every fragment; the repeats must not move the
+        // step start, or the estimate shrinks to the gap between steps.
+        let mut rates = StepRates::default();
+        let t0 = Instant::now();
+        let island = member(1, 10);
+        for (step, start) in [(1u64, 0u64), (2, 10)] {
+            for fragment in 0..4 {
+                rates.note(island, step, t0 + Duration::from_secs(start + 2 * fragment));
+            }
+        }
+        let est = rates.max_step_secs_for(&[island]).unwrap();
+        assert!((est - 10.0).abs() < 1e-9, "step start to step start is 10 s, got {est}");
+    }
+
+    #[test]
     fn step_rates_smooth_with_ema() {
         let mut rates = StepRates::default();
         let t0 = Instant::now();
@@ -6525,8 +8607,13 @@ mod tests {
             quorum_deadline: Instant::now() + Duration::from_secs(1),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: None,
             grace_ms: None,
+            fold: None,
+            carried: Vec::new(),
             pushes: HashMap::new(),
         }
     }
@@ -6542,6 +8629,7 @@ mod tests {
             c_steps: 2,
             c_tokens: 20,
             outer_gradient: vec![1.0],
+            tensor_scales: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -6595,8 +8683,8 @@ mod tests {
         let registry = Arc::new(Mutex::new(RegistryState::default()));
         {
             let mut registry = registry.lock().unwrap();
-            registry.register_group(test_group(old)).unwrap();
-            registry.register_group(test_group(replacement)).unwrap();
+            registry.register_group(test_group(old), Instant::now()).unwrap();
+            registry.register_group(test_group(replacement), Instant::now()).unwrap();
         }
         let mut rounds = vec![test_round(vec![old])];
 
@@ -6859,6 +8947,7 @@ mod tests {
             c_steps: 1,
             c_tokens: 1,
             outer_gradient: vec![1.0],
+            tensor_scales: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -6939,6 +9028,7 @@ mod tests {
                 c_steps: 4,
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
+                tensor_scales: None,
                 transfer: PushTransfer {
                     recv_seconds: 1.5,
                     arrived_unix: 1792000000.25,
@@ -6958,6 +9048,7 @@ mod tests {
             33,
             None,
             &pushes,
+            &[],
             0.5,
             44,
             &[7; 32],
@@ -7007,6 +9098,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],
@@ -7036,6 +9128,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],
@@ -7112,6 +9205,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -7127,6 +9221,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -7144,6 +9239,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],
@@ -7155,5 +9251,610 @@ mod tests {
         assert_eq!(text.matches("\"contribution\":0.5").count(), 2);
         assert_eq!(text.matches("\"accounted_c_steps\":1").count(), 2);
         std::fs::remove_file(&path).ok();
+    }
+
+    // ----- dynamic membership (S27 E-1/E-2) -----
+
+    fn capacity_round(expected: Vec<Member>, theta: f64, caps: &[(u32, f64)]) -> Round {
+        let cfg = crate::membership::MembershipConfig {
+            quorum_rule: crate::membership::QuorumRule::Capacity { theta, q_min: 1 },
+            capacities: caps.iter().copied().collect(),
+            ..Default::default()
+        };
+        let mut round = test_round(expected);
+        round.capacity_quorum = cfg.round_quorum();
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round
+    }
+
+    #[test]
+    fn capacity_quorum_round_waits_for_theta_then_for_grace() {
+        let (big, small, other) = (member(0, 1), member(1, 1), member(2, 1));
+        let mut round = capacity_round(vec![big, small, other], 0.75, &[(0, 8.0)]);
+        round.pushes.insert(small, test_push(5));
+        round.pushes.insert(other, test_push(5));
+        assert!(!round.quorum_reached(), "2 of 10 capacity");
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.pushes.remove(&other);
+        round.pushes.insert(big, test_push(5));
+        assert!(round.quorum_reached(), "9 of 10 capacity");
+        round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "grace still open");
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn soft_deadline_merges_below_quorum_but_never_merges_nothing() {
+        let (first, second) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.soft_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "nothing arrived");
+        round.pushes.insert(first, test_push(5));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete, "1 of K=2 at the soft deadline");
+        round.soft_min = 2;
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "q_min binds the soft merge");
+        round.soft_deadline = None;
+        round.soft_min = 1;
+        round.quorum_deadline = Instant::now() - Duration::from_millis(1);
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart, "off: unchanged");
+    }
+
+    #[test]
+    fn expired_member_leaves_an_empty_round_waiting() {
+        let only = member(0, 10);
+        let mut round = test_round(vec![only]);
+        assert!(round.forget_unanswered(only));
+        assert!(round.expected_members.is_empty());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        let answered = member(1, 20);
+        let mut round = test_round(vec![answered]);
+        round.pushes.insert(answered, test_push(5));
+        assert!(!round.forget_unanswered(answered), "an accepted push keeps its slot");
+    }
+
+    fn leased_registry(lease_s: u64) -> Registry {
+        let cfg = crate::membership::MembershipConfig {
+            lease: Some(Duration::from_secs(lease_s)),
+            ..Default::default()
+        };
+        Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg, 2))))
+    }
+
+    fn catch_up_sends(catch_ups: &mut CatchUps<()>) -> Vec<(u32, usize)> {
+        let mut sent = Vec::new();
+        while let Some(step) = catch_ups.next_step() {
+            match step {
+                CatchUpStep::Send(member, (), p) => sent.push((member.learner_id, p)),
+                CatchUpStep::Done(_) => {}
+            }
+        }
+        sent
+    }
+
+    #[test]
+    fn catch_up_yields_one_fragment_per_step_then_its_tail() {
+        let rejoined = member(1, 7);
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(rejoined, (), 0..3, CatchUpTail::REJOIN);
+        assert!(catch_ups.holds(rejoined));
+        for expected in 0..3 {
+            match catch_ups.next_step() {
+                Some(CatchUpStep::Send(who, (), p)) => assert_eq!((who, p), (rejoined, expected)),
+                _ => panic!("fragment {expected} was not the next step"),
+            }
+        }
+        match catch_ups.next_step() {
+            Some(CatchUpStep::Done(done)) => {
+                assert_eq!(done.member, rejoined);
+                assert_eq!(done.tail, CatchUpTail::REJOIN);
+            }
+            _ => panic!("finished catch-up did not yield its tail"),
+        }
+        assert!(catch_ups.is_empty() && !catch_ups.holds(rejoined));
+    }
+
+    #[test]
+    fn catch_up_interleaves_learners_and_merges_duplicate_requests() {
+        let (a, b) = (member(1, 7), member(2, 9));
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(a, (), 0..2, CatchUpTail::REJOIN);
+        catch_ups.enqueue(b, (), 0..2, CatchUpTail::REJOIN);
+        // The disconnect of a's old generation asks again: no second copy.
+        catch_ups.enqueue(a, (), 0..2, CatchUpTail::REBIND);
+        assert_eq!(catch_up_sends(&mut catch_ups), vec![(1, 0), (2, 0), (1, 1), (2, 1)]);
+
+        catch_ups.enqueue(a, (), 0..1, CatchUpTail::REJOIN);
+        catch_ups.enqueue(a, (), 0..1, CatchUpTail::REBIND);
+        let _ = catch_ups.next_step();
+        match catch_ups.next_step() {
+            Some(CatchUpStep::Done(done)) => {
+                assert_eq!(done.tail, CatchUpTail { rejoin: true, rebind: true })
+            }
+            _ => panic!("merged catch-up lost its tail"),
+        }
+    }
+
+    #[test]
+    fn catch_up_drops_superseded_generations_and_abandons_failed_streams() {
+        let (old, current) = (member(1, 7), member(2, 9));
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(old, (), 0..4, CatchUpTail::REJOIN);
+        catch_ups.enqueue(current, (), 0..4, CatchUpTail::REJOIN);
+        assert_eq!(catch_ups.drop_superseded(|m| m == current), vec![old]);
+        assert!(!catch_ups.holds(old));
+
+        // A failed stream stops the sends; the tail still runs.
+        catch_ups.abandon(current);
+        assert!(matches!(catch_ups.next_step(), Some(CatchUpStep::Done(done)) if done.member == current));
+        assert!(catch_ups.next_step().is_none());
+    }
+
+    #[tokio::test]
+    async fn lease_drop_rejoin_and_stale_generation_fencing() {
+        let registry = leased_registry(1);
+        let (silent, alive) = (member(0, 10), member(1, 20));
+        let (tx, mut rx) = mpsc::channel(4);
+        let t0 = Instant::now() - Duration::from_secs(5);
+        {
+            let mut r = registry.lock().unwrap();
+            r.register_group(test_group_with_control(silent, tx), t0).unwrap();
+            r.register_group(test_group(alive), t0).unwrap();
+            assert!(r.membership.renew(alive, Instant::now()));
+        }
+        let mut rounds = vec![test_round(vec![silent, alive])];
+        let mut rates = StepRates::default();
+
+        // Drop: the silent island's lease ran out.
+        expire_member_leases(&registry, &mut rounds, &mut rates).await;
+        assert_eq!(rounds[0].expected_members, vec![alive]);
+        assert!(!is_current_member(&registry, silent));
+        assert!(is_current_member(&registry, alive));
+        let frame = rx.recv().await.expect("re-JOIN request");
+        assert_eq!(frame.msg_type, MSG_ERROR);
+        assert!(std::str::from_utf8(&frame.parts[0]).unwrap().contains("re-JOIN"));
+        // Its later push no longer fits the round.
+        assert_eq!(
+            route_push(&mut rounds, silent, test_push(5), None, false),
+            PushDisposition::UnexpectedMember
+        );
+
+        let mut r = registry.lock().unwrap();
+        r.unregister(silent);
+        // Stale id: the expired generation cannot come back.
+        assert_eq!(
+            r.register_group(test_group(silent), Instant::now()).map(|x| x.1),
+            Err(RegisterError::Fenced(AdmitError::RetiredGeneration))
+        );
+        assert_eq!(
+            r.register_group(test_group(member(2, 1)), Instant::now()).map(|x| x.1),
+            Err(RegisterError::Fenced(AdmitError::OutOfRange { limit: 2 }))
+        );
+        // Reconnect: a new generation is a re-JOIN with a per-fragment fence.
+        let back = member(0, 11);
+        assert_eq!(
+            r.register_group(test_group(back), Instant::now()).map(|x| x.1),
+            Ok(Admission::Rejoin)
+        );
+        r.membership.record_catch_up(back, &[3, 5]);
+        assert!(r.membership.check_push_base(back, 1, 4).is_err());
+        r.membership.check_push_base(back, 1, 5).unwrap();
+        assert!(r.current.get(&0) == Some(&back));
+    }
+
+    #[tokio::test]
+    async fn pool_member_under_peer_recovery_has_weight_zero_until_promoted() {
+        let registry = leased_registry(1);
+        let recover = HelloExt { syncer_epoch: Some(0), recover: true, ..Default::default() };
+        let (donor, lost) = (member(1, 20), member(0, 10));
+        let t0 = Instant::now() - Duration::from_secs(5);
+        {
+            let mut r = registry.lock().unwrap();
+            r.register_group(test_group(donor), Instant::now()).unwrap();
+            // A pool slot filled by an island that asks for peer recovery:
+            // admitted to the pool, kept off the round roster and donors.
+            r.register_group_with(test_group(lost), t0, recover).unwrap();
+            assert!(r.is_recovering(lost));
+            assert!(r.membership.is_live(lost));
+        }
+        assert!(!is_current_member(&registry, lost));
+        let candidates = recovery_candidates(&registry, &[]);
+        assert_eq!(candidates.iter().map(|c| c.member).collect::<Vec<_>>(), vec![donor]);
+
+        // Its lease runs out during the restore: it leaves the pool and the
+        // recovery; the next generation asks again (re-JOIN).
+        let mut rounds = vec![test_round(vec![donor])];
+        let mut rates = StepRates::default();
+        assert_eq!(expire_member_leases(&registry, &mut rounds, &mut rates).await, vec![lost]);
+        assert_eq!(rounds[0].expected_members, vec![donor]);
+        let mut r = registry.lock().unwrap();
+        assert!(!r.is_recovering(lost));
+        r.unregister(lost);
+        let back = member(0, 11);
+        assert_eq!(r.register_group_with(test_group(back), Instant::now(), recover).map(|x| x.1),
+                   Ok(Admission::Rejoin));
+        assert!(r.is_recovering(back) && !r.current.contains_key(&0));
+
+        // Promoted with the versions it holds after the replay: pushes based
+        // on older versions are fenced.
+        assert!(r.promote_recovered(back));
+        r.membership.record_catch_up(back, &[7, 8]);
+        assert_eq!(r.current.get(&0), Some(&back));
+        assert!(r.membership.check_push_base(back, 0, 6).is_err());
+        r.membership.check_push_base(back, 0, 7).unwrap();
+        assert!(!r.promote_recovered(back), "promotion happens once per generation");
+    }
+
+    #[test]
+    fn membership_options_are_refused_with_a_fixed_roster() {
+        let mut cfg = round_test_config(4);
+        cfg.learners = 2;
+        cfg.quorum = 2;
+        cfg.membership.soft_deadline = Some(Duration::from_secs(5));
+        assert!(validate_config(&cfg).unwrap_err().to_string().contains("non-fixed rounds"));
+        cfg.max_base_lag = None;
+        validate_config(&cfg).unwrap();
+        cfg.membership.quorum_rule =
+            crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        assert!(validate_config(&cfg).is_err(), "θ with K=2");
+        cfg.quorum = 1;
+        validate_config(&cfg).unwrap();
+    }
+
+    fn fold_test_state(mode: u8) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: mode,
+                tensor_numels: vec![5, 3, 8],
+                tensor_shapes: (mode == crate::state::MERGE_ISO)
+                    .then(|| vec![(5, 1), (1, 3), (2, 4)]),
+            }],
+        };
+        let mut state = GlobalState::new(layout, 0.7, 0.9, DTYPE_F32).unwrap();
+        state.init_fragment(0, (0..16).map(|i| i as f32 * 0.125).collect()).unwrap();
+        state
+    }
+
+    fn fold_test_push(learner_id: u32) -> Push {
+        let gradient = (0..16u32)
+            .map(|i| {
+                let x = (learner_id * 31 + i * 17) % 23;
+                if i % 7 == 0 {
+                    0.0
+                } else {
+                    (x as f32 - 11.0) * 0.37f32.powi((learner_id + i) as i32 % 5)
+                }
+            })
+            .collect();
+        Push {
+            learner_id,
+            fragment_id: 0,
+            global_step: 1,
+            round_attempt: 1,
+            base_version: 0,
+            local_step: 1,
+            c_steps: 1,
+            c_tokens: 1 + u64::from(learner_id),
+            outer_gradient: gradient,
+            tensor_scales: None,
+            transfer: PushTransfer::default(),
+        }
+    }
+
+    fn fold_test_round(cfg: &Config, st: &GlobalState, members: &[Member], fold: bool) -> Round {
+        let mut round = test_round(members.to_vec());
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 0;
+        round.quorum_size = members.len();
+        round.fold = if fold {
+            round_fold(cfg, st, 0, members, members.len())
+        } else {
+            None
+        };
+        round
+    }
+
+    fn committed_bits(
+        cfg: &Config,
+        mode: u8,
+        members: &[Member],
+        order: &[usize],
+        fold: bool,
+    ) -> Vec<u32> {
+        let mut st = fold_test_state(mode);
+        let mut round = fold_test_round(cfg, &st, members, fold);
+        assert_eq!(round.fold.is_some(), fold);
+        for &index in order {
+            let member = members[index];
+            assert_eq!(
+                route_one(&mut round, member, fold_test_push(member.learner_id)),
+                PushDisposition::Accepted
+            );
+        }
+        let merge = prepare_round_compute(cfg, &st, &mut round)
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0].iter().map(|v| v.to_bits()).collect()
+    }
+
+    fn route_one(round: &mut Round, member: Member, push: Push) -> PushDisposition {
+        super::route_push(std::slice::from_mut(round), member, push, None, false)
+    }
+
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in permutations(n - 1) {
+            for at in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(at, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn streaming_fold_commits_bit_identically_in_every_arrival_order() {
+        let cfg = round_test_config(1);
+        let members = [member(0, 3), member(2, 1), member(5, 9), member(7, 2)];
+        for mode in [
+            crate::state::MERGE_AVG,
+            crate::state::MERGE_RDA,
+            crate::state::MERGE_ISO,
+        ] {
+            let buffered = committed_bits(&cfg, mode, &members, &[3, 1, 0, 2], false);
+            for order in permutations(members.len()) {
+                assert_eq!(
+                    committed_bits(&cfg, mode, &members, &order, true),
+                    buffered,
+                    "mode {mode} arrival order {order:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_fold_releases_in_order_pushes_and_holds_early_ones() {
+        let cfg = round_test_config(1);
+        let st = fold_test_state(crate::state::MERGE_RDA);
+        let members = [member(0, 1), member(1, 1), member(2, 1)];
+        let mut round = fold_test_round(&cfg, &st, &members, true);
+        let held = |round: &Round| -> Vec<u32> {
+            let mut ids: Vec<u32> = round
+                .pushes
+                .iter()
+                .filter(|(_, push)| !push.outer_gradient.is_empty())
+                .map(|(member, _)| member.learner_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        route_one(&mut round, members[2], fold_test_push(2));
+        assert_eq!(held(&round), vec![2], "learner 2 waits for 0 and 1");
+        route_one(&mut round, members[0], fold_test_push(0));
+        assert_eq!(held(&round), vec![2], "learner 0 is folded at once");
+        route_one(&mut round, members[1], fold_test_push(1));
+        assert!(held(&round).is_empty(), "1 then the held 2 are folded");
+        assert!(matches!(round.fold.as_ref(), Some(RoundFold::Exact(fold)) if fold.is_complete()));
+    }
+
+    #[test]
+    fn streaming_fold_is_used_only_when_merge_inputs_are_fixed_at_launch() {
+        let st = fold_test_state(crate::state::MERGE_AVG);
+        let members = [member(0, 1), member(1, 1)];
+        let cfg = round_test_config(1);
+        assert!(round_fold(&cfg, &st, 0, &members, 2).is_some());
+        assert!(round_fold(&cfg, &st, 0, &members, 1).is_none(), "partial quorum");
+        let mut weighted = round_test_config(1);
+        weighted.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!(round_fold(&weighted, &st, 0, &members, 2).is_none());
+        let mut heloco = fold_test_state(crate::state::MERGE_AVG);
+        heloco.delta_correction = Some(crate::merge::Heloco::default());
+        assert!(round_fold(&cfg, &heloco, 0, &members, 2).is_none());
+        let duplicate = [member(0, 1), member(0, 2)];
+        assert!(round_fold(&cfg, &st, 0, &duplicate, 2).is_none());
+        let mut leased = round_test_config(1);
+        leased.membership.lease = Some(Duration::from_secs(5));
+        assert!(round_fold(&leased, &st, 0, &members, 2).is_none(), "dynamic membership");
+    }
+
+    #[test]
+    fn recovering_hello_stays_off_the_roster_until_promoted() {
+        let mut r = RegistryState::new(Membership::default());
+        let t0 = Instant::now();
+        let old = Member { learner_id: 0, generation: 1 };
+        let back = Member { learner_id: 0, generation: 2 };
+        r.register_group(test_group(old), t0).unwrap();
+        let recover = HelloExt { syncer_epoch: None, recover: true, expert_tokens: false };
+        let (replaced, _) = r.register_group_with(test_group(back), t0, recover).unwrap();
+        assert_eq!(replaced, Some(old), "the lost generation leaves the roster");
+        assert!(r.current.is_empty() && r.is_recovering(back) && r.groups.contains_key(&back));
+        assert!(!r.promote_recovered(old));
+        assert!(r.promote_recovered(back));
+        assert_eq!(r.current.get(&0), Some(&back));
+        assert!(!r.is_recovering(back));
+        // A recovering generation that disconnects is gone from both sets.
+        let again = Member { learner_id: 0, generation: 3 };
+        r.register_group_with(test_group(again), t0, recover).unwrap();
+        r.unregister(again);
+        assert!(r.current.is_empty() && !r.is_recovering(again));
+    }
+
+    #[test]
+    fn hello_epoch_fence_and_membership_record_survive_restart() {
+        let dir = std::env::temp_dir().join(format!("yeto-membership-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("syncer.ckpt");
+        let record = membership_record_path(&checkpoint);
+        std::fs::remove_file(&record).ok();
+        let mut cfg = Config { checkpoint_path: Some(checkpoint.clone()), syncer_epoch: 4, ..round_test_config(1) };
+        let (membership, path) = initial_membership(&cfg, 2).unwrap();
+        let mut r = RegistryState { membership_record: path, ..RegistryState::new(membership) };
+        let t0 = Instant::now();
+        let stale = HelloExt { syncer_epoch: Some(3), recover: false, expert_tokens: false };
+        let gone = Member { learner_id: 1, generation: 9 };
+        assert_eq!(
+            r.register_group_with(test_group(gone), t0, stale).unwrap_err(),
+            RegisterError::Fenced(AdmitError::StaleSyncerEpoch { offered: 3, current: 4 })
+        );
+        let current = HelloExt { syncer_epoch: Some(4), recover: false, expert_tokens: false };
+        r.register_group_with(test_group(gone), t0, current).unwrap();
+        r.unregister(gone);
+        assert!(record.exists(), "a retirement is persisted at once");
+
+        // Restart with a lower configured epoch: the persisted fence holds.
+        cfg.syncer_epoch = 0;
+        cfg.resume = true;
+        let (membership, _) = initial_membership(&cfg, 2).unwrap();
+        assert_eq!(membership.syncer_epoch(), 4);
+        let mut r = RegistryState::new(membership);
+        assert_eq!(
+            r.register_group_with(test_group(gone), t0, HelloExt::default()).unwrap_err(),
+            RegisterError::Fenced(AdmitError::RetiredGeneration)
+        );
+        // Without --resume the record is not read.
+        cfg.resume = false;
+        assert_eq!(initial_membership(&cfg, 2).unwrap().0.syncer_epoch(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Legacy HELLO body: one AVG fragment of one 4-element tensor.
+    fn test_hello_payload(member: Member) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        out.extend_from_slice(&member.learner_id.to_le_bytes());
+        out.extend_from_slice(&member.generation.to_le_bytes());
+        out.push(crate::protocol::DTYPE_F32);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(crate::state::MERGE_AVG);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&4u64.to_le_bytes());
+        out.extend_from_slice(&[1; 32]); // layout fingerprint
+        out.extend_from_slice(&[2; 32]); // session contract
+        out.extend_from_slice(&2u16.to_le_bytes()); // num_streams
+        out
+    }
+
+    #[test]
+    fn hello_extension_trailer_is_parsed_after_the_legacy_body() {
+        let member = Member { learner_id: 0, generation: 5 };
+        let legacy = test_hello_payload(member);
+        let parsed = parse_hello(&legacy, 1).unwrap();
+        assert_eq!(parsed.ext, HelloExt::default());
+        let ext = HelloExt { syncer_epoch: Some(12), recover: true, expert_tokens: false };
+        let mut extended = legacy.clone();
+        extended.extend_from_slice(&ext.encode());
+        let parsed = parse_hello(&extended, 1).unwrap();
+        assert_eq!(parsed.ext, ext);
+        assert_eq!(parsed.generation, 5);
+    }
+
+    fn streaming_cfg() -> Config {
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        cfg.learner_weight = LearnerWeight::Tokens2OverSteps;
+        cfg.max_base_lag = None;
+        cfg
+    }
+
+    #[test]
+    fn weighted_fold_mode_selects_the_reduction_per_round() {
+        let st = fold_test_state(crate::state::MERGE_RDA);
+        let members = [member(0, 1), member(1, 1), member(2, 1)];
+        let kind = |cfg: &Config, st: &GlobalState, members: &[Member], quorum| {
+            match round_fold(cfg, st, 0, members, quorum) {
+                None => "buffered",
+                Some(RoundFold::Exact(_)) => "exact",
+                Some(RoundFold::Streaming(_)) => "streaming",
+            }
+        };
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        assert_eq!(kind(&cfg, &st, &members, 3), "exact");
+        assert_eq!(kind(&cfg, &st, &members, 1), "streaming");
+        assert_eq!(kind(&cfg, &st, &[member(0, 1), member(0, 2)], 2), "streaming");
+        let weighted = streaming_cfg();
+        assert_eq!(kind(&weighted, &st, &members, 3), "streaming");
+        let mut heloco = fold_test_state(crate::state::MERGE_RDA);
+        heloco.delta_correction = Some(crate::merge::Heloco::default());
+        assert_eq!(kind(&weighted, &heloco, &members, 1), "buffered");
+        let mut control = streaming_cfg();
+        control.weighted_fold = WeightedFoldMode::Buffered;
+        assert_eq!(kind(&control, &st, &members, 1), "buffered");
+    }
+
+    fn committed_params(cfg: &Config, mode: u8, members: &[Member], arrivals: &[usize]) -> Vec<f32> {
+        let mut st = fold_test_state(mode);
+        let mut round = test_round(members.to_vec());
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 0;
+        round.quorum_size = 1;
+        round.fold = round_fold(cfg, &st, 0, members, 1);
+        for &index in arrivals {
+            let member = members[index];
+            let mut push = fold_test_push(member.learner_id);
+            push.c_steps = 1 + member.learner_id % 3;
+            assert_eq!(
+                super::route_push(std::slice::from_mut(&mut round), member, push, None, false),
+                PushDisposition::Accepted
+            );
+            if matches!(round.fold, Some(RoundFold::Streaming(_))) {
+                // The streaming fold releases every push on arrival.
+                assert!(round.pushes.values().all(|push| push.outer_gradient.is_empty()));
+            }
+        }
+        let merge = prepare_round_compute(cfg, &st, &mut round)
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0].to_vec()
+    }
+
+    #[test]
+    fn streaming_partial_quorum_round_commits_within_rounding_of_buffered() {
+        let streaming = streaming_cfg();
+        let mut buffered_cfg = streaming_cfg();
+        buffered_cfg.weighted_fold = WeightedFoldMode::Buffered;
+        let members = [member(0, 3), member(2, 1), member(5, 9), member(7, 2)];
+        for mode in [
+            crate::state::MERGE_AVG,
+            crate::state::MERGE_RDA,
+            crate::state::MERGE_ISO,
+        ] {
+            // Quorum 1 of 4: any subset may close the round.
+            for subset in [vec![2], vec![0, 3], vec![3, 1, 2], vec![0, 1, 2, 3]] {
+                let buffered = committed_params(&buffered_cfg, mode, &members, &subset);
+                let scale = buffered.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let first = committed_params(&streaming, mode, &members, &subset);
+                let mut sorted = subset.clone();
+                sorted.sort_unstable();
+                for order in permutations(subset.len()) {
+                    let arrivals: Vec<usize> = order.iter().map(|&i| subset[i]).collect();
+                    let out = committed_params(&streaming, mode, &members, &arrivals);
+                    let err = out
+                        .iter()
+                        .zip(&buffered)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        err <= 32.0 * f32::EPSILON * scale,
+                        "mode {mode} arrivals {arrivals:?}: error {err:e}, scale {scale:e}"
+                    );
+                    if arrivals == subset {
+                        assert_eq!(out, first, "same arrival order must repeat exactly");
+                    }
+                }
+            }
+        }
     }
 }

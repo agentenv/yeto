@@ -471,7 +471,10 @@ class MilesPublisher:
         version = state.policy_version if token_rollout_id is None else token_rollout_id
         token = policy_token(version, tensor_hash)
         self.last_timing = {"check_s": time.monotonic() - started}
-        members, checksums = self._runner.run(self._publish(version, token))
+        # E1: a round whose policy is not hashed (state.verified False) also skips the
+        # engine read-back; the next verified publication reads it back again
+        members, checksums = self._runner.run(
+            self._publish(version, token, read_back=getattr(state, "verified", True) is not False))
         # E1 diagnosis: where a publication's wall time goes (driver log only)
         print("yeto publish timing " + json.dumps(
             {k: round(v, 3) for k, v in self.last_timing.items()}, sort_keys=True), flush=True)
@@ -536,7 +539,7 @@ class MilesPublisher:
         return engines, ids, members
 
     async def _publish(
-        self, version: int, token: str
+        self, version: int, token: str, *, read_back: bool = True
     ) -> tuple[frozenset[str], dict[str, Any] | None]:
         if getattr(self._args, "debug_train_only", False):
             # Trainer-only island (Miles --debug-train-only, samples from the store):
@@ -566,7 +569,7 @@ class MilesPublisher:
         self._time("stamp_s", mark)
 
         checksums = None
-        if self._verify_checksums:
+        if self._verify_checksums and read_back:
             mark = time.monotonic()
             bodies = await read_engine_checksums(self._controller, self._flatten)
             self._time("checksum_s", mark)

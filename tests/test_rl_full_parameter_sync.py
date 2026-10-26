@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.protocol import PartialMessageGenerationLost, PullRequest
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.adapters.miles.full_parameter.role_stream import (
     RoleRoundResult,
     RoleSubmissionCandidate,
@@ -49,6 +49,10 @@ def _steps(progress, role):
 
 
 class _PairedRole:
+    # Like the Miles role stream: never delivers an older version of a
+    # fragment after a newer one, so a version jump is a catch-up.
+    monotonic_broadcasts = True
+
     def __init__(
         self,
         role: str,
@@ -70,6 +74,7 @@ class _PairedRole:
         self.terminal_submitted = False
         self._queued_steps = []
         self._staged_steps = []
+        self.caught_up = []
         self.local_boundaries = 0
         self.closed = False
         self.final_acknowledged = False
@@ -158,10 +163,14 @@ class _PairedRole:
     def has_staged_broadcast(self, fragment_id, version):
         return (fragment_id, version) in self.staged_fragment_versions
 
-    async def apply_staged_broadcast(self, fragment_id, version):
+    async def apply_staged_broadcast(self, fragment_id, version, *, catch_up=False):
         versions = list(self.fragment_versions)
         assert (fragment_id, version) in self.staged_fragment_versions
         self._staged_steps.remove(version)
+        if catch_up:
+            self.caught_up.append((fragment_id, version))
+            self._staged_steps[:] = [step for step in self._staged_steps
+                                     if (step - 1) % len(versions) != fragment_id or step > version]
         versions[fragment_id] = version
         self.fragment_versions = tuple(versions)
         return (fragment_id,)
@@ -375,6 +384,36 @@ async def test_terminal_final_manifest_drains_all_retained_pipeline_pairs():
     assert not pairing.inflight
     assert len(pairing.journal) == 2
     assert pairing.acknowledge_final()
+
+
+def test_terminal_pull_of_one_shard_does_not_stop_training_before_other_last_rounds():
+    # Sharded head: shard 1 (fragment 1) asks for the terminal step 4 while
+    # shard 0 has not yet asked for step 3, fragment 0's last round. The
+    # island must keep training so it can still answer step 3.
+    events = []
+    actor = _PairedRole("actor", [_candidate("actor", 4, base_version=2)], events,
+                        release_broadcasts=False)
+    actor.fragment_versions = (1, 2)
+    pairing = _pairing(actor)
+
+    pairing.submit_ready()
+    assert ("actor", 4, True) in events
+    assert not pairing.terminal_seen and not pairing.any_finalizing
+
+    actor.candidates.append(_candidate("actor", 3, base_version=1))
+    pairing.submit_ready()
+    assert ("actor", 3, True) in events
+    assert pairing.terminal_seen
+
+
+def test_terminal_pull_stops_training_when_other_last_rounds_already_closed():
+    events = []
+    actor = _PairedRole("actor", [_candidate("actor", 4, base_version=2)], events)
+    actor.fragment_versions = (3, 2)  # fragment 0's last round (step 3) closed
+    pairing = _pairing(actor)
+
+    pairing.submit_ready()
+    assert pairing.terminal_seen
 
 
 @pytest.mark.asyncio
@@ -831,3 +870,10 @@ def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch,
     assert lines[-1].endswith(
         "sent 3.0 MiB, 7 chunk(s) queued, 1 redial(s), connected=True"
     )
+
+
+def test_role_stream_matrix_merge_is_avg_or_rda():
+    assert _role_stream_config("actor", 30100).matrix_merge == "avg"
+    assert replace(_role_stream_config("actor", 30100), matrix_merge="rda").matrix_merge == "rda"
+    with pytest.raises(ValueError, match="matrix merge must be avg or rda"):
+        replace(_role_stream_config("actor", 30100), matrix_merge="iso")

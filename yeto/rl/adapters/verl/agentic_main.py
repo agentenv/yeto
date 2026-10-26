@@ -1,7 +1,7 @@
 """verl's own synchronous trainer on the Harbor agentic path (S25 N10.9; runs inside the verl image).
 
 ``python -m yeto.rl.adapters.verl.agentic_main <hydra overrides>`` is verl's
-``main_ppo.main`` unchanged, with Ray started here so that every Ray worker:
+``main_ppo.main`` unchanged (``--fully-async``: verl's ``fully_async_main.main``), with Ray started here so that every Ray worker:
 
 * registers the ``yeto_grpo`` advantage estimator right after verl's
   ``core_algos`` is imported (Ray ``worker_process_setup_hook`` installs an
@@ -26,6 +26,7 @@ import importlib
 import importlib.abc
 import importlib.util
 import os
+import runpy
 import sys
 from typing import Any
 
@@ -68,8 +69,24 @@ class _AfterImport(importlib.abc.MetaPathFinder):
         return spec
 
 
+def _log_to_stderr() -> None:
+    """yeto's warnings reach the worker log: the agentic workers had no handler that printed them
+    (agv-async-off-a: none of the per-trajectory lines appeared)."""
+    import logging
+
+    log = logging.getLogger("yeto")
+    if not any(getattr(h, "_yeto_worker", False) for h in log.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        handler._yeto_worker = True
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        log.propagate = False
+
+
 def setup_worker() -> None:
     """Ray ``worker_process_setup_hook``: register yeto_grpo once verl's core_algos loads (module doc)."""
+    _log_to_stderr()
     if ESTIMATOR_HOST in sys.modules:
         importlib.import_module(ESTIMATOR_MODULE)
         return
@@ -77,14 +94,18 @@ def setup_worker() -> None:
         sys.meta_path.insert(0, _AfterImport(ESTIMATOR_HOST, ESTIMATOR_MODULE))
 
 
-def runtime_env(environ: dict[str, str] | None = None) -> dict:
-    """verl's PPO runtime env plus the forwarded agentic variables and the setup hook."""
+def runtime_env(environ: dict[str, str] | None = None, *, fully_async: bool = False) -> dict:
+    """verl's PPO runtime env plus the forwarded agentic variables and the setup hook.
+
+    The synchronous V1 trainer runs on TransferQueue; the fully-async trainer
+    reads ``transfer_queue.enable`` from its own config, so the variable is left out."""
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     environ = dict(os.environ if environ is None else environ)
     env = get_ppo_ray_runtime_env(None)
     env.setdefault("env_vars", {})
-    env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"  # verl's V1 trainer runs on TransferQueue
+    if not fully_async:
+        env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"  # verl's V1 trainer runs on TransferQueue
     for key, value in environ.items():
         if key.startswith(FORWARD_ENV_PREFIXES) or key in FORWARD_ENV_NAMES:
             env["env_vars"][key] = value
@@ -92,16 +113,36 @@ def runtime_env(environ: dict[str, str] | None = None) -> dict:
     return env
 
 
+FULLY_ASYNC_FLAG = "--fully-async"
+SYNC_ENTRY = "verl.trainer.main_ppo"
+FULLY_ASYNC_ENTRY = "verl.experimental.fully_async_policy.fully_async_main"
+
+
 def main(argv: list[str] | None = None) -> None:
+    """``[--fully-async] <hydra overrides>``: verl's ``main_ppo`` or, with the flag, its
+    ``fully_async_main`` (separate rollout and trainer GPUs, a policy-age limit)."""
+    from yeto.launch.image_check import check_image_at_start
+
+    check_image_at_start()  # before Ray: a mismatched image stops here with the failed checks
     import ray
-    import verl.trainer.main_ppo as main_ppo
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    fully_async = FULLY_ASYNC_FLAG in args
+    if fully_async:
+        args.remove(FULLY_ASYNC_FLAG)
+    entry = None if fully_async else importlib.import_module(SYNC_ENTRY)
 
     importlib.import_module(ESTIMATOR_MODULE)  # the driver validates algorithm.adv_estimator too
     if not ray.is_initialized():
-        ray.init(runtime_env=runtime_env(), namespace="yeto-verl-agentic")
-    if argv is not None:
-        sys.argv = [sys.argv[0], *argv]
-    main_ppo.main()
+        ray.init(runtime_env=runtime_env(fully_async=fully_async), namespace="yeto-verl-agentic")
+    sys.argv = [sys.argv[0], *args]
+    if entry is not None:
+        entry.main()
+        return
+    # As ``python -m``: hydra resolves fully_async_main's config_path="config" from the file
+    # when the module runs as __main__; imported, it looks for a Python package
+    # ``...fully_async_policy.config`` that does not exist (agv-async-eff-a, exit after 30 s).
+    runpy.run_module(FULLY_ASYNC_ENTRY, run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":

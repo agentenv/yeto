@@ -22,7 +22,7 @@ Rust syncer.
 |---|---|---|---|
 | strict (``StrictAvgSync``, ``DualStrictAvgSync`` for the critic) | syncer ``--learner-weight equal`` (launcher RL default); ``tokens2-over-steps`` = ``merge::learner_weight`` when chosen | ``--max-base-lag 0``: every island trains from the exact global version v and pushes against v; quorum = all islands | stop when the committed version reaches ``global_rounds``; ``finish`` checks the final policy equals the committed one |
 | decoupled (``DecoupledSync``) | same syncer flags as strict (``equal``, ``--max-base-lag 0``), per fragment | fragments rotate with ``--pipeline`` fragments in flight; each fragment is merged against its own fragment version | stop when the syncer is finalizing or a submission reaches ``total_fragment_steps``; ``learner_budget_steps`` consolidates into one final cut |
-| elastic (``ElasticAvgSync``) | ``merge_weight`` = ``merge::learner_weight`` (tokens^2 / steps); a catch-up island has weight 0 on its join version; a late delta is carried with ``carry_gamma^lag`` | a delta with lag > ``DEFAULT_MAX_CARRY_LAG`` (2) is rejected (``carry_lag_exceeded``); samples at most ``MAX_SAMPLE_OUTER_LAG`` (2) outer steps stale; step at quorum ``theta`` (0.75) of capacity, at least ``q_min`` (1) | the syncer answers FINISHED after ``total_steps``, and keeps answering for ``final_grace_s`` (default: the soft deadline) |
+| island pool (``PoolAvgSync``) | syncer ``--learner-weight`` (``tokens2-over-steps`` by default here); a late delta is carried with ``carry_gamma^lag`` | a delta whose base lags the round by more than ``--rl-sync-max-base-lag`` is rejected (``carry_lag_exceeded``); a round merges at quorum ``theta`` of capacity (at least ``q_min``) or at the soft deadline; islands hold leases and re-JOIN after an expiry | the syncer sends the final cut after ``total_steps`` and waits ``final_grace_s`` for the islands still connected |
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ from yeto.rl.core import (
     policy_hash,
     policy_tensor_hash,
 )
-from yeto.rl import elastic_client
-from yeto.rl.elastic_client import (
+from yeto.rl import pool_client
+from yeto.rl.pool_client import (
     DEFAULT_ISLAND_LEASE_S,
-    ElasticClientConfig,
-    ElasticFinished,
     LeaveReason,
+    PoolClientConfig,
+    PoolFinished,
 )
 
 from . import progress as legacy_progress
@@ -94,9 +94,70 @@ def _local_state(driver: Any, version: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Round cuts at the safe point (shared by the no-sync and the synced islands)
+# ---------------------------------------------------------------------------
+class RoundCutHooks:
+    """The driver's round-cut hooks (``at_safe_point`` / ``cut_due`` / ``prepare_cut``)
+    over ``self.round_cuts`` (:class:`~.round_cut.RoundCutCheckpoint`, wired when a
+    checkpoint store is configured; None: no cuts).
+
+    :class:`LocalOnlySync` resumes from its cuts. A synced island (S27 R-2:
+    ``--rl-checkpoint-store`` with a syncer) only writes them -- for offline
+    evaluation and as the island's own record; at start its syncer stays
+    authoritative for the policy -- and cuts periodically only (no final cut:
+    the syncer holds the final policy)."""
+
+    round_cuts: Any = None
+
+    def _cut_final(self, rollout_id: int) -> bool:
+        """Is the cut at the safe point before ``rollout_id`` the run's last one?"""
+        return False
+
+    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int, final: bool = False) -> None:
+        """M4: keep a round cut at the safe point when one is due (``--rl-cut-every`` /
+        ``--rl-cut-auto-mtbf-s``, and at the end). A failed cut is reported, not fatal:
+        the previous pointer stays valid."""
+        if self.round_cuts is None:
+            return
+        try:
+            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True,
+                                         **({"trigger": self.final_trigger} if self.final_trigger else {}))
+                    if final else self.round_cuts.save(driver, rollout_id=rollout_id))
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
+            return
+        if info is not None:
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
+            driver.emit("rl_cut_saved", rollout_id=rollout_id, **{
+                k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
+                                         "store_commit_s", "total_s", "write_bytes_per_s",
+                                         "policy_hash", "store_synced", "latest_seq", "pruned",
+                                         "incarnation_index", "final", "trainer_onloaded_for_cut",
+                                         "store_commit", "prepared_before_offload")})
+
+    def cut_due(self, rollout_id: int) -> bool:
+        """A round cut is due at the safe point before ``rollout_id``."""
+        return self.round_cuts is not None and self.round_cuts.due(
+            rollout_id, final=self._cut_final(rollout_id))
+
+    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
+        """E1: write the trainer part of the cut due at the next safe point while the
+        trainer is still resident (the driver calls this right before it offloads a
+        colocated trainer for the publication). A failure is reported, not fatal: the
+        safe point then cuts the usual way."""
+        if self.round_cuts is None:
+            return
+        try:
+            self.round_cuts.prepare(driver, rollout_id=rollout_id, state=state,
+                                    final=self._cut_final(rollout_id))
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_cut_prepare_failed", rollout_id=rollout_id, error=repr(error)[:2000])
+
+
+# ---------------------------------------------------------------------------
 # No outer sync (single island smoke; task 4.1)
 # ---------------------------------------------------------------------------
-class LocalOnlySync:
+class LocalOnlySync(RoundCutHooks):
     """Train-only island: the local result is the next policy."""
 
     def __init__(self, num_rollout: int) -> None:
@@ -119,46 +180,6 @@ class LocalOnlySync:
         return SyncStart(_local_state(driver, rollout_id), rollout_id,
                          finished=rollout_id >= self._end())
 
-    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int, final: bool = False) -> None:
-        """M4: keep a round cut at the safe point (every ``--rl-cut-every`` rounds, and
-        always at the end). A failed cut is reported, not fatal: the previous pointer
-        stays valid."""
-        if self.round_cuts is None:
-            return
-        try:
-            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True,
-                                         **({"trigger": self.final_trigger} if self.final_trigger else {}))
-                    if final else self.round_cuts.save(driver, rollout_id=rollout_id))
-        except Exception as error:  # noqa: BLE001
-            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
-            return
-        if info is not None:
-            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
-            driver.emit("rl_cut_saved", rollout_id=rollout_id, **{
-                k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
-                                         "store_commit_s", "total_s", "write_bytes_per_s",
-                                         "policy_hash", "store_synced", "latest_seq", "pruned",
-                                         "incarnation_index", "final", "trainer_onloaded_for_cut",
-                                         "store_commit", "prepared_before_offload")})
-
-    def cut_due(self, rollout_id: int) -> bool:
-        """A round cut is due at the safe point before ``rollout_id``."""
-        return self.round_cuts is not None and self.round_cuts.due(
-            rollout_id, final=rollout_id >= self._end())
-
-    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
-        """E1: write the trainer part of the cut due at the next safe point while the
-        trainer is still resident (the driver calls this right before it offloads a
-        colocated trainer for the publication). A failure is reported, not fatal: the
-        safe point then cuts the usual way."""
-        if self.round_cuts is None:
-            return
-        try:
-            self.round_cuts.prepare(driver, rollout_id=rollout_id, state=state,
-                                    final=rollout_id >= self._end())
-        except Exception as error:  # noqa: BLE001
-            driver.emit("rl_cut_prepare_failed", rollout_id=rollout_id, error=repr(error)[:2000])
-
     def resume_data_cursor(self) -> dict[str, int] | None:
         """The data cursor recorded by the round cut this run resumed from (None:
         no resume, or the cut recorded none). The driver seeks to it first."""
@@ -167,6 +188,9 @@ class LocalOnlySync:
 
     def _end(self) -> int:
         return self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
+
+    def _cut_final(self, rollout_id: int) -> bool:
+        return rollout_id >= self._end()
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.num_rollout
@@ -305,8 +329,12 @@ class _PortsStrictRuntime:
             self.progress.commit_round(stats)
 
 
-class StrictAvgSync:
+class StrictAvgSync(RoundCutHooks):
     """Strict-avg at the safe boundary: export+PUSH, wait v+1, reset-apply."""
+
+    # a strict roster has every island train every round: one island cannot end on
+    # its own when its buffer is exhausted (S26 E9.3)
+    ends_on_data_end = False
 
     def __init__(
         self,
@@ -423,9 +451,9 @@ class StrictAvgSync:
             self.bridge.client.close()
 
 
-def _elastic_local_round_fields(stats: LocalRoundStats, base_version: int, payload_bytes: int) -> dict:
+def _pool_local_round_fields(stats: LocalRoundStats, base_version: int, payload_bytes: int) -> dict:
     """0.24: the strict bridge's ``rl_local_round`` fields (yeto/rl/bridge.py
-    ``_record_submission``) for an elastic round; base = the syncer's outer version."""
+    ``_record_submission``) for an island-pool round; base = the syncer's outer version."""
     return {
         **asdict(stats),
         "rl/active_groups": stats.active_groups,
@@ -452,16 +480,39 @@ def _elastic_local_round_fields(stats: LocalRoundStats, base_version: int, paylo
     }
 
 
-class ElasticAvgSync:
-    """``--rl-island-scheduling elastic`` sync session (rl-inter-island-scheduling 0.15).
+def _flat(state: CanonicalLoraState, specs) -> torch.Tensor:
+    """The LoRA vector as one flat f32 tensor in ``specs`` order."""
+    parts = [state.tensors[spec.name].detach().to(torch.float32).reshape(-1) for spec in specs]
+    return torch.cat(parts) if parts else torch.zeros(0, dtype=torch.float32)
 
-    Same session interface as :class:`StrictAvgSync`, backed by the elastic
-    syncer: JOIN at start (ELASTIC_INIT when no base exists yet), one
-    DELTA_TENSOR per boundary (theta - base as a flat f32 vector; c_tokens =
-    ``stats.action_tokens``, c_steps = ``local_optimizer_steps``), then the next
-    ELASTIC_BASE is reset-applied. The driver's rollout ids stay local round
-    ids; the syncer's outer version is tracked separately (``base_version``)
-    because a late island may see it jump. LEAVE at finish/close.
+
+def _unflat(flat: torch.Tensor, version: int, template: CanonicalLoraState, specs) -> CanonicalLoraState:
+    tensors, offset = {}, 0
+    for spec in specs:
+        tensors[spec.name] = flat[offset:offset + spec.numel].reshape(spec.shape).clone()
+        offset += spec.numel
+    if offset != flat.numel():
+        from yeto.rl.core import StrictRlInvariantError
+
+        raise StrictRlInvariantError("layout_hash_mismatch",
+                                     f"pool base has {flat.numel()} values, layout needs {offset}")
+    return canonical_state(version, tensors, base_model_revision=template.base_model_revision,
+                           lora_config_hash=template.lora_config_hash,
+                           layout_hash=template.layout_hash, expected_specs=specs)
+
+
+class PoolAvgSync(RoundCutHooks):
+    """Sync session of a LoRA island in a dynamic island pool.
+
+    Same session interface as :class:`StrictAvgSync`, on the fragment-round
+    syncer with membership options (lease, capacity quorum, soft deadline,
+    carry discount, final grace): join at start (island 0 seeds the initial
+    vector when the syncer has none yet), one delta per boundary (theta - base as one
+    flat f32 fragment; c_tokens = ``stats.action_tokens``, c_steps =
+    ``local_optimizer_steps``), then the next base is reset-applied. The
+    driver's rollout ids stay local round ids; the syncer's outer version is
+    tracked separately (``base_version``) because a late island may see it
+    jump. Leaves the pool at finish/close.
     """
 
     OUTER_SYNC_KIND = "elastic"
@@ -483,7 +534,7 @@ class ElasticAvgSync:
         self.client = client
         self.template: CanonicalLoraState | None = None
         self.specs = None
-        self.base: list[float] | None = None
+        self.base: torch.Tensor | None = None
         self.base_version: int | None = None
         self.in_boundary = False
         self.left = False
@@ -491,32 +542,28 @@ class ElasticAvgSync:
 
     def _client(self):
         if self.client is None:
-            # looked up on the module at call time: tests substitute the client class
-            self.client = elastic_client.ElasticIslandClient(
-                self._client_config(), elastic_client.hmac_key_from_env(),
-                on_event=self._client_event)
-        return self.client
+            from yeto.rl.bridge import _session_contract
+            from yeto.rl.core import build_avg_layout
 
-    def _client_config(self) -> ElasticClientConfig:
-        c = self.config
-        return ElasticClientConfig(c.syncer_addr, c.learner_id, syncer_epoch=self.syncer_epoch,
-                                   lease_s=self.lease_s,
-                                   backend_identity_sha256=config_island_contract_sha256(c),
-                                   compat_group=getattr(c, "compat_group", None))
+            c = self.config
+            layout = build_avg_layout(self.specs)
+            config = PoolClientConfig(
+                c.syncer_addr, c.learner_id, lease_s=self.lease_s, syncer_epoch=self.syncer_epoch,
+                session_contract_hash=_session_contract(layout, config_island_contract_sha256(c)),
+                compat_group=getattr(c, "compat_group", None), wan_streams=c.wan_streams)
+            # looked up on the module at call time: tests substitute the client class
+            self.client = pool_client.PoolIslandClient(config, layout, on_event=self._client_event)
+        return self.client
 
     _TAPE_CLIENT_EVENTS = ("elastic_rejoin", "elastic_rejoin_failed", "elastic_debug_pause",
                            "elastic_debug_pause_end")
 
     def _client_event(self, ev: dict) -> None:
-        """0.22: re-JOIN outcomes go onto the island tape (sent/received frames do not)."""
+        """0.22: re-JOIN outcomes go onto the island tape."""
         driver = getattr(self, "_driver", None)
         if driver is not None and ev.get("event") in self._TAPE_CLIENT_EVENTS:
             fields = {k: v for k, v in ev.items() if k != "event"}
             driver.emit(ev["event"], **fields)
-            limit = getattr(getattr(self.client, "config", None), "max_rejoin_failures", None)
-            if ev["event"] == "elastic_rejoin_failed" and limit and ev.get("failures", 0) >= limit:
-                # 0.27: the launcher reads this as "left the elastic pool" (exit 7)
-                driver.emit("elastic_left_pool", reason="rejoin_exhausted", failures=ev["failures"])
 
     def _base_timing(self, submit_ts: float, base) -> SyncTiming:
         """L5.6 timing of ``base``; the client records receive time only
@@ -530,24 +577,21 @@ class ElasticAvgSync:
     def _wait(self, newer_than):
         base = self.client.wait_base(newer_than=newer_than, timeout_s=self.base_wait_s)
         if base is None:
-            raise RuntimeError(f"no ELASTIC_BASE newer than {newer_than} within "
+            raise RuntimeError(f"no syncer base newer than {newer_than} within "
                                f"{self.base_wait_s}s; errors: {self.client.errors}")
         return base
 
     def _apply(self, driver: IslandDriver, base, rollout_id: int) -> TrainableState:
-        from yeto.rl.bridge import unflatten_state
-
-        self.base, self.base_version = list(base.params), base.outer_version
-        state = unflatten_state(self.base, rollout_id, self.template, self.specs)
+        self.base, self.base_version = base.params, int(base.outer_version)
+        state = _unflat(self.base, rollout_id, self.template, self.specs)
         return driver.apply_policy(TrainableState.from_lora(state), optimizer="reset",
                                    local_step=rollout_id * self.config.local_optimizer_steps,
                                    outer_version=int(base.outer_version))
 
     def start(self, driver: IslandDriver) -> SyncStart:
-        from yeto.rl.bridge import flatten_state
-
         self.template = _lora(driver.export_local())
-        self.specs = tuple(self.config.expected_specs or ()) or tuple(self.template.specs)
+        # The syncer layout orders tensors by spec (core.build_avg_layout).
+        self.specs = tuple(sorted(self.config.expected_specs or ())) or tuple(sorted(self.template.specs))
         self._driver = driver
         injected = self.client is not None  # a client built by _client() already reports to the tape
         client = self._client()
@@ -564,13 +608,14 @@ class ElasticAvgSync:
         driver.phase("elastic_join", catch_up=ack.catch_up, base_version=ack.base_version)
         base = client.wait_base(newer_than=None, timeout_s=1.0)
         if base is None:
-            client.elastic_init(flatten_state(self.template, self.specs))
+            if int(self.config.learner_id) == 0:  # the syncer takes INIT from island 0 only
+                client.elastic_init(_flat(self.template, self.specs))
             base = self._wait(None)
         # 0.21: a restarted island resumes after its own trained rounds and never
         # behind the syncer's version (the driver then seeks the data cursor).
         ledger = getattr(driver, "ledger", None)
         ledger_next = ledger.next_rollout_id() if ledger is not None else 0
-        start = max(ledger_next, int(ack.base_version), 0)
+        start = max(ledger_next, int(base.outer_version), 0)
         if start > 0:
             driver.phase("elastic_resume", rollout_id=start, ledger_next=ledger_next,
                          base_version=ack.base_version, outer_version=base.outer_version)
@@ -582,7 +627,7 @@ class ElasticAvgSync:
         """0.25: ``YETO_RL_ELASTIC_DEBUG_DELAY`` = "ISLAND:S[,...]" (bare S = all)."""
         import os
 
-        from yeto.rl.elastic_client import DEBUG_DELAY_ENV, parse_elastic_debug_delay
+        from yeto.rl.pool_client import DEBUG_DELAY_ENV, parse_elastic_debug_delay
 
         spec = os.environ.get(DEBUG_DELAY_ENV, "")
         if not spec:
@@ -595,7 +640,7 @@ class ElasticAvgSync:
         """``YETO_RL_ELASTIC_DEBUG_PAUSE`` = "ISLAND:AFTER_V:S[,...]" -> (after_v, s) for this island."""
         import os
 
-        from yeto.rl.elastic_client import DEBUG_PAUSE_ENV, parse_elastic_debug_pause
+        from yeto.rl.pool_client import DEBUG_PAUSE_ENV, parse_elastic_debug_pause
 
         spec = os.environ.get(DEBUG_PAUSE_ENV, "")
         if not spec:
@@ -620,14 +665,13 @@ class ElasticAvgSync:
         return whole_round_restart_cursor(current, start_rollout_id, self.groups_per_round)
 
     def _reached_final(self) -> bool:
-        """S17 M1: an elastic island ends once it applied the syncer's final outer
+        """S17 M1: a pool island ends once it applied the syncer's final outer
         version, not after ``global_rounds`` LOCAL rounds.  A re-JOINed island lost
-        rounds (its delta refused while it was not a member, then the catch-up
-        entry weighted 0) yet its local rollout id kept counting, so on the local
-        count it left before the last outer step (s17-m1-20261008a: island 1 left
-        after v5, v6 merged island 0 alone).  When base == rollout_id + 1 (no
-        rejoin) this is the old rule.  Extra rounds past the local schedule run at
-        the trainer's tail learning rate (linear decay: 0) -- known limitation."""
+        rounds (its delta refused while it was not a member) yet its local rollout
+        id kept counting, so on the local count it would leave before the last
+        outer step.  When base == rollout_id + 1 (no rejoin) both rules agree.
+        Extra rounds past the local schedule run at the trainer's tail learning
+        rate (linear decay: 0) -- known limitation."""
         return self.base_version is not None and self.base_version >= self.config.global_rounds
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
@@ -636,23 +680,20 @@ class ElasticAvgSync:
         return rollout_id + 1 >= self.config.global_rounds
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
-        from yeto.rl.bridge import flatten_state
-
         if self.base is None:
-            raise RuntimeError("elastic sync called outside an active round")
+            raise RuntimeError("pool sync called outside an active round")
         if rollout_id + 1 > self.config.global_rounds:
             driver.phase("elastic_extra_round", rollout_id=rollout_id, base_version=self.base_version)
         self.in_boundary = True
         driver.phase("export_push", rollout_id=rollout_id, base_version=self.base_version)
-        local = flatten_state(_lora(driver.export_local()), self.specs)
-        update = [a - b for a, b in zip(local, self.base)]
+        update = _flat(_lora(driver.export_local()), self.specs) - self.base
         sent_on = self.base_version
-        stats = replace(stats, delta_l2_norm=math.sqrt(sum(u * u for u in update)))
+        stats = replace(stats, delta_l2_norm=float(torch.linalg.vector_norm(update)))
         delay = self.debug_delay_s()
         if delay > 0:  # 0.25 test switch (heartbeats continue on their own thread)
             driver.phase("elastic_debug_delay", rollout_id=rollout_id, delay_s=delay)
             self._sleep(delay)
-        driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)),
+        driver.emit("rl_local_round", **_pool_local_round_fields(stats, sent_on, 4 * update.numel()),
                     **{"sync/base_outer_version": sent_on})
         self.client.inner_step += self.config.local_optimizer_steps
         try:
@@ -669,20 +710,18 @@ class ElasticAvgSync:
                         **self._base_timing(submit_ts, base).fields())
             state = self._apply(driver, base, rollout_id + 1)
             self._maybe_pause_link(driver)
-        except ElasticFinished as done:
+        except PoolFinished as done:
             return self._finished(driver, done, rollout_id=rollout_id, sent_on=sent_on)
         self.in_boundary = False
         return SyncBoundary(state, self._reached_final())
 
     def _finished(self, driver, done, *, rollout_id: int, sent_on: int) -> SyncBoundary:
         """0.26: the syncer ended the run while this (late) island was still
-        pushing: end normally on the newest base (exit 0), not BrokenPipe/exit 1."""
+        pushing: end normally on the final cut (exit 0), not BrokenPipe/exit 1."""
         base = self.client.latest_base
         driver.emit("elastic_finished", rollout_id=rollout_id, reason=done.reason,
                     final_outer_version=done.final_outer_version, sent_on=sent_on,
                     base_version=None if base is None else base.outer_version)
-        # FINISHED: LEAVE first so the syncer exits as soon as every island left
-        # instead of waiting out its final grace window; best-effort otherwise.
         self.leave(LeaveReason.FINISHED)
         self.in_boundary = False
         if base is not None and base.outer_version > sent_on:
@@ -701,27 +740,27 @@ class ElasticAvgSync:
         self.leave(LeaveReason.FINISHED)
 
     def leave(self, reason: int) -> bool:
-        """Send LEAVE once per process; True when this call sent it (the first reason wins: a reclaim
-        listener's PREEMPTED is not overwritten by the driver's close). A failed
-        send is reported as ``elastic_leave_failed``, never raised: the driver
+        """Leave the pool once per process; True when this call left (the first
+        reason wins: a reclaim listener's PREEMPTED is not overwritten by the
+        driver's close). The reason goes on the island tape; a failure to
+        close is reported as ``elastic_leave_failed``, never raised: the driver
         may be propagating the original error (design D2)."""
         with self._leave_lock:
             if self.client is None or self.left:
                 return False
             self.left = True
         code = sendable(reason)
+        driver = getattr(self, "_driver", None)
         try:
             self.client.leave(code)
-            return True
         except Exception as error:  # noqa: BLE001 - the syncer may already be gone
-            if isinstance(error, (ElasticFinished, BrokenPipeError, ConnectionResetError)) \
-                    and code is LeaveReason.FINISHED:
-                return False  # 0.26: the syncer already finished
-            driver = getattr(self, "_driver", None)
             if driver is not None:
                 driver.emit("elastic_leave_failed", reason=int(code), reason_name=code.name,
                             error_type=type(error).__name__, error=str(error))
             return False
+        if driver is not None:
+            driver.emit("elastic_leave", reason=int(code), reason_name=code.name)
+        return True
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
         if self.client is not None:
@@ -794,6 +833,10 @@ class DualStrictAvgSync:
     raised and the island stays at the last committed round v (in memory when
     ``keep_committed``; durably through the round cut, whose critic round must
     equal the actor round, 4.3)."""
+
+    # a strict roster has every island train every round: one island cannot end on
+    # its own when its buffer is exhausted (S26 E9.3)
+    ends_on_data_end = False
 
     OUTER_SYNC_KIND = "strict"
 
@@ -955,7 +998,7 @@ class DecoupledIslandProgress:
         )
 
 
-class DecoupledSync:
+class DecoupledSync(RoundCutHooks):
     """Run-until-stop decoupled fragments through PolicyState/Publisher.
 
     Mirrors ``DecoupledMilesPolicySync`` step for step; ``_record_local_round``

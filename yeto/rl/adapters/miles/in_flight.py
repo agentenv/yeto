@@ -8,8 +8,9 @@ unfinished work in the rollout process:
   tokens generated so far, their version segments and generation
   log-probabilities;
 * agentic (stage 3, ``--agentic-suspend-between-turns``): trajectories suspended
-  between two model turns -- live coroutines with a Codex process and a sandbox,
-  known to the cut only by reference (``session_ref``).
+  between two model turns -- live Harbor trial coroutines with an agent process
+  and a sandbox, known to the cut only by reference (``session_ref``,
+  :func:`yeto.rl.agentic.suspend.suspended_references`).
 
 :func:`export_in_flight` turns both into :class:`~yeto.rl.engine.version_segments.InFlightTrajectory`
 entries (one per trajectory; a buffered sample also carries its full Miles
@@ -39,10 +40,12 @@ from yeto.rl.engine.version_segments import (
     restore_in_flight,
 )
 
+from yeto.rl.agentic.suspend import SESSION_LOST_REASON, SESSION_REF_PREFIX, is_suspended_ref, suspended_references
+
 from .carry_over import response_token_versions
 
-AGENTIC_SESSION_PREFIX = "codex-suspended:"
-AGENTIC_SESSION_LOST = "agentic_session_lost"
+AGENTIC_SESSION_PREFIX = SESSION_REF_PREFIX
+AGENTIC_SESSION_LOST = SESSION_LOST_REASON
 
 
 class InFlightExportError(RuntimeError):
@@ -104,37 +107,10 @@ def buffered_entries(buffer: Iterable[Sequence[Any]]) -> list[dict[str, Any]]:
     return entries
 
 
-def agentic_entries(gates: Mapping[str, Any], inflight: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """One entry per suspended agentic trajectory (reference only)."""
-    entries = []
-    for trajectory_id in sorted(gates):
-        stage = (inflight.get(trajectory_id) or {}).get("stage")
-        entry = InFlightTrajectory(
-            trajectory_id=str(trajectory_id), group_id=f"agentic:{trajectory_id}",
-            task_id=str(trajectory_id), provenance=TokenProvenance((), ()),
-            session_ref=f"{AGENTIC_SESSION_PREFIX}{trajectory_id}",
-        ).to_dict()
-        if stage:
-            entry["stage"] = str(stage)
-        entries.append(entry)
-    return entries
-
-
-def _codex_suspension() -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    import sys
-
-    module = sys.modules.get("yeto.rl.harness.codex.codex_openenv_subprocess_agent_function")
-    if module is None:
-        return {}, {}
-    state = getattr(module, "_SUSPEND_STATE", {}) or {}
-    return dict(state.get("gates") or {}), dict(getattr(module, "_INFLIGHT", {}) or {})
-
-
 def export_in_flight(executor: Any) -> dict[str, Any]:
     """Runs INSIDE the rollout executor actor: the in-flight entries and the
     data buffer length they account for (fully_async: also ``data_cursor``, the
     data source position read together with them)."""
-    gates, inflight = _codex_suspension()
     if getattr(getattr(executor, "args", None), "fully_async", False):
         # P0-S decision 3: background generation is never saved; the cut carries
         # every drawn, untrained prompt (reset) like a buffered group, so the
@@ -144,13 +120,21 @@ def export_in_flight(executor: Any) -> dict[str, Any]:
         from .fully_async_prompts import snapshot_untrained
 
         snap = snapshot_untrained(executor)
-        return {"entries": buffered_entries(snap["groups"]) + agentic_entries(gates, inflight),
+        return {"entries": buffered_entries(snap["groups"]) + agentic_entries(),
                 "buffer_groups": len(snap["groups"]), "data_cursor": snap["data_cursor"]}
     source = getattr(executor, "data_source", None)
     source = getattr(source, "__self__", source)
     buffer = list(getattr(source, "buffer", None) or [])
-    entries = buffered_entries(buffer) + agentic_entries(gates, inflight)
+    entries = buffered_entries(buffer) + agentic_entries()
     return {"entries": entries, "buffer_groups": len(buffer)}
+
+
+def agentic_entries() -> list[dict[str, Any]]:
+    """Suspended agentic trajectories of this process as reference-only cut entries."""
+    empty = TokenProvenance(versions=(), logprobs=())
+    return [InFlightTrajectory(ref["trajectory_id"], ref["group_id"], ref["task_id"], empty,
+                               session_ref=ref["session_ref"]).to_dict()
+            for ref in suspended_references()]
 
 
 def import_in_flight(executor: Any, entries: Sequence[Mapping[str, Any]], *, max_policy_age: int,
@@ -158,7 +142,7 @@ def import_in_flight(executor: Any, entries: Sequence[Mapping[str, Any]], *, max
                      sample_from_dict: Any = None) -> dict[str, Any]:
     """Runs INSIDE the rollout executor actor on restore: resumed buffered groups go
     back into the data buffer; the rest is discarded. Returns the report."""
-    agentic = [e for e in entries if str(e.get("session_ref") or "").startswith(AGENTIC_SESSION_PREFIX)]
+    agentic = [e for e in entries if is_suspended_ref(e.get("session_ref"))]
     buffered = [e for e in entries if e not in agentic]
     decision = restore_in_flight(buffered, max_policy_age=max_policy_age,
                                  current_version=current_version,

@@ -93,6 +93,8 @@ class EffSpec:
     # engines need DP=1, so a 2-card trainer runs tensor parallel 2 in every arm.
     tuning: str = "lora"
     tensor_parallel: int = 1
+    # yeto+Miles only, observation (E1): --rl-profile-trainer (not in the fingerprint)
+    profile_trainer: bool = False
 
     @property
     def samples_per_round(self) -> int:
@@ -185,7 +187,8 @@ def cards(mode: str, total: int = 0) -> dict[str, int]:
 def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
-    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
+    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint",
+                                                                 "profile_trainer")}
     # fields added after E0.1: a default value keeps the fingerprints of earlier runs valid
     for key, default in (("cards", 0), ("data_file", ""), ("train_rows", 0), ("tuning", "lora"),
                          ("tensor_parallel", 1)):
@@ -418,17 +421,18 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     return argv
 
 
-CHECKPOINT_MODES = ("final", "every-round")
+CHECKPOINT_MODES = ("final", "every-round", "default")
 
 
-def cut_every(spec: EffSpec) -> int:
+def cut_every(spec: EffSpec) -> int | None:
     """Round-cut interval of the yeto+Miles arm: ``final`` cuts only at the end (the
-    bare arms keep no checkpoint), ``every-round`` is the product default.
+    bare arms keep no checkpoint), ``every-round`` cuts every round, ``default`` passes
+    no interval (the product default, ``yeto.rl.engine.resume.DEFAULT_CUT_EVERY``).
     The yeto+verl arm sets no checkpoint store and fully_async refuses cuts, so it
     has no round cut in either mode."""
     if spec.checkpoint not in CHECKPOINT_MODES:
         raise ValueError(f"checkpoint must be one of {CHECKPOINT_MODES}, got {spec.checkpoint!r}")
-    return spec.rounds if spec.checkpoint == "final" else 1
+    return {"final": spec.rounds, "every-round": 1, "default": None}[spec.checkpoint]
 
 
 # E1: the GPU model every arm must run on, per spec.gpu (as tools/eval/modal_verl.GPU_NAMES:
@@ -456,7 +460,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--controller local --cluster-prefix {run_id} {_yeto_tuning(spec)}"
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {_yeto_data(spec)} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
-            f"--rl-cut-every {cut_every(spec)} "
+            f"{'' if cut_every(spec) is None else f'--rl-cut-every {cut_every(spec)} '}"
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
             f"--rollout-batch-size {spec.groups_per_round} --n-samples-per-prompt {spec.samples_per_group} "
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
@@ -469,6 +473,8 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
             # TIS (upper 2.0) and eps_clip_high 0.28 as in the bare arms; staleness 2 >= max_policy_age
             f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC}")
+    if spec.profile_trainer:
+        args += " --rl-profile-trainer"
     if kwargs:
         args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
     if mode == "async":
@@ -539,9 +545,9 @@ def yeto_miles_islands_launcher_args(spec: EffSpec, islands: int, run_id: str, *
             "--no-sglang-deterministic-inference --rl-lr-schedule constant --rl-activation-recompute "
             f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
             f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC} "
-            # elastic: the multi-island LoRA path with real-card runs (S24 d4, S25 c3); legacy
-            # scheduling hung in the first apply on both islands (e11-yeto-2i-1, no round in 13 min)
-            "--rl-island-scheduling elastic "
+            # island pool: the multi-island LoRA path with real-card runs (S24 d4, S25 c3); a
+            # fixed roster hung in the first apply on both islands (e11-yeto-2i-1, no round in 13 min)
+            "--rl-sync-quorum-theta 0.75 --rl-sync-carry-gamma 0.5 --rl-sync-soft-deadline-s 900 --rl-sync-max-base-lag 2 --rl-sync-learner-weight tokens2-over-steps --rl-sync-island-lease-s 150 "
             f"--rl-placement fixed-partition --rl-rollout-gpus {per // 2} "
             f"--rl-max-policy-age {spec.max_policy_age}")
     if kwargs:

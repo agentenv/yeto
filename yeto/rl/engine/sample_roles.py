@@ -28,8 +28,15 @@ with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
 reads lane m of the buffer; the island with learner id 0 releases the merged
 policy. The store reaches the island as ``--rl-sample-store`` (buffer and
 releases only: multi-island round cuts do not exist), the trainer count as
-``--rl-sample-lanes``. The samplers are separate
-no-sync launches over the same store.
+``--rl-sample-lanes``. The samplers are separate no-sync launches over the
+same store, or (S26 E9.4) islands of the same launch, a *synced group*
+(``--rl-sample-role trainer --rl-island-sample-role M:sampler``, a syncer): the
+listed islands are no-sync samplers (learner 0 of 1, like a pair's samplers)
+and every other island is a synced trainer, learner k of K in island order
+(:func:`synced_group_learners`). With the full-parameter preset (its
+asynchronous rounds only) the publisher releases full weights at the merged
+version of the fragments (``full_parameter_sync.merged_version``), and the
+samplers run ``--tuning full``.
 
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
@@ -40,6 +47,9 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from typing import Any
+
+from .data_split import DataSlot  # noqa: F401 - re-exported (S26 E9.3 callers)
+from .selection import FULL_PARAMETER_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
@@ -58,13 +68,24 @@ class SampleBufferConfig:
     groups);
     ``wait_s``: trainer, max seconds to wait for one full round;
     ``min_round_s``: sampler, min seconds from one round start to the next (a
-    throttle, so a test can make the sampler slower than the trainer)."""
+    throttle, so a test can make the sampler slower than the trainer);
+    ``fused_stage``: LoRA sampler, check the release digest while copying the
+    adapter to local disk (``--rl-sampler-fused-stage``, S26 E5);
+    ``release_legacy``: trainer or convertible node, reload the store before every
+    policy release and commit LATEST separately (``--rl-release-reload-latest``;
+    ``PolicyReleaseStore.cached_latest``);
+    ``release_inline``: trainer, write each full-weight release into the store on
+    the training critical path instead of staging it on local disk and uploading
+    it in the background (``--rl-release-inline``; ``sampler_island`` module doc)."""
 
     role: str
     store: str
     max_backlog_groups: int | None = None
     wait_s: float | None = None
     min_round_s: float | None = None
+    fused_stage: bool = False
+    release_legacy: bool = False
+    release_inline: bool = False
 
 
 def sample_role(args: Any) -> str:
@@ -98,11 +119,44 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
     if int(num_islands) < 2:
         raise ValueError("--rl-sample-role trainer without --rl-single-island-no-sync is a synced "
                          f"multi-island launch: it needs at least two islands (got {num_islands})")
-    if is_pair(args) or is_convertible_pool(args):
-        raise ValueError("synced trainers do not combine with --rl-island-sample-role or "
-                         "convertible nodes")
+    if is_convertible_pool(args):
+        raise ValueError("synced trainers do not combine with convertible nodes")
     if getattr(args, "tuning", "lora") != "lora":
-        raise ValueError("synced trainers merge LoRA deltas: they need --tuning lora")
+        raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
+                         "they need --tuning lora")
+    if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
+            getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
+        # The strict sweep publishes in lockstep (policy age 0); a synced trainer
+        # trains on buffered samples of earlier versions.
+        raise ValueError("full-parameter synced trainers need --rl-sync-full-parameter-rounds "
+                         "async (the strict sweep takes no --rl-max-policy-age)")
+    if is_synced_group(args):
+        check_synced_group(args, num_islands)
+
+
+def check_synced_group(args: Any, num_islands: int) -> None:
+    """Launch checks of a synced group (module doc): ``--rl-island-sample-role``
+    names only samplers, at least two trainers remain, and the samplers split the
+    trainers' rounds evenly; then every island's own role checks."""
+    listed = _listed_roles(args, num_islands)
+    if any(role != SAMPLER for role in listed.values()):
+        raise ValueError("--rl-island-sample-role with --rl-sample-role trainer names the sampler "
+                         f"islands only (every other island is a synced trainer); got {listed}")
+    trainers = len(synced_group_learners(args, num_islands))
+    if trainers < 2:
+        raise ValueError(f"a synced group needs at least two trainer islands (got {trainers}); "
+                         "one trainer with samplers is a pair (--rl-single-island-no-sync)")
+    samplers = len(listed)
+    if (trainers * int(getattr(args, "total_steps", 0) or 0)) % samplers:
+        raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
+                         f"rounds of {trainers} trainers; trainers x total steps must be a multiple "
+                         "of the sampler count")
+    if int(getattr(args, "external_learners", 0) or 0):
+        raise ValueError("a synced group does not take external learners")
+    if getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
+        raise ValueError("--rl-trainer-scheduler does not combine with a synced group")
+    for m in range(num_islands):
+        check_launch(island_args(args, m, num_islands))
 
 
 def check_sample_store(args: Any) -> None:
@@ -155,6 +209,14 @@ def island_roles(args: Any, num_islands: int) -> dict[int, str]:
     a malformed, out-of-range or repeated entry."""
     if is_convertible_pool(args):
         return {m: CONVERTIBLE for m in convertible_islands(args)}
+    roles = _listed_roles(args, num_islands)
+    if is_synced_group(args):
+        # the listed islands are samplers; every other island is a synced trainer
+        return {m: roles.get(m, TRAINER) for m in range(int(num_islands))}
+    return roles
+
+
+def _listed_roles(args: Any, num_islands: int) -> dict[int, str]:
     roles: dict[int, str] = {}
     for item in getattr(args, "rl_island_sample_role", None) or ():
         island, sep, role = str(item).partition(":")
@@ -173,8 +235,32 @@ def island_roles(args: Any, num_islands: int) -> dict[int, str]:
 
 def is_pair(args: Any) -> bool:
     """Whether the launch is a store-coupled group: one trainer island and one or
-    more sampler islands (``--rl-island-sample-role``; "pair" for short)."""
-    return bool(getattr(args, "rl_island_sample_role", None))
+    more sampler islands (``--rl-island-sample-role`` without a synced trainer
+    role; "pair" for short)."""
+    return bool(getattr(args, "rl_island_sample_role", None)) and not is_synced_group(args)
+
+
+def is_synced_group(args: Any) -> bool:
+    """S26 E9.4: one launch of synced trainers and their sampler islands
+    (``--rl-sample-role trainer`` with a syncer and ``--rl-island-sample-role
+    M:sampler``; module doc)."""
+    return bool(getattr(args, "rl_island_sample_role", None)) and is_synced_trainer(args)
+
+
+def synced_group_learners(args: Any, num_islands: int) -> dict[int, int]:
+    """{trainer island: learner id} of a synced group: the trainers in island order
+    are learners 0..K-1 (learner 0 releases the merged policy); {} otherwise."""
+    if not is_synced_group(args):
+        return {}
+    trainers = [m for m, role in sorted(island_roles(args, num_islands).items()) if role == TRAINER]
+    return {m: k for k, m in enumerate(trainers)}
+
+
+def syncer_learner_count(args: Any, num_islands: int) -> int:
+    """The learners the syncer waits for among the launch's islands: the trainers
+    of a synced group, every island otherwise (a no-sync launch has no syncer)."""
+    learners = synced_group_learners(args, num_islands)
+    return len(learners) if learners else int(num_islands)
 
 
 def sampler_islands(args: Any, num_islands: int) -> list[int]:
@@ -204,12 +290,17 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     roles = island_roles(args, num_islands)
     if not roles:
         return args
+    if is_synced_group(args):
+        return _synced_group_island_args(args, island, num_islands, roles)
     out = copy.copy(args)
     out.rl_sample_role = roles[island]
     if out.rl_sample_role in (SAMPLER, TRAINER):
         out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
         out.rl_buffer_shards = buffer_shards(args, num_islands)
         samplers = len(sampler_islands(args, num_islands))
+        # each sampler island draws its own slot of the data (S26 E9.3)
+        out.rl_sampler_data_slot = (DataSlot(sampler_islands(args, num_islands).index(island), samplers).env()
+                                    if out.rl_sample_role == SAMPLER and samplers > 1 else None)
         if out.rl_sample_role == SAMPLER and getattr(args, "rl_sampler_spot", False):
             # spot billing without the legacy --spot volume: the buffer is the sampler's
             # durable state (S25 C1)
@@ -229,14 +320,61 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     else:
         out.rl_sampler_max_backlog_rounds = None
         out.rl_sampler_min_round_seconds = None
+    if out.rl_sample_role != SAMPLER:
+        out.rl_sampler_fused_stage = False
+    if out.rl_sample_role not in (TRAINER, CONVERTIBLE):
+        out.rl_release_reload_latest = False
+    if out.rl_sample_role != TRAINER:
+        out.rl_release_inline = False
     return out
 
 
-def island_learner(args: Any, island: int, num_learners: int) -> tuple[int, int]:
+def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: dict[int, str]) -> Any:
+    """Island args of a synced group. A trainer keeps the synced args (its lane and
+    the sampler shards); a sampler becomes a pair-style no-sync sampler over the
+    same store: no syncer and no island pool options, its node name and data
+    slot, and its share of the trainers' rounds."""
+    from ...launch.syncer import _ISLAND_POOL_PARAMS
+
+    samplers = sampler_islands(args, num_islands)
+    out = copy.copy(args)
+    out.rl_island_sample_role = None  # the island is no group: its role is below
+    out.rl_sample_role = roles[island]
+    out.rl_buffer_shards = buffer_shards(args, num_islands)
+    out.rl_synced_trainers = len(synced_group_learners(args, num_islands))
+    if out.rl_sample_role == TRAINER:
+        out.rl_sampler_node = None
+        out.rl_sampler_data_slot = None
+        out.rl_sampler_max_backlog_rounds = None
+        out.rl_sampler_min_round_seconds = None
+        return out
+    out.rl_single_island_no_sync = True
+    for name, _flag in _ISLAND_POOL_PARAMS:
+        setattr(out, name, None)
+    out.rl_syncer_epoch = None
+    out.rl_sampler_node = node_name(island)
+    out.rl_sampler_data_slot = (DataSlot(samplers.index(island), len(samplers)).env()
+                                if len(samplers) > 1 else None)
+    out.rl_sample_wait_s = None
+    out.total_steps = out.rl_synced_trainers * int(args.total_steps) // len(samplers)
+    if getattr(args, "rl_total_fragment_steps", None) is not None:
+        out.rl_total_fragment_steps = out.total_steps * int(getattr(args, "fragments", 1) or 1)
+    return out
+
+
+def island_learner(args: Any, island: int, num_learners: int,
+                   num_islands: int | None = None) -> tuple[int, int]:
     """``(learner id, number of learners)`` the island command carries. A pair
-    island is a one-learner no-sync island: (0, 1). The launcher keeps ``island``
-    for the cluster / Modal function name, the tape and the volumes."""
-    return (0, 1) if is_store_coupled(args) else (island, num_learners)
+    island is a one-learner no-sync island: (0, 1); so is a synced group's sampler,
+    and its trainers are learners 0..K-1 (:func:`synced_group_learners`). The
+    launcher keeps ``island`` for the cluster / Modal function name, the tape and
+    the volumes."""
+    if is_store_coupled(args):
+        return 0, 1
+    learners = synced_group_learners(args, num_learners if num_islands is None else num_islands)
+    if learners:
+        return (learners[island], len(learners)) if island in learners else (0, 1)
+    return island, num_learners
 
 
 def buffer_full_parameter(args: Any) -> bool:
@@ -321,6 +459,12 @@ def check_launch(args: Any) -> None:
                            ("--rl-sample-wait-s", "rl_sample_wait_s")):
             if getattr(args, dest, None) is not None:
                 raise ValueError(f"{flag} needs --rl-sample-role sampler or trainer")
+        if getattr(args, "rl_sampler_fused_stage", False):
+            raise ValueError("--rl-sampler-fused-stage needs --rl-sample-role sampler")
+        if getattr(args, "rl_release_reload_latest", False):
+            raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer")
+        if getattr(args, "rl_release_inline", False):
+            raise ValueError("--rl-release-inline needs --rl-sample-role trainer")
         return
     if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
@@ -330,7 +474,7 @@ def check_launch(args: Any) -> None:
                          "buffer and the policy releases live in it)")
     if getattr(args, "rl_elastic", False):
         # --rl-elastic is placement reconfiguration (T/R cells), not the island sync:
-        # synced trainers use --rl-island-scheduling elastic (or strict sync)
+        # synced trainers use an island pool (or strict sync)
         raise ValueError(f"--rl-sample-role {role} does not support --rl-elastic "
                          "(placement reconfiguration)")
     if role in (TRAINER, CONVERTIBLE) and not int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
@@ -349,6 +493,13 @@ def check_launch(args: Any) -> None:
     if min_round_s is not None and (role != SAMPLER or not float(min_round_s) > 0):
         raise ValueError("--rl-sampler-min-round-seconds needs --rl-sample-role sampler "
                          "and a value > 0")
+    if getattr(args, "rl_sampler_fused_stage", False) and (
+            role != SAMPLER or (getattr(args, "tuning", None) or "lora") != "lora"):
+        raise ValueError("--rl-sampler-fused-stage needs --rl-sample-role sampler and "
+                         "--tuning lora (it fuses the LoRA adapter copy with its digest)")
+    if getattr(args, "rl_release_reload_latest", False) and role not in (TRAINER, CONVERTIBLE):
+        raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer "
+                         "(or a convertible pool): only a trainer writes policy releases")
     wait_s = getattr(args, "rl_sample_wait_s", None)
     if wait_s is not None and (role not in (TRAINER, CONVERTIBLE) or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
@@ -390,7 +541,11 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         max_backlog_groups=None if rounds is None else int(groups_per_round) * rounds,
         wait_s=None if wait_s is None else float(wait_s),
         min_round_s=(float(min_round_s) if role == SAMPLER and min_round_s is not None
-                     else None))
+                     else None),
+        fused_stage=role == SAMPLER and bool(getattr(args, "rl_sampler_fused_stage", False)),
+        release_legacy=role in (TRAINER, CONVERTIBLE)
+        and bool(getattr(args, "rl_release_reload_latest", False)),
+        release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -420,8 +575,17 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-min-round-seconds {float(args.rl_sampler_min_round_seconds)!r}"
     if getattr(args, "rl_sample_wait_s", None) is not None:
         flags += f" --rl-sample-wait-s {float(args.rl_sample_wait_s)!r}"
+    if role == SAMPLER and getattr(args, "rl_sampler_fused_stage", False):
+        flags += " --rl-sampler-fused-stage"
+    if role in (TRAINER, CONVERTIBLE) and getattr(args, "rl_release_reload_latest", False):
+        flags += " --rl-release-reload-latest"
+    if role == TRAINER and getattr(args, "rl_release_inline", False):
+        flags += " --rl-release-inline"
     if getattr(args, "rl_sampler_node", None):
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):
         flags += f" --rl-buffer-shards {','.join(args.rl_buffer_shards)}"
+    if getattr(args, "rl_sampler_data_slot", None):
+        flags += f" --rl-sampler-data-slot {args.rl_sampler_data_slot}"
     return flags
+

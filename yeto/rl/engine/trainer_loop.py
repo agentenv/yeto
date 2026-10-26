@@ -46,7 +46,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
 from .trainer_lifecycle import (
     BacklogStats,

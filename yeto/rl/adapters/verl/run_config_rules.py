@@ -19,9 +19,15 @@ def check_trainer_parallel(actor_gpus: int, tensor_parallel: int, pipeline_paral
         raise ValueError("verl backend first step: one GPU per island")
 
 
+# S26 E7 decision: the verl Megatron engine (the only verl path with expert
+# parallelism) is not wired into this adapter; MoE runs with EP go to Miles.
+EP_REFUSAL = ("verl 后端不支持专家并行（EP>1）：yeto 的 verl 适配层只接 FSDP2，"
+              "未接 verl Megatron 引擎（S26 E7 结论：不做）。EP 训练请用 Miles 后端")
+
+
 def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
     if expert_parallel != 1:
-        raise ValueError("verl backend first step: no expert parallelism")
+        raise ValueError(f"{EP_REFUSAL}；收到 expert_parallel={expert_parallel}")
 
 
 def check_global_batch(global_batch: int, data_parallel: int) -> None:

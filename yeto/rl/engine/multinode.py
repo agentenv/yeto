@@ -46,9 +46,11 @@ def trainer_replica_gpus(dims: Mapping[str, int]) -> int:
     ranks (expert tensor parallel ``etp`` defaults to 1), so ``ep*etp <= tp``
     needs no extra GPU and a larger EP needs ``ep*etp/tp`` data-parallel
     replicas of the dense ``tp*cp*pp`` group (the old ``tp*cp*ep*pp``
-    over-estimated by a factor of up to tp)."""
+    over-estimated by a factor of up to tp). Megatron-Core carves the expert
+    group out of TP x CP x DP (ETP x EP x EDP = TP x CP x DP), so with context
+    parallelism ``ep*etp <= tp*cp`` needs no extra GPU either (S27 G-AC)."""
     tp, cp, pp, ep, etp = (max(1, int(dims.get(dim, 1) or 1)) for dim in ("tp", "cp", "pp", "ep", "etp"))
-    return tp * cp * pp * max(1, -(-ep * etp // tp))
+    return tp * cp * pp * max(1, -(-ep * etp // (tp * cp)))
 
 
 class TopologyError(ValueError):

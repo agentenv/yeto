@@ -45,6 +45,18 @@ class _MilesInboundTransaction:
     finished: bool = False
 
 
+def _chunk_put(ray_module):
+    """``put`` of one CPU chunk: Miles' zero-copy form when this Miles has
+    it (S27 G-AP; a broadcast stores ~2 GB per Nemotron 30B fragment, ~10x
+    faster than pickling the tensor), else ``ray_module.put``."""
+
+    try:
+        from miles.backends.megatron_utils.full_parameter_state import put_full_parameter_chunk
+    except ImportError:  # a Miles from before zero-copy chunks
+        return ray_module.put
+    return lambda value: put_full_parameter_chunk(ray_module, value)
+
+
 class MilesRayInboundChunkSink:
     """Stream exact wire bytes into the production Miles typed Ray layout."""
 
@@ -59,6 +71,7 @@ class MilesRayInboundChunkSink:
             raise TypeError("Miles transactional sink has the wrong type")
         self.sink = sink
         self.ray = _resolve_ray_module(sink.ray_module)
+        self._put = _chunk_put(self.ray)
         self._lock = threading.Lock()
 
     @staticmethod
@@ -140,7 +153,7 @@ class MilesRayInboundChunkSink:
                 target.release()
         finally:
             raw.release()
-        reference = self.ray.put(value)
+        reference = self._put(value)
         if reference is None:
             raise RuntimeError("Ray returned no staged inbound chunk reference")
         return reference
@@ -268,7 +281,7 @@ class MilesRayInboundChunkSink:
                 plan_hash=transaction.shard.plan_hash,
             ),
         )
-        reference = self.ray.put(value)
+        reference = self._put(value)
         if reference is None:
             raise RuntimeError("Ray returned no typed inbound chunk reference")
         transaction.descriptors.append(descriptor)

@@ -61,10 +61,12 @@ from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.launch.node_inventory import InventoryError, Node, load_inventory
 from yeto.rl.adapters.miles.models import glm5_next
 from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
+from yeto.rl.engine.data_split import DataSlot
 from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
+VERL_STRATEGY = "fsdp2"  # the only verl actor strategy the adapter runs (S26 E7)
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 RAY_PORT = 6379
 MEMORY_TOLERANCE = 0.02  # plan memory figures vs the estimator (both 推算)
@@ -558,7 +560,8 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
         env = {**common_env, DEVICE_FAMILY_ENV: node.device_family, **engine.env()}
         sampler_runs.append({"node": node.name, "engine_argv": engine.argv(engine.config.base_dir), "env": env,
                              "spec_path": f"{state_dir}/sampler-{node.name}.json",
-                             "spec": sampler_spec(plan, node, engine),
+                             "spec": sampler_spec(plan, node, engine, slot=DataSlot(samplers.index(node),
+                                                                                    len(samplers))),
                              "argv": ["python3", "-m", "yeto.rl.engine.engine_sampler",
                                       "--spec", f"{state_dir}/sampler-{node.name}.json"],
                              "url": f"http://{rendezvous.get(node.name)}:{engine.config.port}"})
@@ -594,8 +597,9 @@ def state_dir_of(plan: Stage1Plan) -> str:
     return f"/data/yeto/{plan.run_id}"
 
 
-def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
-    """The engine sampler island's spec file (``engine_sampler_entry``)."""
+def sampler_spec(plan: Stage1Plan, node: Node, engine: Any, *, slot: DataSlot | None = None) -> dict[str, Any]:
+    """The engine sampler island's spec file (``engine_sampler_entry``). ``slot``:
+    the node's slot of the prompt data when several sampler nodes draw (S26 E9.3)."""
     sampling, task, quant = plan.section("sampling"), plan.section("task"), plan.section("quant")
     config, options = engine.config, engine.options
     server = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
@@ -622,14 +626,24 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
         "prompts": {"path": str(_get(task, "prompts_jsonl", "task")), "input_key": str(_get(task, "input_key", "task")),
                     "label_key": str(_get(task, "label_key", "task")),
                     "groups_per_round": int(task["rollout_batch_size"]),
-                    "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True},
+                    "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True,
+                    **({"data_slot": slot.env()} if slot is not None and not slot.whole else {})},
         "reward": str(task["reward"]), "reward_kind": "miles",
         # sampler.checks: further PostLoadChecks overrides (e.g. require_fixed_answers for a
         # cut-down rehearsal model); the expected expert count always comes from quant
         "checks": {**dict(plan.section("sampler").get("checks") or {}),
                    "expected_expert_matrices": int(quant["expected_expert_matrices"])},
         "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
+        # S26 E6: the rollout quant tier, applied on the node (sampler_engines.quant_tier)
+        **({"rollout_quant": section} if (section := quant_spec_section(plan)) else {}),
     }
+
+
+def quant_spec_section(plan: Stage1Plan) -> dict[str, Any] | None:
+    """``rollout_quant_tier`` of the plan as the sampler spec section (None for tier 0)."""
+    from yeto.rl.adapters.sampler_engines.quant_tier import spec_section  # noqa: PLC0415
+
+    return spec_section(int(plan.doc.get("rollout_quant_tier", 0) or 0))
 
 
 def head_store_access(plan: Stage1Plan) -> dict[str, Any]:
@@ -778,6 +792,13 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     """Contradictions inside the expanded plan. Empty list = consistent."""
     errors: list[str] = []
     model, quant, sampling = plan.section("model"), plan.section("quant"), plan.section("sampling")
+    tier = int(plan.doc.get("rollout_quant_tier", 0) or 0)
+    if tier and quant.get("scheme") != "bf16":
+        # S26 E6: stage 1 serves the quant section's scheme; a tier on top would quantize twice
+        errors.append(f"rollout_quant_tier {tier} needs quant.scheme bf16 (got {quant.get('scheme')!r})")
+    if tier == 2:
+        errors.append("rollout_quant_tier 2 is not wired into the stage-1 re-quantizer "
+                      "(its requant side process is template-based); use quant.scheme instead")
     sampler_cfg, trainer_cfg = plan.section("sampler"), plan.section("trainer")
     trainers, samplers = plan.nodes_of("trainer"), plan.nodes_of("sampler")
     miles = _section(trainer_cfg, "miles")
@@ -819,6 +840,10 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if "fp8" in flat or "fp4" in flat:
         errors.append("trainer arguments enable FP8/FP4; training is bf16 only (user 10-19, report #1)")
     verl = _section(trainer_cfg, "verl")
+    if out.trainer["backend"] == "verl" and str(verl["strategy"]) != VERL_STRATEGY:
+        # S26 E7: the verl Megatron engine (EP) is not wired; EP runs use Miles.
+        errors.append(f"verl.strategy {verl['strategy']!r}: the yeto verl adapter runs {VERL_STRATEGY} "
+                      "only (verl Megatron/EP not supported, S26 E7); use trainer.backend miles for EP")
     if int(verl["fsdp_size"]) not in (0, out.trainer["cards"]) and out.trainer["cards"] % int(verl["fsdp_size"]):
         errors.append(f"verl.fsdp_size {verl['fsdp_size']} does not divide {out.trainer['cards']} cards")
 

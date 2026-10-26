@@ -89,9 +89,9 @@ def test_final_grace_flag_and_status_state(tmp_path, monkeypatch):
     from yeto import launcher
 
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
-    cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic", "--rl-soft-deadline-s", "240")), 2)
+    cmd = launcher.syncer_command(_args(("--rl-sync-quorum-theta", "0.75", "--rl-sync-soft-deadline-s", "240")), 2)
     assert " --final-grace-s 240" in cmd
-    cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic", "--rl-final-grace-s", "60")), 2)
+    cmd = launcher.syncer_command(_args(("--rl-sync-quorum-theta", "0.75", "--rl-sync-final-grace-s", "60")), 2)
     assert " --final-grace-s 60" in cmd
     assert "--final-grace-s" not in launcher.syncer_command(_args(), 2)
 
@@ -106,15 +106,15 @@ def test_final_grace_flag_and_status_state(tmp_path, monkeypatch):
     assert ls.finished()
 
 
-# -- 10-09 ruling: elastic is not a fixed roster -----------------------------------
-def test_controller_fixed_roster_only_for_non_elastic_rl():
+# -- 10-09 ruling: an island pool is not a fixed roster -----------------------------------
+def test_controller_fixed_roster_only_without_island_pool():
     from types import SimpleNamespace
 
     from yeto.launcher import controller_fixed_roster
 
-    assert controller_fixed_roster(SimpleNamespace(training_mode="rl", rl_island_scheduling="legacy"))
-    assert not controller_fixed_roster(SimpleNamespace(training_mode="rl", rl_island_scheduling="elastic"))
-    assert not controller_fixed_roster(SimpleNamespace(training_mode="sft", rl_island_scheduling="legacy"))
+    assert controller_fixed_roster(SimpleNamespace(training_mode="rl"))
+    assert not controller_fixed_roster(SimpleNamespace(training_mode="rl", rl_sync_island_lease_s=30))
+    assert not controller_fixed_roster(SimpleNamespace(training_mode="sft"))
 
 
 def _refusing_ops(text):

@@ -5,6 +5,7 @@ container-set poller.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -14,15 +15,28 @@ from ..gpu_spec import ClusterSpec
 from . import REPO_ROOT
 from .code_pack import code_workdir
 from .remote_setup import HF_TOKEN_PATH
-from .syncer import critic_syncer_address, island_hmac_secret
+from .syncer import critic_syncer_address, island_hmac_secret, rl_dense_sweep
 from .credentials import SECRET_ENV_NAMES, _secret_value, registry_login_for
 from .storage import (
     MODAL_CHECKPOINT_STORE_MOUNT, MODEL_STORE_MOUNT, _rl_checkpoint_mount,
     _rl_checkpoint_storage_name, droppable_rejoins_in_new_container, modal_checkpoint_store,
     resumes_in_new_container,
 )
-from .codex import CODEX_CONTAINER_DIR, modal_sandbox_secret_name
+from .harness_env import modal_sandbox_secret_name
 from .fleet import TEARDOWN_UNVERIFIED_EXIT
+
+
+def verl_needs_nccl_shm_off(args, spec: ClusterSpec) -> bool:
+    """A verl island with several cards in one Modal container runs NCCL with
+    its shared-memory transport off.
+
+    S26 E9 e9-g2-a: on a 2-card Modal container verl's NCCL checkpoint engine
+    failed attaching ``/dev/shm/nccl-*`` ("No such file or directory", NCCL
+    system error); the same run with ``NCCL_SHM_DISABLE=1`` passed (e9-g2-d/e).
+    NCCL then uses P2P/sockets between the two local ranks. Miles islands are
+    not changed (no failure seen there)."""
+    backend = getattr(args, "rl_backend", None) or "miles"
+    return backend == "verl" and int(spec.gpus_per_node or 1) > 1
 
 
 def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str):
@@ -50,6 +64,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # The critic syncer shares the actor syncer's host: swap it too, or a
         # Modal island behind --syncer-public-addr dials the private address.
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
+    if rl and verl_needs_nccl_shm_off(args, spec):
+        envs.setdefault("NCCL_SHM_DISABLE", "1")  # --modal-env below still overrides it
     for item in getattr(args, "modal_env", None) or []:
         key, sep, value = str(item).partition("=")
         if not sep or not key:
@@ -74,16 +90,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     if rl and island_keeps_spot_volume(args):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
         volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
-    # Codex run bundle: the sky task mounts it at CODEX_CONTAINER_DIR; Modal
-    # mounts the same directory through the image (add_local_dir).
+    # Every sky file_mount (local prompt file, initial adapter, HF token file)
+    # is mounted into the container the same way; `~` is /root in Modal.
     all_mounts = dict(getattr(task, "file_mounts", None) or {})
-    codex_dir = all_mounts.get(CODEX_CONTAINER_DIR)
-    # Every other sky file_mount (local prompt file, initial adapter, HF token
-    # file) is mounted into the container the same way; `~` is /root in Modal.
     extra_mounts = {
         ("/root" + target[1:] if target.startswith("~") else target): str(source)
         for target, source in all_mounts.items()
-        if target != CODEX_CONTAINER_DIR and not str(source).startswith(("s3://", "gs://", "r2://"))
+        if not str(source).startswith(("s3://", "gs://", "r2://"))
     }
     requirements: tuple[str, ...] = ()
     if not rl:
@@ -112,8 +125,6 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         pip_requirements=requirements,
         volume_name=volume_name,
         volume_mount=volume_mount,
-        codex_dir=codex_dir,
-        codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
         checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
         checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
@@ -124,6 +135,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
         cpu_override=getattr(args, "modal_cpu", None),
         memory_gib_override=getattr(args, "modal_memory_gib", None),
+        ephemeral_disk_gib=modal_ephemeral_disk_gib(args) if rl else getattr(
+            args, "modal_ephemeral_disk_gib", None),
         tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
                      if getattr(args, "modal_tape_volume", None) else None),
         workdir=code_workdir(args),
@@ -141,6 +154,41 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         **({"timeout_s": int(args.modal_timeout_s)}
            if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
+
+
+# A full-parameter island holds whole-model f32 cuts as Ray objects: its
+# anchors, the current cut, the overlap round base, staged broadcasts and a
+# reconnect catch-up. What does not fit in the object store spills to the
+# container disk; s27-gh-a (27B, Modal's default disk) spilled 318 GB and
+# failed with ENOSPC. Size the disk for this many f32 copies.
+FULL_PARAMETER_SPILL_COPIES = 5
+MODAL_EPHEMERAL_DISK_MARGIN_GIB = 64
+MODAL_EPHEMERAL_DISK_MIN_GIB = 512
+MODAL_EPHEMERAL_DISK_MAX_GIB = 3072
+
+
+def modal_ephemeral_disk_gib(args) -> int | None:
+    """Container disk of a Modal RL island: ``--modal-ephemeral-disk-gib``, or
+    for full-parameter sync a size scaled to the model; None keeps Modal's
+    default (other modes, or a model whose size is unknown)."""
+    explicit = getattr(args, "modal_ephemeral_disk_gib", None)
+    if explicit is not None:
+        if int(explicit) < 1:
+            raise ValueError("--modal-ephemeral-disk-gib must be >= 1")
+        return int(explicit)
+    if not rl_dense_sweep(args):
+        return None
+    from ..shape.memory import model_weights_gb
+
+    try:
+        bf16_gb = model_weights_gb(args.model, getattr(args, "weights_gb", None))
+    except ValueError as exc:
+        print(f"[yeto] Modal island disk: model size unknown ({exc}); keeping Modal's "
+              "default disk, pass --modal-ephemeral-disk-gib to size it", file=sys.stderr)
+        return None
+    bf16_gib = bf16_gb * 1e9 / (1 << 30)
+    need = (FULL_PARAMETER_SPILL_COPIES * 2 + 1) * bf16_gib + MODAL_EPHEMERAL_DISK_MARGIN_GIB
+    return min(max(math.ceil(need), MODAL_EPHEMERAL_DISK_MIN_GIB), MODAL_EPHEMERAL_DISK_MAX_GIB)
 
 
 def modal_tape_subdir(cluster_prefix: str, learner_id: int) -> str:
@@ -284,10 +332,12 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
-def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True):
+def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True,
+                             attributed=None):
     """The log-independent container guard (modal_runner.ContainerSetPoller), only when
     a new container is never expected: no launcher relaunch, no checkpoint-store resume
-    and no droppable island. None otherwise."""
+    and no droppable island. None otherwise. ``attributed()`` returns the container ids
+    the islands printed (container id -> (island, rank))."""
     if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
         return None
     if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
@@ -297,8 +347,26 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
     from ..modal_runner import ContainerSetPoller
 
     expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
-    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change)
+    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change,
+                                attributed=attributed)
     return poller.start() if start else poller
+
+
+def container_log_follower_for(args, modal_ops, modal_cfgs, route, *, poller, start: bool = True):
+    """The follower of rescheduled containers' logs (modal_runner.ContainerLogFollower),
+    only when a new container is expected (no failing container guard: ``poller``
+    is None) and the ops can stream one container. None otherwise."""
+    if poller is not None or modal_ops is None or not modal_cfgs:
+        return None
+    if not (callable(getattr(modal_ops, "list_container_ids", None))
+            and callable(getattr(modal_ops, "stream_container_logs", None))):
+        return None
+    from ..modal_runner import ContainerLogFollower
+
+    expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
+    follower = ContainerLogFollower(modal_ops.list_container_ids, modal_ops.stream_container_logs,
+                                    expected, route=route)
+    return follower.start() if start else follower
 
 
 def effective_recover_timeout(args) -> float:

@@ -327,7 +327,7 @@ def _config(sweeps: int) -> RoleStreamConfig:
         max_fragment_bytes=64, max_chunk_bytes=8, overlap=True)
 
 
-def _run(monkeypatch, sweeps: int, *, cut=None):
+def _run(monkeypatch, sweeps: int, *, cut=None, trainer_cls=None):
     """Run ``sweeps`` overlapped rounds; ``cut(rollout_id, syncer)`` runs while
     that round trains (the mid-overlap cut point)."""
     generator = torch.Generator().manual_seed(11)
@@ -340,7 +340,7 @@ def _run(monkeypatch, sweeps: int, *, cut=None):
     peer = {k: rand(0.1) for k in range(sweeps)}
     ray = FakeRay()
     adapter = _adapter()
-    trainer = _Trainer(adapter, ray, initial, lambda k: steps[k])
+    trainer = (trainer_cls or _Trainer)(adapter, ray, initial, lambda k: steps[k])
     syncer = _Syncer(initial, sweeps, lambda k: peer[k])
     client = _Client(syncer)
 
@@ -502,3 +502,142 @@ def test_syncer_restart_with_a_partly_committed_sweep_mid_overlap(monkeypatch):
     run = _run(monkeypatch, sweeps, cut=cut)
     _check_exactly_once(run, sweeps)
     assert [step for step, attempt, _ in run.syncer.pushed if attempt == 2][0] == lost
+
+
+class _ResidentTrainer(_Trainer):
+    """A trainer whose apply takes ``skip_resident_fragments`` like Miles.
+
+    It records the payload hash of each fragment it last exported or applied
+    and skips a fragment with the same hash, after checking that the skipped
+    bytes really are the ones it holds (the role stream's precondition)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.resident: dict[int, str] = {}
+        self.skipped = 0
+        self.read = 0
+
+    def _remember(self, cut) -> None:
+        self.resident = {d.fragment_id: d.payload_hash for shard in cut.shards for d in shard.fragments}
+
+    async def export_full_parameter_chunked_cut(self, *args, **kwargs):
+        cut = await super().export_full_parameter_chunked_cut(*args, **kwargs)
+        self._remember(cut)
+        return cut
+
+    async def apply_full_parameter_chunked_cut(self, cut, *, commit_token=None, max_commit_attempts=3,
+                                               skip_resident_fragments=False):
+        assert commit_token and skip_resident_fragments
+        for shard in cut.shards:
+            for descriptor, refs in zip(shard.fragments, shard.chunk_refs, strict=True):
+                assert all(ref is not None for ref in refs), "applied a released chunk"
+                value = torch.cat([self.ray.get(ref) for ref in refs]).clone()
+                if self.resident.get(descriptor.fragment_id) == descriptor.payload_hash:
+                    assert torch.equal(value.view(torch.int32),
+                                       self.values[descriptor.fragment_id].view(torch.int32))
+                    self.skipped += 1
+                    continue
+                self.read += 1
+                self.values[descriptor.fragment_id] = value
+        self._remember(cut)
+        self.installed = cut.policy_version
+        self.generation = 0
+        return self.adapter.expected_parameter_tensor_count
+
+
+def test_skip_resident_is_requested_and_keeps_every_value_bit_identical(monkeypatch):
+    sweeps = 4
+    plain = _run(monkeypatch, sweeps)
+    run = _run(monkeypatch, sweeps, trainer_cls=_ResidentTrainer)
+    _check_exactly_once(run, sweeps)
+    assert run.trainer.read > 0
+    for f in range(P):
+        assert torch.equal(run.trainer.values[f].view(torch.int32), plain.trainer.values[f].view(torch.int32))
+        assert torch.equal(run.syncer.global_[f].view(torch.int32), plain.syncer.global_[f].view(torch.int32))
+
+
+def test_skip_resident_follows_the_group_signature_and_the_kill_switch(monkeypatch):
+    from yeto.rl.adapters.miles.models.chunked_full_parameter import SKIP_RESIDENT_ENV, skip_resident_supported
+
+    trainer = _ResidentTrainer(_adapter(), FakeRay(), {f: torch.zeros(n) for f, n in enumerate(SIZES)},
+                               lambda _k: {})
+    assert skip_resident_supported(trainer)
+    assert not skip_resident_supported(_Trainer(_adapter(), FakeRay(), {}, lambda _k: {}))
+    assert not skip_resident_supported(object())
+    monkeypatch.setenv(SKIP_RESIDENT_ENV, "0")
+    assert not skip_resident_supported(trainer)
+
+
+def test_a_one_fragment_mixed_target_keeps_the_other_rows_resident():
+    asyncio.run(_one_fragment_mixed_target())
+
+
+async def _one_fragment_mixed_target():
+    """``assemble_mixed_target`` reuses the current cut's rows for every
+    fragment it does not replace, so only the replaced one is read."""
+    adapter = _adapter()
+    ray = FakeRay()
+    initial = {f: torch.arange(n, dtype=torch.float32) + 10 * f for f, n in enumerate(SIZES)}
+    trainer = _ResidentTrainer(adapter, ray, initial, lambda _k: {})
+    current = adapter.validate_cut(
+        await trainer.export_full_parameter_chunked_cut(0, 0, max_chunk_bytes=adapter.max_chunk_bytes), 0, 0)
+    replacement = torch.tensor([0.5, -0.0, 3.0e-39])
+    stored = adapter.fragment_sink(current, ray_module=ray)(0, 1, replacement.numpy().tobytes())
+    target = adapter.assemble_mixed_target(current, target_policy_version=1, authoritative_fragments=(stored,))
+    assert await adapter.apply(trainer, target, commit_token="t") == adapter.expected_parameter_tensor_count
+    assert (trainer.read, trainer.skipped) == (1, P - 1)
+    assert torch.equal(trainer.values[0].view(torch.int32), replacement.view(torch.int32))
+    assert torch.equal(trainer.values[1], initial[1])
+
+
+class _ForwardingHandle:
+    """Like Miles' RayWorkerHandle: every method is a generic ``call(*args, **kwargs)``."""
+
+    def __init__(self, target) -> None:
+        self._target = target
+
+    def __getattr__(self, name):
+        async def call(*args, **kwargs):
+            return await getattr(self._target, name)(*args, **kwargs)
+        return call
+
+
+def _local_miles_skips() -> bool:
+    import inspect
+
+    from miles.ray import full_parameter_transport
+
+    return "skip_resident_fragments" in inspect.signature(full_parameter_transport.apply_chunked_cut).parameters
+
+
+def test_a_forwarding_group_uses_the_local_miles_to_decide_the_skip(monkeypatch):
+    """s27-gr-c: the production group forwards ``*args, **kwargs``, so the
+    signature check alone kept the whole-model apply on every rank."""
+    from yeto.rl.adapters.miles.models.chunked_full_parameter import SKIP_RESIDENT_ENV, skip_resident_supported
+
+    trainer = _ResidentTrainer(_adapter(), FakeRay(), {f: torch.zeros(n) for f, n in enumerate(SIZES)},
+                               lambda _k: {})
+    handle = _ForwardingHandle(trainer)
+    assert skip_resident_supported(handle) is _local_miles_skips()
+    monkeypatch.setenv(SKIP_RESIDENT_ENV, "0")
+    assert not skip_resident_supported(handle)
+
+
+def test_one_fragment_apply_through_a_forwarding_group_reads_one_fragment():
+    if not _local_miles_skips():
+        pytest.skip("this Miles has no skip_resident_fragments")
+
+    async def body():
+        adapter = _adapter()
+        ray = FakeRay()
+        initial = {f: torch.arange(n, dtype=torch.float32) + 10 * f for f, n in enumerate(SIZES)}
+        trainer = _ResidentTrainer(adapter, ray, initial, lambda _k: {})
+        handle = _ForwardingHandle(trainer)
+        current = adapter.validate_cut(
+            await handle.export_full_parameter_chunked_cut(0, 0, max_chunk_bytes=adapter.max_chunk_bytes), 0, 0)
+        stored = adapter.fragment_sink(current, ray_module=ray)(1, 2, torch.tensor([4.0, -2.0]).numpy().tobytes())
+        target = adapter.assemble_mixed_target(current, target_policy_version=1, authoritative_fragments=(stored,))
+        await adapter.apply(handle, target, commit_token="t")
+        assert (trainer.read, trainer.skipped) == (1, P - 1)
+
+    asyncio.run(body())

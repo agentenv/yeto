@@ -94,7 +94,7 @@ def test_verl_run_config_rules_refuse_multi_gpu_and_megatron_options():
     (dict(top_p=0.9), "top_p"),
     (dict(top_k=50), "top_p/top_k"),
     (dict(temperature=0.7), "温度"),
-    (dict(n_gpus=2), "1 张卡"),
+    (dict(n_gpus=0), "n_gpus 必须 >= 1"),
 ])
 def test_config_rules_refuse(kw, match):
     with pytest.raises(vconf.VerlConfigError, match=match):
@@ -471,3 +471,28 @@ def test_fully_async_runtime_env_keeps_nccl_host_buffers_on_shm(monkeypatch):
     assert verl_main.CUMEM_HOST_ENV not in verl_main._runtime_env()["env_vars"]
     monkeypatch.setenv(verl_main.CUMEM_HOST_ENV, "1")
     assert verl_main._runtime_env(fully_async=True)["env_vars"][verl_main.CUMEM_HOST_ENV] == "1"
+
+
+def test_vllm_prefix_renaming_is_undone():
+    """Qwen3.5 VL in vLLM serves 'model.language_model.*' as 'language_model.model.*' (E10)."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.verl import param_names as pn
+
+    mapper = SimpleNamespace(orig_to_new_prefix={"model.language_model.": "language_model.model.",
+                                                 "model.visual.": "visual.", "mtp.": None})
+    hf = pn.hf_prefixes_from_mapper(mapper)
+    assert hf == {"language_model.model.": "model.language_model.", "visual.": "model.visual."}
+    assert pn.vllm_to_canonical("language_model.model.layers.0.linear_attn.out_proj", "B", None, hf) == \
+        "base_model.model.model.language_model.layers.0.linear_attn.out_proj.lora_B.weight"
+    assert pn.vllm_to_canonical("model.layers.0.self_attn.o_proj", "A", None, hf) == \
+        "base_model.model.model.layers.0.self_attn.o_proj.lora_A.weight"
+
+
+def test_verl_refuses_expert_parallel_with_e7_reason():
+    # S26 E7: verl+EP is refused with the reason and the backend to use instead.
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    rules.check_expert_parallel(8, 1)
+    with pytest.raises(ValueError, match="E7.*Miles"):
+        rules.check_expert_parallel(8, 8)

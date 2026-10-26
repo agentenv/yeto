@@ -129,6 +129,13 @@ def _tolerant():
                          correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
 
 
+def _tolerant4():
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+
+    return AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=4),
+                         correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
+
+
 def test_partitioned_limit_overlaps_rollout_through_miles_fully_async():
     from tests.test_rl_miles_adapter_config import make_config, sub
     from yeto.rl.adapters.miles import config as mc
@@ -140,13 +147,40 @@ def test_partitioned_limit_overlaps_rollout_through_miles_fully_async():
     overlap = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
     assert not strict.rollout_overlap and overlap.rollout_overlap
     assert [a for a in overlap.argv if a not in strict.argv] == [
-        "--fully-async", "--max-weight-staleness"]  # "1" already occurs in the argv
+        "--fully-async", "--max-weight-staleness",
+        "--async-data-buffer-capacity-factor"]  # "1" already occurs in the argv
     for flag in ("--rollout-all-samples-process-path", "--buffer-filter-path", "--partial-rollout"):
         assert flag not in overlap.argv
     assert "--rollout-sample-filter-path" in overlap.argv
     # colocated keeps the carry-over at the cut-off (no overlap)
     colocated = mc.translate_run_config(make_config(), _tolerant(), max_policy_age=1)
     assert not colocated.rollout_overlap and "--partial-rollout" in colocated.argv
+
+
+def test_async_buffer_rounds_sets_the_fully_async_buffer_only_with_overlap():
+    from tests.test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.adapters.miles import config as mc
+
+    partitioned = sub(make_config(colocated=False), "serving", offload_train=False)
+    default = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
+    i = default.argv.index("--async-data-buffer-capacity-factor")  # default: A_hard
+    assert default.argv[i + 1] == "1"
+    age4 = mc.translate_run_config(partitioned, _tolerant4(), max_policy_age=4)
+    assert age4.argv[age4.argv.index("--async-data-buffer-capacity-factor") + 1] == "4"
+    strict = mc.translate_run_config(partitioned, _tolerant())
+    assert "--async-data-buffer-capacity-factor" not in strict.argv
+    sized = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1,
+                                    async_buffer_rounds=4)
+    i = sized.argv.index("--async-data-buffer-capacity-factor")
+    assert sized.argv[i + 1] == "4"
+    with pytest.raises(mc.MilesConfigError, match="overlaps training"):
+        mc.translate_run_config(partitioned, _tolerant(), async_buffer_rounds=2)
+    with pytest.raises(mc.MilesConfigError, match="overlaps training"):
+        mc.translate_run_config(make_config(), _tolerant(), max_policy_age=1,
+                                async_buffer_rounds=2)
+    with pytest.raises(mc.MilesConfigError, match=">= 1"):
+        mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1,
+                                async_buffer_rounds=0)
 
 
 def test_parsed_fully_async_is_accepted_only_for_an_overlapped_launch():
@@ -191,19 +225,3 @@ def test_fully_async_trained_groups_hook_reports_the_round(monkeypatch):
     assert len(reported) == 1  # the all-samples hook reports otherwise
 
 
-def test_rollout_side_matches_plain_versions_against_the_published_label():
-    from yeto.rl.adapters.miles import carry_over
-    from yeto.rl.adapters.miles.rollout_meta_hook import group_matches_policy
-    from yeto.rl.harness.codex.codex_openenv_generate import window_problem
-
-    def sample(version):
-        span = SimpleNamespace(version=version, abs_start=1, abs_end=2)
-        return SimpleNamespace(status=SimpleNamespace(value="completed"), tokens=[0, 1],
-                               response_length=1, weight_versions=[SimpleNamespace(spans=[span])])
-
-    label = f"yeto:6:{H6}"
-    assert group_matches_policy([sample("6"), sample("6")], label, 2)
-    assert not group_matches_policy([sample("6"), sample("5")], label, 2)
-    assert carry_over.response_token_versions(sample("5")) == [5]
-    assert window_problem(["5", "6"], label, 1) is None
-    assert "behind" in window_problem(["4"], label, 1)

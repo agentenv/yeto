@@ -40,14 +40,14 @@ from .rl.event_echo import TapeCollector as EventCollector
 from .launch.rl_backend import _rl_backend_module
 from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
-    SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
-    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, syncer_event_tape,
-    syncer_status_reader,
+    SYNCER_PORT, island_pool, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
+    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, role_syncer_shards,
+    syncer_event_tape, syncer_shard_addrs, syncer_status_reader,
 )
 from .launch.storage import (
     droppable_rejoins_in_new_container, resumes_in_new_container,
 )
-from .launch.island_tasks import island_task_plan
+from .launch.island_tasks import data_split_plan, island_task_plan
 from .launch.args import prepare_launch_args
 from .launch.rl_island_task import _echoes_events, make_miles_island_task
 from .launch.learner_task import make_learner_task
@@ -60,9 +60,10 @@ from .launch.tapes import (
 )
 from .launch.modal_islands import (
     _modal_tape_run_dir, _tail_modal, _verify_modal_app_stopped, build_modal_island_config,
-    container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
-    require_modal_for_gpu_exact, wan_probe_relaunches,
+    container_log_follower_for, container_set_poller_for, effective_recover_timeout,
+    pull_modal_tapes, require_modal_for_gpu_exact, wan_probe_relaunches,
 )
+from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
     RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT,
@@ -94,7 +95,8 @@ from .launch.syncer import (  # noqa: F401
     RL_SYNCER_EVENT_TAPE, ROLE_SYNCERS, SYNCER_EVENT_TAPE, SYNCER_REMOTE_BUILD,
     _syncer_expected_contract, _syncer_quorum_timeout, build_syncer_binary, critic_syncer_address,
     elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret, probe_listener_command,
-    rl_syncer_profile, syncer_command, syncer_ports, syncer_tape_sidecar, tcp_probe, ufw_setup,
+    rl_syncer_profile, syncer_command, syncer_disk_resources, syncer_ports, syncer_tape_sidecar, tcp_probe,
+    ufw_setup,
 )
 from .launch.loss import PICKLED_LOSS_PREFIX, pickled_loss_path, resolve_loss_function  # noqa: F401
 from .launch.credentials import (  # noqa: F401
@@ -125,13 +127,8 @@ from .launch.images import (  # noqa: F401
 from .launch.in_vm_docker import (  # noqa: F401
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_image, in_vm_docker_run,
 )
-from .launch.codex import (  # noqa: F401
-    CODEX_BUNDLE_DIR_ENV, CODEX_COMPACTION_ENV, CODEX_CONTAINER_DIR,
-    HARNESS_ENVIRONMENT_PROVIDER_ENV, HARNESS_PASSTHROUGH_ENV, HARNESS_PREFLIGHT_ENV,
-    HEAD_CODEX_BUNDLE_PATH, MODAL_CLIENT_SETUP, MODAL_SANDBOX_PROVIDER, MODAL_SANDBOX_PROVIDERS,
-    PREBAKED_MODAL_SANDBOX_PROVIDER, SANDBOX_MODAL_TOKEN_ENVS, SANDBOX_TOKEN_IN_ISLAND_CHECK,
-    codex_bundle_contract, codex_harness_launch, codex_head_staging, modal_sandbox_secret_name,
-    require_sandbox_modal_token,
+from .launch.harness_env import (  # noqa: F401
+    check_compaction_launch, compactionrl_launch_env, modal_sandbox_secret_name,
 )
 from .launch.rl_island_task import _worker_node_ip_flag  # noqa: F401
 from .launch.diffusion_sample import make_diffusion_sample_task, run_diffusion_sample  # noqa: F401
@@ -184,13 +181,27 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     iargs = droppable.role_args(io.island_args(rl_island_args(args, m), m, overrides), role)
     # L5.4 pair: the island's sample role; it runs as learner 0 of 1 (no syncer).
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
-    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners)
+    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
-                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None))})
+                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
+                            **_resume_marker_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
+    """A resumable island on Modal (``--rl-checkpoint-store`` without
+    ``--rl-elastic``: the island's ``--rl-resume-store``): the reclaim marker path
+    (S26 E9.1). Modal signals only the container's main process (the runner), so
+    the runner writes the marker and the driver's watcher thread -- in a Ray actor
+    on verl -- writes the store's preemption notice."""
+    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
+        return {}
+    from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
+
+    return {RECLAIM_MARKER_ENV: DEFAULT_RECLAIM_MARKER}
 
 
 def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:
@@ -304,7 +315,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # counts them in --learners and its port is already public, so they
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
-    num_learners = len(specs) + external
+    from .rl.engine import sample_roles
+
+    # S26 E9.4: the sampler islands of a synced group are no learners of the syncer
+    num_learners = sample_roles.syncer_learner_count(args, len(specs)) + external
     require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
@@ -333,7 +347,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print("[launcher] --rl-single-island-no-sync: no syncer, no outer sync")
         elif head_mode:
             syncer_task = syncer_job = None
-            syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(os.environ['SYNCER_PUBLIC_IP'], args)
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
             if getattr(args, "wandb", False):
@@ -346,10 +360,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
             syncer_job, syncer_handle = sky.stream_and_get(rid)
             clusters.append(syncer_cluster)
-            syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(str(syncer_handle.head_ip), args)
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, str(syncer_handle.head_ip))
-        if not no_sync and island_scheduling_mode(args) == "elastic" \
+        if not no_sync and island_pool(args) \
                 and getattr(args, "rl_syncer_epoch", None) is None:
             # 0.17: the islands JOIN with the term the syncer actually runs.
             resolve_island_syncer_epoch(args, syncer_status_reader(
@@ -614,9 +628,26 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
-        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
+        def attributed_containers() -> dict:
+            # container id -> (island, rank) from each island's first container line
+            return {cid: key for g in list(container_guards)
+                    for key, cid in dict(getattr(g, "first", None) or {}).items()}
+
+        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change,
+                                                    attributed=attributed_containers)
         if container_poller is not None:
             container_guards.append(container_poller)
+
+        def route_container(learner_id: int):
+            # the island of a rescheduled container's lines (unique learner id only:
+            # the islands of a pair all run as learner 0)
+            names = [n for n, cfg in modal_cfgs.items() if int(cfg.learner_id) == int(learner_id)]
+            if len(names) != 1:
+                return None
+            return names[0], (event_collectors.get(names[0]) if names[0] in echo_names else None)
+
+        # daemon threads; each container's log ends when the app stops
+        container_log_follower_for(args, modal_ops, modal_cfgs, route_container, poller=container_poller)
 
         from . import runs
         from .modal_runner import RoutingOps
@@ -658,13 +689,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
                 if echo_names else None
             ),
-            elastic=island_scheduling_mode(args) == "elastic",
+            elastic=island_pool(args),
             no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
             wan_reject_probe=(
                 (lambda name: event_collectors[name].wan_rejects if name in event_collectors else 0)
                 if echo_names else None
             ),
             wan_probe_relaunches=wan_probe_relaunches(args),
+            island_relaunch_envs=peer_recovery_relaunch_envs(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -733,7 +765,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         drain_tapes()
         if container_changed():
             return CONTAINER_CHANGED_EXIT
-        if (no_sync_incomplete and head_mode and island_scheduling_mode(args) == "elastic"):
+        if (no_sync_incomplete and head_mode and island_pool(args)):
             # S16 §6.6: an island the syncer removed from the pool for an excused
             # reason (finished, stopped, preempted, lease expiry) owes no
             # rl_learner_finalized; report it, do not exit 3. Failure codes still fail.
@@ -932,8 +964,9 @@ NO_SYNC_INCOMPLETE_EXIT = 3
 
 def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
     commands = role_syncer_commands(args, num_learners)
-    return [
-        {
+    plans = []
+    for syncer in rl_role_syncers(args):
+        plan = {
             "role": syncer.role,
             "port": syncer.port,
             "address": syncer.address,
@@ -942,8 +975,12 @@ def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
             "checkpoint": syncer.checkpoint,
             "event_tape": syncer.event_tape,
         }
-        for syncer in rl_role_syncers(args)
-    ]
+        shards = role_syncer_shards(args, syncer)
+        if len(shards) > 1:
+            plan["shards"] = [{"port": shard.port, "checkpoint": shard.checkpoint,
+                               "event_tape": shard.event_tape} for shard in shards]
+        plans.append(plan)
+    return plans
 
 
 def dry_run_plan(args) -> dict:
@@ -974,6 +1011,7 @@ def dry_run_plan(args) -> dict:
 
     memory = dry_run_memory(args, specs)
     task_plan = island_task_plan(args) if rl else None
+    split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
     for learner_id, spec in enumerate(specs):
         entry = {
@@ -995,19 +1033,23 @@ def dry_run_plan(args) -> dict:
         if rl:
             role = _island_role(args, specs, learner_id)
             task = _island_task(make_miles_island_task, args, spec, learner_id,
-                                len(specs) + external, "$SYNCER_ADDR", island_overrides, role)
+                                sample_roles.syncer_learner_count(args, len(specs)) + external,
+                                "$SYNCER_ADDR", island_overrides, role)
             if role is not None:
                 from .cloud.droppable import billing, rejoin_source
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
-            if sample_roles.is_store_coupled(args):  # L5.4/L7.5: per-island role, learner 0 of 1
+            if sample_roles.is_store_coupled(args) or sample_roles.is_synced_group(args):
+                # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id == trainer_loop.held_island(args):
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:
                 entry["island_tasks"] = task_plan[learner_id].record()
+            if split_plan.several_islands:
+                entry["data_split"] = split_plan.island_record(learner_id)
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 
@@ -1024,12 +1066,15 @@ def dry_run_plan(args) -> dict:
         "rl_engine": "ports" if rl else None,
         "controller": "head" if head else "local",
         "islands": len(specs) + external,
+        # S27 task assignment: which rows of --data each training island reads
+        **({"data_split": {**split_plan.record(), "warning": split_plan.warning()}}
+           if split_plan is not None else {}),
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
         # P0-D8: one syncer per trainable role (actor first); none without outer sync
         "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
-            args, len(specs) + external),
+            args, sample_roles.syncer_learner_count(args, len(specs)) + external),
         "outer_sync": not no_sync,
         # rl-trainer-start-stop L5.3b/L5.4: the head's scheduler and the island it owns
         "trainer_scheduler": (None if not trainer_loop.enabled(args) else {

@@ -1,0 +1,86 @@
+{
+  "harbor": {
+    "requirement": "harbor @ git+https://github.com/harbor-framework/harbor@8f88560ce9daae9b4cc0f6ff7bac8779ae9cfa15",
+    "commit": "8f88560ce9daae9b4cc0f6ff7bac8779ae9cfa15",
+    "version": "0.20.0"
+  },
+  "boat_sdk": "1.10.0",
+  "uv": "0.9.5",
+  "assert_packages": [
+    "torch",
+    "triton",
+    "transformers",
+    "tokenizers",
+    "safetensors",
+    "accelerate",
+    "peft",
+    "ray",
+    "numpy",
+    "pydantic",
+    "pydantic-core",
+    "huggingface-hub",
+    "aiohttp",
+    "yarl",
+    "fastapi",
+    "uvicorn",
+    "sglang",
+    "sglang-router",
+    "sgl-kernel",
+    "flashinfer-python",
+    "megatron-core",
+    "transformer-engine",
+    "miles",
+    "vllm",
+    "verl",
+    "tensordict",
+    "flash-attn"
+  ],
+  "backends": {
+    "miles": {
+      "image": "yeto-miles-ports+harbor",
+      "changes": {
+        "openai": {
+          "base": "2.6.1",
+          "layer": "2.54.0",
+          "why": "litellm >= 1.83.14 (Harbor floor) needs openai >= 2.20; SGLang 2fa88018 pins openai==2.6.1"
+        },
+        "pyyaml": {
+          "base": "6.0.1",
+          "layer": "6.0.3",
+          "why": "Harbor 0.20.0 needs pyyaml >= 6.0.2; SGLang 2fa88018 pins PyYAML==6.0.1"
+        },
+        "websockets": {
+          "base": "17.1",
+          "layer": "15.0.1",
+          "why": "supabase -> realtime >= 2.28.2 needs websockets < 16"
+        },
+        "importlib-metadata": {
+          "base": "9.0.1",
+          "layer": "8.9.0",
+          "why": "litellm >= 1.84.0 needs importlib-metadata < 9.0"
+        }
+      }
+    },
+    "verl": {
+      "image": "verl-build+harbor",
+      "changes": {
+        "websockets": {
+          "base": "16.0",
+          "layer": "15.0.1",
+          "why": "supabase -> realtime >= 2.28.2 needs websockets < 16"
+        },
+        "importlib-metadata": {
+          "base": "9.0.0",
+          "layer": "8.9.0",
+          "why": "litellm >= 1.84.0 needs importlib-metadata < 9.0"
+        }
+      }
+    }
+  },
+  "pins": {
+    "litellm": {
+      "version": "1.95.0",
+      "why": "newest litellm that resolves with filelock 4.0.0 (Miles base), aiohttp 3.14.1 (verl base) and openai 2.54.0 (uv pip compile, 2026-10-20); 1.106.0 needs filelock < 4 and aiohttp >= 3.14.2"
+    }
+  }
+}

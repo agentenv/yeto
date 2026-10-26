@@ -15,6 +15,7 @@ import torch
 
 from ..export import parse_checkpoint, validate_against_layout
 from ..tensor_io import apply_fragment
+from .engine.selection import RL_MATRIX_MERGES
 from .core import (
     CanonicalLoraState,
     CanonicalTensorSpec,
@@ -288,6 +289,9 @@ def export_rl_checkpoint(
     fragments: int = 1,
     pipeline: int = 1,
     local_horizon: int = 1,
+    matrix_merge: str = "avg",
+    outer_lr: float = 0.7,
+    outer_momentum: float = 0.9,
     benchmark_learner_budget_steps: int | None = None,
     algorithm_spec: Any = None,
     unverified_mechanisms: Sequence[str] = (),
@@ -352,7 +356,7 @@ def export_rl_checkpoint(
             raise ValueError("benchmark learner budget must be positive")
         if benchmark_learner_budget_steps is None and checkpoint.global_step % fragments:
             raise ValueError("decoupled RL checkpoint is not a complete fragment sweep")
-        layout = build_rl_fragment_layout(specs, fragments)
+        layout = build_rl_fragment_layout(specs, fragments, matrix_merge=matrix_merge)
         if checkpoint.layout_hash is None:
             raise ValueError("RL checkpoint does not contain a sync layout fingerprint")
         validate_against_layout(checkpoint, layout)
@@ -418,8 +422,8 @@ def export_rl_checkpoint(
             ),
             "total_fragment_steps": checkpoint.global_step,
             "benchmark_learner_budget_steps": benchmark_learner_budget_steps,
-            "outer_lr": 0.7,
-            "outer_momentum": 0.9,
+            "outer_lr": outer_lr,
+            "outer_momentum": outer_momentum,
             "final_fragment_versions": [
                 version for version, _, _ in checkpoint.fragments
             ],
@@ -428,6 +432,8 @@ def export_rl_checkpoint(
             "sync_layout_fingerprint": checkpoint.layout_hash,
             "checkpoint_sha256": checkpoint.sha256,
         }
+        if matrix_merge != "avg":
+            provenance["matrix_merge"] = matrix_merge
     provenance = {
         **(provenance or {"sync_preset": sync_preset, "policy_hash": policy_tensor_hash(state)}),
         "rl_engine": "ports",
@@ -482,6 +488,16 @@ def parse_args(argv=None):
     parser.add_argument("--fragments", type=int, default=1)
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
+    parser.add_argument(
+        "--matrix-merge",
+        choices=RL_MATRIX_MERGES,
+        default="avg",
+        help="decoupled: the run's --rl-sync-matrix-merge (part of the layout fingerprint)",
+    )
+    parser.add_argument("--outer-lr", type=float, default=0.7,
+                        help="decoupled: the run's outer lr, recorded in the provenance")
+    parser.add_argument("--outer-momentum", type=float, default=0.9,
+                        help="decoupled: the run's outer momentum, recorded in the provenance")
     parser.add_argument(
         "--rl-algorithm-spec",
         default=None,
@@ -572,6 +588,9 @@ def main(argv=None) -> None:
         fragments=args.fragments,
         pipeline=args.pipeline,
         local_horizon=args.local_horizon,
+        matrix_merge=args.matrix_merge,
+        outer_lr=args.outer_lr,
+        outer_momentum=args.outer_momentum,
         algorithm_spec=algorithm_spec,
         unverified_mechanisms=unverified,
         **({"event_tape_incomplete": True} if incomplete else {}),

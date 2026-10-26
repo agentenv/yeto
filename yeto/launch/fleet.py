@@ -7,16 +7,15 @@ import sys
 import threading
 from dataclasses import dataclass
 
-from .syncer import island_scheduling_mode
+from .syncer import island_pool
 from .sky_ops import SYNCER_REFUSAL_MARKERS
 
 
 def controller_fixed_roster(args) -> bool:
-    """FleetController ``fixed_roster``: RL runs whose island scheduling is NOT
-    elastic. Elastic membership is dynamic: an island that fails for good is
-    dropped and the pool goes on (10-09 ruling of the main agent for the user;
-    before, every RL run, elastic included, was a fixed roster)."""
-    return getattr(args, "training_mode", "sft") == "rl" and island_scheduling_mode(args) != "elastic"
+    """FleetController ``fixed_roster``: RL runs without island pool options.
+    A pool's membership is dynamic: an island that fails for good is dropped
+    and the pool goes on (10-09 ruling of the main agent for the user)."""
+    return getattr(args, "training_mode", "sft") == "rl" and not island_pool(args)
 
 
 # FleetController states.
@@ -29,6 +28,13 @@ ABANDONED = "abandoned"
 @dataclass(frozen=True)
 class _RlStrictFailure:
     reason: str
+
+
+class RelaunchBlocked(Exception):
+    """Raised by ``sky_ops.relaunch`` when the island must not be relaunched at all
+    (not now, not on a later poll): e.g. its Modal app was stopped by a teardown.
+    The message is the reason; the controller abandons the island instead of
+    retrying until the recovery timeout."""
 
 
 class _RelaunchAttempt:
@@ -158,6 +164,7 @@ class FleetController:
         replacement_planner=None,
         wan_reject_probe=None,
         wan_probe_relaunches: int = 0,
+        island_relaunch_envs=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -185,6 +192,9 @@ class FleetController:
         # existing relaunch runs unchanged. On: its launch() result (a new job
         # id) replaces the same-place relaunch.
         self.replacement_planner = replacement_planner
+        # S27 E-3: environment added to an island task before its relaunch (peer
+        # recovery: the relaunched trainer restores from a peer, not from scratch).
+        self.island_relaunch_envs = dict(island_relaunch_envs or {})
         # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
         # post-mortem instead of tearing it down; the final teardown still honors --keep.
         self.keep_abandoned = keep_abandoned
@@ -666,7 +676,19 @@ class FleetController:
                 if planned is not None:
                     rec["attempt"] = planned
                     return
+            if not is_syncer:
+                self._add_relaunch_envs(rec["task"])
             rec["attempt"] = self._start_relaunch(rec)
+
+    def _add_relaunch_envs(self, task) -> None:
+        if not self.island_relaunch_envs:
+            return
+        if callable(getattr(task, "update_envs", None)):  # sky.Task
+            task.update_envs(self.island_relaunch_envs)
+        elif isinstance(getattr(task, "envs", None), dict):  # ModalIslandConfig
+            task.envs.update(self.island_relaunch_envs)
+        else:
+            raise TypeError(f"cannot add relaunch envs to a {type(task).__name__}")
 
     def _plan_replacement(self, rec):
         try:
@@ -720,7 +742,11 @@ class FleetController:
                 if self._stop_requested(rec, "relaunch"):  # set after the check in the poll loop
                     attempt.result = None
                     return
-                attempt.result = self.ops.relaunch(task, target)
+                try:
+                    attempt.result = self.ops.relaunch(task, target)
+                except RelaunchBlocked as blocked:
+                    attempt.blocked, attempt.result = str(blocked), None
+                    return
                 if attempt.result is not None and self.instance_guard is not None:
                     after = getattr(self.instance_guard, "after_relaunch", None)
                     if after is not None:

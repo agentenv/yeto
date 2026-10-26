@@ -65,6 +65,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,8 @@ class JsonlIndex:
             if not self.path.exists():
                 self.path.touch()
         self._offset = 0  # bytes of complete lines read
+        self._held = 0  # open one_commit() blocks
+        self._uncommitted = False  # appends made inside them, not committed yet
 
     def write_payload(self, name: str, data: bytes) -> str:
         path = self.root / PAYLOADS / name
@@ -162,7 +165,23 @@ class JsonlIndex:
                 absorb(list(self._lines(fh)))
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        self.store.commit()
+        if self._held:
+            self._uncommitted = True
+        else:
+            self.store.commit()
+
+    @contextmanager
+    def one_commit(self) -> Iterator[None]:
+        """Appends inside the block are committed once, when it ends (also on an
+        error: what was appended stays)."""
+        self._held += 1
+        try:
+            yield
+        finally:
+            self._held -= 1
+            if not self._held and self._uncommitted:
+                self._uncommitted = False
+                self.store.commit()
 
     # ------------------------------------------------------------ shards (merger side)
     def shard_names(self) -> list[str]:
@@ -356,12 +375,18 @@ def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
 
 def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int,
                         lane: BufferLane | None = None, create_index: bool = True,
-                        **kwargs: Any) -> "FileSampleBuffer":
+                        shards: Iterable[str] | None = None, **kwargs: Any) -> "FileSampleBuffer":
     """The buffer of a trainer (the reader): it merges the sampler shards of a
-    store that shards (:func:`needs_shards`) unless it is a synced trainer other
-    than the publisher (``merged_release.merges_shards``); ``lane``: its lane."""
-    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index, lane=lane,
-                            merge_shards=needs_shards(store) and merges_shards(lane), **kwargs)
+    store that shards (:func:`needs_shards`), or the named ``shards`` of several
+    sampler islands on one shared directory (the data ends once every named
+    shard ended), unless it is a synced trainer other than the publisher
+    (``merged_release.merges_shards``); ``lane``: its lane. A merging trainer
+    is the only writer of the index, so it creates the index even with
+    ``create_index=False`` (no sampler writes ``index.jsonl`` then)."""
+    named = tuple(shards or ())
+    merge = (needs_shards(store) or bool(named)) and merges_shards(lane)
+    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index or merge, lane=lane,
+                            merge_shards=merge, expected_shards=named if merge and named else None, **kwargs)
 
 
 class FileSampleBuffer:
@@ -451,6 +476,16 @@ class FileSampleBuffer:
                                         "behavior_version": int(entry.behavior_version),
                                         "payload_ref": entry.payload_ref, "tokens": int(entry.tokens),
                                         "appended_at": float(entry.appended_at), **source})
+
+    @contextmanager
+    def one_commit(self) -> Iterator[None]:
+        """Appends inside the block reach the store with one commit when it ends.
+        A Modal Volume commit costs seconds, so a sampler appends the groups of a
+        round inside one block; other islands see them after it. An object-store
+        index has no commit: its appends are visible one by one, as before."""
+        hold = getattr(self.index, "one_commit", None)
+        with hold() if callable(hold) else nullcontext():
+            yield
 
     def mark_data_end(self) -> None:
         """The samplers will append nothing more."""
@@ -587,6 +622,20 @@ class FileSampleBuffer:
                     out.append(Selected(pos, self._entries[pos]))
                 pos += 1
             self._read = pos
+            return out
+
+    def peek(self, limit: int) -> list[Selected]:
+        """The entries :meth:`select` would return next (after a refresh), without
+        selecting them: the read cursor does not move (a reader prefetches their
+        payloads)."""
+        with self._lock:
+            self.refresh()
+            out: list[Selected] = []
+            pos = self._read
+            while len(out) < max(0, int(limit)) and pos < len(self._entries):
+                if self.lane is None or self.lane.owns(pos):
+                    out.append(Selected(pos, self._entries[pos]))
+                pos += 1
             return out
 
     def commit_consumed(self, cursor: int) -> None:

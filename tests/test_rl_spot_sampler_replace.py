@@ -101,6 +101,35 @@ def test_a_round_cut_short_by_the_reclaim_keeps_its_groups_and_is_not_written_ag
     assert [i.split("-")[1] for i in ids] == ["a"] * 4 + ["b"] * 3
 
 
+def test_a_round_reaches_the_store_with_one_commit(tmp_path):
+    class CountingStore(CheckpointStore):
+        commits = 0
+
+        def commit(self):
+            CountingStore.commits += 1
+            return super().commit()
+
+    store = CountingStore(tmp_path)
+    writer = br.SamplerRoundWriter(br.open_buffer(_shard_env(tmp_path, "island0"), sampler=True),
+                                   "island0", incarnation="a")
+    writer.buffer.store = writer.buffer.index.store = store  # count this writer's commits
+    before = CountingStore.commits
+    assert writer.write_round(0, _round(0, 5), _cursor(5)) == 5
+    assert CountingStore.commits - before == 1
+    # an error during the round still commits the groups appended before it
+    class Failing(list):
+        def __iter__(self):
+            yield from super().__iter__()
+            raise RuntimeError("payload write failed")
+
+    with pytest.raises(RuntimeError, match="payload write failed"):
+        writer.write_round(1, Failing(_round(1, 2)), _cursor(7))
+    assert CountingStore.commits - before == 2
+    reader = br.open_buffer(_shard_env(tmp_path), reader=True)
+    reader.refresh()
+    assert len(reader) == 7
+
+
 def test_a_round_still_generating_at_the_reclaim_is_generated_again(tmp_path):
     store = CheckpointStore(tmp_path)
     old = br.SamplerRoundWriter(FileSampleBuffer(store, batch_size=1), "island0", incarnation="a",
@@ -339,7 +368,10 @@ def test_the_island_resolves_its_sampler_id_and_the_shards():
     assert (env[br.SAMPLER_ID_ENV], env[br.SHARDS_ENV]) == ("island1", "island0,island1")
 
 
-def test_only_sampler_islands_get_the_reclaim_marker():
+def test_sampler_and_resumable_trainer_islands_get_the_reclaim_marker():
+    """S25 C1: the sampler islands; S26 E9.1: also the trainer, a resumable island on
+    Modal (--rl-checkpoint-store), whose driver turns the marker into the preemption
+    notice."""
     from yeto.gpu_spec import parse_gpu_spec
     from yeto.launch.modal_islands import build_modal_island_config
     from yeto.launcher import _island_task, make_miles_island_task
@@ -348,7 +380,7 @@ def test_only_sampler_islands_get_the_reclaim_marker():
     for m, spec in enumerate(parse_gpu_spec(args.gpu)):
         task = _island_task(make_miles_island_task, args, spec, m, 3, "none", {})
         cfg = build_modal_island_config(args, spec, m, task, "none")
-        assert (RECLAIM_MARKER_ENV in cfg.envs) == (m < 2)
+        assert RECLAIM_MARKER_ENV in cfg.envs, m
 
 
 def test_two_samplers_refuse_the_trainer_scheduler():

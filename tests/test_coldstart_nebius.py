@@ -3,6 +3,7 @@ the cloud-local model store (``--model-store nebius-fs://...``)."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import types
@@ -73,9 +74,11 @@ def test_model_store_uri_validation(capsys):
 
 
 def _run(snippet):
+    # hermetic: the caller's HF_HUB_CACHE (a test runner may set it) must not leak in
+    env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_CACHE", "YETO_MODEL_STORE_HIT")}
     return subprocess.run(
         ["bash", "-c", snippet + '\necho "HUB=${HF_HUB_CACHE:-} HIT=${YETO_MODEL_STORE_HIT:-}"'],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=env,
     )
 
 

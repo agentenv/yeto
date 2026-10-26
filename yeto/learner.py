@@ -51,6 +51,7 @@ from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .wandb_logger import TELEMETRY_EVERY
 from .models import MODEL_ALIASES as MODEL_ALIASES
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from .syncer_shards import ShardedSyncerClient, parse_syncer_addrs
 from .tensor_io import (
     apply_fragment,
     pack_fragment,
@@ -87,8 +88,10 @@ def parse_args(argv=None):
     p.add_argument(
         "--syncer",
         required=True,
-        help="host:port of the syncer, or 'none' for a standalone DDP "
-        "baseline (no async sync; stops at --max-local-steps)",
+        help="host:port of the syncer, a comma-separated host:port list "
+        "(one per shard of a fragment-sharded syncer head, in shard order), "
+        "or 'none' for a standalone DDP baseline (no async sync; stops at "
+        "--max-local-steps)",
     )
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
@@ -1070,10 +1073,17 @@ def main(argv=None) -> None:
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
     client = None
     if rank == 0 and args.syncer != "none":
-        host, port = args.syncer.rsplit(":", 1)
-        client = SyncerClient(
-            (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
-        )
+        addrs = parse_syncer_addrs(args.syncer)
+        if len(addrs) > 1:
+            # Fragment-sharded head: one connection per shard, every
+            # fragment routed to its owner (yeto/syncer_shards.py).
+            client = ShardedSyncerClient(
+                addrs, args.learner_id, layout, wire_dtype, args.wan_streams
+            )
+        else:
+            client = SyncerClient(
+                addrs[0], args.learner_id, layout, wire_dtype, args.wan_streams
+            )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:

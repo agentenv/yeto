@@ -31,7 +31,7 @@ from yeto.launch.trainer_island import (
     sky_binding,
 )
 from yeto.rl import event_echo
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine import recovery
 from yeto.rl.engine.fake_lifecycle import FakeSampler
 from yeto.rl.engine.journal import Journal

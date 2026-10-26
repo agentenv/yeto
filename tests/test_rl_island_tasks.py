@@ -202,7 +202,7 @@ def test_island_task_mount_replaces_the_shared_data(catalog, tmp_path, monkeypat
     assert str(catalog) not in mounts.values()
 
 
-def test_without_the_flag_every_island_shares_data(tmp_path, monkeypatch):
+def test_without_the_flag_every_island_shares_the_data_file_and_reads_its_row_slot(tmp_path, monkeypatch):
     from yeto import launcher
 
     args = _launcher_args("ports", gpu=TWO_ISLANDS)
@@ -211,6 +211,8 @@ def test_without_the_flag_every_island_shares_data(tmp_path, monkeypatch):
     commands = [i["learner_command"] for i in launcher.dry_run_plan(args)["island_requests"]]
     assert {_flag(c, "--data") for c in commands} == {"org/data"}
     assert all("--data-sha256" not in c for c in commands)
+    # S27 task assignment: the default split gives each island its own rows of the file
+    assert [_flag(c, "--rl-data-slot") for c in commands] == ["0/2", "1/2"]
     assert launcher._island_tasks_manifest(args) == {}
 
 
@@ -328,15 +330,16 @@ def test_non_ports_paths_refuse_island_tasks(factory):
 
 MIXED_GPUS = "aws:1xa100@us-east-1,aws:2xa100@us-west-2"
 MIXED_PLACEMENT = ("--rl-island-placement", "1:placement=fixed-partition",
-                   "--rl-rollout-gpus", "1", "--rl-island-scheduling", "elastic")
+                   "--rl-rollout-gpus", "1")
+ISLAND_POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")
 
 
-def _mixed_island_args(catalog, tmp_path, monkeypatch, spec, *extra):
+def _mixed_island_args(catalog, tmp_path, monkeypatch, spec, *extra, pool=ISLAND_POOL):
     from yeto import runs
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")  # elastic scheduling needs one
-    args = _launcher_args("ports", (F, spec, *MIXED_PLACEMENT, *extra), gpu=MIXED_GPUS)
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", (F, spec, *MIXED_PLACEMENT, *pool, *extra), gpu=MIXED_GPUS)
     args.data, args.data_revision, args.controller = str(catalog), None, "local"
     return args
 
@@ -375,9 +378,8 @@ def test_island_tasks_with_mixed_placement_keep_both_refusals(catalog, tmp_path,
                               "--rl-eval-samples-per-prompt", "1")
     with pytest.raises(ValueError, match="training islands do not run eval"):
         launcher._prepare_rl_args(args)
-    args = _mixed_island_args(catalog, tmp_path, monkeypatch, "l0=web1;l1=web2")
-    args.rl_island_scheduling = "legacy"
-    with pytest.raises(ValueError, match="needs --rl-island-scheduling elastic"):
+    args = _mixed_island_args(catalog, tmp_path, monkeypatch, "l0=web1;l1=web2", pool=())
+    with pytest.raises(ValueError, match="needs island pool options"):
         launcher._prepare_rl_args(args)
 
 

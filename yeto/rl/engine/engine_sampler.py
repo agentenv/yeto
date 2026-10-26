@@ -52,6 +52,7 @@ from .sampler_engine import (
     SamplerEngine,
     SamplerEngineError,
     SamplingParams,
+    updates_during_generation,
 )
 from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
@@ -89,8 +90,25 @@ def sample_record(item: PromptItem, completion: Completion, *, reward: float, ve
         "metadata": {**dict(item.metadata), "prompt_id": item.prompt_id,
                      "weight_version": engine_weight_version(int(version)),
                      "finish_reason": completion.finish_reason,
-                     "prompt_tokens_known": bool(prompt_ids), "provenance": dict(provenance)},
+                     "prompt_tokens_known": bool(prompt_ids), "provenance": dict(provenance),
+                     **({} if completion.final_weight_version is None else
+                        {"final_weight_version": engine_weight_version(int(completion.final_weight_version))})},
     }
+
+
+def _completion_version(completion: Completion, served: int, *, live: bool) -> int:
+    """The behavior version of one completion: the round's served version, or the
+    completion's own on an engine that updates during a generation (it must give
+    one)."""
+    if not live:
+        if completion.weight_version not in (None, served):
+            raise SamplerEngineError(f"completion of v{completion.weight_version} in a round served "
+                                     f"at v{served}; the engine does not update during a generation")
+        return served
+    if completion.weight_version is None:
+        raise SamplerEngineError("an engine that updates during a generation must give each "
+                                 "completion its weight_version")
+    return int(completion.weight_version)
 
 
 class EngineRound:
@@ -102,12 +120,16 @@ class EngineRound:
                  loop_guard: LoopGuard | None = None, incarnation: str | None = None,
                  resume: SamplerResume | None = None,
                  data_cursor: Callable[[int], Mapping[str, int]] | None = None,
-                 reclaimed: Callable[[], bool] = lambda: False) -> None:
+                 reclaimed: Callable[[], bool] = lambda: False,
+                 unchecked_in_flight: Callable[[], bool] = lambda: False) -> None:
         """``incarnation``: this process's id (``sampler_resume.new_incarnation``);
         with it, sample ids are ``<sampler>-<incarnation>-r<round>-<prompt id>`` and
         every entry carries its round record. ``resume``: where the earlier
         incarnations got to (its rounds are refused). ``data_cursor(rollout_id)``:
-        the prompt source's position after the round drew its prompts."""
+        the prompt source's position after the round drew its prompts.
+        ``unchecked_in_flight()``: True when a load during this round's generation
+        left weights that did not pass the post-load checks (an engine that
+        updates during a generation); the round's groups are then not written."""
         self.engine = engine
         self.writer = writer
         self.prompts = prompts
@@ -120,6 +142,7 @@ class EngineRound:
         self.guard = None if resume is None else RoundGuard(resume)
         self.data_cursor = data_cursor
         self.reclaimed = reclaimed
+        self.unchecked_in_flight = unchecked_in_flight
         self.dropped_groups = 0  # groups not written because the island is leaving
 
     def _round_record(self, rollout_id: int, last: bool) -> dict[str, Any] | None:
@@ -140,8 +163,15 @@ class EngineRound:
         groups = self.engine.generate([item.prompt for item in items], self.sampling)
         if len(groups) != len(items):
             raise SamplerEngineError(f"engine returned {len(groups)} groups for {len(items)} prompts")
-        if self.engine.served_version() != version:  # a reload during the round would mix versions
+        live = updates_during_generation(self.engine)
+        if not live and self.engine.served_version() != version:  # a reload would mix versions
             raise SamplerEngineError(f"served version changed from v{version} during round {rollout_id}")
+        if live and self.unchecked_in_flight():  # some tokens may come from weights that failed a check
+            self.dropped_groups += len(items)
+            self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version, groups=0,
+                      samples=0, response_tokens=0, finish={}, source=self.provenance.key(),
+                      dropped_groups=len(items), dropped_reason="unchecked_weights_in_flight")
+            return
         record = self.provenance.to_record()
         finish: Counter[str] = Counter()
         tokens = 0
@@ -157,7 +187,8 @@ class EngineRound:
                 finish[completion.finish_reason] += 1
                 tokens += len(completion.token_ids)
                 samples.append(sample_record(
-                    item, completion, reward=self.reward(item, completion), version=version,
+                    item, completion, reward=self.reward(item, completion),
+                    version=_completion_version(completion, version, live=live),
                     provenance=record, group_index=position,
                     index=position * self.sampling.n + j))
             scored.append((item, samples))
@@ -192,6 +223,7 @@ class EngineSamplerConfig:
     base_dir: Path | None = None  # None: the engine's configured base weights
     min_round_s: float | None = None
     poll_s: float = 5.0
+    live_poll_s: float | None = None  # store poll during a round (engines that update live); None: poll_s
     loop_guard: LoopGuard | None = None
     max_consecutive_load_failures: int = 3
 
@@ -240,19 +272,22 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
         loader.start(config.base_dir, int(config.base_version))
     except ReleaseNotLoaded as error:  # no served version to fall back to
         raise SamplerLoadFatal(f"the engine failed its start checks: {error}") from error
-    follower = PolicyFollower(releases, loader, version=int(config.base_version))
+    follower = PolicyFollower(releases, loader, version=int(config.base_version),
+                              live_update=updates_during_generation(engine))
     engine_round = EngineRound(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
                                loop_guard=config.loop_guard, incarnation=incarnation,
                                resume=resume, data_cursor=data_cursor,
                                reclaimed=should_stop if reclaimed is None else reclaimed)
     extra = {} if sleep is None else {"sleep": sleep}
+    loop: SamplerLoop
+    engine_round.unchecked_in_flight = lambda: loop.unchecked_in_flight
     loop = SamplerLoop(follower=follower, buffer=buffer, generate=engine_round,
                        num_rollouts=int(config.num_rollouts),
                        max_backlog_groups=int(config.max_backlog_groups), emit=emit,
                        poll_s=config.poll_s, should_stop=should_stop,
                        min_round_s=config.min_round_s, loaded_fields=loader.loaded_fields,
-                       ready=lambda: loader.ready, **extra)
+                       ready=lambda: loader.ready, live_poll_s=config.live_poll_s, **extra)
     return EngineSamplerIsland(loop=loop, loader=loader, follower=follower, round=engine_round,
                                resume=resume)
 

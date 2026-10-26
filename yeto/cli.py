@@ -190,6 +190,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
     tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
+    tune.add_argument("--context-parallel", type=int, default=1,
+                      help="RL ports (Miles) trainer: context-parallel degree (S27 G-AC long sequences); "
+                           "the trainer world is TP x PP x CP x DP")
     tune.add_argument(
         "--train-on",
         choices=["assistant", "all"],
@@ -362,6 +365,25 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(
+        "--syncer-shards",
+        type=int,
+        default=1,
+        help="split the syncer head into N processes by fragment range "
+        "(each owns ~1/N of the parameters, momentum and checkpoint; "
+        "islands route each fragment to its owner). 1 = one syncer. "
+        "SFT torch causal-LM learners, or RL --rl-sync-preset full-parameter "
+        "with --rl-sync-full-parameter-rounds async (actor only)",
+    )
+    sync.add_argument(
+        "--syncer-weighted-fold",
+        choices=("buffered", "streaming"),
+        default="buffered",
+        help="rounds with a quorum below all learners or token weights: "
+        "buffered keeps every push until the round closes; streaming adds "
+        "each push to a running weighted sum on arrival (less head memory, "
+        "equal to buffered up to f32 rounding)",
+    )
+    sync.add_argument(
         "--external-learners",
         type=int,
         default=0,
@@ -416,6 +438,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     sync.add_argument("--outer-lr", type=float, default=0.7)
     sync.add_argument("--outer-momentum", type=float, default=0.9)
+    sync.add_argument(
+        "--outer-delayed-nesterov-period",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Delayed Nesterov outer optimizer: update the outer momentum only every N syncs "
+        "with the mean of their outer gradients; unset or 1 = plain Nesterov",
+    )
     sync.add_argument(
         "--fragment-pattern",
         choices=["binpack", "strided"],
@@ -538,6 +568,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands: container memory request = limit in GiB (default 32 GiB per GPU)",
     )
     infra.add_argument(
+        "--modal-ephemeral-disk-gib",
+        type=int,
+        default=None,
+        metavar="GIB",
+        help="Modal islands: container disk in GiB (Ray spills its object store here). "
+        "Default: full-parameter RL sizes it from the model (5 f32 model copies + the "
+        "bf16 snapshot + 64 GiB, 512..3072 GiB); other runs keep Modal's default",
+    )
+    infra.add_argument(
         "--modal-cpu",
         type=int,
         default=None,
@@ -601,6 +640,26 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
+    infra.add_argument(
+        "--syncer-disk-gib",
+        type=int,
+        default=None,
+        help="syncer/head VM disk size in GiB (default: the cloud default). A full-parameter "
+        "head writes checkpoints of params + momentum in f32 (8 bytes per parameter)",
+    )
+    infra.add_argument(
+        "--syncer-instance-type",
+        default=None,
+        help="syncer/head VM instance type (default: the cheapest that meets --syncer-memory; "
+        "on AWS that can be an arm64 type)",
+    )
+    infra.add_argument(
+        "--syncer-disk-tier",
+        choices=("low", "medium", "high", "ultra", "best"),
+        default=None,
+        help="syncer/head VM disk tier (default: the cloud default); higher tiers write "
+        "large checkpoints faster",
+    )
     infra.add_argument(
         "--syncer-public-addr",
         default=None,
@@ -1303,10 +1362,6 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # The head's controller defines, deploys and spawns modal: islands
         # through the Modal SDK (yeto.modal_runner), so it needs the package.
         head_pip += ' && pip install -q "modal>=1.0"'
-    if getattr(args, "codex_bundle_dir", None):
-        # S17 M1: the head attests the Codex bundle and imports the harness
-        # preflight (aiohttp / dill) when it builds each island.
-        head_pip += " && pip install -q aiohttp dill"
     if getattr(args, "wandb", False):
         # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
         head_pip += " && pip install -q wandb"
@@ -1346,6 +1401,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
             memory=f"{args.syncer_memory}+",
             ports=launcher.syncer_ports(args),
             use_spot=False,
+            **launcher.syncer_disk_resources(args),
         )
     )
     if launcher.syncer_ports(args) is None:
@@ -1476,16 +1532,6 @@ def cmd_launch_head(args) -> int:
             args.rl_initial_adapter
         )
         args.rl_initial_adapter = launcher.RL_HEAD_INITIAL_ADAPTER_PATH
-    # S17 M1: a signed Codex run needs its bundle and harness env on the head,
-    # which builds the islands (attested here first; fails before provisioning).
-    try:
-        codex_mounts, codex_secrets = launcher.codex_head_staging(args)
-    except ValueError as exc:
-        print(f"[yeto] {exc}", file=sys.stderr)
-        return 1
-    if codex_mounts:
-        data_mounts.update(codex_mounts)
-        args.codex_bundle_dir = launcher.HEAD_CODEX_BUNDLE_PATH
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)
@@ -1535,7 +1581,6 @@ def cmd_launch_head(args) -> int:
         # 0.20: the head's LocalSyncer and the islands it launches read the
         # island HMAC key from this secret env (elastic only; {} in legacy).
         secrets.update(launcher.island_hmac_secret(args))
-    secrets.update(codex_secrets)
     # secret-handling-hardening: HF/W&B/CyberGym tokens ride as secrets too.
     envs, env_secrets = launcher.split_secret_envs(envs)
     secrets.update(env_secrets)
@@ -1585,9 +1630,13 @@ def cmd_head(payload: str) -> int:
         from .rl.sao_streaming_manifest import load_sao_streaming_manifest
 
         args.rl_sao_manifest = load_sao_streaming_manifest(args.rl_sao_contracts)
-    # Same count launcher.run uses: --gpu islands plus --external-learners
+    # Same count launcher.run uses: the synced islands (a synced group's sampler
+    # islands do not join the syncer, S26 e9b-sync-a) plus --external-learners
     # seats; without the seats the syncer rejects every manual joiner.
-    num_learners = len(parse_gpu_spec(args.gpu)) + (getattr(args, "external_learners", 0) or 0)
+    from .rl.engine import sample_roles
+
+    num_learners = (sample_roles.syncer_learner_count(args, len(parse_gpu_spec(args.gpu)))
+                    + (getattr(args, "external_learners", 0) or 0))
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()

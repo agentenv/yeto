@@ -288,16 +288,20 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
         async def create(cls, config):
             seen["version"] = config.agent.kwargs["version"]
             seen["summary"] = config.agent.kwargs["reasoning_summary"]
+            seen["import_path"] = config.agent.import_path
+            seen["idle"] = config.agent.kwargs["stream_idle_timeout_s"]
             return cls(config)
 
     Trial.result = _result({"reward": 1.0})
     monkeypatch.setattr(mod, "HarborHarness",
-                        lambda build: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
-                            build, trial_cls=Trial))
+                        lambda build, **kw: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
+                            build, trial_cls=Trial, **kw))
     out = _run(mod.run("http://ss:30000/sessions/s1", metadata={"instance_id": "fix-git"}))
     assert example.calls == ["key", ("codex", "http://ss:30000/sessions/s1/v1")]
     assert seen["version"] == "0.145.0"  # Harbor's default would be @latest
     assert seen["summary"] == "none"  # the gateway refuses reasoning summaries
+    assert seen["import_path"] == "yeto.rl.harness.harbor.codex_agent:YetoCodex"  # R3
+    assert seen["idle"] == 1800
     assert (out[OUTCOME_KEY], out["reward"]) == ("ok", 1.0)
 
     Trial.result = _result(None, "EnvironmentStartTimeoutError")
@@ -310,7 +314,8 @@ def test_miles_reward_hook_marks_aborted_and_fails_closed(miles_stubs):
     ok = SimpleNamespace(metadata={OUTCOME_KEY: "ok", "reward": 1.0}, status="COMPLETED")
     aborted = SimpleNamespace(metadata={OUTCOME_KEY: "aborted", "reward": 0.0}, status="COMPLETED")
     assert _run(mod.reward_func(None, [ok, aborted])) == [1.0, 0.0]
-    assert aborted.status == "ABORTED" and ok.status == "COMPLETED"
+    # Miles installed (its image): the real Sample.Status enum; else the CPU-test string
+    assert getattr(aborted.status, "name", aborted.status) == "ABORTED" and ok.status == "COMPLETED"
     with pytest.raises(mod.UntrustedAgentOutcome):
         _run(mod.reward_func(None, SimpleNamespace(metadata={"reward": 1.0})))
 
@@ -333,7 +338,8 @@ def test_miles_train_args_match_the_example_except_the_yeto_hooks(monkeypatch):
     theirs = launch_common.agentic_train_args(**kw).split()
     ours = harbor_agent.train_args(**kw).split()
     swap = {"harbor_agent_function.run": harbor_agent.AGENT_FUNCTION,
-            "generate.reward_func": harbor_agent.REWARD_FUNCTION}
+            "generate.reward_func": harbor_agent.REWARD_FUNCTION,
+            "generate.RolloutFn": harbor_agent.ROLLOUT_FUNCTION}
     assert ours == [swap.get(token, token) for token in theirs]
 
 
@@ -542,8 +548,8 @@ def test_miles_custom_provider_uses_the_yeto_builder(miles_stubs, monkeypatch, t
         result = _result({"reward": 1.0})
 
     monkeypatch.setattr(mod, "HarborHarness",
-                        lambda build: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
-                            build, trial_cls=Trial))
+                        lambda build, **kw: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
+                            build, trial_cls=Trial, **kw))
     out = _run(mod.run("http://ss", metadata={"instance_id": "fix-git", "agent_name": "oracle"}))
     assert built == [("oracle", "boat", 900.0, "http://ss/v1", tmp_path, {"ttl_s": 600})]
     assert example.calls == ["key"]  # the example's builder is not called

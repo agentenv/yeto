@@ -13,6 +13,23 @@
   (several islands and a syncer): only learner 0 releases, with the merged
   version (:mod:`yeto.rl.engine.merged_release`).
 
+  Staged full releases (S27 G-AT, the default on a trainer island; off with
+  ``--rl-release-inline``): the trainer exports into a local staging directory
+  (every rank writes a share of the files, ``release_plugin.write_full_checkpoint``)
+  and goes on training while a background thread uploads it to the store
+  (``PolicyReleaseStore.release_staged``). The next release waits for that
+  upload, so releases stay in order and at most one is in flight; the driver
+  waits for the last one before the run ends (``drain_releases``). The release
+  records the trainer's buffer read position after the weights are uploaded, so
+  it includes the round the trainer took meanwhile: a sampler at its backlog
+  cap starts its next round with this release instead of the next one.
+
+  The base policy: the samplers' engines start with the base weights (version
+  0), so a non-synced full-parameter trainer releases nothing for version 0 while
+  the store holds no release (``rl_policy_release_skipped``, reason
+  ``base_policy``). Synced trainers release it (a restarted trainer restores its
+  published versions from the store's releases).
+
 Engine weight load (the order of the publisher, ``publish.MilesPublisher``):
 under the controller's update lock, every engine loads the release, then the
 plain policy version is stamped and read back on every engine; any failure
@@ -27,6 +44,13 @@ aborts the lock. The rollout executor then takes the version as its current one.
   (:attr:`EngineReleaseLoader.last_checksum`); they must equal the trainer's
   (``PolicyRelease.engine_checksum``) when the release carries it.
 
+LoRA staging (S26 E5): the adapter is copied to local disk before the update
+lock. With ``fused_stage`` (``--rl-sampler-fused-stage``, default off) the copy
+also computes the release digest, so the release is read from the store once
+instead of twice (the follower's check, then the copy); a digest mismatch fails
+the load before any engine sees the files, as the follower's check does.
+``last_timings`` holds the seconds of each load phase.
+
 This module imports Miles only inside :func:`run_sampler_island`.
 """
 
@@ -38,20 +62,29 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from yeto.rl.engine.policy_release import (
     FULL,
     LORA,
+    BackgroundReleaser,
+    PhaseTimer,
     PolicyFollower,
     PolicyRelease,
     PolicyReleaseStore,
+    check_release_digest,
+    copy_with_digest,
+    ReleaseNotLoaded,
 )
 from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, merged_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
+from yeto.rl.quant.schemes import BF16, FP8_FFN_CHANNEL, release_dir_for
+from yeto.rl.quant.scope import QuantScopeError
+from yeto.rl.quant.tiers import TIER_TRAINER_FP8, check_release_scope, describe, release_scheme
 
 from .buffer_rollout import (
     SampleBufferRolloutError,
@@ -70,10 +103,14 @@ from .publish import (
     read_engine_checksums,
     weight_view_digest,
 )
-from .release_plugin import WRITE_LORA_ADAPTER
+from .release_plugin import WRITE_LORA_ADAPTER, full_checkpoint_writer
 
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
+STAGING_ENV = "YETO_RL_RELEASE_STAGING"  # local directory of staged releases (default: system temp)
+# "miles": a staged release is written by Miles' export_hf (rank 0 writes) instead of
+# every rank (release_plugin.write_full_checkpoint); a fallback that needs no code change
+STAGED_EXPORT_ENV = "YETO_RL_RELEASE_EXPORT"
 ADAPTER_REQUEST_TIMEOUT_S = 600.0
 # A fixed greedy request each LoRA load answers (rl_sampler_policy_loaded.probe):
 # its token log-probabilities show that the served adapter changed with the version.
@@ -86,10 +123,48 @@ def _buffer_config(miles_args: Any, role: str) -> Any:
     return config if config is not None and config.role == role else None
 
 
-def release_store(config: Any, environ: Any = None) -> PolicyReleaseStore:
+def release_store(config: Any, environ: Any = None, *, scheme: str = BF16) -> PolicyReleaseStore:
     from yeto.rl.engine.resume import store_for
 
-    return PolicyReleaseStore(store_for(config.store, environ=environ))
+    return PolicyReleaseStore(store_for(config.store, environ=environ),
+                              release_dir=release_dir_for(scheme),
+                              cached_latest=not config.release_legacy)
+
+
+def _quant_tier(miles_args: Any) -> int:
+    return int(getattr(miles_args, "yeto_rollout_quant_tier", 0) or 0)
+
+
+def prepare_quantized_base(miles_args: Any, work_dir: Path) -> Path:
+    """S26 E6 tier 2, sampler side: the engines start on the FP8 conversion of the BF16
+    base (``miles_args.hf_checkpoint``), so later FP8 releases load into FP8 parameters
+    of the same layout. The conversion is checked against the scope rule. Returns the
+    converted directory, which replaces ``miles_args.hf_checkpoint``."""
+    from yeto.rl.quant.awq import AwqSmoothing
+    from yeto.rl.quant.requant import requantize_checkpoint, save_scoped_template
+
+    base = Path(miles_args.hf_checkpoint)
+    template, out = work_dir / "fp8-template", work_dir / "fp8-base"
+    save_scoped_template(base, template, FP8_FFN_CHANNEL)
+    stats = requantize_checkpoint(base, template, out, AwqSmoothing.none())
+    check_release_scope(out)
+    print(f"[rl] {describe(TIER_TRAINER_FP8)}: base {base} -> {out} {stats}", flush=True)
+    miles_args.hf_checkpoint = str(out)
+    return out
+
+
+def scope_checked(load: Callable[[PolicyRelease, Path], None]) -> Callable[[PolicyRelease, Path], None]:
+    """A ``PolicyFollower`` load hook that refuses an FP8 release outside the scope rule
+    before the engines are touched (S26 E6 tier 2 post-load check, step one)."""
+    def hook(release: PolicyRelease, directory: Path) -> None:
+        try:
+            check_release_scope(Path(directory))
+        except QuantScopeError as error:
+            raise ReleaseNotLoaded(f"r{release.seq}-v{release.version}: {error}",
+                                   reason="release_refused:quant_scope") from error
+        load(release, directory)
+
+    return hook
 
 
 # ---------------------------------------------------------------------- sampler side
@@ -132,7 +207,8 @@ class EngineReleaseLoader:
     must then carry ``weights == "lora"``. ``adapter_loaded``: the engines already
     serve the adapter (a convertible node: its trainer pushed it at boot), so the
     first load unloads it first. ``warmup`` and ``flatten`` replace the warm-up
-    generate and the checksum flattening (tests)."""
+    generate and the checksum flattening (tests). ``fused_stage``: the LoRA staging
+    copy checks the release digest (module doc; ``verifies_files``)."""
 
     def __init__(self, controller: Any, executor: Any, run: Callable[[Any], Any], *,
                  lora: bool = False, post: Callable[..., Any] = _post_engine,
@@ -140,7 +216,8 @@ class EngineReleaseLoader:
                  flatten: Callable[[Any], list[dict[str, Any]]] | None = None,
                  probe: Callable[[Any, str], Any] | None = probe_generate,
                  warmup_timeout_s: float = 120.0, staging_root: str | None = None,
-                 adapter_loaded: bool = False) -> None:
+                 adapter_loaded: bool = False, fused_stage: bool = False,
+                 timer: Callable[[], float] = time.perf_counter) -> None:
         self.controller = controller
         self.executor = executor
         self.run = run
@@ -158,23 +235,72 @@ class EngineReleaseLoader:
         self.staging_root = staging_root  # local copies of loaded adapters (None: system temp)
         self._staged: Path | None = None  # the local copy the engines serve
         self.last_checksum: str | None = None  # LoRA: the engines' lora:* read-back digest
+        self.fused_stage = bool(fused_stage) and self.lora
+        self.timer = timer
+        self._timing: PhaseTimer | None = None  # the load in progress
+        self.last_timings: dict[str, float] = {}  # seconds per phase of the last load
 
     @property
     def weights(self) -> str:
         return LORA if self.lora else FULL
+
+    @property
+    def verifies_files(self) -> bool:
+        """True: this loader checks the release digest (``PolicyFollower`` skips its check)."""
+        return self.fused_stage
+
+    @contextmanager
+    def _phase(self, name: str) -> Iterator[None]:
+        if self._timing is None:
+            yield
+            return
+        with self._timing.phase(name):
+            yield
 
     def __call__(self, release: PolicyRelease, directory: Path) -> None:
         if release.weights != self.weights:
             raise SampleBufferRolloutError(
                 f"release r{release.seq}-v{release.version} holds {release.weights} weights; "
                 f"this sampler serves {self.weights}")
-        engines = self.run(self._load(str(directory), int(release.version)))
-        if self.lora:
-            self.last_checksum = self.run(self._read_back_adapter(engines))
-            if release.engine_checksum is not None and self.last_checksum != release.engine_checksum:
-                raise SampleBufferRolloutError(
-                    f"release r{release.seq}-v{release.version}: the engines serve LoRA checksum "
-                    f"{self.last_checksum}, the trainer published {release.engine_checksum}")
+        self._timing = PhaseTimer(self.timer)
+        try:
+            self._call(release, directory)
+        finally:
+            self.last_timings = self._timing.as_dict()
+            self._timing = None
+
+    def _call(self, release: PolicyRelease, directory: Path) -> None:
+        if not self.lora:
+            self.run(self._load(str(directory), int(release.version)))
+            return
+        staged = self._stage(release, directory)
+        try:
+            engines = self.run(self._load(str(staged), int(release.version)))
+        except BaseException:
+            if self._staged != staged:  # no engine took this copy
+                shutil.rmtree(staged, ignore_errors=True)
+            raise
+        self.last_checksum = self.run(self._read_back_adapter(engines))
+        if release.engine_checksum is not None and self.last_checksum != release.engine_checksum:
+            raise SampleBufferRolloutError(
+                f"release r{release.seq}-v{release.version}: the engines serve LoRA checksum "
+                f"{self.last_checksum}, the trainer published {release.engine_checksum}")
+
+    def _stage(self, release: PolicyRelease, directory: Path) -> Path:
+        """A local copy of the adapter (SGLang keeps the adapter files open: open
+        files on a Modal Volume make every later reload fail, T-LSMP g). With
+        ``fused_stage`` the copy also checks the release digest."""
+        staged = Path(tempfile.mkdtemp(prefix=f"v{int(release.version)}-", dir=self.staging_root))
+        try:
+            with self._phase("stage_s"):
+                if self.fused_stage:
+                    check_release_digest(release, copy_with_digest(Path(directory), staged))
+                else:
+                    shutil.copytree(directory, staged, dirs_exist_ok=True)
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+        return staged
 
     def stamp(self, version: int) -> None:
         """Stamp ``version`` on the engines without loading weights (the base policy)."""
@@ -186,26 +312,18 @@ class EngineReleaseLoader:
             await asyncio.gather(*(e.update_weights_from_disk(model_path=path, weight_version=stamp)
                                    for e in engines))
             return
-        # SGLang keeps the adapter files open (safetensors mmap); open files on a Modal
-        # Volume make every later reload fail, so no new release is ever seen
-        # (T-LSMP g). The engines load a local copy; the previous copy is removed
-        # once its adapter is unloaded.
-        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging_root))
-        shutil.copytree(path, staged, dirs_exist_ok=True)
-        try:
-            if self._adapter_loaded:
-                await asyncio.gather(*(self.post(e, "unload_lora_adapter", {"lora_name": self.adapter})
-                                       for e in engines))
-                self._adapter_loaded = False
-                self._drop_staged()
-            await asyncio.gather(*(self.post(e, "load_lora_adapter",
-                                             {"lora_name": self.adapter, "lora_path": str(staged)})
+        # ``path`` is the local copy (``_stage``); the previous copy is removed once its
+        # adapter is unloaded. On a failure before the load the caller removes ``path``.
+        if self._adapter_loaded:
+            await asyncio.gather(*(self.post(e, "unload_lora_adapter", {"lora_name": self.adapter})
                                    for e in engines))
-        except BaseException:
-            shutil.rmtree(staged, ignore_errors=True)
-            raise
+            self._adapter_loaded = False
+            self._drop_staged()
+        await asyncio.gather(*(self.post(e, "load_lora_adapter",
+                                         {"lora_name": self.adapter, "lora_path": path})
+                               for e in engines))
         self._adapter_loaded = True
-        self._staged = staged
+        self._staged = Path(path)
 
     def _drop_staged(self) -> None:
         if self._staged is not None:
@@ -214,35 +332,42 @@ class EngineReleaseLoader:
 
     async def _read_back_adapter(self, engines: list[Any]) -> str | None:
         """Warm the adapter into every engine's LoRA pool, then read the checksums."""
-        await asyncio.gather(*(self.warmup(e, self.adapter, self.warmup_timeout_s) for e in engines))
-        bodies = await read_engine_checksums(self.controller, self.flatten)
+        with self._phase("warmup_s"):
+            await asyncio.gather(*(self.warmup(e, self.adapter, self.warmup_timeout_s) for e in engines))
+        with self._phase("checksum_s"):
+            bodies = await read_engine_checksums(self.controller, self.flatten)
         if self.probe is not None:
-            self.last_probe = dict(await self.probe(engines[0], self.adapter))
+            with self._phase("probe_s"):
+                self.last_probe = dict(await self.probe(engines[0], self.adapter))
         return weight_view_digest(bodies, lora=True)
 
     async def _load(self, path: str | None, version: int) -> list[Any]:
         """Load and stamp under the update lock; returns the engines."""
-        info = await self.controller.start_update_weights()
+        with self._phase("lock_s"):
+            info = await self.controller.start_update_weights()
         ok = False
         try:
             engines = list(info.rollout_engines)
             if not engines:
                 raise SampleBufferRolloutError("no rollout engines to load the policy into")
             if path is not None:
-                await self._load_weights(engines, path, version)
+                with self._phase("engine_load_s"):
+                    await self._load_weights(engines, path, version)
             ids = [_engine_id(e, i) for i, e in enumerate(engines)]
-            failed, cause = await _stamp_engine_version(engines, ids, version)
+            with self._phase("stamp_s"):
+                failed, cause = await _stamp_engine_version(engines, ids, version)
             if failed:
                 raise SampleBufferRolloutError(
                     f"{len(failed)}/{len(engines)} rollout engines did not take policy "
                     f"v{version} ({cause.value}): {sorted(failed)}")
             ok = True
         finally:
-            if ok:
-                await self.controller.end_update_weights(
-                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
-            else:
-                await self.controller.abort_update_weights()
+            with self._phase("unlock_s"):
+                if ok:
+                    await self.controller.end_update_weights(
+                        snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
+                else:
+                    await self.controller.abort_update_weights()
         await _maybe_await(self.executor.set_weight_version(int(version)))
         return engines
 
@@ -265,7 +390,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from miles.utils.async_utils import Disposer
     from miles.utils.orchestration_utils import init_orchestration_script
 
-    from yeto.rl.elastic_client import LeaveReason
+    from yeto.rl.pool_client import LeaveReason
     from yeto.rl.engine.events import append_tape_event
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
@@ -310,6 +435,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                                    incarnation, resume, emit)
     progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
+    if _quant_tier(miles_args) == TIER_TRAINER_FP8:
+        if lora_mode(miles_args):
+            raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
+        prepare_quantized_base(miles_args, Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
     connect_island_ray(miles_args=miles_args)
     # The rollout process's metadata hook pushes each round's group records to this
     # named actor (on a trainer island the driver creates it and consumes them).
@@ -352,11 +481,14 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     try:
         controller, executor = runner.run(init())
         lora = lora_mode(miles_args)
-        loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora)
+        loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora,
+                                     fused_stage=bool(config.fused_stage))
         if not lora:  # LoRA: no adapter is served before the first release (require_release)
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
-        follower = PolicyFollower(release_store(config, environ), loader,
-                                  version=BASE_POLICY_VERSION)
+        scheme = release_scheme(_quant_tier(miles_args))
+        follower = PolicyFollower(release_store(config, environ, scheme=scheme),
+                                  loader if scheme == BF16 else scope_checked(loader),
+                                  version=BASE_POLICY_VERSION, scheme=scheme)
         loop = SamplerLoop(
             follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
@@ -364,7 +496,9 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             max_backlog_groups=int(config.max_backlog_groups),
             min_round_s=config.min_round_s, require_release=lora, should_stop=reclaimed,
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
-                                   "probe": loader.last_probe})
+                                   "probe": loader.last_probe,
+                                   "load_timings": loader.last_timings,
+                                   "fused_stage": loader.fused_stage})
         latest = follower.releases.latest()
         membership.join(latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
@@ -416,7 +550,12 @@ class ReleasingPublisher:
     reader exists). The release records the wrapped publisher's engine weight
     checksums of this publish (``last_engine_checksums``; LoRA: the ``lora:*``
     keys) when every engine reported the same one. Every other attribute is the
-    wrapped publisher's."""
+    wrapped publisher's.
+
+    ``staging``: stage each release in a new directory under it and upload it on
+    ``releaser`` (module doc, staged full releases); None: write it into the
+    store on the caller's thread. ``skip_base``: release nothing for the base
+    policy while the store holds no release (module doc)."""
 
     def __init__(self, inner: Any, releases: PolicyReleaseStore,
                  export: Callable[[int, Path], None],
@@ -425,13 +564,24 @@ class ReleasingPublisher:
                  read_shards: Callable[[], dict[str, int] | None] | None = None,
                  version_of: Callable[[Any], int] | None = None,
                  guard: MergedReleaseGuard | None = None,
-                 origin: Callable[[Any], dict[str, Any]] | None = None) -> None:
+                 origin: Callable[[Any], dict[str, Any]] | None = None,
+                 staging: Path | None = None, releaser: BackgroundReleaser | None = None,
+                 skip_base: bool = False,
+                 read_position_from_thread: Callable[[], int | None] | None = None,
+                 read_shards_from_thread: Callable[[], dict[str, int] | None] | None = None,
+                 timer: Callable[[], float] = time.perf_counter) -> None:
         """``read_shards``: the trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
         backlog caps. Synced trainers (:mod:`yeto.rl.engine.merged_release`):
         ``version_of(state)`` is the merged version to release (default: the
         policy version), ``guard`` keeps the release versions increasing and
-        ``origin(state)`` is the release record's ``origin``."""
+        ``origin(state)`` is the release record's ``origin``.
+        ``read_position_from_thread`` / ``read_shards_from_thread``: the same reads,
+        callable from the upload thread (default: ``read_position`` / ``read_shards``)."""
+        if (staging is None) != (releaser is None):
+            raise ValueError("staging and releaser go together")
+        self.read_position_from_thread = read_position_from_thread or read_position
+        self.read_shards_from_thread = read_shards_from_thread or read_shards
         self.version_of = version_of or (lambda state: int(state.policy_version))
         self.guard = guard
         self.origin = origin
@@ -442,6 +592,10 @@ class ReleasingPublisher:
         self.read_shards = read_shards
         self.emit = emit
         self.weights = weights
+        self.staging = None if staging is None else Path(staging)
+        self.releaser = releaser
+        self.skip_base = bool(skip_base)
+        self.timer = timer
 
     def _engine_checksum(self) -> str | None:
         checksums = getattr(self.inner, "last_engine_checksums", None)
@@ -450,7 +604,11 @@ class ReleasingPublisher:
         return weight_view_digest(list(checksums.values()), lora=self.weights == LORA)
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
+        started = self.timer()
         result = self.inner.publish(state, **kwargs)
+        publish_s = round(self.timer() - started, 3)  # the trainer's own engines
+        # an upload in flight ends first: the store is read below, and releases stay in order
+        waited_s = 0.0 if self.releaser is None else round(self.releaser.wait(), 3)
         version = int(self.version_of(state))
         if self.guard is not None:
             latest = self.releases.latest()
@@ -460,24 +618,83 @@ class ReleasingPublisher:
                           latest_version=None if latest is None else latest.version,
                           reason="not_newer_than_latest")
                 return result
-        position = self.read_position()
-        shards = self.read_shards() if self.read_shards is not None and position is not None else None
+        if self.skip_base and version == BASE_POLICY_VERSION and self.releases.latest() is None:
+            self.emit("rl_policy_release_skipped", policy_version=version,
+                      local_version=int(state.policy_version), latest_version=None,
+                      reason="base_policy")
+            return result
+        fields = {"weights": self.weights, "engine_checksum": self._engine_checksum(),
+                  "origin": None if self.origin is None else self.origin(state)}
+        policy_hash = state.policy_tensor_hash()
+        event = {"policy_version": version, "local_version": int(state.policy_version),
+                 "publish_s": publish_s}
+        if self.staging is None:
+            position, shards = self._positions(self.read_position, self.read_shards)
+            release = self.releases.release(version, policy_hash,
+                                            lambda directory: self.export(version, directory),
+                                            buffer_selected=position, buffer_shards=shards, **fields)
+            self._emit_released(release, event, self.releases.last_timings)
+            return result
+        staged = self._stage(version)
+        export_started = self.timer()
+        try:
+            self.export(version, staged)
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+        stage = {"wait_previous_s": waited_s, "stage_export_s": round(self.timer() - export_started, 3)}
+
+        def positions() -> tuple[int | None, dict[str, int] | None]:
+            return self._positions(self.read_position_from_thread, self.read_shards_from_thread)
+
+        def upload() -> None:
+            try:
+                release = self.releases.release_staged(version, policy_hash, staged,
+                                                       position=positions, **fields)
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
+            self._emit_released(release, {**event, "staged": True,
+                                          "visible_at": self.releases.last_visible_at},
+                                {**stage, **self.releases.last_timings})
+
+        self.releaser.submit(upload)
+        return result
+
+    def _positions(self, read_position: Callable[[], int | None],
+                   read_shards: Callable[[], dict[str, int] | None] | None
+                   ) -> tuple[int | None, dict[str, int] | None]:
+        """The trainer's buffer read position (and per shard) for a release record."""
+        position = read_position()
+        shards = read_shards() if read_shards is not None and position is not None else None
         if position is None:  # nothing read yet in this process: keep the last known positions
             latest = self.releases.latest()
             position = None if latest is None else latest.buffer_selected
             shards = None if latest is None else latest.buffer_shards
-        release = self.releases.release(version, state.policy_tensor_hash(),
-                                        lambda directory: self.export(version, directory),
-                                        buffer_selected=position, weights=self.weights,
-                                        engine_checksum=self._engine_checksum(), buffer_shards=shards,
-                                        origin=None if self.origin is None else self.origin(state))
-        if release is not None:
-            self.emit("rl_policy_released", seq=release.seq, policy_version=version,
-                      local_version=int(state.policy_version), origin=release.origin,
-                      policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
-                      weights=release.weights, sha256=release.sha256,
-                      engine_checksum=release.engine_checksum)
-        return result
+        return position, shards
+
+    def _stage(self, version: int) -> Path:
+        """A new, empty staging directory for ``version`` (earlier ones of it removed)."""
+        self.staging.mkdir(parents=True, exist_ok=True)
+        for old in self.staging.glob(f"v{int(version)}-*"):
+            shutil.rmtree(old, ignore_errors=True)
+        return Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+
+    def _emit_released(self, release: PolicyRelease | None, event: dict[str, Any],
+                       timings: dict[str, float]) -> None:
+        if release is None:
+            return
+        self.emit("rl_policy_released", seq=release.seq, origin=release.origin,
+                  policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
+                  weights=release.weights, sha256=release.sha256,
+                  engine_checksum=release.engine_checksum, released_at=release.released_at,
+                  release_timings=timings, latest_source=self.releases.last_latest_source,
+                  release_bytes=sum((release.files or {}).values()), **event)
+
+    def drain_releases(self) -> None:
+        """Wait for the staged release in flight (the driver calls it before the run
+        ends); raises its error. No-op without staging."""
+        if self.releaser is not None:
+            self.releaser.drain()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
@@ -532,6 +749,13 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         def on_gap(previous: int, version: int) -> None:
             driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
 
+        # S27 L11: the lane cursor log resumes a relaunched synced trainer, not
+        # the data source; and it accepts groups made with the versions the
+        # store's releases name (a publisher of an earlier process released them).
+        driver.data_position_owner = "buffer_lane"
+        releases = release_store(config, environ)
+        driver.published_policy_history = lambda: [
+            (r.version, r.policy_hash) for r in releases.records() if r.derived_from is None]
         driver.publisher = GateVersionPublisher(
             driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
         publisher_island = is_publisher(lane.index, lane.count)
@@ -542,16 +766,54 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
+    env = os.environ if environ is None else environ
+    # module doc: a trainer island stages its full releases unless --rl-release-inline
+    staged = config.role == TRAINER and not lora and not config.release_inline
+    all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"
+
+    # local disk: every rank writes a share of the files
+    write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write)
 
     def export(version: int, directory: Path) -> None:
         if lora:
             runner.run(actor_model.run_plugin(WRITE_LORA_ADAPTER, {"path": str(directory)}))
         else:
-            runner.run(actor_model.export_hf(rollout_id=int(version), path=str(directory)))
+            write_full(version, directory)
 
+    staging = None
+    if staged:
+        staging = Path(env.get(STAGING_ENV) or Path(tempfile.gettempdir()) / "yeto-release-staging")
+        shutil.rmtree(staging, ignore_errors=True)  # an earlier process's partial stages
+    # the upload thread may not drive the driver's event loop (it may be running)
+    from_thread = getattr(driver.rollout, "_in_executor_from_thread", None) or in_executor
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
-                                   emit=driver.emit, weights=LORA if lora else FULL, **synced)
+                                   emit=driver.emit, weights=LORA if lora else FULL,
+                                   staging=staging,
+                                   releaser=None if staging is None else BackgroundReleaser(),
+                                   skip_base=not lora and lane is None,
+                                   read_position_from_thread=lambda: from_thread(executor_read_cursor),
+                                   read_shards_from_thread=lambda: from_thread(executor_read_shards),
+                                   **synced)
     driver.publisher = publisher
+    if _quant_tier(miles_args) == TIER_TRAINER_FP8:
+        start_trainer_releaser(miles_args, config, environ)
     return publisher
+
+
+def start_trainer_releaser(miles_args: Any, config: Any, environ: Any = None) -> Any:
+    """S26 E6 tier 2, trainer side: a thread of this driver converts every BF16 release
+    into an FP8 release (``yeto.rl.quant.release.scoped_releaser``) for the sampler islands."""
+    import threading
+
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
+
+    if lora_mode(miles_args):
+        raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
+    env = os.environ if environ is None else environ
+    template = Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl") / "fp8-template"
+    releaser = scoped_releaser(store_for(config.store, environ=environ), Path(miles_args.hf_checkpoint),
+                               template, FP8_FFN_CHANNEL)
+    return start_scoped_releaser(releaser, threading.Event())

@@ -336,3 +336,40 @@ def validate_compaction_segments(segments: Sequence[Any]) -> None:
         for value in identity
     ):
         raise RuntimeError("Miles compaction segments changed trajectory identity")
+
+
+def _optimized_tokens(sample: Any) -> int:
+    mask = getattr(sample, "loss_mask", None) or []
+    return int(sum(1 for value in mask if value))
+
+
+def refresh_segment_counts(samples: Any) -> int:
+    """Recompute ``segment_tokens``/``tokens_after``/``gae_length`` from the final loss masks.
+
+    Segment samples (``metadata.segment_index``) count optimised tokens when
+    they are assembled; later hooks still set loss_mask 1 -> 0 (S19 #8
+    placeholder-logprob stop tokens, S17 WP6 reasoning tokens) before the
+    backend converts the samples. N_{>s} and l are optimised-token counts, so
+    they are refreshed after those hooks (s19-compaction-g1-20261010g:
+    tokens_after was 1-17 tokens high). Returns the number of segment samples
+    whose counts changed.
+    """
+    rollouts: dict[Any, list[Any]] = {}
+    for sample in samples:
+        meta = getattr(sample, "metadata", None)
+        if not isinstance(meta, dict) or not isinstance(meta.get("segment_index"), int):
+            continue
+        key = (getattr(sample, "rollout_id", None), getattr(sample, "group_index", None),
+               getattr(sample, "index", None))
+        rollouts.setdefault(key, []).append(sample)
+    changed = 0
+    for segments in rollouts.values():
+        segments.sort(key=lambda s: s.metadata["segment_index"])
+        tokens = [_optimized_tokens(s) for s in segments]
+        for index, sample in enumerate(segments):
+            new = {"segment_tokens": tokens[index], "tokens_after": sum(tokens[index + 1:]),
+                   "gae_length": sum(tokens)}
+            if any(sample.metadata.get(k) != v for k, v in new.items()):
+                changed += 1
+            sample.metadata.update(new)
+    return changed

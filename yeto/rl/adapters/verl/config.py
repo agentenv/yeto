@@ -64,6 +64,9 @@ class VerlRunConfig:
     lora_merge: bool = False
     engine_commit: str = VERL_COMMIT
     gpu_memory_utilization: float = 0.5
+    # vLLM context length; None = the model's max_position_embeddings (262144 for
+    # Qwen3-4B-Instruct-2507, whose KV cache then does not fit next to the actor)
+    max_model_len: int | None = None
     n_gpus: int = 1
     model_dtype: str = "fp32"
     reward_path: str = ""
@@ -111,8 +114,8 @@ def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
             "确需如此请显式 allow_sampling_shift")
     if cfg.groups_per_round <= 0 or cfg.samples_per_group <= 0 or cfg.total_rounds <= 0:
         raise VerlConfigError("groups_per_round / samples_per_group / total_rounds 必须为正")
-    if cfg.n_gpus != 1:
-        raise VerlConfigError("verl 后端第一版每岛只支持 1 张卡（V1/V2 范围）")
+    if cfg.n_gpus < 1:
+        raise VerlConfigError(f"n_gpus 必须 >= 1（单节点岛的卡数），得到 {cfg.n_gpus}")
     if cfg.model_dtype not in ("fp32", "bf16"):
         raise VerlConfigError(f"model_dtype 必须是 fp32 或 bf16，得到 {cfg.model_dtype!r}")
 
@@ -161,6 +164,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={cfg.gpu_memory_utilization}",
+        *([f"actor_rollout_ref.rollout.max_model_len={cfg.max_model_len}"] if cfg.max_model_len else []),
         f"actor_rollout_ref.rollout.n={cfg.samples_per_group}",
         f"actor_rollout_ref.rollout.temperature={cfg.temperature}",
         f"actor_rollout_ref.rollout.top_p={cfg.top_p}",

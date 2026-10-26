@@ -167,8 +167,8 @@ def publish_selftest(island, publisher, policy_state, specs) -> dict:
 
 def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str,
                compat_group: str | None = None):
-    """Outer sync of the island plan: none / strict / elastic (both trainer paths)."""
-    from yeto.rl.engine.bridges import ElasticAvgSync, LocalOnlySync, StrictAvgSync
+    """Outer sync of the island plan: none / strict / pool (both trainer paths)."""
+    from yeto.rl.engine.bridges import LocalOnlySync, PoolAvgSync, StrictAvgSync
 
     learner_id = int(plan["learner_id"])
     mode = plan["sync"]
@@ -190,8 +190,8 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
             bcast_delta=bool(plan.get("bcast_delta", False)))
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
-        elif mode == "elastic":
-            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)),
+        elif mode == "pool":
+            sync = PoolAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)),
                                   lease_s=plan.get("island_lease_s"))
         else:
             raise ValueError(f"unknown sync mode {mode!r}")
@@ -267,6 +267,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",
@@ -281,7 +282,8 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     return result
 
 
-def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buffer_ports=None) -> dict:
+def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buffer_ports=None,
+                           seek_rollouter=None) -> dict:
     """agentic-rollout-utilization 6.4b: the yeto driver over the fully_async ports.
 
     ``call(method, *args)`` reaches the trainer actor; ``start_rollouter`` starts the
@@ -289,7 +291,10 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
 
     ``buffer_ports(island)``: a buffer trainer (S25 C2, ``buffer_ports.install_buffer_ports``
     bound to the run's buffer and release store) returns ``(rollout, publisher,
-    placement)``; the trainer port and the policy state stay the fully_async ones."""
+    placement)``; the trainer port and the policy state stay the fully_async ones.
+
+    ``seek_rollouter(prompts)``: skips prompts of the rollouter's data before it
+    starts (round cuts with ``--rl-resume-store``, S26 E9.2; :mod:`.fully_async_cut`)."""
     from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.driver import EventTape, IslandDriver
@@ -299,6 +304,8 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     from .entry import verl_capabilities
     from .fully_async_ports import (FullyAsyncIsland, FullyAsyncPlacement, FullyAsyncPublisher,
                                     FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
+    from . import round_cuts
+    from .fully_async_cut import optimizer_steps_per_round
     from .fully_async_round import execution_profile_for
     from .identity import backend_identity
     from .ports_impl import VerlPolicyState
@@ -317,7 +324,9 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         out_dir=plan["out_dir"], readback_dir=os.environ.get("YETO_VERL_READBACK_DIR", plan["out_dir"]),
         emit=lambda event, **f: tape.append({"event": event, **f}), start_rollouter=start_rollouter,
         base_model_revision=plan["model_revision"], lora_config_hash=lora_hash,
-        layout_hash=layout_hash, expected_specs=specs)
+        layout_hash=layout_hash, expected_specs=specs, seek_rollouter=seek_rollouter,
+        optimizer_steps_per_round=(optimizer_steps_per_round(cfg, groups_per_round=int(plan["groups_per_round"]))
+                                   if plan.get("resume") else None))
     call("yeto_configure", float(plan.get("tis_upper", 2.0)), list(plan["thresholds_key"]))
     from yeto.hw.catalog import runtime_versions
 
@@ -340,14 +349,20 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
                                          FullyAsyncPlacement())
     else:
         rollout, publisher, placement = buffer_ports(island)
+    if buffer_ports is not None and plan.get("resume"):
+        raise ValueError("round cuts are not wired for a verl buffer trainer")
+    # S26 E9.2: round cuts as on the sync path; restored before the driver is built
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
-        sync=sync, events=tape, profile=profile)
+        sync=sync, events=tape, profile=profile, ledger=None if resume is None else resume.ledger)
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
-    state = driver.run()
+    round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
+    state = round_cuts.run_driver(driver, resume)
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,
               "final_policy_tensor_hash": state.policy_tensor_hash(),

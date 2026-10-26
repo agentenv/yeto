@@ -11,6 +11,7 @@ import time
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
 from .code_pack import code_pack_island_flag, code_workdir
+from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
@@ -18,11 +19,13 @@ from .remote_setup import (
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
-    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_spec, rl_trainer_shape,
+    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_spill_dir_prelude,
+    rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
 )
 from .syncer import (
     critic_syncer_address, elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret,
-    rl_dense_sweep, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
+    rl_dense_sweep, rl_full_parameter_async, rl_full_parameter_final_cut, rl_needs_critic,
+    rl_sao_streaming, rl_syncer_profile,
 )
 from .credentials import registry_login_for, split_secret_envs
 from .storage import (
@@ -38,11 +41,7 @@ from ..rl.engine.start_phases import SUBMITTED_ENV, shell_mark, shell_reset
 from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
-from .codex import (
-    HARNESS_ENVIRONMENT_PROVIDER_ENV, MODAL_CLIENT_SETUP, MODAL_SANDBOX_PROVIDERS,
-    SANDBOX_TOKEN_IN_ISLAND_CHECK, codex_harness_launch, modal_sandbox_secret_name,
-    require_sandbox_modal_token,
-)
+from .harness_env import check_compaction_launch
 
 
 def submitted_unix() -> float:
@@ -79,6 +78,13 @@ def _wan_transport_flags(args) -> str:
     return flags
 
 
+def _rl_matrix_merge_flag(args) -> str:
+    """S27 P1: decoupled islands build their fragment layout with the syncer's
+    merge modes; omitted at the default so the island command is unchanged."""
+    merge = getattr(args, "rl_sync_matrix_merge", "avg")
+    return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -100,12 +106,36 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if rl_full_parameter_async(args):
+        sweep += " --full-parameter-rounds async"
+    if getattr(args, "rl_sync_expert_token_weights", False):
+        sweep += " --sweep-expert-token-weights"
+    if rl_full_parameter_final_cut(args) == "ack":
+        sweep += " --sweep-final-cut ack"
+    if getattr(args, "rl_sync_init_mode", "auto") != "auto":
+        sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):
         sweep += " --sweep-overlap"
+    if getattr(args, "rl_sync_push_no_tensor_blocks", False):
+        sweep += " --sweep-push-no-tensor-blocks"
+    if getattr(args, "rl_sync_max_local_rounds_ahead", None) is not None:
+        sweep += f" --sweep-max-local-rounds-ahead {int(args.rl_sync_max_local_rounds_ahead)}"
+    if float(getattr(args, "rl_sync_wait_timeout_s", 900.0)) != 900.0:
+        sweep += f" --sweep-wait-timeout-s {float(args.rl_sync_wait_timeout_s):g}"
+    if getattr(args, "rl_sync_fragment_max_bytes", 2 << 30) != 2 << 30:
+        sweep += f" --sweep-fragment-max-bytes {int(args.rl_sync_fragment_max_bytes)}"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
         sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
+    if getattr(args, "rl_sync_push_dtype", "f32") == "int4":
+        sweep += f" --sweep-push-int4-block {int(getattr(args, 'rl_sync_push_int4_block', 128))}"
+        if getattr(args, "rl_sync_push_int4_stochastic", False):
+            sweep += " --sweep-push-int4-stochastic"
+        error_feedback = getattr(args, "rl_sync_push_int4_error_feedback", "off")
+        if error_feedback != "off":
+            sweep += f" --sweep-push-int4-error-feedback {error_feedback}"
+    sweep += peer_recovery_island_flags(args)
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep
@@ -129,8 +159,8 @@ def make_miles_island_task(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
-    island_data, island_data_sha256, data_mounts = island_task_data(args, learner_id)
-    codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
+    island_data, island_data_flags, data_mounts = island_task_data(args, learner_id)
+    check_compaction_launch(args)
     # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
     island = rl_island_spec(args, spec)
 
@@ -147,7 +177,7 @@ def make_miles_island_task(
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
         )
-        + f" --data {shlex.quote(island_data)}{island_data_sha256}"
+        + f" --data {shlex.quote(island_data)}{island_data_flags}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
@@ -185,6 +215,7 @@ def make_miles_island_task(
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
+        + _rl_matrix_merge_flag(args)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
@@ -233,17 +264,14 @@ def make_miles_island_task(
             " --dynamic-sampling-max-replacements "
             f"{args.dynamic_sampling_max_replacements}"
         )
-    if getattr(args, "secrlenv_max_infrastructure_replacements", None) is not None:
-        flags += (
-            " --secrlenv-max-infrastructure-replacements "
-            f"{args.secrlenv_max_infrastructure_replacements}"
-        )
     if args.rl_offload_train:
         flags += " --rl-offload-train"
     algorithm_prelude, algorithm_flags = _ports_algorithm_flags(args)
     flags += algorithm_flags
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
+    if int(getattr(args, "context_parallel", 1) or 1) > 1:
+        flags += f" --context-parallel {int(args.context_parallel)}"
     for flag, name in (
         ("--rl-prompt-column", "rl_prompt_column"),
         ("--rl-label-column", "rl_label_column"),
@@ -258,8 +286,19 @@ def make_miles_island_task(
         value = getattr(args, name, None)
         if value is not None:
             flags += f" {flag} {shlex.quote(str(value))}"
+    if getattr(args, "rl_rollout_quant_tier", 0):  # S26 E6 (validated by the launcher)
+        flags += f" --rl-rollout-quant-tier {int(args.rl_rollout_quant_tier)}"
+        from yeto.rl.quant.tiers import FP8_SOURCE_ENGINE, fp8_source
+
+        source = fp8_source(args)
+        if source != FP8_SOURCE_ENGINE:
+            flags += f" --rl-rollout-quant-fp8-source {shlex.quote(source)}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
+    if getattr(args, "observe_training_entropy", False):
+        flags += " --observe-training-entropy"
+    if getattr(args, "mamba_training_ssm_states_dtype", None):
+        flags += f" --mamba-training-ssm-states-dtype {args.mamba_training_ssm_states_dtype}"
     if getattr(args, "apply_chat_template_kwargs", None):
         chat_kwargs = json.dumps(
             args.apply_chat_template_kwargs, sort_keys=True, separators=(",", ":")
@@ -292,20 +331,6 @@ def make_miles_island_task(
             flags += f" --session-server-workers {int(args.session_server_workers)}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
-        if getattr(args, "codex_backend_profile", None):
-            flags += (
-                " --codex-backend-profile "
-                f"{shlex.quote(args.codex_backend_profile)}"
-            )
-        if getattr(args, "codex_exclude_reasoning_from_loss", False):
-            flags += " --codex-exclude-reasoning-from-loss"
-        if getattr(args, "codex_reasoning_effort", None):
-            # The learner's _preflight_codex_harness re-validates the stock
-            # profile (xhigh) and fails closed without it.
-            flags += (
-                " --codex-reasoning-effort "
-                f"{shlex.quote(args.codex_reasoning_effort)}"
-            )
         if getattr(args, "tito_allowed_append_roles", None):
             roles = " ".join(
                 shlex.quote(role) for role in args.tito_allowed_append_roles
@@ -357,10 +382,6 @@ def make_miles_island_task(
         file_mounts[HF_TOKEN_PATH] = local_token
     if rl_sao_streaming(args):
         file_mounts.update(sao_contract_mounts(args, learner_id))
-    if codex_launch is not None:
-        codex_flags, codex_envs, codex_mounts = codex_launch
-        flags += codex_flags
-        file_mounts.update(codex_mounts)
     envs = {
         "SYNCER_ADDR": syncer_addr,
         **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
@@ -416,8 +437,6 @@ def make_miles_island_task(
     for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
-    if codex_launch is not None:
-        envs.update(codex_envs)
     envs.update(elastic_debug_delay_env(args))  # 0.25 ({} unless the test switch is given)
     envs.update(elastic_debug_pause_env(args))  # link-pause test switch ({} by default)
     if getattr(args, "wandb", False):
@@ -439,15 +458,6 @@ def make_miles_island_task(
     store_envs = store_object_envs(args, spec.cloud, spec.num_nodes)
     if store_envs:  # the store's object API (yeto.cloud.s3_store) needs boto3 in the image
         setup_steps.append(STORE_CLIENT_SETUP)
-    sandbox_secret = modal_sandbox_secret_name(args, spec)
-    if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
-        if sandbox_secret is None:
-            require_sandbox_modal_token(envs)
-        else:
-            # The token comes from the named Modal Secret at container start;
-            # the island re-checks it before anything else runs.
-            setup_steps.append(SANDBOX_TOKEN_IN_ISLAND_CHECK)
-        setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
     if (spec.cloud == "modal" and getattr(args, "modal_model_volume", None)
@@ -501,6 +511,7 @@ def make_miles_island_task(
             # command line, so pkill by that path never touches sky's.
             f"{rl_island_gpu_env(args, spec)}"
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
+            f"{rl_island_ray_spill_dir_prelude(args)}"
             # Same escalation as `ray stop --force` (TERM, short grace, KILL)
             # but scoped to this dir: gcs_server, raylet and the autoscaler
             # monitor ignore a bare SIGTERM for 30 s or more.
@@ -524,6 +535,7 @@ def make_miles_island_task(
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
+            + rl_island_ray_storage(args, head=True)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -552,7 +564,7 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"

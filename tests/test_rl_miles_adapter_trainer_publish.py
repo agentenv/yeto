@@ -592,3 +592,22 @@ def test_trainer_only_island_publishes_without_engines(monkeypatch):
     )
     result = pub.publish(state())
     assert calls == [] and result.members == frozenset() and pub.last_engine_checksums is None
+
+
+# E1: publication checks at the round-cut interval
+def test_an_unverified_publication_skips_only_the_engine_read_back():
+    from dataclasses import replace as dc_replace
+
+    class Unverified:  # a verified state's identity, marked unverified
+        def __init__(self, s):
+            self._s, self.verified, self.policy_version = s, False, s.policy_version
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    ctl = Controller([Engine("http://e0")], checksum_ok=False)  # a read-back would fail
+    pub, calls = publisher(ctl, export=lambda: state())
+    pub.publish(Unverified(state()))  # no read-back on an unverified round
+    assert pub.last_engine_checksums is None and calls == ["update_weights"]
+    with pytest.raises(PublicationError, match="checksum"):
+        pub.publish(state())  # a verified (spot-check) round still fails on a bad read-back

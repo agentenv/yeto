@@ -615,7 +615,7 @@ class ConvertibleIslands:
     def release_incarnation(self, incarnation: int) -> bool:
         """A trainer the dead head started: tell it to stop (SCHEDULED cut); the
         node converts back on its own."""
-        from yeto.rl.elastic_client import LeaveReason
+        from yeto.rl.pool_client import LeaveReason
 
         append_trainer_command(self.files, incarnation, STOP, reason=LeaveReason.STOPPED.name)
         return True

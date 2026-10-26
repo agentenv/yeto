@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -24,10 +25,27 @@ def snapshot_config(*, colocated: bool = False):
     return sub(cfg, "serving", offload_train=False, sampler_snapshot=True)
 
 
+# The G-L8 passes were recorded on SGLang 2fa880182 (S24). The pin moved to 10afe11a7
+# and 754605964 (S26 E6: the FP8 activation-cast fix in Qwen2/Qwen3, the compressed-tensors
+# FP8 in-place reload); until G-L8 is re-run on it
+# the snapshot mode is refused, as for any commit without a record.
+VERIFIED_SGLANG_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
+
+
+def _records_at_the_pin():
+    return tuple(dataclasses.replace(r, sglang_commit=SGLANG_NEXT_COMMIT) for r in ss.load_compat_records())
+
+
 def test_shipped_records_hold_the_l8_1_tensor_pass():
-    record = ss.require_recorded_pass(ss.UPDATE_PATH_TENSOR)
-    assert record.sglang_commit == SGLANG_NEXT_COMMIT
+    record = ss.require_recorded_pass(ss.UPDATE_PATH_TENSOR, sglang_commit=VERIFIED_SGLANG_COMMIT)
     assert record.check == "G-L8.1"
+
+
+def test_the_pinned_commit_waits_for_its_own_record():
+    if SGLANG_NEXT_COMMIT == VERIFIED_SGLANG_COMMIT:
+        pytest.skip("the pin is the verified commit")
+    with pytest.raises(ss.SamplerSnapshotRefused, match="no recorded pass"):
+        ss.require_recorded_pass(ss.UPDATE_PATH_TENSOR)
 
 
 def test_refused_without_recorded_pass_names_the_missing_check():
@@ -99,8 +117,10 @@ def test_cli_flag_is_off_by_default_and_parses():
     assert cli.build_parser().parse_args([*base, "--rl-sampler-snapshot"]).rl_sampler_snapshot is True
 
 
-def test_shipped_records_hold_the_l8_2_distributed_pass():
-    record = ss.require_recorded_pass(ss.UPDATE_PATH_DISTRIBUTED)
+def test_shipped_records_hold_the_l8_2_distributed_pass(monkeypatch):
+    record = ss.require_recorded_pass(ss.UPDATE_PATH_DISTRIBUTED, sglang_commit=VERIFIED_SGLANG_COMMIT)
     assert record.check == "G-L8.2"
+    at_the_pin = _records_at_the_pin()
+    monkeypatch.setattr(ss, "load_compat_records", lambda text=None: at_the_pin)
     argv = mc.translate_run_config(snapshot_config(), AlgorithmSpec()).argv
     assert "--sglang-config" in argv

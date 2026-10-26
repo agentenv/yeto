@@ -1,5 +1,7 @@
 # 会话服务协议（decoupling 任务 3.8，spec `rl-neutral-rewards-harness`）
 
+> S26 E0.5: the Codex harness this file describes was removed (tag `s26-pre-harness-removal`); the protocol stays as the contract of the test double.
+
 codex harness 对"会话服务"的全部依赖。Miles 会话服务是这个协议的一种实现；以后换框架（如 verl）时，只要提供同样的五条路径，harness 不用改。测试替身：`tests/session_service_double.py`。
 
 本协议只写文档与测试替身，**没有**实现 verl 侧。

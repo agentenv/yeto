@@ -61,8 +61,9 @@ import dataclasses
 import json
 from contextlib import contextmanager
 import math
+import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,9 +73,11 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
+from . import phase_profile
 from .algorithm import AlgorithmSpec
+from .buffer_payload import is_buffer_exhausted
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -131,14 +134,21 @@ _PHASE_TASK = {"sync": "outer_sync"}
 
 FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
 FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+# Set by the Modal runner: 0 for an island's first container, k for its k-th re-run.
+MODAL_INCARNATION_ENV = "YETO_MODAL_INCARNATION"
 
 
-def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
 
     Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
     ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
-    frozen code snapshot). Keys: ``publish_delay_s``.
+    frozen code snapshot). Keys: ``publish_delay_s``; ``round_delay_s`` (sleep
+    before each round's rollout, to emulate a slow island) with optional
+    ``round_delay_islands`` (learner ids it applies to; default every island).
+    ``exit_at_round`` and ``exit_islands`` (the island process exits with
+    code 137 before that rollout, only in its first Modal container, so a
+    re-run of the island is a fresh process that rejoins).
     """
     import os
 
@@ -148,13 +158,34 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     if not candidate.is_file():
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"publish_delay_s"})
+    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
+                              "exit_at_round", "exit_islands"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
-    delay = float(raw.get("publish_delay_s", 0.0))
-    if not math.isfinite(delay) or delay < 0:
-        raise ValueError("publish_delay_s must be a non-negative number")
-    return {"publish_delay_s": delay} if delay else {}
+    out: dict[str, Any] = {}
+    for key in ("publish_delay_s", "round_delay_s"):
+        delay = float(raw.get(key, 0.0))
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError(f"{key} must be a non-negative number")
+        if delay:
+            out[key] = delay
+    if "round_delay_islands" in raw:
+        islands = raw["round_delay_islands"]
+        if not isinstance(islands, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in islands):
+            raise ValueError("round_delay_islands must be a list of learner ids")
+        if "round_delay_s" in out:
+            out["round_delay_islands"] = sorted(set(islands))
+    if "exit_at_round" in raw:
+        round_id, islands = raw["exit_at_round"], raw.get("exit_islands")
+        if type(round_id) is not int or round_id < 1:
+            raise ValueError("exit_at_round must be a positive rollout id")
+        if not isinstance(islands, list) or not islands or not all(type(i) is int for i in islands):
+            raise ValueError("exit_at_round needs exit_islands, a list of learner ids")
+        out["exit_at_round"] = round_id
+        out["exit_islands"] = sorted(set(islands))
+    elif "exit_islands" in raw:
+        raise ValueError("exit_islands needs exit_at_round")
+    return out
 
 
 class DriverError(RuntimeError):
@@ -380,6 +411,29 @@ def defer_digest(driver: Any) -> bool:
             and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
 
 
+def verify_publication(driver: Any, version: int) -> bool:
+    """E1: does the publication of policy ``version`` hash the policy and read the
+    engine weight checksums back? Yes on the first publication, on a round whose safe
+    point keeps a round cut (resume relies on its policy hash), on every K-th version
+    (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
+    round cuts, or with a policy state that cannot skip it, every round is verified.
+    The other rounds still check that the trainer holds the policy (weights version)."""
+    if bool(getattr(driver, "verify_every_round", False)):
+        return True
+    if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
+        return True
+    cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    every = int(getattr(cuts, "every", 0) or 0)
+    if cuts is None or every <= 1:
+        return True
+    if getattr(driver, "published_version", None) is None:
+        return True
+    cut_due = getattr(driver.sync, "cut_due", None)
+    if callable(cut_due) and cut_due(int(version)):
+        return True
+    return int(version) % every == 0
+
+
 class IslandDriver:
     def __init__(
         self,
@@ -464,6 +518,20 @@ class IslandDriver:
         self.published_state: TrainableState | None = None
         # P0-S: published versions within the policy-age window (version -> hash)
         self.published_policies = PublishedPolicies()
+        # S27 L11: where a restarted island's data position comes from when it is not
+        # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
+        # log); None: the data source cursor is restored (_restore_data_cursor).
+        self.data_position_owner: str | None = None
+        # S27 task assignment: an island whose rounds count from 0 in every process
+        # (full parameter) keeps its data position in the run store
+        # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
+        self.data_positions: Any = None
+        # --rl-export-hf-rounds: the model of chosen rounds as HF directories in the
+        # store (``hf_export.HfRoundExports``, set by the adapter entry); None: off.
+        self.hf_exports: Any = None
+        # S27 L11: () -> ((version, policy hash), ...) published before this process
+        # started (e.g. the store's policy releases); None: none to restore.
+        self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
         self.at_safe_point = False
         self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
@@ -480,6 +548,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -630,6 +699,7 @@ class IslandDriver:
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
             **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
+            **({"data_slot": self.data_slot} if self.data_slot else {}),
             **self._code_identity(),
         )
 
@@ -699,6 +769,10 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if not verify_publication(self, int(policy_version)):
+            state = self.policy_state.export_identity(policy_version=int(policy_version))
+            if state is not None:
+                return state
         if defer_digest(self):
             return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))
@@ -753,6 +827,9 @@ class IslandDriver:
             policy_version=rollout_id,
             **{
                 "rl/policy_token": self.expected_token,
+                # E1: only on a round whose policy content was not hashed (recorded tapes
+                # of verified rounds stay byte-identical)
+                **({"sync/publication_verified": False} if getattr(state, "verified", True) is False else {}),
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),
@@ -773,6 +850,30 @@ class IslandDriver:
         if callable(setter):
             setter(self.published_policies)
 
+    def _restore_published_policies(self, start_rollout_id: int) -> None:
+        """S27 L11: a restarted island learns the versions published before it
+        started, so groups the samplers generated with them pass the policy-age
+        check. Only versions below the start version within the policy-age window
+        are restored; the start version and later ones are published again."""
+        history = getattr(self, "published_policy_history", None)
+        if start_rollout_id <= 0 or not callable(history):
+            return
+        oldest = start_rollout_id - self._max_policy_age()
+        restored = {}
+        for version, policy_hash in history():
+            version = int(version)
+            if oldest <= version < start_rollout_id and policy_hash:
+                restored[version] = str(policy_hash)
+        if not restored:
+            return
+        for version, policy_hash in sorted(restored.items()):
+            self.published_policies.record(version, policy_hash)
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
+                  versions=sorted(restored))
+
     def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """P0-S: name every group's generating policy by its label.
 
@@ -789,6 +890,19 @@ class IslandDriver:
             for label, g in zip(labels, batch.groups)
         )
         return dataclasses.replace(batch, groups=groups)
+
+    def _inject_exit(self, rollout_id: int) -> None:
+        """Test-only: kill this island process (first Modal container only)."""
+        import os
+
+        if (self.fault_injection.get("exit_at_round") != rollout_id
+                or self.learner_id not in self.fault_injection.get("exit_islands", ())
+                or os.environ.get(MODAL_INCARNATION_ENV, "0") != "0"):
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(137)
 
     def _refuse_if_recovery_required(self) -> None:
         """3.7 (recovery-design.md F13): an island that opened in RECOVERY_REQUIRED
@@ -1355,6 +1469,21 @@ class IslandDriver:
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)
 
+    def _emit_round_data_rows(self, rollout_id: int, batch: Any) -> None:
+        """S27 task assignment (observe only): one ``rl_round_data_rows`` with every
+        --data row the round trained, as compact runs (not capped per sample)."""
+        rows = getattr(batch, "round_data_rows", None)
+        if not rows:
+            return
+        from .data_split import run_row_count
+        from .timeline import ROUND_DATA_ROWS_EVENT
+
+        runs = [[int(v) for v in run] for run in rows["rows"]]
+        self.emit(ROUND_DATA_ROWS_EVENT, rollout_id=rollout_id,
+                  policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                  t=self.clock(), **self._labels(), samples=int(rows["samples"]),
+                  row_count=run_row_count(runs), rows=runs)
+
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
@@ -1369,6 +1498,9 @@ class IslandDriver:
     # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
     # into rl_driver_start as ``island_tasks`` only when the island has its own list.
     island_tasks: Mapping[str, Any] | None = None
+    # S27 task assignment: the island's row slot "I/N" (``data_split.DataSlot``),
+    # recorded in rl_driver_start only when the island reads a part of --data.
+    data_slot: str | None = None
     # rl-identity-tiering L9.1: this island's code identity, written into
     # rl_driver_start with ``semantic_sha256`` only when set.
     code_pack_digest: str | None = None
@@ -1442,6 +1574,7 @@ class IslandDriver:
             raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         self._probe_nodes(rollout_id)
         started = time.monotonic()
+        self._inject_round_delay(rollout_id)
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
         if self.ledger is not None:
@@ -1458,6 +1591,15 @@ class IslandDriver:
         self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
                   round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
         return boundary
+
+    def _inject_round_delay(self, rollout_id: int) -> None:
+        """Test-only slow island: sleep before the rollout, inside the round wall time."""
+        delay = self.fault_injection.get("round_delay_s")
+        islands = self.fault_injection.get("round_delay_islands")
+        if not delay or (islands is not None and self.learner_id not in islands):
+            return
+        self.emit("rl_fault_injected", kind="round_delay", seconds=delay, rollout_id=rollout_id)
+        time.sleep(delay)
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
                      rollout_seconds: float) -> SyncBoundary:
@@ -1567,12 +1709,15 @@ class IslandDriver:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)
             self._emit_trajectory_rewards(rollout_id, batch)
+            self._emit_round_data_rows(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
+        self._record_data_position(rollout_id)
+        self._export_hf_round(rollout_id, boundary)
         self._join_eval()
         if self.colocated and self.publish_offloaded:
             # E1: a round cut due at the next safe point writes the trainer state now,
@@ -1794,6 +1939,12 @@ class IslandDriver:
         pool that reports cursors -> DriverError (no silent re-training)."""
         if start_rollout_id <= 0:
             return
+        owner = getattr(self, "data_position_owner", None)
+        if owner is not None:
+            # S27 L11: the island reads no data source (a synced trainer reads its
+            # buffer lane, whose cursor log resumes it); no data cursor to restore.
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=owner)
+            return
         seek = getattr(self.rollout, "seek_data_cursor", None)
         from_cut = getattr(self.sync, "resume_data_cursor", None)
         cut_cursor = from_cut() if callable(from_cut) else None
@@ -1854,6 +2005,66 @@ class IslandDriver:
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
 
+    def _resume_data_position(self) -> None:
+        """S27 task assignment (``data_position`` module doc): a process that joined
+        a running pool continues at the island's last recorded data position; a
+        process that starts the run writes a start record. Fail closed: a recorded
+        position the pool cannot seek to, or a seek that lands elsewhere, raises."""
+        log = self.data_positions
+        if log is None:
+            return
+        read = getattr(self.rollout, "data_cursor", None)
+        if not getattr(self.sync, "joined_running_pool", False):
+            self._write_data_position(log.start, read() if callable(read) else None)
+            return
+        record = log.last()
+        if record is None or record.cursor is None:
+            self.emit("rl_data_position_unknown", slot=log.slot,
+                      reason="no recorded data position" if record is None
+                      else "the last record has no data cursor")
+            return
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        if not callable(seek):
+            raise DriverError(f"rejoin: the data position log holds {record.cursor} but the "
+                              "rollout pool cannot seek its data source")
+        landed = seek(record.cursor)
+        landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+        if landed != record.cursor:
+            raise DriverError(f"rejoin: data source seek to the recorded position "
+                              f"{record.cursor} landed on {landed}")
+        self.emit("rl_data_position_restored", after_round=record.round, slot=log.slot,
+                  data_cursor=dict(landed))
+
+    def _record_data_position(self, rollout_id: int) -> None:
+        """S27 task assignment: the data cursor after this round's sync boundary."""
+        log = self.data_positions
+        read = getattr(self.rollout, "data_cursor", None)
+        if log is None or not callable(read):
+            return
+        self._write_data_position(log.record, rollout_id, read())
+
+    def _export_hf_round(self, rollout_id: int, boundary: SyncBoundary) -> None:
+        """--rl-export-hf-rounds: this round's model as an HF directory in the store
+        (``hf_export`` module doc), before the next publication; ``final`` is the
+        round whose boundary stops the island (before its final ACK)."""
+        exports = self.hf_exports
+        if exports is None or not exports.due(rollout_id, final=boundary.stop):
+            return
+        from .hf_export import HF_EXPORT_EVENT
+
+        self.phase("hf_export", rollout_id=rollout_id)
+        record = exports.export(rollout_id, policy_version=boundary.state.policy_version,
+                                final=boundary.stop)
+        self.emit(HF_EXPORT_EVENT, rollout_id=rollout_id, t=self.clock(), **record)
+
+    def _write_data_position(self, write: Callable[..., None], *fields: Any) -> None:
+        """A record the store refuses costs a relaunch some rows read again, never
+        the round: the failure goes on the tape and the island trains on."""
+        try:
+            write(*fields)
+        except OSError as error:
+            self.emit("rl_data_position_write_failed", error=f"{type(error).__name__}: {error}")
+
     def _emit_critic_round(self, rollout_id: int) -> None:
         """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
         hashes, param mode, init source, critic weight hash, value metrics).
@@ -1894,6 +2105,7 @@ class IslandDriver:
                 start = None
                 try:
                     start = self.sync.start(self)
+                    self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)
@@ -1903,6 +2115,7 @@ class IslandDriver:
                         # (1b: rollouts 3, 4 re-trained rollouts 0, 1). S17 N16: same
                         # for a strict island relaunched at v > 0 (verl V2 island 1).
                         self._restore_data_cursor(start.rollout_id)
+                    self._resume_data_position()
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)
                     self._confirm_recovery(start.rollout_id)
@@ -1918,12 +2131,24 @@ class IslandDriver:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
                     self.safe_point(rollout_id)
-                    boundary = self.run_round(rollout_id)
+                    self._inject_exit(rollout_id)
+                    try:
+                        boundary = self.run_round(rollout_id)
+                    except BaseException as error:
+                        if not (is_buffer_exhausted(error)
+                                and getattr(self.sync, "ends_on_data_end", True)):
+                            raise
+                        # S26 E9.3: the samplers ended and nothing trainable is left;
+                        # the rounds so far are trained and published: end FINISHED
+                        self.emit("rl_buffer_exhausted", rollout_id=rollout_id,
+                                  error=f"{type(error).__name__}: {error}")
+                        break
                     state = boundary.state
                     rollout_id += 1
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.refuse_reconfiguration_for_finalization(rollout_id)
+                self._drain_releases()
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)
@@ -1945,6 +2170,13 @@ class IslandDriver:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self._close_sync(failure)
 
+    def _drain_releases(self) -> None:
+        """A policy release still uploading in the background (a trainer island's
+        staged release) reaches the store before the run ends; its error fails the run."""
+        drain = getattr(self.publisher, "drain_releases", None)
+        if callable(drain):
+            drain()
+
     def _close_sync(self, failure: BaseException | None) -> None:
         """Close the bridge with the LEAVE reason of this departure (design D7).
         A failed departure's detail goes to the island tape (``island_leave``);
@@ -1952,7 +2184,20 @@ class IslandDriver:
         reason = leave_reason_for(failure)
         if failure is not None:
             self._record_leave(reason, failure)
+        if self.data_positions is not None:
+            self._close_data_positions()
         self.sync.close(reason)
+
+    def _close_data_positions(self) -> None:
+        """Wait for the last data position commit; a commit that failed or did not
+        end goes on the tape (the tape must not mask the run's own error)."""
+        log = self.data_positions
+        try:
+            ended = log.close()
+            if log.commit_errors or not ended:
+                self.emit("rl_data_position_commit", ended=ended, errors=log.commit_errors[-5:])
+        except Exception:  # noqa: BLE001 - closing the session comes first
+            pass
 
     def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
         try:

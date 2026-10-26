@@ -34,6 +34,8 @@ DPS_SOURCES = {
     # E1: + export_named_optimizer_state(device=None) on the image pin 44d41efd (not pushed)
     "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"),
                          "yeto/s26-e1-device-export"),
+    # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
+    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", "/home/michael/work/miles-s26-e6-fp8"), "ed5f64fd7"),
 }
 
 
@@ -398,14 +400,19 @@ def test_device_export_uses_the_fork_device_argument_when_it_has_one():
 
 
 @needs_dps
+@pytest.mark.parametrize("staged", [False, True], ids=["resident", "sleeps_after_cut"])
 @pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
-def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, monkeypatch):
+def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, staged, monkeypatch):
     """Same shard (file bytes, digests, N7.6 resume state) from the device path as from the
     inline host path, although the trainer trains on before the writer copies to the host."""
     ranks = _world(layout)
     _train(ranks)
     inline = [cp.save_cut_shard(r, directory=str(tmp_path / "inline"), cut_id="c1") for r in ranks]
     monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (True, "ok"))
+    if staged:  # a sleeping trainer's copies go through the staging buffer (CPU stand-ins too)
+        real_stage = cp._stage
+        monkeypatch.setattr(cp, "_sleeps_after_cut", lambda actor: True)
+        monkeypatch.setattr(cp, "_stage", lambda snap: real_stage(snap, include_cpu=True))
     device = []
     for r, rank in enumerate(ranks):  # one pending write per cut id per process: rank by rank
         started = cp.save_cut_shard(rank, directory=str(tmp_path / "device"), cut_id="c1", background=True)
@@ -415,6 +422,7 @@ def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, mon
         rank.opt_param_scheduler.num_steps = 16
         device.append(cp.finish_cut_shard(rank, cut_id="c1"))
     assert [d.pop("writer") for d in device] == [{"mode": "process"}] * len(ranks)
+    assert cp._STAGING.free.is_set() and (cp._STAGING.buffer is not None or not staged)
     assert device == inline
     for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
         assert (tmp_path / "device" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
@@ -517,7 +525,21 @@ def test_the_writer_process_can_be_turned_off(tmp_path, monkeypatch):
 def test_device_copy_plan_needs_cuda_and_can_be_turned_off(monkeypatch):
     named = [("lora_a", torch.nn.Parameter(torch.zeros(2)))]
     assert cp._device_copy_plan(None, named) == (False, "not_cuda")
-    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))
-    assert cp._device_copy_plan(sleeper, named) == (False, "offload_train")
+    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))  # staged, below
+    assert cp._device_copy_plan(sleeper, named) == (False, "not_cuda")
     monkeypatch.setenv(cp.DEVICE_COPY_ENV, "0")
     assert cp._device_copy_plan(None, named) == (False, "disabled")
+
+
+def test_pack_hands_the_state_over_in_one_buffer_and_unpacks_it_exactly():
+    shared = torch.arange(6.0)
+    state = {"a": torch.randn(3, 4), "b": [torch.ones(2, dtype=torch.bfloat16), torch.tensor(7)],
+             "view": torch.arange(10.0)[2:5], "twice": (shared, shared), "empty": torch.zeros(0), "n": 3}
+    skeleton, layout, flat = cp._pack(state)
+    assert len(layout) == 3  # a, b[0], b[1]; the view, the shared storage and the empty one are not packed
+    assert flat.is_shared() and skeleton["n"] == 3
+    back = cp._unpack(skeleton, layout, flat)
+    assert cp.state_digest(back) == cp.state_digest(state)
+    for key in ("a", "view", "empty"):
+        assert back[key].dtype == state[key].dtype and torch.equal(back[key], state[key])
+    assert back["b"][0].untyped_storage().data_ptr() != flat.untyped_storage().data_ptr()  # own copies

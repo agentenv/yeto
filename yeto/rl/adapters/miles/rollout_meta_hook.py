@@ -181,7 +181,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     marks.append(("placeholder_mask", time.monotonic()))
     # CompactionRL: the masks above may drop optimised tokens; the per-segment
     # counts (tokens_after, gae_length) must follow the final masks.
-    from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
+    from yeto.rl.compaction import refresh_segment_counts
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
@@ -478,6 +478,9 @@ def build_metadata(
         # default path (old key set kept).
         payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
             args, all_samples, trained, limit=trajectory_records_limit(args))
+        rows = round_data_rows(trained_samples)
+        if rows is not None:  # S27: only on an island that reads a row slot
+            payload[ROUND_DATA_ROWS_KEY] = rows
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
@@ -682,8 +685,7 @@ def trajectory_reward_records(
         for s in samples:
             if len(out) >= limit:
                 return out
-            meta = getattr(s, "metadata", None)
-            meta = meta if isinstance(meta, dict) else {}
+            meta = _metadata(s)
             reward = _reward(args, s)
             success = meta.get("success")
             trajectory = meta.get("trajectory_id")
@@ -697,6 +699,7 @@ def trajectory_reward_records(
                 "reward": float(reward) if math.isfinite(reward) else None,
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
+                **_data_row(meta),
                 **trajectory_diagnostics(meta),
                 **(_carry.trajectory_fields(s, carry_round)
                    if _carry.max_policy_age(args) > 0 else {}),
@@ -704,8 +707,38 @@ def trajectory_reward_records(
     return out
 
 
+ROUND_DATA_ROWS_KEY = "round_data_rows"
+
+
+def round_data_rows(trained_samples: Iterable[Any]) -> dict[str, Any] | None:
+    """S27 task assignment: ``{"samples": n, "rows": data_split.row_runs(...)}``
+    of every trained sample that carries its --data row
+    (``metadata[DATA_ROW_KEY]``), however many there are (the reward records
+    stop at a limit); None when none does (no row slot)."""
+    from yeto.rl.engine.data_split import row_runs
+
+    rows = [row["data_row"] for row in (_data_row(_metadata(s)) for s in trained_samples) if row]
+    if not rows:
+        return None
+    return {"samples": len(rows), "rows": row_runs(rows)}
+
+
+def _metadata(sample: Any) -> dict[str, Any]:
+    meta = getattr(sample, "metadata", None)
+    return meta if isinstance(meta, dict) else {}
+
+
 _DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",
                         "max_seq_len_hit", "timed_out")
+
+
+def _data_row(meta: dict[str, Any]) -> dict[str, int]:
+    """S27 task assignment: ``{"data_row": n}`` when the island reads a row slot
+    (the row's number in the unsplit data); {} otherwise."""
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
+
+    row = meta.get(DATA_ROW_KEY)
+    return {"data_row": row} if isinstance(row, int) and not isinstance(row, bool) else {}
 
 
 def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:

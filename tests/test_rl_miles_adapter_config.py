@@ -230,6 +230,7 @@ def test_unmappable_values_rejected_by_name(section, field, value, path):
     assert path in str(err.value)
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_full_parameter_mode_emits_no_lora_flags():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
@@ -237,6 +238,60 @@ def test_full_parameter_mode_emits_no_lora_flags():
 
 
 
+
+@pytest.fixture
+def dp_replicas(monkeypatch):
+    """A Miles pin with data-parallel replicas: ``make_config`` is a DP=2 trainer."""
+    monkeypatch.setattr(mc, "full_parameter_dp_replica_gap", lambda: None)
+
+
+def _pin_before_dp_replicas(monkeypatch):
+    """Pin Miles 8edea35a7: in the lineage, but before the DP replica commit."""
+    from yeto.rl.adapters.miles import pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
+
+
+def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin(monkeypatch):
+    # S27 G-AX: a Miles without data-parallel replicas refuses DP>1 at its first manifest.
+    _pin_before_dp_replicas(monkeypatch)
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    with pytest.raises(mc.MilesConfigError, match="DP 2 needs Miles 921cde8c7 or later"):
+        mc.translate_run_config(cfg, AlgorithmSpec())
+    # A no-sync trainer island has no full-parameter reader.
+    assert "use_distributed_optimizer" not in mc.translate_run_config(
+        cfg, AlgorithmSpec(), full_parameter_sync=False).runtime_attrs
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_full_parameter_sync_at_dp_above_one_needs_whole_masters():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    assert mc.translate_run_config(cfg, AlgorithmSpec()).runtime_attrs["use_distributed_optimizer"] is False
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    with pytest.raises(mc.MilesConfigError, match="drop --rl-optimizer-offload-fraction"):
+        mc.translate_run_config(cfg, AlgorithmSpec())
+
+
+def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
+    from yeto.rl.adapters.miles import pins, run_config_rules
+    from yeto.rl.engine.run_config import full_parameter_layout_problem
+
+    # The pinned image (S27 closing, 59aea07-2fa8801) has the replicas.
+    assert run_config_rules.full_parameter_dp_replica_gap() is None
+    assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
+                                         rollout_gpus_per_engine=1) is None
+    # A later fork commit keeps them.
+    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", (*pins.MILES_FORK_LINEAGE, "f" * 40))
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "f" * 40)
+    assert run_config_rules.full_parameter_dp_replica_gap() is None
+    # An earlier one has none: DP>1 with engines on the island is refused.
+    _pin_before_dp_replicas(monkeypatch)
+    assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()
+    assert "DP>1 needs" in full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
+                                                         rollout_gpus_per_engine=1)
+
+
+@pytest.mark.usefixtures("dp_replicas")
 def test_trainer_only_full_parameter_island_starts_no_engine():
     # S25 T-INTEG2: a full-parameter trainer that reads the store (DP>1, no engine).
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
@@ -249,6 +304,7 @@ def test_trainer_only_full_parameter_island_starts_no_engine():
     assert "--colocate" not in argv and "--rollout-num-gpus" not in argv
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     # Miles' set_default_megatron_args forces the distributed optimizer on for
     # Adam, which leaves each FP32 master a flat slice; the full-parameter
@@ -275,11 +331,27 @@ def test_no_sync_full_parameter_trainer_keeps_the_distributed_optimizer():
     mc.validate_parsed_args(_parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1)
 
 
-def test_optimizer_offload_with_the_full_parameter_sync_is_refused():
+def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader(monkeypatch):
+    # S27 G-B: Miles reads DP=1 distributed-optimizer masters (incl. the
+    # HybridDeviceOptimizer's offloaded FP32 copies) from 56190a5a8 on; an
+    # older pinned image is refused before launch.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", data_parallel=1)  # the DP=1 distributed-optimizer reader
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=0.5))
-    with pytest.raises(mc.MilesConfigError, match="needs the distributed optimizer"):
+    monkeypatch.setattr(mc, "MILES_NEXT_COMMIT", "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b")
+    with pytest.raises(mc.MilesConfigError, match="56190a5a8 or later"):
         mc.translate_run_config(cfg, AlgorithmSpec())
+
+
+def test_optimizer_offload_with_the_full_parameter_sync_keeps_the_distributed_optimizer():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", data_parallel=1)  # the DP=1 distributed-optimizer reader
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    assert "use_distributed_optimizer" not in launch.runtime_attrs
+    assert ("--use-distributed-optimizer --use-precision-aware-optimizer --optimizer-cpu-offload "
+            "--overlap-cpu-optimizer-d2h-h2d --optimizer-offload-fraction 1.0") in " ".join(launch.argv)
+    mc.validate_parsed_args(_parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1)
 
 
 def test_build_ports_launch_marks_a_no_sync_trainer_island(monkeypatch):
@@ -305,6 +377,7 @@ def test_lora_mode_leaves_the_distributed_optimizer_to_miles():
     assert "use_distributed_optimizer" not in launch.runtime_attrs
 
 
+@pytest.mark.usefixtures("dp_replicas")
 def test_validate_parsed_args_refuses_a_reenabled_distributed_optimizer():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     launch = mc.translate_run_config(cfg, AlgorithmSpec())
@@ -647,31 +720,18 @@ def test_lr_schedule_flags_are_adapter_owned():
             mc.check_extra_argv((flag, "1"))
 
 
-# ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: append roles by tokenizer family
+# ---------------------------------------------------------------- append roles are decided by the --tito-model template
 
-@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38small", True), ("deepseekv4", True),
-                                           ("nosuchfamily", False)])
-def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
-    """``--tito-model`` is a tokenizer family (``qwen4exp`` for Flash-Next), not a
-    profile name; the s15 4-layer smoke failed with UnmappedConfigError here."""
+def test_explicit_append_roles_are_refused():
+    """Since S26 E0.5 no signed Codex agent may state the append roles."""
     from types import SimpleNamespace
 
-    from yeto.rl import CODEX_OPENENV_AGENT
     from yeto.rl.adapters.miles.config import LEAF_POLICY
 
     check = LEAF_POLICY["agent.tito_allowed_append_roles"]
-    agent = SimpleNamespace(custom_agent_function_path=CODEX_OPENENV_AGENT, tito_model=tito_model)
-    cfg = SimpleNamespace(agent=agent)
+    cfg = SimpleNamespace(agent=SimpleNamespace(custom_agent_function_path="x:y", tito_model="qwen35"))
     assert check(None, cfg) is None
-    if ok:
-        assert check(("tool", "user"), cfg) is None
-        assert "fix the append roles" in check(("tool",), cfg)
-    else:
-        assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
-    # an unsigned agent is still refused
-    cfg.agent.custom_agent_function_path = "x:y"
-    assert check(("tool", "user"), cfg) is not None
-
+    assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
 
 
 # --- S17 N16: --rl-lr-schedule ----------------------------------------------------
@@ -682,6 +742,18 @@ def test_elastic_island_lr_schedule_is_constant():
                                   island_scheduling="elastic") == rc.LrSchedule("constant", 6)
     assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
                                   island_scheduling="legacy") == rc.LrSchedule("linear", 6)
+
+
+def test_async_full_parameter_island_lr_schedule_is_constant():
+    """An asynchronous full-parameter island trains until the syncer stops it
+    (H local rounds per fragment round, more when it is fast under a partial
+    quorum), so a linear horizon of global_rounds could decay the LR to 0
+    while it still trains. The strict sweep keeps the linear schedule."""
+    args = _schedule_args(sync_preset="full-parameter", global_rounds=6)
+    assert rc.resolve_lr_schedule(**args, full_parameter_async=True) == rc.LrSchedule("constant", 6)
+    assert rc.resolve_lr_schedule(**args) == rc.LrSchedule("linear", 6)
+    with pytest.raises(ValueError, match="asynchronous full-parameter"):
+        rc.resolve_lr_schedule(**args, full_parameter_async=True, requested="linear")
 
 
 @pytest.mark.parametrize("preset,scheduling", [("strict-avg", "legacy"), ("decoupled", "legacy"),
@@ -813,3 +885,21 @@ def test_generic_recipe_trains_without_dropout():
         cfg = sub(cfg, "model_recipe", name=rc.RECIPE_GENERIC)
     joined = " ".join(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     assert "--attention-dropout 0.0 --hidden-dropout 0.0" in joined
+
+
+def test_observe_training_entropy_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--observe-training-entropy" not in plain
+    cfg = sub(make_config(), "algorithm", observe_training_entropy=True)
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert argv.count("--observe-training-entropy") == 1
+    assert [value for value in argv if value != "--observe-training-entropy"] == plain
+
+
+def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--mamba-training-ssm-states-dtype" not in plain
+    cfg = sub(make_config(), "algorithm", mamba_training_ssm_states_dtype="fp32")
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    at = argv.index("--mamba-training-ssm-states-dtype")
+    assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain

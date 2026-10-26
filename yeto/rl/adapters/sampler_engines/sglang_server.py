@@ -29,6 +29,33 @@ token, ``meta_info.finish_reason.type``); teacher-forced scores from
 ``meta_info.input_token_logprobs`` with ``max_new_tokens: 0``;
 ``POST /update_weights_from_disk`` for an in-place reload (off unless
 ``in_place_reload``: refit of quantized experts is not tested, A-INF 2.1).
+
+Updates during a generation (``in_place_reload`` and ``live_update``; the
+``updates_during_generation`` capability). Without a pause, SGLang's
+``update_weights_from_disk`` takes the model-update writer lock and waits for
+every running request, so a release waits behind the whole round. With
+``live_update`` the adapter instead:
+
+1. ``POST /pause_generation`` with ``mode: retract``: the scheduler stops and
+   moves the running requests back to its waiting queue (their sampled tokens
+   are kept, their KV cache is freed);
+2. ``POST /update_weights_from_disk`` with ``flush_cache: false`` (a cache
+   flush asserts an idle scheduler, and the retracted requests are queued);
+   the paused server takes the update at once;
+3. ``POST /continue_generation`` (also after a failed update).
+
+The retracted requests then recompute their KV cache with the new weights.
+The adapter starts the server with ``--disable-radix-cache`` so no prefix KV
+computed with older weights is reused. Each completion's ``weight_version``
+is the version of its first output token and ``final_weight_version`` the
+version of its last, from ``meta_info.weight_versions`` (per-token version
+spans of the pinned SGLang fork 2fa88018). An SGLang without spans gives
+only ``meta_info.weight_version`` (the version when it ended); the adapter
+then uses the version served when the request was sent as
+``weight_version`` (never newer than the real one: a request still queued
+at the update counts at the older version).
+Checked against SGLang 0.5.20 (miles-next venv; the miles-ports image pins
+0.5.21.dev70) source; on card see SESSION27/gpu-review/SAMPLER-LIVE.md.
 """
 
 from __future__ import annotations
@@ -36,7 +63,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +103,8 @@ class SGLangOptions:
     served_model_name: str = "yeto-policy"
     # the yeto load-report patch writes each rank's loaded expert count here (None: no report)
     load_report_dir: str | None = None
+    # update the weights while a generation runs (module doc); needs ServerConfig.in_place_reload
+    live_update: bool = False
 
 
 def _finish(meta: dict[str, Any]) -> str:
@@ -88,6 +117,32 @@ def _finish(meta: dict[str, Any]) -> str:
     raise SamplerEngineError(f"sglang finish_reason {reason!r}: request aborted or unknown")
 
 
+def _completion_versions(meta: dict[str, Any], sent: int, started: int) -> dict[str, int]:
+    """``weight_version`` and ``final_weight_version`` of one completion (module doc).
+
+    With ``meta_info.weight_versions`` (spans ``{version, start, end}`` of the
+    output tokens; the pinned SGLang fork) they are the first and last span's
+    version. Without spans: the version the request was sent at, and
+    ``meta_info.weight_version``. ``default`` (no in-place update yet) is the
+    version the server was started on. The final version may be below the
+    first after a new lineage (a lower version with a higher seq)."""
+
+    def number(value: Any, fallback: int) -> int:
+        if value == "default":
+            return started
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    spans = meta.get("weight_versions")
+    if isinstance(spans, list) and spans:
+        first = number(spans[0].get("version"), sent)
+        return {"weight_version": first,
+                "final_weight_version": number(spans[-1].get("version"), first)}
+    return {"weight_version": sent, "final_weight_version": number(meta.get("weight_version"), sent)}
+
+
 class SGLangServerEngine(ServerEngine):
     ENGINE = "sglang"
     HANG_HINT = "Check the PCCL/ACCL-P collective setup of the PPU image."
@@ -97,6 +152,7 @@ class SGLangServerEngine(ServerEngine):
     def __init__(self, config: ServerConfig, options: SGLangOptions | None = None, **kw: Any) -> None:
         super().__init__(config, **kw)
         self.options = options or SGLangOptions()
+        self._started_version = 0
         # The topology is the source label of every sample: it must name the real
         # layout, tp<N> or dp<N> with N = the instance's card count (options.tp).
         match = _TOPOLOGY.fullmatch(config.topology)
@@ -105,9 +161,16 @@ class SGLangServerEngine(ServerEngine):
                 f"sglang topology {config.topology!r} does not match TP {self.options.tp}: expected "
                 f"{sglang_topology(self.options.tp)!r} or {sglang_topology(self.options.tp, dp_attention=True)!r} "
                 "(PD disaggregation is not used)")
+        if self.options.live_update and not config.in_place_reload:
+            raise SamplerEngineError("sglang live_update loads weights in place; set in_place_reload")
         if is_dp_attention(config.topology) and self.options.nextn:
             raise SamplerEngineError("sglang DP attention + DeepEP cannot run NEXTN (A-INF item 8); "
                                      "turn one of them off")
+
+    @property
+    def updates_during_generation(self) -> bool:
+        """The port capability (``sampler_engine.updates_during_generation``)."""
+        return bool(self.options.live_update)
 
     def argv(self, model_dir: Path) -> list[str]:
         c, o = self.config, self.options
@@ -119,6 +182,8 @@ class SGLangServerEngine(ServerEngine):
             argv += ["--dp", str(o.tp), "--enable-dp-attention", "--moe-a2a-backend", "deepep"]
         if o.nextn:
             argv += ["--speculative-algorithm", "NEXTN"]
+        if o.live_update and "--disable-radix-cache" not in c.extra_args:
+            argv += ["--disable-radix-cache"]  # no prefix KV of older weights after an update
         return argv + list(c.extra_args)
 
     def env(self) -> dict[str, str]:
@@ -132,6 +197,7 @@ class SGLangServerEngine(ServerEngine):
         return env
 
     def start(self, release_dir: Path | None, version: int):
+        self._started_version = int(version)  # what ``default`` means in this server's versions
         if self.options.load_report_dir:  # reports of an earlier server must not count for this one
             sglang_load_report.clear_reports(self.options.load_report_dir)
         return super().start(release_dir, version)
@@ -169,11 +235,28 @@ class SGLangServerEngine(ServerEngine):
             detail["warmup_s"] = round(self._clock() - began, 3)
         return detail
 
-    def reload_in_place(self, model_dir: Path, version: int) -> None:
-        body = self.call("POST", "/update_weights_from_disk",
-                         {"model_path": str(model_dir), "weight_version": str(int(version))})
+    def reload_in_place(self, model_dir: Path, version: int) -> dict[str, Any] | None:
+        request = {"model_path": str(model_dir), "weight_version": str(int(version))}
+        if not self.options.live_update:
+            self._update_from_disk(request)
+            return None
+        began = self._clock()
+        self.call("POST", "/pause_generation", {"mode": "retract"})
+        paused = self._clock()
+        try:
+            body = self._update_from_disk({**request, "flush_cache": False})
+        finally:
+            updated = self._clock()
+            self.call("POST", "/continue_generation", {})
+        return {"live": True, "pause_call_s": round(paused - began, 3),
+                "update_s": round(updated - paused, 3), "paused_s": round(self._clock() - paused, 3),
+                "num_paused_requests": body.get("num_paused_requests") if isinstance(body, dict) else None}
+
+    def _update_from_disk(self, request: dict[str, Any]) -> Any:
+        body = self.call("POST", "/update_weights_from_disk", request)
         if isinstance(body, dict) and body.get("success") is False:
             raise SamplerEngineError(f"sglang update_weights_from_disk: {body.get('message')}")
+        return body
 
     # ------------------------------------------------------------------ generation
     @staticmethod
@@ -200,10 +283,16 @@ class SGLangServerEngine(ServerEngine):
             raise SamplerEngineError(f"sglang returned {len(items)} outputs for {len(texts)} inputs")
         return items
 
+    def _sent_version(self) -> int | None:
+        """The version a request sent now starts on (only with live updates)."""
+        return self._version if self.options.live_update else None
+
     def generate(self, prompts: Sequence[str], sampling: SamplingParams) -> list[list[Completion]]:
         n = int(sampling.n)
         texts = [p for p in prompts for _ in range(n)]  # one request per sample: order is explicit
-        return self._completions(self._generate_raw(texts, sampling.replace(n=1)), len(prompts), n)
+        sent = self._sent_version()
+        return self._completions(self._generate_raw(texts, sampling.replace(n=1)), len(prompts), n,
+                                 sent_version=sent, started_version=self._started_version)
 
     def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
                         stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
@@ -211,6 +300,7 @@ class SGLangServerEngine(ServerEngine):
         n = int(sampling.n)
         inputs = [[int(t) for t in p] for p in prompts for _ in range(n)]
         params = self._params(sampling.replace(n=1))
+        sent = self._sent_version()
         if stop_token_ids:
             params["stop_token_ids"] = [int(t) for t in stop_token_ids]
         body = self.call("POST", "/generate", {"input_ids": inputs, "sampling_params": params,
@@ -218,32 +308,43 @@ class SGLangServerEngine(ServerEngine):
         items = body if isinstance(body, list) else [body]
         if len(items) != len(inputs):
             raise SamplerEngineError(f"sglang returned {len(items)} outputs for {len(inputs)} inputs")
-        completions = self._completions(items, len(prompts), n)
-        return [[c if c.prompt_token_ids else Completion(c.token_ids, c.logprobs, c.text, c.finish_reason,
-                                                         prompt_token_ids=tuple(inputs[i * n]))
+        completions = self._completions(items, len(prompts), n, sent_version=sent,
+                                        started_version=self._started_version)
+        return [[c if c.prompt_token_ids else replace(c, prompt_token_ids=tuple(inputs[i * n]))
                  for c in group] for i, group in enumerate(completions)]
 
     @staticmethod
-    def _completions(items: Sequence[dict[str, Any]], prompts: int, n: int) -> list[list[Completion]]:
+    def _completions(items: Sequence[dict[str, Any]], prompts: int, n: int, *,
+                     sent_version: int | None = None, started_version: int = 0) -> list[list[Completion]]:
+        """``sent_version`` (live updates only): set both completion versions
+        (:func:`_completion_versions`)."""
         out: list[list[Completion]] = []
         for i in range(prompts):
             group = []
             for item in items[i * n:(i + 1) * n]:
                 meta = item.get("meta_info") or {}
                 tokens = meta.get("output_token_logprobs") or []
+                versions = ({} if sent_version is None else
+                            _completion_versions(meta, sent_version, started_version))
                 group.append(Completion(token_ids=tuple(int(t[1]) for t in tokens),
                                         logprobs=tuple(float(t[0]) for t in tokens),
-                                        text=str(item.get("text", "")), finish_reason=_finish(meta)))
+                                        text=str(item.get("text", "")), finish_reason=_finish(meta),
+                                        **versions))
             out.append(group)
         return out
 
-    def _input_logprobs(self, text: str) -> list[float | None]:
+    def _input_token_logprobs(self, prompt: dict[str, Any]) -> list[tuple[float | None, int]]:
+        """``(logprob, token id)`` of every input token; ``prompt`` is ``{"text": ...}`` or
+        ``{"input_ids": [...]}``."""
         body = self.call("POST", "/generate", {
-            "text": text, "sampling_params": {"max_new_tokens": 0, "temperature": 0.0},
+            **prompt, "sampling_params": {"max_new_tokens": 0, "temperature": 0.0},
             "return_logprob": True, "logprob_start_len": 0})
         body = body[0] if isinstance(body, list) else body
-        return [None if t[0] is None else float(t[0])
+        return [(None if t[0] is None else float(t[0]), int(t[1]))
                 for t in (body.get("meta_info") or {}).get("input_token_logprobs") or []]
+
+    def _input_logprobs(self, text: str) -> list[float | None]:
+        return [lp for lp, _ in self._input_token_logprobs({"text": text})]
 
     def score(self, prompt: str, continuation: str) -> list[float]:
         prompt_len = len(self._input_logprobs(prompt))
@@ -251,4 +352,14 @@ class SGLangServerEngine(ServerEngine):
         tail = full[prompt_len:]
         if not tail or any(x is None for x in tail):
             raise SamplerEngineError(f"sglang gave no input log-probs for continuation {continuation!r}")
+        return [float(x) for x in tail]
+
+    def score_tokens(self, prompt: str, token_ids: Sequence[int]) -> list[float]:
+        """Teacher-forced log-probs of exactly ``token_ids`` after ``prompt`` (no re-tokenizing
+        of the continuation, so a trailing EOS that has no text is scored too)."""
+        prompt_ids = [tid for _, tid in self._input_token_logprobs({"text": prompt})]
+        full = self._input_token_logprobs({"input_ids": [*prompt_ids, *map(int, token_ids)]})
+        tail = [lp for lp, _ in full[len(prompt_ids):]]
+        if len(tail) != len(token_ids) or any(x is None for x in tail):
+            raise SamplerEngineError(f"sglang scored {len(tail)} of {len(token_ids)} continuation tokens")
         return [float(x) for x in tail]

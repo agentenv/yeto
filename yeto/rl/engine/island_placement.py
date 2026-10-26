@@ -13,9 +13,9 @@ key                       run-wide flag (args dest)        values
 ``use-gpus-per-node``     ``--rl-island-use-gpus-per-node``  integer >= 1
 ========================  ===============================  =================
 
-Mixed placement (islands with different placements) is allowed only under
-inter-island elastic scheduling (``--rl-island-scheduling elastic``): the
-legacy (strict) schedule is not part of this change and is refused. A
+Mixed placement (islands with different placements) is allowed only in an
+island pool (any island pool option, e.g. ``--rl-sync-island-lease-s``): a fixed
+roster is not part of this change and is refused. A
 colocated island has no dedicated rollout or standby GPUs, so in a mixed run it
 drops the run-wide ``--rl-rollout-gpus`` / ``--rl-standby-gpus`` it would
 otherwise inherit; an explicit per-island ``standby-gpus`` above 0 on a
@@ -176,10 +176,10 @@ def check(args: Any, num_islands: int, *, island_scheduling: str) -> tuple[Islan
     if is_mixed(placements) and island_scheduling != "elastic":
         kinds = ", ".join(f"island {p.island} {p.placement}" for p in placements)
         raise ValueError(
-            f"mixed island placement ({kinds}) needs --rl-island-scheduling elastic: the "
-            "legacy (strict) schedule waits for every island each round and is not "
-            "supported with different placements; use one placement for every island "
-            "or add --rl-island-scheduling elastic")
+            f"mixed island placement ({kinds}) needs island pool options: a fixed "
+            "roster waits for every island each round and is not supported with "
+            "different placements; use one placement for every island or add island "
+            "pool options (e.g. --rl-sync-quorum-theta, --rl-sync-island-lease-s)")
     # One placement on every island: the execution-profile checks give the
     # usual error. A mixed run names its colocated islands here.
     for flag, dest in (("--rl-elastic", "rl_elastic"), ("--rl-overlap-eval", "rl_overlap_eval")):

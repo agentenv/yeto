@@ -15,15 +15,20 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``sampling``: :class:`~.sampler_engine.SamplingParams` fields;
 * ``num_rollouts``, ``max_backlog_groups``, ``max_prompt_tokens``;
   optional ``base_version`` (0), ``base_dir`` (the engine's base weights),
-  ``min_round_s``, ``poll_s``, ``max_consecutive_load_failures``;
+  ``min_round_s``, ``poll_s``, ``live_poll_s``, ``max_consecutive_load_failures``;
 * ``store``: the run's checkpoint store (``store_for``; an ``oss://`` store
   needs the store environment of :mod:`yeto.cloud.oss_store`);
   ``release_dir``: the release directory the sampler follows (optional,
   default ``policy-releases``); ``buffer_root``: the store holding
-  ``sample-buffer/`` (optional, default ``store``);
+  ``sample-buffer/`` (optional, default ``store``); ``buffer_shards``: the
+  sampler shards of a run with several samplers on one shared directory
+  (optional; the sampler writes its own shard, the trainer merges them, as
+  ``--rl-buffer-shards`` on the Miles sampler);
 * ``prompts``: ``{"path": JSONL, "input_key", "label_key", "groups_per_round",
   "format": "text" | "chat"}`` -- round ``r`` takes the
   ``groups_per_round`` rows after row ``r * groups_per_round`` (wrapping);
+  optional ``"data_slot": "I/N"``: the sampler draws only rows ``i % N == I``
+  (``sample_roles.DataSlot``; several samplers of one run draw disjoint prompts);
   ``chat`` applies the tokenizer's chat template of ``tokenizer`` (default
   ``base_dir``) to a message list (``trust_remote_code``: optional, false);
 * ``reward``: ``"module:function"`` called as ``function(item, completion)``
@@ -31,6 +36,8 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``reward_kind`` is ``"miles"``;
 * ``checks``: :class:`~.sampler_checks.PostLoadChecks` keyword overrides
   (optional; e.g. ``expected_expert_matrices``);
+* ``rollout_quant``: optional ``{"tier", "apply"}`` (S26 E6), applied first
+  (:func:`apply_rollout_quant`);
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -62,6 +69,7 @@ from typing import Any
 
 from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
 from .sampler_checks import PostLoadChecks
+from .data_split import DataSlot
 from .sampler_engine import Completion, SamplerEngine, SamplingParams
 
 PROMPT_FORMATS = ("text", "chat")
@@ -99,18 +107,39 @@ def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
         raise SamplerSpecError(f"engine: {error}") from None
 
 
+def apply_rollout_quant(spec: Mapping[str, Any]) -> Mapping[str, Any]:
+    """S26 E6: ``spec["rollout_quant"] = {"tier", "apply": "module:function"}`` (written by
+    the launch layer) fills the tier's engine settings on this node; the adapter-layer
+    function returns the new spec. No section: the spec is used as written."""
+    section = spec.get("rollout_quant")
+    if not section:
+        return spec
+    try:
+        return _import(_require(section, "apply", "rollout_quant"))(spec)
+    except ValueError as error:
+        raise SamplerSpecError(f"rollout_quant: {error}") from None
+
+
 # ------------------------------------------------------------------ prompts
 
 class JsonlPrompts:
     """``prompts(rollout_id)`` over a local JSONL file (module doc)."""
 
     def __init__(self, path: str | Path, *, input_key: str, label_key: str | None, groups_per_round: int,
-                 render: Callable[[Any], str] = str) -> None:
+                 render: Callable[[Any], str] = str, data_slot: str | None = None) -> None:
         self.path = Path(path)
-        self.rows = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
-                     if line.strip()]
-        if not self.rows:
+        rows = list(enumerate(json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
+                              if line.strip()))
+        if not rows:
             raise SamplerSpecError(f"prompts file {self.path} has no rows")
+        try:
+            self.slot = DataSlot.parse(data_slot)
+            rows = self.slot.rows(rows)
+        except ValueError as error:
+            raise SamplerSpecError(f"prompts.data_slot: {error}") from None
+        # the prompt ids keep the file's row numbers, so two slots never share one
+        self.row_numbers = [i for i, _ in rows]
+        self.rows = [row for _, row in rows]
         if int(groups_per_round) < 1:
             raise SamplerSpecError("prompts.groups_per_round must be >= 1")
         self.input_key, self.label_key = input_key, label_key
@@ -126,8 +155,8 @@ class JsonlPrompts:
         start = int(rollout_id) * self.groups_per_round
         items = []
         for offset in range(self.groups_per_round):
-            index = (start + offset) % len(self.rows)
-            row = self.rows[index]
+            index = self.row_numbers[(start + offset) % len(self.rows)]
+            row = self.rows[(start + offset) % len(self.rows)]
             if self.input_key not in row:
                 raise SamplerSpecError(f"{self.path} row {index} has no {self.input_key!r}")
             items.append(PromptItem(prompt_id=f"row{index}", prompt=self.render(row[self.input_key]),
@@ -163,7 +192,8 @@ def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
         render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)))
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
-                        groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render)
+                        groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
+                        data_slot=prompts.get("data_slot"))
 
 
 # ------------------------------------------------------------------- reward
@@ -207,7 +237,10 @@ def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = No
                                   release_dir=str(spec.get("release_dir") or RELEASE_DIR))
     buffer_store = store_for(str(spec.get("buffer_root") or store), environ=environ)
     sampler_id = str(_require(spec, "sampler_id"))
-    index = shard_index(sampler_id) if needs_shards(buffer_store) else INDEX
+    shards = [str(s) for s in spec.get("buffer_shards") or ()]
+    if shards and sampler_id not in shards:
+        raise SamplerSpecError(f"sampler {sampler_id!r} is not one of the buffer shards {shards}")
+    index = shard_index(sampler_id) if needs_shards(buffer_store) or shards else INDEX
     return releases, FileSampleBuffer(buffer_store, batch_size=1, index=index)  # as open_buffer(sampler=True)
 
 
@@ -217,14 +250,18 @@ def incarnation_tape(path: str | Path, incarnation: str) -> Path:
     return tape.with_name(f"{tape.stem}.{incarnation}{tape.suffix or '.jsonl'}")
 
 
-def tape_writer(path: str | Path, sampler_id: str) -> Callable[..., None]:
+def tape_writer(path: str | Path, sampler_id: str, island_id: int | None = None) -> Callable[..., None]:
+    """``island_id``: the launcher island this sampler runs as; its records then
+    carry it, so the launcher accepts the file as the island's event tape
+    (``yeto.rl.event_echo.REQUIRED_KEYS``)."""
     from yeto.rl.event_echo import append_record  # noqa: PLC0415
 
     tape = Path(path).expanduser()
     tape.parent.mkdir(parents=True, exist_ok=True)
+    head = {"sampler_id": sampler_id} if island_id is None else {"island_id": int(island_id), "sampler_id": sampler_id}
 
     def emit(event: str, **fields: Any) -> None:
-        append_record(tape, {"sampler_id": sampler_id, "time_unix": time.time(), "event": event, **fields})
+        append_record(tape, {**head, "time_unix": time.time(), "event": event, **fields})
 
     return emit
 
@@ -241,6 +278,7 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
         sampling=SamplingParams(**sampling), max_prompt_tokens=int(_require(spec, "max_prompt_tokens")),
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
+        live_poll_s=None if spec.get("live_poll_s") is None else float(spec["live_poll_s"]),
         max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)))
 
 
@@ -257,7 +295,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     **fields)`` sees every tape record after it is written."""
     import os  # noqa: PLC0415
 
-    from yeto.rl.elastic_client import LeaveReason  # noqa: PLC0415
+    from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .sampler_resume import (  # noqa: PLC0415
         RECLAIM_MARKER_ENV,
@@ -271,10 +309,11 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     )
 
     env = os.environ if environ is None else environ
+    spec = apply_rollout_quant(spec)
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
-    write = tape_writer(tape, config.sampler_id)
+    write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
 
     def emit(event: str, **fields: Any) -> None:
         write(event, **fields)
@@ -319,8 +358,15 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
         rounds = 0 if buffer.data_ended else island.run()
-        leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.FINISHED, rounds=rounds,
+        preempted = reclaimed()
+        leave(LeaveReason.PREEMPTED if preempted else LeaveReason.FINISHED, rounds=rounds,
               dropped_groups=island.round.dropped_groups)
+        if not preempted:
+            from yeto.rl.event_echo import FINALIZED_EVENT  # noqa: PLC0415
+
+            # a launcher island's complete tape ends with this record (yeto.launch.tapes);
+            # a reclaimed incarnation's tape stays open: the next incarnation continues
+            emit(FINALIZED_EVENT, rounds=rounds)
         return rounds
     except BaseException as error:
         try:

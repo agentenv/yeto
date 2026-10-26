@@ -143,7 +143,32 @@ def test_threads_off_skips_and_warns():
     out = io.StringIO()
     rec = lp.thread_preflight(_targs(preflight_threads="off"),
                               counter=lambda: pytest.fail("off must not read"), out=out)
-    assert rec == {"mode": "off", "disabled": True} and "OFF" in out.getvalue()
+    assert rec == {"mode": "off", "disabled": True, "relaxed": {"mode": ["off", "wait"]}}
+    assert "OFF" in out.getvalue() and "RELAXED" in out.getvalue()
+
+
+def test_threads_default_is_on_and_not_relaxed():
+    out = io.StringIO()
+    rec = lp.thread_preflight(_targs(), counter=_counter([100]), out=out)
+    assert rec["mode"] == "wait" and rec["relaxed"] == {} and "RELAXED" not in out.getvalue()
+
+
+def test_threads_loosened_values_are_logged_and_recorded():
+    out = io.StringIO()
+    rec = lp.thread_preflight(_targs(preflight_thread_start=2950, preflight_thread_hard=3200),
+                              counter=_counter([2900]), out=out)
+    assert rec["relaxed"] == {"start": [2950, 2800], "hard": [3200, 3000]}
+    assert "start 2950 (default 2800)" in out.getvalue() and "hard 3200 (default 3000)" in out.getvalue()
+    # a stricter setting is not a relaxation
+    assert lp.thread_relaxations(lp.ThreadConfig(mode="error", start=100, hard=200)) == {}
+
+
+def test_eval_launch_args_keep_the_thread_preflight_on():
+    from pathlib import Path
+    from tools.eval import miles
+    root = Path(__file__).resolve().parents[1]
+    assert "--preflight-threads off" not in (root / "tools/eval/miles_head.sh").read_text()
+    assert "--preflight-threads off" not in Path(miles.__file__).read_text()
 
 
 def test_thread_message_text():
@@ -406,7 +431,7 @@ def test_island_task_env_only_for_negative_runs():
     t = launcher._island_task(factory, args, None, 0, 2, "x", {})
     assert t.envs == {"A": "1"} and seen[0] is args
     args = SimpleNamespace(rl_negative_test_run=True, rl_lr_schedule="auto", rl_max_policy_age=0,
-                           rl_island_scheduling="legacy", training_mode="rl", rl_engine="ports")
+                           training_mode="rl", rl_engine="ports")
     ov = {1: {"identity_test_salt": "s1"}}
     t0 = launcher._island_task(factory, args, None, 0, 2, "x", ov)
     t1 = launcher._island_task(factory, args, None, 1, 2, "x", ov)
@@ -426,7 +451,7 @@ def test_override_validation():
     assert io_.overrides_of(a, 2) == {1: {"rl_lr_schedule": "constant"}}
     for item, msg in [("2:rl_lr_schedule=constant", "out of range"),
                       ("1:model_revision=abc", "allowed"),
-                      ("1:rl_max_carry_lag=3", "syncer"),
+                      ("1:rl_sync_max_base_lag=3", "syncer"),
                       ("1:rl_lr_schedule=cosine", "must be one of"),
                       ("x:rl_lr_schedule=constant", "ISLAND:KEY=VALUE"),
                       ("1:rl_max_policy_age=-1", ">= 0")]:
@@ -455,7 +480,7 @@ def test_identity_salt_changes_contract_only_when_given():
 # --- 3.4 manifest fields and island tape ---------------------------------------------
 def test_manifest_fields_and_tape_event(tmp_path, capsys):
     args = SimpleNamespace(rl_negative_test_run=True, rl_lr_schedule="auto",
-                           rl_island_scheduling="elastic", rl_checkpoint_store=None)
+                           rl_sync_island_lease_s=30, rl_checkpoint_store=None)
     ov = {1: {"rl_lr_schedule": "linear"}}
     m = io_.manifest_fields(args, ov)
     assert m["negative_test"] is True

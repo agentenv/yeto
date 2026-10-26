@@ -113,6 +113,7 @@ def _ensure_builtins() -> None:
     from yeto.rl.rewards import builtin
 
     for name, fn in (("math", builtin.math_reward), ("gsm8k", builtin.gsm8k_reward),
+                     ("numeric_answer", builtin.numeric_answer_reward),
                      ("length", builtin.length_reward), ("gdpo", builtin.gdpo_reward),
                      ("gdpo_correctness", builtin.gdpo_correctness_reward)):
         register_reward(name, fn)

@@ -22,14 +22,16 @@ import json
 import logging
 from pathlib import Path
 import os
+import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
-    SECRLENV_GROUP_CHECK_FILTER,
-    TBENCH_GROUP_CHECK_FILTER,
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
@@ -273,10 +275,7 @@ def miles_capabilities(
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
         placements={"colocated"},
-        dynamic_sampling_filters={
-            BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
-            TBENCH_GROUP_CHECK_FILTER,
-        },
+        dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
@@ -432,21 +431,13 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     The elastic drain board when wired; the island's named board when the
     tool-wait workload generate is configured (it counts on that board); 0
     (``TOOL_WAIT_NO_BOARD_STOCK``) for Miles' stock generate, which makes no
-    tool calls; the island's named board for the Codex OpenEnv agent, which
-    enters/exits it around every tool call (agentic-rollout-utilization 1.3);
-    None (unknown) for any other custom generate.
+    tool calls; None (unknown) for any other custom generate.
     """
-    from yeto.rl import CODEX_OPENENV_AGENT
-
     from .rollout import TOOL_WAIT_NO_BOARD_STOCK
 
     board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
     if board is not None:
         return board
-    if getattr(miles_args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT:
-        from .elastic_wiring import LazyBoardActor
-
-        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0))
     custom = getattr(miles_args, "custom_generate_function_path", None)
     if not custom:
         return TOOL_WAIT_NO_BOARD_STOCK
@@ -531,10 +522,8 @@ def publish_member_cell(miles_args: Any, learner_id: int | None = None, environ:
 
     Source, in order: an explicit ``miles_args.yeto_rl_cell_id`` (INFRA may pre-set it),
     ``learner_id`` (the island number the launcher already assigns; ``island_id`` in the
-    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  The env
-    export reaches rollout-worker subprocesses through ``worker_runtime_env`` and
-    ``preflight.configure_rollout_worker``; ``preflight.resolve_member`` then yields
-    ``engine:<cell>`` (``engine:0`` on a single island).
+    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  Rollout-side
+    code reads the env export (``engine:<cell>``; ``engine:0`` on a single island).
     """
     environ = os.environ if environ is None else environ
     cell = getattr(miles_args, "yeto_rl_cell_id", None)
@@ -643,13 +632,13 @@ def build_sync(
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
-    if getattr(miles_args, "yeto_rl_island_scheduling", "legacy") == "elastic":
-        # rl-inter-island-scheduling 0.15: absent attribute = legacy (unchanged below).
-        from yeto.rl.engine.bridges import ElasticAvgSync
+    if getattr(miles_args, "yeto_rl_island_pool", False):
+        # Dynamic island pool; absent attribute = fixed roster (unchanged below).
+        from yeto.rl.engine.bridges import PoolAvgSync
 
         if getattr(miles_args, "use_critic", False):
-            raise ValueError("--rl-island-scheduling elastic does not support a critic yet")
-        return ElasticAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
+            raise ValueError("island pool options do not support a critic yet")
+        return PoolAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
                               syncer_epoch=int(getattr(miles_args, "yeto_rl_syncer_epoch", 0)),
                               lease_s=getattr(miles_args, "yeto_rl_island_lease_s", None),
                               groups_per_round=int(getattr(miles_args, "rollout_batch_size", 0) or 0) or None,
@@ -666,6 +655,46 @@ def build_sync(
         raise ValueError("strict-avg with a critic needs the critic syncer (--critic-syncer); "
                          "the actor syncer alone would leave the critics unaveraged")
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
+
+
+def data_position_log_for(miles_args: Any, sync: Any, *, learner_id: int) -> Any:
+    """S27 task assignment: the data position log of a full-parameter island in
+    the run store (``--rl-data-position-store``), None otherwise. Only a
+    full-parameter session restarts its round counter at 0 in every process; the
+    other sessions resume their data cursor by global rollout id."""
+    store = getattr(miles_args, "yeto_rl_data_position_store", None)
+    if not store or not _is_full_parameter_sync(sync):
+        return None
+    from yeto.rl.engine.data_position import data_position_log
+
+    return data_position_log(str(store), learner_id=int(learner_id),
+                             slot=getattr(miles_args, "yeto_rl_data_slot", None))
+
+
+HF_EXPORT_STAGING = "yeto-hf-export"  # under the system temp dir (local disk)
+
+
+def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
+                   environ: Mapping[str, str] | None = None) -> Any:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``): the island's
+    ``HfRoundExports``, None when off. With the trainer on one node every rank
+    writes a share of the files into the local staging directory; across nodes
+    Miles' ``export_hf`` writes them on rank 0."""
+    config = getattr(miles_args, "yeto_rl_hf_exports", None)
+    if not config:
+        return None
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds, HfRoundExports
+    from yeto.rl.engine.resume import store_for
+
+    from .publish import lora_mode
+    from .release_plugin import full_checkpoint_writer
+
+    if lora_mode(miles_args):
+        raise ValueError(f"{EXPORT_HF_FLAG} writes full weights; a LoRA island has no full export")
+    one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
+    return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
+                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node),
+                          staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
 
 
 def _is_full_parameter_sync(sync: Any) -> bool:
@@ -830,6 +859,8 @@ def compose_island(
         ),
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
+    # E1: publication checks on every round (default: cut, first and every-K rounds)
+    driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 
@@ -880,10 +911,13 @@ def compose_island(
         if observe:
             elastic.controller.set_event_sink(driver.emit, journal=True)
     if resume is not None:
-        sync.stop_after = resume.stop_after
-        from yeto.rl.engine.resume import install_preempt_handler
+        if resume.stop_after is not None:
+            sync.stop_after = resume.stop_after
+        from yeto.rl.engine.resume import install_preempt_handler, watch_preempt_marker
 
         install_preempt_handler(resume.controller, emit=driver.emit)
+        # S26 E9.1: on Modal the signal reaches the runner, which writes the reclaim marker
+        watch_preempt_marker(resume.controller)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)
@@ -910,7 +944,7 @@ def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
         return None
 
     def leave() -> bool:
-        from yeto.rl.elastic_client import LeaveReason
+        from yeto.rl.pool_client import LeaveReason
 
         return sync.leave(LeaveReason.PREEMPTED)  # once per process; the driver's close won't resend
 
@@ -985,24 +1019,32 @@ def next_lr_for(miles_args: Any):
 
 class ResumeWiring:
     """The round-cut controller + batch ledger of a run with ``--rl-resume-store`` and
-    no ``--rl-elastic`` (same attribute names as ElasticWiring for _wire_round_cuts)."""
+    no ``--rl-elastic`` (same attribute names as ElasticWiring for _wire_round_cuts).
+    ``interval``: when a cut is due (:mod:`yeto.rl.engine.cut_interval`)."""
 
     def __init__(self, *, controller: Any, ledger: Any, every: int, stop_after: int | None,
-                 allow_config_change: bool) -> None:
+                 allow_config_change: bool, interval: Any = None) -> None:
         self.controller = controller
         self.ledger = ledger
         self.every = every
         self.stop_after = stop_after
         self.allow_config_change = allow_config_change
+        self.interval = interval
 
 
 def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> ResumeWiring | None:
     config = getattr(miles_args, "yeto_rl_resume", None)
     if not config:
         return None
-    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.bridges import LocalOnlySync, RoundCutHooks
+    from yeto.rl.engine.cut_interval import cut_interval_for
 
-    if not isinstance(sync, LocalOnlySync):
+    if config.get("write_only"):
+        # S27 R-2: a synced island writes round cuts; its syncer stays authoritative
+        if isinstance(sync, LocalOnlySync) or not isinstance(sync, RoundCutHooks):
+            raise ValueError(f"--rl-island-cut-store: {type(sync).__name__} takes no island round cuts "
+                             "(strict, decoupled or full-parameter outer sync only)")
+    elif not isinstance(sync, LocalOnlySync):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")
     from yeto.rl.engine.ledger import BatchLedger
@@ -1014,9 +1056,12 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
     controller = ResumeController(state_dir=config["state_dir"], store=store,
                                   runtime_fingerprint=str(config.get("runtime_fingerprint") or ""),
                                   keep=int(config.get("keep", 2)))
+    interval = cut_interval_for(every=config.get("every"), auto_mtbf_s=config.get("auto_mtbf_s"),
+                                max_interval_s=config.get("max_interval_s"))
     return ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir),
-                        every=int(config.get("every", 1)), stop_after=config.get("stop_after"),
-                        allow_config_change=bool(config.get("allow_config_change", False)))
+                        every=interval.every, stop_after=config.get("stop_after"),
+                        allow_config_change=bool(config.get("allow_config_change", False)),
+                        interval=interval)
 
 
 def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
@@ -1040,12 +1085,41 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
     checkpoint = wire_round_cuts(
         driver, controller=controller, source=source,
         every=int(getattr(elastic, "every", None) or config.get("every")
-                  or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+                  or getattr(miles_args, "yeto_rl_resume_every", None) or DEFAULT_CUT_EVERY),
         fingerprint=run_fingerprint_of(miles_args, algorithm),
         allow_config_change=bool(getattr(elastic, "allow_config_change", False)
                                  or config.get("allow_config_change", False)),
-        next_lr=next_lr_for(miles_args))
+        next_lr=next_lr_for(miles_args), interval=_cut_interval_of(elastic, miles_args))
+    if config.get("write_only"):
+        # S27 R-2: a synced trainer's buffer lane keeps its own position (S25 C3)
+        _commit_cuts_inline_for_buffer_reader(checkpoint, miles_args=miles_args)
+        return
     _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -> None:
+    """A write-only cut store on a trainer that reads the sample buffer: commit
+    each cut inline. A deferred cut holds the store writer guard until the next
+    cut, so the buffer reader skips every Volume reload in between, never sees
+    the sampler's new groups and fails the round (S27 L11 s27-gle9-b: "0/32
+    groups after 900 s")."""
+    from .buffer_rollout import READER_FUNCTION_PATHS
+
+    if checkpoint is not None and getattr(miles_args, "rollout_function_path", None) in READER_FUNCTION_PATHS:
+        checkpoint.background_commit = False
+
+
+def _cut_interval_of(wiring: Any, miles_args: Any) -> Any:
+    """The resume wiring's interval, else a timed one (``--rl-cut-auto-mtbf-s`` on an
+    ``--rl-elastic`` run), else None (every N rounds)."""
+    interval = getattr(wiring, "interval", None)
+    auto = getattr(miles_args, "yeto_rl_cut_auto", None)
+    if interval is not None or not auto:
+        return interval
+    from yeto.rl.engine.cut_interval import cut_interval_for
+
+    return cut_interval_for(every=None, auto_mtbf_s=auto["auto_mtbf_s"],
+                            max_interval_s=auto.get("max_interval_s"))
 
 
 def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:
@@ -1073,6 +1147,9 @@ def run_commanded_trainer(driver: Any) -> Any:
         raise RuntimeError("a trainer started by the head's scheduler needs round cuts "
                            "(a checkpoint store and no outer syncer)")
     run_commanded_island(driver, store=store)
+    drain = getattr(driver.publisher, "drain_releases", None)
+    if callable(drain):  # a staged policy release still uploading reaches the store
+        drain()
     return driver.published_state
 
 
@@ -1300,8 +1377,10 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     """
 
     environ = os.environ if environ is None else environ
+    quant_env = rollout_quant_env(miles_args, environ)  # S26 E6 tier 1: checked before any engine starts
     address = environ.get("RAY_ADDRESS")
     if not address:
+        environ.update(quant_env)  # a Ray the driver starts inherits the driver's environment
         return None
     if ray_module is None:
         import ray as ray_module
@@ -1355,14 +1434,55 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
-    if miles_args is not None:
-        # Codex harness: the agent function runs in RolloutExecutor actors and
-        # configures itself from this env (preflight.configure_rollout_worker).
-        from yeto.rl.harness.codex.preflight import worker_runtime_env
-
-        env_vars.update(worker_runtime_env(miles_args, environ))
+    env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+def rollout_quant_env(miles_args: Any, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """S26 E6 tier 1: the SGLang ignore list for ``miles_args.hf_checkpoint``, after the
+    scope check (:func:`yeto.rl.quant.tiers.online_plan` raises before any engine starts).
+    Empty for every other tier and for a trainer-only island (no rollout engine).
+
+    With the trainer FP8 source (``yeto_rollout_quant_fp8_source``) the engines start on
+    Miles' block-FP8 conversion instead (:func:`prepare_native_fp8_base`, which sets
+    ``miles_args.rollout_hf_checkpoint``); its config carries the ignore list, so no
+    environment entry is needed."""
+    from yeto.rl.quant import tiers
+
+    if miles_args is None or getattr(miles_args, "yeto_rollout_quant_tier", 0) != tiers.TIER_ONLINE_FP8:
+        return {}
+    plan = tiers.online_plan(Path(miles_args.hf_checkpoint))
+    print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)}: {json.dumps(plan.summary())}", flush=True)
+    if getattr(miles_args, "yeto_rollout_quant_fp8_source", tiers.FP8_SOURCE_ENGINE) == tiers.FP8_SOURCE_TRAINER:
+        environ = os.environ if environ is None else environ
+        prepare_native_fp8_base(miles_args, plan, Path(environ.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
+        return {}
+    return tiers.sglang_online_env(plan)
+
+
+def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: Any = subprocess.run) -> Path:
+    """S26 E6 tier 1, trainer source: convert the BF16 base with Miles' own converter
+    (``tools/convert_hf_to_fp8.py``, 128x128 blocks) keeping the plan's ignore list in BF16,
+    check the result against the scope rule, and point the engines at it
+    (``--rollout-hf-checkpoint``). The trainer keeps ``hf_checkpoint`` (BF16) and Miles
+    block-quantizes each weight update by the converted config (``quantize_params_fp8``)."""
+    from yeto.rl.quant import tiers
+
+    if not hasattr(miles_args, "rollout_hf_checkpoint"):
+        raise RuntimeError("this Miles has no --rollout-hf-checkpoint (needs the S26 E6 fork commit)")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    ignore_file, out = work_dir / "fp8-native-ignore.json", work_dir / "fp8-native-base"
+    ignore_file.write_text(json.dumps(tiers.native_ignore_list(plan)))
+    converter = Path.home() / "miles" / "tools" / "convert_hf_to_fp8.py"
+    run([sys.executable, str(converter), "--model-dir", str(miles_args.hf_checkpoint), "--save-dir", str(out),
+         "--strategy", "block", "--block-size", *map(str, tiers.NATIVE_BLOCK),
+         "--ignored-layers-file", str(ignore_file)], check=True, stdout=subprocess.DEVNULL)
+    count = tiers.check_native_base(out)
+    print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)} trainer source: {miles_args.hf_checkpoint} -> {out} "
+          f"({count} FP8 modules)", flush=True)
+    miles_args.rollout_hf_checkpoint = str(out)
+    return out
 
 
 # E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode);
@@ -2099,6 +2219,9 @@ def run_ports_island(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
             eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+            driver.data_slot = getattr(miles_args, "yeto_rl_data_slot", None)
+            driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
+            driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
             driver.start_phases = start_phases  # L0: first_step_done

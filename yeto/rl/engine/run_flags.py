@@ -34,9 +34,35 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from yeto.rl.engine.backends import DEFAULT_BACKEND, KNOWN_BACKENDS
-from yeto.rl.engine.selection import SYNC_PRESETS, canonical_sync_preset
+from yeto.rl.engine.data_split import AUTO, DATA_SPLITS
+from yeto.rl.engine.selection import (
+    FULL_PARAMETER_ROUNDS,
+    RL_MATRIX_MERGES,
+    RL_SYNC_MODES,
+    SYNC_PRESETS,
+    ASYNC_GRACE_CAP_MS,
+    ASYNC_NESTEROV_MIN_H,
+    canonical_sync_preset,
+    sync_mode_default,
+)
 
 CLI = "cli"
+# S27 asynchronous full-parameter rounds: the default and the largest number
+# of fragment rounds in flight (--rl-sync-fragment-pipeline / island
+# --pipeline).  The syncer and the island pairing take any depth up to P; the
+# bound limits the retained submissions and staged broadcasts (one fragment
+# each) an island holds at once.  60 lets the probed P=60 layouts push a whole
+# model round at once (``--total-steps 1``: one boundary submits every
+# fragment).
+FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE = 2
+FULL_PARAMETER_ASYNC_MAX_PIPELINE = 60
+# The island's wait for a paired broadcast, the terminal barrier and the FINAL
+# cut (--rl-sync-wait-timeout-s / island --sweep-wait-timeout-s).
+FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S = 900.0
+# S27 G-AG lead cap of the asynchronous rounds (--rl-sync-max-local-rounds-ahead
+# / island --sweep-max-local-rounds-ahead): the largest accepted K.
+FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD = 1000
+
 ISLAND = "island"
 LAYERS = (CLI, ISLAND)
 
@@ -301,7 +327,7 @@ _ALGORITHM = (
             "fallback after this many rejected groups"
         ),
     ),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--secrlenv-max-infrastructure-replacements",
         type=int,
         default=None,
@@ -402,13 +428,22 @@ _PLACEMENT = (
              help="give island ISLAND its own placement value (repeatable); KEY is "
              "placement (colocated | fixed-partition), standby-gpus or use-gpus-per-node; "
              "other islands keep --rl-placement / --rl-standby-gpus / "
-             "--rl-island-use-gpus-per-node. Different placements need "
-             "--rl-island-scheduling elastic"),
+             "--rl-island-use-gpus-per-node. Different placements need island pool "
+             "options (e.g. --rl-sync-island-lease-s)"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
              "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
              "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N"),
+    cli_flag("--rl-island-ray-object-store-gib", type=int, default=None, metavar="GIB",
+             help="RL island: Ray object store size per node in GiB (ray start "
+             "--object-store-memory); unset = Ray's default (30%% of memory, capped by "
+             "/dev/shm). Full-parameter islands keep whole-model f32 cuts there; what does "
+             "not fit spills to disk (see --rl-island-ray-spill-dir)"),
+    cli_flag("--rl-island-ray-spill-dir", default=None, metavar="PATH",
+             help="RL island: directory for Ray object spilling (default: the island's Ray "
+             "temp dir on the container/VM disk). Point it at the largest local disk; on "
+             "Modal size the disk with --modal-ephemeral-disk-gib"),
     cli_flag("--rl-node-inventory", default=None, metavar="PATH",
              help="rl-ssh-node-pool: YAML inventory of the nodes yeto reaches by SSH "
              "(per node: ssh target, optional jump host, device family, card, card count, "
@@ -495,6 +530,13 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+    shared_flag("--rl-verify-every-round", action="store_true",
+                help="ports: hash the policy and read the engine weight checksums back at every "
+                "publication (default: on the first publication and on every --rl-cut-every-th "
+                "round, which includes every round that keeps a round cut)"),
+    shared_flag("--rl-profile-trainer", action="store_true",
+                help="ports, observation only (E1): per training step, print where the trainer "
+                "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
     shared_flag("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                 help="ports: NVML rl_resource_sample period forwarded to the learner "
                 "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)"),
@@ -551,7 +593,20 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1"),
+                "last round and our own stop). Default: a timed interval, at most 5%% of the "
+                "wall time in cuts and sqrt(2 * C * 21600) s between them (C = the measured "
+                "cost of a cut), where the engine wires timed cuts; else every round. The "
+                "publication checks (policy "
+                "hash, engine weight read-back) run at the same interval and on the first "
+                "publication; see --rl-verify-every-round"),
+    # S27 R-2: a timed cut interval
+    shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
+                help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "
+                "once sqrt(2 * C * S) seconds have passed since the previous one (C = "
+                "the measured seconds a cut costs the round, S = the expected seconds between "
+                "interruptions, e.g. 21600 for spot, 604800 on demand); off by default"),
+    shared_flag("--rl-cut-max-interval-s", type=float, default=None, metavar="S",
+                help="with --rl-cut-auto-mtbf-s: at most S seconds between cuts (default 3600)"),
     shared_flag("--rl-cut-keep", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
                 "(default 2); older ones are deleted only after the new LATEST is committed"),
@@ -561,6 +616,14 @@ _RESUME = (
     shared_flag("--rl-stop-after-rounds", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
                 "with a final cut (our own stop; the next launch resumes)"),
+    # S27 closing-run evaluation (yeto.rl.engine.hf_export)
+    shared_flag("--rl-export-hf-rounds", default=None, metavar="R[,R...][,final]",
+                help="with --rl-checkpoint-store (full parameter, no --rl-elastic): at "
+                "the sync boundary of round R (the island's R-th trained round; final: the "
+                "round that stops the island, before its final ACK), write the island's own "
+                "model as an HF directory to <store>/hf/island<k>/round-R (k = learner id; "
+                "complete when it holds .complete; <store>/hf/island<k>/final.json names the "
+                "final one); tape event rl_hf_export. Off by default"),
     # rl-trainer-start-stop L4.6: sampler / trainer islands over the durable sample buffer
     shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer", "convertible"),
                 default="both",
@@ -585,6 +648,19 @@ _RESUME = (
     shared_flag("--rl-sampler-min-round-seconds", type=float, default=None, metavar="S",
                 help="--rl-sample-role sampler: start one round at most every S seconds (a "
                 "throttle; a check run uses it to make the trainer idle); default no throttle"),
+    shared_flag("--rl-sampler-fused-stage", action="store_true", default=False,
+                help="--rl-sample-role sampler with --tuning lora: check each release's digest "
+                "while copying the adapter to local disk (one read of the store instead of "
+                "two); default off"),
+    shared_flag("--rl-release-reload-latest", action="store_true", default=False,
+                help="--rl-sample-role trainer: reload the store and read LATEST before every "
+                "policy release and commit LATEST in a second commit (the behavior before "
+                "S26 E5); default: the trainer keeps the LATEST it wrote and commits once"),
+    shared_flag("--rl-release-inline", action="store_true", default=False,
+                help="--rl-sample-role trainer: write each full-weight policy release into the "
+                "store before the next training step (the behavior before S27 G-AT); default: "
+                "stage it on local disk (every rank writes a share) and upload it while the "
+                "next step trains"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),
@@ -596,6 +672,9 @@ _RESUME = (
                 type=lambda text: [s for s in text.split(",") if s],
                 help="--rl-island-sample-role with several samplers: the sampler shards of the "
                 "buffer (set by the launcher); each sampler writes its own, the trainer merges them"),
+    shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
+                help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
+                "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
 )
 
 _SCHEDULING = (
@@ -609,13 +688,6 @@ _SCHEDULING = (
                 help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                 "rollout engine cells (placement map rollout_cells: started on the rollout "
                 "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)"),
-    # rl-inter-island-scheduling 0.13: explicit old/new outer-scheduling choice.
-    # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
-    # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
-    shared_flag("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy",
-                help="legacy (default): existing syncer behaviour, fixed members, every "
-                "island must arrive; elastic: inter-island scheduling (capacity-weighted "
-                "stepping, late deltas carried over with a discount, join/leave)"),
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
              help="secret-handling-hardening: island contract v3 (backend identity bound to "
@@ -627,42 +699,97 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
+    # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
+    # realised policy age (the backend maps K to its own buffer setting).
+    shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",
+                help="--rl-max-policy-age N > 0 with generation that overlaps training "
+                "(partitioned island): the finished-group buffer holds K rounds of groups, "
+                "so generation runs at most about K rounds ahead and the realised policy "
+                "age stays near min(K, N). Default: K = N (a deeper buffer only adds groups "
+                "that are too old when trained). Refused without overlap"),
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
-                help="island optimizer LR schedule: auto (default) = constant for decoupled "
-                "and elastic islands, linear decay over global_rounds x optimizer_steps "
+                help="island optimizer LR schedule: auto (default) = constant for decoupled, "
+                "island-pool and asynchronous full-parameter islands (they train until the "
+                "syncer stops them), linear decay over global_rounds x optimizer_steps "
                 "otherwise; constant = fixed LR in every mode (single island included); "
-                "linear is refused for decoupled/elastic"),
-    cli_flag("--rl-quorum-theta", type=float, default=None, metavar="F",
-             help="elastic: step when arrived capacity >= F x total (default 0.75)"),
-    cli_flag("--rl-carry-gamma", type=float, default=None, metavar="F",
-             help="elastic: discount per outer step for a late delta (default 0.5)"),
-    cli_flag("--rl-soft-deadline-s", type=int, default=None, metavar="S",
-             help="elastic: soft deadline of an outer round (default: the quorum "
-             "timeout, syncer default 900)"),
+                "linear is refused where islands train until the syncer stops them"),
+    cli_flag("--rl-sync-quorum-theta", type=float, default=None, metavar="F",
+             help="membership: merge a round once the arrived islands hold F of the "
+             "capacity the round expects (replaces --rl-sync-quorum). Any membership "
+             "option (this, --rl-sync-q-min, --rl-sync-soft-deadline-s, "
+             "--rl-sync-carry-gamma, --rl-sync-island-lease-s, --rl-sync-max-learners, "
+             "--rl-sync-final-grace-s) puts the islands in a pool with dynamic membership; "
+             "unset ones stay off. strict-avg, decoupled and full-parameter with "
+             "--rl-sync-full-parameter-rounds async"),
+    cli_flag("--rl-sync-q-min", type=int, default=None, metavar="N",
+             help="membership: minimum arrived islands for a capacity-quorum or "
+             "soft-deadline merge (default 1)"),
+    cli_flag("--rl-sync-soft-deadline-s", type=int, default=None, metavar="S",
+             help="membership: merge what arrived after S seconds even below quorum "
+             "(default off)"),
+    cli_flag("--rl-sync-carry-gamma", type=float, default=None, metavar="F",
+             help="membership: weight discount F^lag of a delta whose base lags the round "
+             "(default 1: no discount); the largest lag is --rl-sync-max-base-lag"),
+    shared_flag("--rl-sync-island-lease-s", type=float, default=None, metavar="S",
+                help="membership: island lease on the syncer (--island-lease-s); an island "
+                "silent this long is removed and re-JOINs; islands heartbeat every S/3. "
+                "Default 150 in a pool"),
+    cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
+             help="membership: the syncer admits island ids 0..N-1, so islands may join "
+             "after the launch (default: the launched islands; not with the "
+             "full-parameter preset, whose session binds the roster)"),
+    cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
+             help="membership: after the last step the syncer waits this long for the "
+             "islands still connected to take the final cut, then finishes without the "
+             "missing ones (default: --rl-sync-soft-deadline-s; unset both: wait for all)"),
     cli_flag("--rl-elastic-debug-delay-s", default=None, metavar="ISLAND:S[,ISLAND:S]",
-             help="elastic TEST switch: the given island(s) wait S seconds before "
+             help="membership TEST switch: the given island(s) wait S seconds before "
              "submitting each round's delta (bare S = every island); used to trigger "
              "the soft deadline and carried_over on real hardware"),
     cli_flag("--rl-elastic-debug-pause", default=None, metavar="ISLAND:AFTER_V:S[,...]",
-             help="elastic TEST switch: after the island applied outer version >= AFTER_V "
-             "its link to the syncer goes silent for S seconds (no heartbeats, sends and "
-             "received frames held; training continues) to exercise lease expiry and "
-             "automatic re-JOIN on real hardware"),
-    cli_flag("--rl-final-grace-s", type=int, default=None, metavar="S",
-             help="elastic: after total steps the syncer keeps answering FINISHED for "
-             "this long so late islands end cleanly (default: the soft deadline)"),
-    shared_flag("--rl-island-lease-s", type=float, default=None, metavar="S",
-                help="elastic: island lease on the syncer (--island-lease-s); an island "
-                "silent this long is removed; islands heartbeat every S/3. Default 150"),
-    cli_flag("--rl-q-min", type=int, default=None, metavar="N",
-             help="elastic: minimum arrived islands for a step (default 1)"),
+             help="membership TEST switch: after the island applied outer version >= AFTER_V "
+             "it stops heartbeating and holds its pushes for S seconds (training continues) "
+             "to exercise lease expiry and automatic re-JOIN on real hardware"),
     shared_flag("--rl-syncer-epoch", type=int, default=None, metavar="N",
-                help="elastic: syncer term (incremented on each syncer restart); passed to "
-                "the syncer as --syncer-epoch and to every island for JOIN (default 0)",
+                help="island pool, or full-parameter async with --rl-peer-recovery: syncer "
+                "term (incremented on each syncer restart); passed to the syncer as "
+                "--syncer-epoch and to every island's HELLO (default: read from the running "
+                "syncer, else 0)",
                 island={"default": 0}),
-    cli_flag("--rl-max-carry-lag", type=int, default=None, metavar="N",
-             help="elastic: oldest late delta still carried over, in outer steps (default 2)"),
+    cli_flag("--rl-peer-recovery", action=argparse.BooleanOptionalAction, default=None,
+             help="full-parameter async: an island relaunched after it lost its trainer "
+             "state restores the inner optimizer state from a peer island's snapshot, "
+             "then takes every fragment from the syncer. Default: on in --rl-sync-mode "
+             "async where it applies (full-parameter async rounds, one syncer process, "
+             "no broadcast deltas, a snapshot store from --rl-peer-recovery-store or "
+             "--rl-checkpoint-store; a fixed roster or an island pool), else off. Same as "
+             "--rl-island-state-source peer (on) or catch-up (off)"),
+    cli_flag("--rl-island-state-source", choices=("peer", "catch-up", "cut"), default=None,
+             help="full-parameter async: where an island that replaces a lost island (a "
+             "relaunch, or a new member of an island pool) takes its trainer state. peer: "
+             "parameters and inner optimizer state from a healthy peer, then the newer "
+             "fragments from the syncer (--rl-peer-recovery); catch-up: every fragment "
+             "from the syncer, fresh optimizer state; cut: the island's own latest round "
+             "cut (not implemented for synced islands yet, refused). Default: peer where "
+             "--rl-peer-recovery applies, else catch-up"),
+    cli_flag("--rl-recovery-bound-steps", type=int, default=None, metavar="H",
+             help="--rl-peer-recovery: bound on one recovery in syncer steps; the syncer "
+             "records a recovery past it as missed (default: measured, not checked)"),
+    cli_flag("--rl-recovery-max-donor-tries", type=int, default=None, metavar="N",
+             help="--rl-peer-recovery: donors the syncer asks before the island restarts "
+             "with fresh optimizer state (default 3)"),
+    cli_flag("--rl-recovery-donor-timeout-s", type=int, default=None, metavar="S",
+             help="--rl-peer-recovery: wait for one donor snapshot before asking the next "
+             "(default 600)"),
+    shared_flag("--rl-peer-recovery-store", default=None, metavar="PATH",
+                help="--rl-peer-recovery: checkpoint store of the peer snapshots, reached "
+                "by every island (a shared path, a Modal Volume or bucket mount, or an "
+                "object store through the store environment); default: the "
+                "--rl-checkpoint-store"),
+    shared_flag("--rl-peer-recovery-ttl-s", type=float, default=None, metavar="S",
+                help="--rl-peer-recovery: snapshots older than this are removed (a donor "
+                "or recovering island died); longer than a snapshot transfer (default 3600)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
                 "island's strict pause budget input (default: syncer default 900)"),
@@ -697,6 +824,23 @@ _SCHEDULING = (
              "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
              "every training island needs a list; eval runs on the eval island only; a JSON "
              "spec file path must not contain '='"),
+    # S27 task assignment (P1): which training island reads which rows of --data.
+    cli_flag("--rl-data-split", choices=DATA_SPLITS, default=AUTO,
+             help="which rows of --data each training island reads (islands that generate "
+             "and train; samplers always read their own slots). auto (default): with N >= 2 "
+             "such islands, the island with learner id k reads the rows i with i %% N == k, "
+             "in data order; after its last row it starts the next pass over its own rows, "
+             "reshuffled; a relaunched island keeps its rows. --rl-island-tasks replaces this. "
+             "stride: the same as auto, and refused where auto would not split. shared: "
+             "every island reads every row in the same order (the old behaviour; controlled "
+             "experiments only, the launch warns)"),
+    shared_flag("--rl-data-slot", default=None, metavar="I/N",
+                help="this training island reads only the rows i of --data with i %% N == I "
+                "(set by the launcher from --rl-data-split; not a launch option)"),
+    shared_flag("--rl-data-position-store", default=None, metavar="PATH",
+                help="full-parameter island: keep the data position after every round under "
+                "PATH, so a relaunched island continues at its next row (set by the launcher "
+                "with --rl-checkpoint-store; not a launch option)"),
 )
 
 _EVAL = (
@@ -791,14 +935,41 @@ _RUN_CONTROL = (
 
 _ROLLOUT_ENGINE = (
     shared_flag("--use-rollout-routing-replay", action="store_true"),
+    shared_flag(
+        "--observe-training-entropy",
+        action="store_true",
+        help="log the training-side policy entropy; metrics only, the loss is "
+        "unchanged while the entropy coefficient is 0",
+    ),
+    shared_flag(
+        "--mamba-training-ssm-states-dtype",
+        choices=("fp32", "bf16"),
+        default=None,
+        help="Mamba/hybrid models: dtype of the inter-chunk SSM states in training "
+        "(default: the params dtype, bf16; rollouts keep fp32 states). "
+        "Changes the training numerics, so it is part of the training contract",
+    ),
     shared_flag("--rollout-max-response-len", type=int, default=32768,
                 island={"default": None, "required": True}),
+    # S26 E6: quantized rollout tiers (yeto.rl.quant.tiers)
+    shared_flag("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0,
+                help="sampler precision: 0 BF16 (default); 1 the engine quantizes FFN linears "
+                "(dense) or routed experts (MoE) to FP8 itself, FP8 KV cache; 2 the trainer side "
+                "converts each release to FP8 W8A8 on the same linears and the sampler island "
+                "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
+                "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
+                "KV cache stays BF16. Needs FP8 cards (H100, H200, L4)"),
+    shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default=None,
+                help="tier 1 only: who quantizes (default: trainer where the backend supports it, else engine). "
+                "trainer: the engines start on a 128x128 block-FP8 conversion of the base "
+                "and the trainer block-quantizes every weight update. engine: the rollout engine "
+                "quantizes at load (online FP8). Same ignore list"),
 )
 
 _AGENT = (
     shared_flag("--apply-chat-template-kwargs", type=json.loads, default=None),
     shared_flag("--custom-generate-function-path", default=None),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-reasoning-effort",
         choices=["xhigh"],
         default=None,
@@ -811,7 +982,7 @@ _AGENT = (
     shared_flag("--session-server-ip", default=None),
     shared_flag("--session-server-port", type=int, nargs="+", default=None),
     shared_flag("--tito-model", default=None),
-    shared_flag(
+    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-exclude-reasoning-from-loss",
         action="store_true",
         help=(
@@ -830,6 +1001,27 @@ _AGENT = (
 _SYNC = (
     cli_flag("--local-rl-rounds-per-sync", type=int, default=1),
     cli_flag(
+        "--rl-sync-mode",
+        choices=RL_SYNC_MODES,
+        default="async",
+        help="how a run with two or more islands fills the sync options left unset "
+        "(strict-avg, decoupled and full-parameter; one island, SAO, a critic and "
+        "--experimental-rl-sync keep the strict values). async (default): "
+        "full-parameter asynchronous sharded rounds (--rl-sync-full-parameter-rounds "
+        "async, at most 2 fragment rounds in flight), --rl-sync-quorum 1 with the "
+        "adaptive grace window (--rl-sync-grace-ms %d cap; --grace-gamma/--grace-tau keep "
+        "their defaults, no gamma value is prescribed), --rl-sync-max-base-lag 1, "
+        "tokens2-over-steps island weights, rda matrix merge (decoupled, full-parameter), "
+        "outer step by local rounds per sync H: plain averaging (lr 1.0, momentum 0) "
+        "below H=%d, Nesterov lr 0.7 momentum 0.9 from H=%d on, broadcast overwrite "
+        "(merge alpha 0), "
+        "int4 push (full-parameter, block 128). strict: the control, every island "
+        "per round, equal weights, plain average, f32; its commands equal the "
+        "commands from before the modes. An option given explicitly always wins. A "
+        "session started in one mode resumes only with the same settings"
+        % (ASYNC_GRACE_CAP_MS, ASYNC_NESTEROV_MIN_H, ASYNC_NESTEROV_MIN_H),
+    ),
+    cli_flag(
         "--rl-sync-preset",
         choices=SYNC_PRESETS,
         type=canonical_sync_preset,
@@ -844,19 +1036,23 @@ _SYNC = (
     cli_flag(
         "--rl-sync-fragment-pipeline",
         type=int,
-        default=1,
+        default=sync_mode_default(1),
         help="full-parameter only: fragment rounds the syncer gathers at once "
-        "(1..--fragments). Above 1, fragment k+1 uploads while fragment k merges "
-        "and downloads; merge results are unchanged (default 1 = serial)",
+        "(1..--fragments; asynchronous rounds: 1..min(60, --fragments)). Above 1, fragment k+1 uploads "
+        "while fragment k merges and downloads (default: min(2, --fragments) with "
+        "asynchronous rounds, else 1 = serial)",
     ),
     cli_flag(
         "--rl-sync-push-dtype",
-        choices=("f32", "bf16", "int8"),
-        default="f32",
+        choices=("f32", "bf16", "int8", "int4", "int4-log"),
+        default=sync_mode_default("f32"),
         help="full-parameter only: wire dtype of the islands' pushed outer deltas "
         "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
-        "--rl-sync-push-int8-block) quarters them; the syncer keeps f32 masters, "
-        "momentum and f32 FINAL (default f32 = exact)",
+        "--rl-sync-push-int8-block) quarters them, int4 (linear, 15 levels per block "
+        "absmax scale, see --rl-sync-push-int4-block) and int4-log (the SFT q4 codec: "
+        "256-value blocks, log2 levels) cut them to ~1/7.5-1/7.8; the syncer keeps "
+        "f32 masters, momentum and f32 FINAL (default: int4 in --rl-sync-mode async, "
+        "f32 = exact in --rl-sync-mode strict)",
     ),
     cli_flag(
         "--rl-sync-overlap",
@@ -868,11 +1064,71 @@ _SYNC = (
         "Needs --rl-sync-fragment-pipeline equal to --fragments",
     ),
     cli_flag(
+        "--rl-sync-fragment-max-bytes",
+        type=int,
+        default=2 << 30,
+        help="full-parameter only: f32 byte bound of one sync fragment (multiple of 4, "
+        "4..2147483648). A parameter above the bound spans several fragments as "
+        "dimension-0 row slices, each merged as its own tensor (RDA per slice). "
+        "A smaller bound changes the layout hash, so the probe must use the same value",
+    ),
+    cli_flag(
+        "--rl-sync-max-local-rounds-ahead",
+        type=int,
+        default=None,
+        help="full-parameter async rounds only: lead cap K >= 1 (default off). At a "
+        "boundary an island waits, still pushing and applying, instead of training a "
+        "K-th local round on top of an unmerged push of its own. K=1 starts no round "
+        "while one of its pushes is unmerged: with a fixed roster a fast island stays "
+        "at most one local round ahead of the slowest island. The wait gives up (and "
+        "trains on) after half of --rl-sync-wait-timeout-s since that push. Island-local: "
+        "the layout, syncer profile and training contract hashes do not change",
+    ),
+    cli_flag(
+        "--rl-sync-wait-timeout-s",
+        type=float,
+        default=FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S,
+        help="full-parameter only: seconds an island waits for a paired broadcast "
+        "after its last push of that round, for the terminal barrier and for the "
+        "FINAL cut; a value other than 900 also sets the syncer's final-ACK "
+        "timeout (which changes the syncer profile hash, not the layout hash)",
+    ),
+    cli_flag(
         "--rl-sync-push-int8-block",
         type=int,
         default=128,
         help="full-parameter only, with --rl-sync-push-dtype int8: values per f32 "
         "scale (32..1048576; error <= block absmax / 254 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-block",
+        type=int,
+        default=128,
+        help="full-parameter only, with --rl-sync-push-dtype int4: values per f32 "
+        "scale (even, 64..256; nearest rounding errs <= block absmax / 14 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-push-no-tensor-blocks",
+        action="store_true",
+        help="full-parameter only, with --rl-sync-push-dtype int8, int4 or int4-log: let "
+        "quantization blocks run across a whole fragment (the layout before tensor blocks). "
+        "By default blocks restart at every tensor so a tensor replicated on several ranks "
+        "quantizes the same on each. A resumed run must repeat the choice it started with",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-stochastic",
+        action="store_true",
+        help="full-parameter only, with --rl-sync-push-dtype int4: unbiased stochastic "
+        "rounding instead of round-to-nearest (default off)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-error-feedback",
+        choices=("off", "bf16", "f32"),
+        default="off",
+        help="full-parameter only, with --rl-sync-push-dtype int4 (nearest rounding): "
+        "each island adds the previous int4 rounding error of a fragment to its next "
+        "delta, kept in this dtype (bf16 = 2 bytes per pushed parameter on the island "
+        "host). Dropped after skipped rounds, re-JOIN and resume (default off)",
     ),
     cli_flag(
         "--rl-sync-bcast-delta-full-every",
@@ -896,6 +1152,117 @@ _SYNC = (
         action="store_true",
         help="full-parameter only: the syncer writes each per-round checkpoint off "
         "its scheduler and broadcasts that round only once the checkpoint is durable",
+    ),
+    # S27 P1: the outer-merge settings each RL preset used to fix. Unset keeps
+    # the preset's value, so the syncer command and profile stay unchanged.
+    cli_flag(
+        "--rl-sync-init-mode",
+        choices=("auto", "local", "upload"),
+        default="auto",
+        help="full-parameter only (S27): how islands get the version-0 weights. "
+        "local = every island keeps the base checkpoint it loaded and reports "
+        "per-fragment digests; the syncer checks they agree and sends no initial "
+        "broadcast (learner 0 still uploads INIT for the syncer's f32 masters). "
+        "upload = learner 0 uploads INIT and the syncer broadcasts it to every "
+        "island. auto (default) = local with --rl-sync-full-parameter-rounds async",
+    ),
+    cli_flag(
+        "--rl-sync-full-parameter-rounds",
+        choices=FULL_PARAMETER_ROUNDS,
+        default=sync_mode_default("sweep"),
+        help="full-parameter only (S27 P2): sweep = strict policy sweeps (every "
+        "island per fragment round, plain average; the control, default in "
+        "--rl-sync-mode strict); async = (default in --rl-sync-mode async) "
+        "asynchronous fragment rounds: H = --local-rl-rounds-per-sync, at most "
+        "--rl-sync-fragment-pipeline (1 or 2) fragment rounds in flight, the "
+        "decoupled preset's outer Nesterov (0.7, 0.9), and the --rl-sync-quorum "
+        "/ grace / learner-weight / max-base-lag / outer / matrix-merge options",
+    ),
+    cli_flag(
+        "--rl-sync-quorum",
+        type=int,
+        default=None,
+        metavar="K",
+        help="strict-avg / decoupled / full-parameter async: islands whose pushes close a round "
+        "(1..islands; default 1 in --rl-sync-mode async, every island in strict)",
+    ),
+    cli_flag(
+        "--rl-sync-grace-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="strict-avg / decoupled / full-parameter async: cap of the adaptive post-quorum grace window "
+        "(--grace-gamma, --grace-tau; the window adapts to the islands' step time, "
+        "the cap only bounds it); default %d in --rl-sync-mode async, 0 = no grace in strict"
+        % ASYNC_GRACE_CAP_MS,
+    ),
+    cli_flag(
+        "--rl-sync-learner-weight",
+        choices=("equal", "tokens2-over-steps"),
+        default=sync_mode_default("equal"),
+        help="strict-avg / decoupled / full-parameter async: island weight in the outer merge; "
+        "tokens2-over-steps weighs by c_tokens^2 / c_steps (default tokens2-over-steps in "
+        "--rl-sync-mode async, equal in strict)",
+    ),
+    cli_flag(
+        "--rl-sync-final-cut",
+        choices=("auto", "ack", "download"),
+        default="auto",
+        help="full-parameter preset: what islands take from the final cut. ack = the final "
+        "version manifest only (an island ACKs once its pushes drained; the final parameters "
+        "stay in the syncer checkpoint, no island downloads the f32 model); download = every "
+        "f32 fragment, applied to the trainer before the ACK (island-side eval or a bitwise "
+        "check). auto (default) = ack for --rl-sync-full-parameter-rounds async in "
+        "--rl-sync-mode async without --rl-eval-interval, else download",
+    ),
+    cli_flag(
+        "--rl-sync-expert-token-weights",
+        action="store_true",
+        help="full-parameter async, MoE models only: weight each expert's tensors in the "
+        "outer merge by the tokens the island routed to that expert during the outer "
+        "interval, relative to an even split over the layer's experts (an expert an island "
+        "never routed to gets weight 0 from that island); multiplies the island weight of "
+        "--rl-sync-learner-weight. Islands count routed tokens with a router hook (default off)",
+    ),
+    cli_flag(
+        "--rl-sync-max-base-lag",
+        type=int,
+        default=sync_mode_default(0),
+        metavar="N",
+        help="strict-avg / decoupled / full-parameter async: how many rounds a push's base "
+        "may lag the fragment being merged (default 1 in --rl-sync-mode async, so a delta "
+        "that misses the quorum merges into the next round; 0 = late pushes are refused, "
+        "the strict default). One round "
+        "merges every fragment once; the launcher passes N x fragments to the syncer, whose "
+        "--max-base-lag counts versions",
+    ),
+    cli_flag(
+        "--rl-sync-outer-lr",
+        type=float,
+        default=None,
+        help="strict-avg / decoupled / full-parameter async: outer Nesterov learning rate "
+        "(default in --rl-sync-mode async: 1.0 below %d local rounds per sync, 0.7 "
+        "from there; strict: the preset's, 1.0 strict-avg, 0.7 decoupled and "
+        "full-parameter async)" % ASYNC_NESTEROV_MIN_H,
+    ),
+    cli_flag(
+        "--rl-sync-outer-momentum",
+        type=float,
+        default=None,
+        help="strict-avg / decoupled / full-parameter async: outer Nesterov momentum in [0, 1) "
+        "(default in --rl-sync-mode async: 0 below %d local rounds per sync, 0.9 "
+        "from there; strict: the preset's, 0.0 strict-avg, 0.9 decoupled and "
+        "full-parameter async)" % ASYNC_NESTEROV_MIN_H,
+    ),
+    shared_flag(
+        "--rl-sync-matrix-merge",
+        choices=RL_MATRIX_MERGES,
+        default=sync_mode_default("avg"),
+        island={"default": "avg"},
+        help="decoupled and full-parameter async only: avg merges every fragment by weighted averaging "
+        "(default in --rl-sync-mode strict); rda (default in --rl-sync-mode async) merges "
+        "fragments without embedding tensors by radial-directional averaging, embedding "
+        "fragments stay averaged",
     ),
     cli_flag(
         "--rl-initial-adapter",

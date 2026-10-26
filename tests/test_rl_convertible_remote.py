@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine.convertible import (
     CONVERSION_DECISION_KIND,
     ConvertibleNode,

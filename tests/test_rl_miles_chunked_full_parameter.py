@@ -598,6 +598,50 @@ async def test_grpo_h1_wrapper_preserves_versioned_policy_binding():
     assert receipt.optimizer_steps == 1
 
 
+def test_local_init_anchor_shares_the_version_zero_refs_and_equals_a_wire_copy():
+    import hashlib
+
+    ray = FakeRay()
+    adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (32,)), manifest(1, (32,))),
+        algorithm="grpo",
+        components=(component(),),
+        minimum_fragments=2,
+        max_fragment_bytes=256,
+        max_chunk_bytes=16,
+    )
+    initial = adapter.validate_cut(
+        _cut(adapter, {0: 3, 1: 5}, policy_version=0, generation=0, ray=ray), 0, 0
+    )
+    sink = adapter.fragment_sink(initial, ray_module=ray)
+    payload = b"".join(adapter.fragment_parts(initial, 1, ray_module=ray)())
+    wire_hash = hashlib.sha256(payload).hexdigest()
+    objects_before = len(ray.objects)
+
+    adopted = sink.adopt(initial, 1, 0, wire_hash)
+    assert len(ray.objects) == objects_before  # no second model copy
+    assert sink.adopt(initial, 1, 0, wire_hash) is adopted
+    with pytest.raises(RuntimeError, match="changed bytes"):
+        sink.adopt(initial, 1, 0, "0" * 64)
+
+    # The same bytes stored from the wire give an identical anchor.
+    copied = adapter.fragment_sink(initial, ray_module=ray)(1, 0, payload)
+    assert copied.descriptor == adopted.descriptor
+    assert copied.wire_payload_hash == adopted.wire_payload_hash
+    assert [ray.get(r).tolist() for r in copied.refs] == [ray.get(r).tolist() for r in adopted.refs]
+
+    # Releasing the cut leaves the anchor's refs; releasing the anchor
+    # leaves the cut's.
+    other = sink.adopt(initial, 0, 0, "f" * 64)
+    other.release()
+    assert all(r is not None for r in adopted.refs)
+    assert all(r is not None for refs in initial.transport_cut.shards[0].chunk_refs for r in refs)
+    adapter.release(initial)
+    assert all(r is not None for r in adopted.refs)
+    with pytest.raises(ValueError, match="released"):
+        adapter.fragment_sink(initial, ray_module=ray).adopt(initial, 1, 0, wire_hash)
+
+
 def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     ray = FakeRay()
     adapter = MilesChunkedFullParameterAdapter.create(

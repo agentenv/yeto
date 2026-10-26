@@ -30,6 +30,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.rl.adapters.miles.pins import (
+    MILES_DISTOPT_FULL_PARAMETER_COMMIT,
+    MILES_NEXT_COMMIT,
+    miles_fork_lineage_from,
+)
 from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
     BOUNDED_NONZERO_STD_FILTER,
@@ -37,6 +42,7 @@ from yeto.rl.engine.algorithm import (
     normalize_filter_name,
     AlgorithmSpec,
 )
+from yeto.rl.quant.tiers import FP8_SOURCE_ENGINE, TIER_ONLINE_FP8, sglang_online_argv
 from .lr_schedule import LR_SCHEDULE_FLAGS
 from .algorithm_flags import (
     OBJECTIVE_FLAGS,
@@ -46,6 +52,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
+from .run_config_rules import full_parameter_dp_replica_gap
 from . import sampler_snapshot
 from .binding import filter_argv
 
@@ -95,7 +102,7 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--rollout-all-samples-process-path",
         "--rollout-sample-filter-path",
         "--rollout-function-path",
-        "--data-source-path",  # SecRLEnv same-task retry (secrlenv_retry)
+        "--data-source-path",
         "--buffer-filter-path",
         "--fully-async",
         "--debug-train-only",
@@ -189,48 +196,6 @@ def _must_be_none(reason: str) -> _Check:
     return check
 
 
-def _stock_codex_append_roles_or_none(reason: str) -> _Check:
-    """Append roles are decided by the ``--tito-model`` template upstream, so
-    the option is refused -- except for a signed stock Codex agent, whose
-    launcher-side profile check (``validate_stock_codex_fields``) requires the
-    roles to be stated and equal to the profile's.  Those are accepted when they
-    match the profile and are NOT emitted to argv (the template decides)."""
-
-    def check(value, config):
-        if value is None:
-            return None
-        agent = getattr(config, "agent", None)
-        try:
-            from yeto.rl import SIGNED_CODEX_AGENTS
-            from yeto.rl.codex_backend import (
-                stock_codex_backend_profile,
-                stock_codex_profiles_for_tito_model,
-            )
-        except ImportError:  # pragma: no cover - defensive
-            return reason
-        if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
-            return reason
-        if not getattr(agent, "tito_model", None):
-            return reason
-        # ``tito_model`` is the Miles tokenizer family, not the profile name
-        # (``qwen35`` happened to be both; ``qwen4exp`` serves the Flash-Next
-        # profiles, rl-fn-codex-rollout 1.0): the roles are fixed by every
-        # profile of that family, which the launcher already matched to the
-        # declared ``--codex-backend-profile`` (``validate_stock_codex_fields``).
-        names = stock_codex_profiles_for_tito_model(str(agent.tito_model))
-        if not names:
-            return reason
-        fixed = {tuple(stock_codex_backend_profile(n)["tito_allowed_append_roles"]) for n in names}
-        if len(fixed) != 1 or tuple(value) != next(iter(fixed)):
-            return (
-                f"stock Codex profiles {list(names)} (tito-model {agent.tito_model!r}) fix the "
-                f"append roles to {sorted(list(r) for r in fixed)} (got {list(value)})"
-            )
-        return None
-
-    return check
-
-
 def _must_be_false(reason: str) -> _Check:
     def check(value, _config):
         return reason if value else None
@@ -249,14 +214,7 @@ SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
 )
 
 
-# yeto's Codex wrapper calls AGENTIC_TOOL_CALL_GENERATE with the same args (so it
-# reads the same agent flags) and turns CompactionRL segment sessions into one
-# sample per segment; without it a compacted rollout trains as one sample.
-from yeto.rl.algos.compactionrl import CODEX_OPENENV_GENERATE  # noqa: E402  (single source)
-from yeto.rl import SECRLENV_GENERATE  # noqa: E402  (wraps AGENTIC_TOOL_CALL_GENERATE)
-AGENT_FLAG_READERS = frozenset(
-    {AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE, SECRLENV_GENERATE}
-)
+AGENT_FLAG_READERS = frozenset({AGENTIC_TOOL_CALL_GENERATE})
 
 
 def _requires_agentic_generate(flag: str) -> _Check:
@@ -329,6 +287,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "model_recipe.gdn.gated_delta_net": _ok,
     "model_recipe.gdn.qkv_format": _ok,
     "model_recipe.transformer_impl": _ok,
+    "model_recipe.model_flags": _ok,
     **{f"geometry.{name}": _ok for name in _GEOMETRY_FIELDS},
     **{
         f"geometry.moe.{name}": _ok
@@ -345,6 +304,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.tensor_parallel": _ok,
     "parallel.pipeline_parallel": _ok,
     "parallel.expert_parallel": _ok,
+    "parallel.context_parallel": _ok,  # S27 G-AC: --context-parallel-size (translate_run_config)
     # Derived by Megatron from world size / TP / PP; consumed, not passed.
     "parallel.data_parallel": _ok,
     "parallel.rollout_num_gpus_per_engine": _ok,
@@ -396,6 +356,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.lr_schedule.decay_style": _ok,
     "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
+    "algorithm.observe_training_entropy": _ok,
+    "algorithm.mamba_training_ssm_states_dtype": _ok,
     "algorithm.rollout_seed": _ok,
     # rl-algo-critic-family 2.4: translated with the AlgorithmSpec (critic_load_argv)
     "algorithm.critic": _ok,
@@ -427,6 +389,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
     "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
+    "serving.rollout_quant_tier": _ok,  # S26 E6: SGLang flags in translate_run_config
+    "serving.rollout_quant_fp8_source": _ok,  # S26 E6: tier 1 engine vs trainer (Miles block FP8)
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -452,7 +416,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.session_server_port": _ok,
     "agent.session_server_workers": _ok,
     "agent.tito_model": _ok,
-    "agent.tito_allowed_append_roles": _stock_codex_append_roles_or_none(
+    "agent.tito_allowed_append_roles": _must_be_none(
         "upstream Miles has no --tito-allowed-append-roles; the append roles are "
         "decided by the --tito-model template (allowed_append_roles)"
     ),
@@ -475,7 +439,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
     **{f"sample_buffer.{name}": _ok
-       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
+                    "fused_stage", "release_legacy", "release_inline")},
 }
 
 
@@ -525,22 +490,6 @@ def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
             f"{algorithm.dynamic_sampling_filter!r}",
         )
     return algorithm.dynamic_sampling_filter
-
-
-def _secrlenv_retry_argv(agent, batch, dynamic_filter: str | None,
-                         max_policy_age: int) -> tuple[str, ...]:
-    """P0-1.7b.4-Q1: the SecRLEnv agents bind the same-task retry classes."""
-
-    from .secrlenv_retry import rollout_argv
-
-    try:
-        return rollout_argv(custom_agent=agent.custom_agent_function_path,
-                            dynamic_filter=dynamic_filter,
-                            rollout_batch_size=batch.groups_per_round,
-                            over_sampling_batch_size=batch.over_sampling_batch_size,
-                            max_policy_age=max_policy_age)
-    except ValueError as exc:
-        raise UnmappedConfigError("agent.custom_agent_function_path", str(exc)) from None
 
 
 def placement_request(config) -> PlacementRequest:
@@ -718,6 +667,7 @@ def translate_run_config(
     extra_argv: Sequence[str] = (),
     tito_parser_resolver: Callable[[str], tuple[str | None, str | None]] | None = None,
     max_policy_age: int = 0,
+    async_buffer_rounds: int | None = None,
     full_parameter_sync: bool = True,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
@@ -729,6 +679,12 @@ def translate_run_config(
     rollout with training through Miles' fully_async (P0-S), so the
     all-samples metadata hook and the carry-over buffer filter are not set:
     the trained-groups hook reports the round instead.
+
+    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): K >= 1 sets the
+    fully_async buffer to K rounds of groups (``--async-data-buffer-capacity-factor
+    K``); None (default) uses K = ``max_policy_age``, not Miles' own default 2,
+    which at age 1 dropped about half of the generated groups as too old
+    (SESSION26 E2). Only with overlap.
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
@@ -746,7 +702,7 @@ def translate_run_config(
     problems = launch_problems(algorithm, {
         "rollout_batch_size": config.batch.groups_per_round,
         "rollout_max_response_len": config.batch.rollout_max_response_len,
-        "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+        "context_parallel_size": int(getattr(config.parallel, "context_parallel", 1) or 1),
         "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
         # rl-algo-critic-family 2.3: critic GPU counts / deploy-component / indep-dp
         "extra_argv": tuple(extra_argv),
@@ -784,11 +740,12 @@ def translate_run_config(
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
+        RECIPE_NEMOTRON_H,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
     )
     from .lr_schedule import lr_schedule_argv
-    from .models import glm5_next
+    from .models import glm5_next, nemotron_h
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
 
     geometry = config.geometry
@@ -911,7 +868,7 @@ def translate_run_config(
         "--sglang-mem-fraction-static", str(serving.mem_fraction_static),
         "--tensor-model-parallel-size", str(parallel.tensor_parallel),
         "--pipeline-model-parallel-size", str(parallel.pipeline_parallel),
-        "--context-parallel-size", "1",
+        "--context-parallel-size", str(int(getattr(parallel, "context_parallel", 1) or 1)),
         "--expert-model-parallel-size", str(parallel.expert_parallel),
         "--expert-tensor-parallel-size", "1",
         # data
@@ -957,6 +914,10 @@ def translate_run_config(
     # Explicit LR schedule: Miles' default horizon is --num-rollout (global
     # rounds), which under decoupled is not the island's local step count.
     values.extend(lr_schedule_argv(config.algorithm.lr_schedule))
+    if config.algorithm.observe_training_entropy:
+        values.append("--observe-training-entropy")
+    if config.algorithm.mamba_training_ssm_states_dtype is not None:
+        values.extend(("--mamba-training-ssm-states-dtype", config.algorithm.mamba_training_ssm_states_dtype))
     if algorithm.kl_coef is not None:
         values.extend(("--kl-coef", str(algorithm.kl_coef)))
     if dynamic_filter is not None:
@@ -979,6 +940,19 @@ def translate_run_config(
         values.extend(policy_age_argv(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
+    if async_buffer_rounds is None and rollout_overlap:
+        async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
+    if async_buffer_rounds is not None:
+        if not rollout_overlap:
+            raise MilesConfigError(
+                "--rl-async-buffer-rounds needs generation that overlaps training "
+                "(--rl-max-policy-age > 0 on a partitioned island without a sample buffer)")
+        if int(async_buffer_rounds) < 1:
+            raise MilesConfigError(
+                f"--rl-async-buffer-rounds must be >= 1, got {async_buffer_rounds}")
+        from .offpolicy_correction import BUFFER_CAPACITY_FLAG
+
+        values.extend((BUFFER_CAPACITY_FLAG, str(int(async_buffer_rounds))))
     values.extend(critic_load_argv(config, algorithm))
     if sample_buffer is not None:
         values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))
@@ -1010,6 +984,12 @@ def translate_run_config(
                 values.extend((flag, str(value)))
     if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
+    if getattr(serving, "rollout_quant_tier", 0) == TIER_ONLINE_FP8 and \
+            getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) == FP8_SOURCE_ENGINE:
+        # S26 E6 tier 1: SGLang quantizes the in-scope linears itself; the ignore list
+        # travels in the workers' environment (entry.connect_island_ray). The trainer
+        # source needs no SGLang flag: the FP8 checkpoint's config carries the method.
+        values.extend(sglang_online_argv())
     if getattr(serving, "sampler_snapshot", False):
         try:
             values.extend(sampler_snapshot.snapshot_argv(request, extra_argv=extra_argv))
@@ -1081,7 +1061,6 @@ def translate_run_config(
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
-    values.extend(_secrlenv_retry_argv(agent, batch, dynamic_filter, max_policy_age))
     if agent.agent_max_seq_len is not None:
         values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
@@ -1129,13 +1108,17 @@ def translate_run_config(
                 "--num-experts", str(moe.num_experts),
                 "--moe-ffn-hidden-size", str(moe.ffn_hidden_size),
                 "--moe-router-topk", str(moe.router_topk),
-                "--moe-layer-freq", str(moe.layer_freq),
+                "--moe-layer-freq", megatron_moe_layer_freq(moe.layer_freq),
             )
         )
         if moe.shared_expert_intermediate_size is not None:
             values.extend(
                 ("--moe-shared-expert-intermediate-size", str(moe.shared_expert_intermediate_size))
             )
+    # recipe-owned model flags read from the provider (nemotron_h: router, latent MoE)
+    values.extend(getattr(recipe, "model_flags", ()))
+    if recipe.name == RECIPE_NEMOTRON_H:
+        values.extend(_nemotron_h_train_flags(nemotron_h, config))
     if geometry.multi_latent_attention:
         values.append("--multi-latent-attention")
         for name, value in geometry.mla_dims:
@@ -1167,6 +1150,7 @@ def translate_run_config(
         values = glm5_next.apply_recipe(values, glm5_next.model_argv(
             **shape, transformer_impl=recipe.transformer_impl))
     values.extend(extra_argv)
+    values.extend(train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, "")))
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
@@ -1180,8 +1164,15 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
+            # S26 E6: only a quantized tier adds the attribute (tier 0 keeps the argv golden)
+            **({"yeto_rollout_quant_tier": int(serving.rollout_quant_tier)}
+               if getattr(serving, "rollout_quant_tier", 0) else {}),
+            **({"yeto_rollout_quant_fp8_source": serving.rollout_quant_fp8_source}
+               if getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) != FP8_SOURCE_ENGINE else {}),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
-                                              full_parameter_sync=full_parameter_sync),
+                                              full_parameter_sync=full_parameter_sync,
+                                              data_parallel=config.parallel.data_parallel,
+                                              builds_trainer=not _is_sampler_island(sample_buffer)),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
             **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
                if getattr(config.algorithm, "critic", None) is not None
@@ -1207,6 +1198,69 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+
+
+def megatron_moe_layer_freq(layer_freq: Any) -> str:
+    """Megatron's ``--moe-layer-freq`` value: an int, or a per-layer 0/1 mask.
+
+    Megatron's ``moe_freq_type`` accepts a list only as a pattern of digits,
+    commas, brackets, ``+``, ``*`` and parentheses (``_eval_pattern``): no
+    spaces. ``str([0, 1])`` has spaces and is rejected (s27-aw-a, Nemotron-H
+    120B: ``invalid moe_freq_type value``), so a mask is written ``[0,1,...]``.
+    """
+    if isinstance(layer_freq, (list, tuple)):
+        return "[" + ",".join(str(int(value)) for value in layer_freq) + "]"
+    return str(layer_freq)
+
+
+# S27 G-Y: trainer-speed flags for MFU measurement on the Nemotron-H recipe, from the
+# island environment (launcher --modal-env). Only allow-listed Megatron flags pass;
+# none of them changes the parallel layout (TP/EP/PP/CP/DP).
+TRAIN_EXTRA_ENV = "YETO_MILES_TRAIN_EXTRA_ARGV"
+TRAIN_EXTRA_FLAGS = frozenset({
+    "--recompute-granularity", "--recompute-modules", "--recompute-method",
+    "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
+    "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
+    "--moe-flex-dispatcher-backend",
+})
+
+
+def _nemotron_h_train_flags(recipe_module: Any, config: Any) -> tuple[str, ...]:
+    """Nemotron-H training defaults (``models.nemotron_h.train_flags``); prints its launch warnings."""
+
+    memory, parallel = config.train_memory, config.parallel
+    for warning in recipe_module.train_warnings(
+        samples_per_step=config.batch.global_batch,
+        optimizer_offload_fraction=float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0),
+        trainer_gpus=parallel.actor_num_nodes * parallel.actor_num_gpus_per_node,
+    ):
+        print(f"[rl] WARNING: {warning}", flush=True)
+    return recipe_module.train_flags(
+        tuple(getattr(config.model_recipe, "model_flags", ())),
+        activation_recompute=bool(memory.activation_recompute),
+        max_tokens_per_gpu=memory.max_tokens_per_gpu,
+        tensor_parallel=int(parallel.tensor_parallel),
+        context_parallel=int(getattr(parallel, "context_parallel", 1) or 1),
+        seq_len=int(config.batch.seq_len),
+        deepep=recipe_module.deepep_available(),
+    )
+
+
+def train_extra_argv(recipe_name: str, raw: str) -> tuple[str, ...]:
+    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV`` (space- or comma-separated); empty unless set. Nemotron-H only."""
+    import shlex
+
+    from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H
+
+    tokens = shlex.split((raw or "").replace(",", " "))  # commas: one shell word
+    if not tokens:
+        return ()
+    if recipe_name != RECIPE_NEMOTRON_H:
+        raise MilesConfigError(f"{TRAIN_EXTRA_ENV} is only for the {RECIPE_NEMOTRON_H} recipe")
+    bad = [t for t in tokens if t.startswith("--") and t not in TRAIN_EXTRA_FLAGS]
+    if bad or not tokens[0].startswith("--"):
+        raise MilesConfigError(f"{TRAIN_EXTRA_ENV}: flags not allowed: {bad or tokens[:1]}")
+    return tuple(tokens)
 
 
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
@@ -1241,17 +1295,37 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
-def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool) -> dict[str, Any]:
-    """Keep every FP32 master whole when the full-parameter sync reads them.
+def _is_sampler_island(sample_buffer: Any) -> bool:
+    from .buffer_rollout import SAMPLER
+
+    return sample_buffer is not None and sample_buffer.role == SAMPLER
+
+
+def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool,
+                                    data_parallel: int = 1, builds_trainer: bool = True) -> dict[str, Any]:
+    """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
-    ``sao-streaming-full``) builds its shard manifest from whole masters (Miles
-    ``full_parameter_state._master_parameter`` refuses the flat owned-range
-    slice that ``param.main_param`` is under the distributed optimizer, even at
-    DP=1). Miles' ``set_default_megatron_args`` turns the distributed optimizer
-    on for Adam regardless of argv, so the attribute is applied in
-    ``preprocess_args``, after Miles' defaults and before Megatron's
-    ``validate_args``.
+    ``sao-streaming-full``) reads one whole FP32 master per parameter on each
+    rank. At DP>1 one rank of each data-parallel replica group owns (exports)
+    a parameter and the other replicas apply its bytes; that needs a Miles pin
+    with data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
+    and a whole master on every replica, so no optimizer offload. A sampler
+    island (``builds_trainer=False``) has no trainer and no such check.
+
+    * No optimizer offload: the non-distributed optimizer, whose masters are
+      whole tensors. Miles' ``set_default_megatron_args`` turns the
+      distributed optimizer on for Adam regardless of argv, so the attribute
+      is applied in ``preprocess_args``, after Miles' defaults and before
+      Megatron's ``validate_args``.
+    * ``--rl-optimizer-offload-fraction`` > 0: Megatron's distributed +
+      precision-aware optimizer with a HybridDeviceOptimizer
+      (``OPTIMIZER_OFFLOAD_ARGV``). At DP=1 each parameter's FP32 master is
+      the hybrid optimizer's whole FP32 copy (host-pinned when offloaded);
+      Miles reads it and, on a cut apply, writes both that copy and the BF16
+      model view (``full_parameter_state._propagate_master_writes``). Needs
+      a Miles image at or after :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT`;
+      DP=1 only (at DP>1 a distributed-optimizer master is a partial range).
 
     A no-sync trainer island (samples from the store, L4.6) has no such reader:
     it keeps Miles' distributed optimizer, so DP replicas shard the optimizer
@@ -1260,11 +1334,30 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
 
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
-    if float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0:
-        raise MilesConfigError(
-            "--rl-optimizer-offload-fraction needs the distributed optimizer; the full-parameter sync "
-            "keeps whole FP32 masters (use a no-sync trainer island)")
+    offload = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0
+    if data_parallel != 1 and builds_trainer:
+        if (gap := full_parameter_dp_replica_gap()) is not None:
+            raise MilesConfigError(f"the full-parameter sync at DP {data_parallel} needs {gap}")
+        if offload:
+            raise MilesConfigError(
+                f"the full-parameter sync at DP {data_parallel} needs a whole FP32 master on every "
+                "data-parallel rank (the non-distributed optimizer): drop --rl-optimizer-offload-fraction")
+        return {"use_distributed_optimizer": False}
+    if offload:
+        if not _miles_reads_distributed_optimizer_masters():
+            raise MilesConfigError(
+                "--rl-optimizer-offload-fraction with the full-parameter sync needs Miles "
+                f"{MILES_DISTOPT_FULL_PARAMETER_COMMIT[:9]} or later (reads distributed-optimizer masters); "
+                f"the pinned image ships {MILES_NEXT_COMMIT[:9]} (or use a no-sync trainer island)")
+        return {}
     return {"use_distributed_optimizer": False}
+
+
+def _miles_reads_distributed_optimizer_masters() -> bool:
+    from yeto.rl.adapters.miles import pins
+
+    return (MILES_DISTOPT_FULL_PARAMETER_COMMIT in pins.MILES_FORK_LINEAGE
+            and MILES_NEXT_COMMIT in miles_fork_lineage_from(MILES_DISTOPT_FULL_PARAMETER_COMMIT))
 
 
 def _resolve_tito_parsers(model: str) -> tuple[str | None, str | None]:

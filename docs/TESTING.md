@@ -59,7 +59,7 @@ fix the side that is wrong.
 |---|---|---|---|---|---|---|
 | 2026-10-09 | s18-fkrt (base fc82f175) | 5055 | 45 | 23 | 0 | 413 s |
 
-The 45 skips name the missing item: codex-cli 0.145.0, an elastic syncer
-binary (`YETO_TEST_ELASTIC_SYNCER`), external adapters (yeto_miles_secrlenv,
+The 45 skips name the missing item: codex-cli 0.145.0, a syncer
+binary (`YETO_TEST_SYNCER`), external adapters (yeto_miles_secrlenv,
 SecRLEnv, CyberGym, swebench), upstream Miles/Megatron/mlx, CUDA, ray (the
 guard self-tests; they pass in a venv with ray), and a trimmed evidence log.

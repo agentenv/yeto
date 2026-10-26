@@ -12,11 +12,6 @@ yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，�
 yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
 #
-# --- harness（A6、A7、R4-R7、R14）
-yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
-yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101
-yeto/rl/harness/codex/tb2_provider.py	modal	# 审计未列（扫描新发现）：:362,368,679 tb2 环境用 Modal 沙箱；云层接口时再定归属
-#
 # --- 奖励与过滤（R1-R3）
 yeto/rl/math_reward.py	miles	# R1 :24 math_utils —— 保留（D9c，运行时 math 奖励需装 Miles）
 yeto/rl/filters.py	miles	# R3 :30 DynamicFilterOutput

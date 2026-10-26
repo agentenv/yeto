@@ -40,6 +40,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.agentic.suspend import is_suspended_ref
 from yeto.rl.engine import recovery
 from yeto.rl.engine.recovery import CUT_KEY, PERIODIC, PREEMPT, ConsistentCut
 from yeto.rl.engine.resume import CheckpointStore
@@ -95,7 +96,7 @@ def write_in_flight(exported: Mapping[str, Any], directory: str | os.PathLike[st
     folder = Path(directory)
     folder.mkdir(parents=True, exist_ok=True)
     entries = list(exported.get("entries") or [])
-    agentic = sum(1 for e in entries if str(e.get("session_ref") or "").startswith("codex-suspended:"))
+    agentic = sum(1 for e in entries if is_suspended_ref(e.get("session_ref")))
     document = {"schema": "yeto.inflight_save/v1", "written_at": time.time(), **dict(exported)}
     if cut is not None:
         document[CUT_KEY] = dict(cut)

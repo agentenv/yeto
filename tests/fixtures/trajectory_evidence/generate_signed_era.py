@@ -22,7 +22,7 @@ os.environ["TBENCH_REWARD_HMAC_KEY"] = "t" * 48
 os.environ.pop("TBENCH_REWARD_HMAC_KEY_FILE", None)
 
 from yeto.rl import tbench_outcome  # noqa: E402
-from yeto.rl.harness.codex import reward  # noqa: E402
+from yeto.rl import secrlenv_outcome as reward  # noqa: E402
 from yeto.rl.trajectory_evidence import (  # noqa: E402
     build_trajectory_batch_evidence,
     write_trajectory_batch_evidence,

@@ -227,6 +227,12 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         def start_rollouter():
             state["future"] = rollouter.fit.remote()
 
+        def seek_rollouter(prompts: int):
+            # S26 E9.2: before fit, in the rollouter actor (fully_async_cut)
+            from .fully_async_cut import skip_rollouter_prompts
+
+            return ray.get(rollouter.__ray_call__.remote(skip_rollouter_prompts, int(prompts)))
+
         def call(name, *args, timeout=None):
             # timeout (s): S19 async5 hung 33 min in a push whose vLLM side had died;
             # a call that does not return in time raises TimeoutError.
@@ -245,7 +251,8 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
 
         try:
             return run_fully_async_island(call, start_rollouter, plan,
-                                          OmegaConf.to_container(config, resolve=True))
+                                          OmegaConf.to_container(config, resolve=True),
+                                          seek_rollouter=seek_rollouter)
         finally:
             if state["future"] is not None:
                 ray.cancel(state["future"])

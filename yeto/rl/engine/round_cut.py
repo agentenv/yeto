@@ -117,6 +117,11 @@ class CutSource:
             settled, token = bool(driver.at_safe_point), driver.expected_token
         if state is None or version is None:
             raise RebuildRefused("no published policy to cut")
+        if getattr(state, "verified", True) is False:
+            # E1: a cut carries the policy's content hash (resume checks it); a round
+            # whose publication was not hashed is never committed as a cut
+            raise RebuildRefused(f"the publication of policy v{version} was not verified "
+                                 "(no content hash); see --rl-verify-every-round")
         cursor = (self.rollout.data_cursor()
                   if callable(getattr(self.rollout, "data_cursor", None)) else None)
         if cursor is None:
@@ -185,6 +190,7 @@ class _PreparedCut:
     context: Any  # CutContext the shards and manifest were written with
     save_s: float
     pending: Any = None  # the trainer's pending cut (start_cut); None: already written
+    guard: Any = None  # the store writer guard held since its first shard (_hold_writer)
 
     def matches(self, rollout_id: int, context: Any) -> bool:
         """The safe point's own context names the same cut: same id, progress
@@ -208,18 +214,20 @@ class RoundCutCheckpoint:
 
     def __init__(self, *, controller: Any, source: Any, trainer: Any, every: int = 1,
                  fingerprint: dict[str, Any] | None = None, allow_config_change: bool = False,
-                 next_lr: Any = None, background_commit: bool | None = None) -> None:
+                 next_lr: Any = None, background_commit: bool | None = None,
+                 interval: Any = None) -> None:
+        from .cut_interval import FixedCutInterval
+
         if getattr(controller, "checkpoint_store", None) is None:
             raise ValueError("round cuts need the checkpoint store")
-        if int(every) < 1:
-            raise ValueError("--rl-cut-every must be >= 1")
+        # S27 R-2: when a cut is due (cut_interval: every N rounds, or by wall time)
+        self.interval = FixedCutInterval(every) if interval is None else interval
         self.controller = controller
         self.source = source  # rebuild_wiring.CutSource (cut_root is set here)
         self.trainer = trainer  # MilesTrainerGroup: save_cut / restore_cut / actual_layout
         self.root = str(Path(controller.checkpoint_store) / ROUND_CUTS)
         source.cut_root = self.root
         self.resumed: dict[str, Any] | None = None
-        self.every = int(every)
         self.fingerprint = dict(fingerprint) if fingerprint is not None else None
         self.allow_config_change = bool(allow_config_change)
         self.next_lr = next_lr  # callable(driver) -> list[float] | None
@@ -300,10 +308,20 @@ class RoundCutCheckpoint:
         return len(groups), consumed_digest(groups)
 
     # ---------------------------------------------------------------- save
-    def due(self, rollout_id: int, *, final: bool = False) -> bool:
-        from yeto.rl.engine.resume import should_cut
+    @property
+    def every(self) -> int:
+        """Rounds between cuts (fixed, or the last observed gap of a timed interval);
+        the publication checks follow it (``driver.verify_publication``)."""
+        return int(self.interval.every)
 
-        return should_cut(int(rollout_id), every=self.every, final=final)
+    @every.setter
+    def every(self, every: int) -> None:
+        from .cut_interval import FixedCutInterval
+
+        self.interval = FixedCutInterval(every)
+
+    def due(self, rollout_id: int, *, final: bool = False) -> bool:
+        return self.interval.due(int(rollout_id), final=final)
 
     def _skip(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
         """No cut at this safe point: not due, island RECOVERY_REQUIRED, or just
@@ -321,6 +339,12 @@ class RoundCutCheckpoint:
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
         if background and callable(start):
+            if self.pointer() is None:
+                # the store's first cut: until its LATEST is committed the store holds a
+                # cut and no LATEST; the mark lets a restart drop it and start at 0
+                from yeto.rl.engine.resume import mark_first_cut
+
+                mark_first_cut(self.controller.checkpoint_store, context.cut_id)
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
@@ -346,13 +370,30 @@ class RoundCutCheckpoint:
             raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
         self.join_commit(driver, wait=False)  # the previous cut is complete before this one starts
         cut_id = self._cut_id(rollout_id)
-        self._drop_unpointed(cut_id)
-        started = time.monotonic()
-        context = self.source.context(cut_id, pending=(int(rollout_id), state))
-        pending = self._start(context, background=self._defer(final))
+        guard = self._hold_writer()
+        try:
+            self._drop_unpointed(cut_id)
+            started = time.monotonic()
+            context = self.source.context(cut_id, pending=(int(rollout_id), state))
+            pending = self._start(context, background=self._defer(final))
+        except BaseException:
+            guard.release()
+            raise
         self._prepared = _PreparedCut(rollout_id=int(rollout_id), context=context,
-                                      save_s=time.monotonic() - started, pending=pending)
+                                      save_s=time.monotonic() - started, pending=pending, guard=guard)
         return True
+
+    def _hold_writer(self) -> Any:
+        """Hold the store's writer guard from a cut's first shard to its store
+        commit: on a Modal Volume a reload in between remounts the Volume and
+        drops the uncommitted files (seen as EPERM on makedirs of the store
+        directory, which killed the trainer cell)."""
+        hold = getattr(self.controller.store, "hold_writer", None)
+        if callable(hold):
+            return hold()
+        from yeto.rl.engine.resume import StoreWriterGuard
+
+        return StoreWriterGuard()
 
     def _commit_busy(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
         """E1: a periodic cut is skipped while the previous cut's store commit still
@@ -388,11 +429,11 @@ class RoundCutCheckpoint:
     def _defer(self, final: bool) -> bool:
         """Write the trainer shards and commit the store in the background: periodic
         cuts only (the final cut is complete when the run ends), and not when a sample
-        buffer commits the same store during the round (no two commits at once), and
-        not before the first cut of the store is committed (a store holding cuts but
-        no LATEST refuses to start)."""
-        return (self.background_commit and not final and self.buffer_watermark is None
-                and self.pointer() is not None)
+        buffer commits the same store during the round (no two commits at once). The
+        store's first cut is deferred too (E1: with ``--rl-cut-every`` N > 1 it falls in
+        the steady rounds); :meth:`_start` marks it first, since a store holding cuts but
+        no LATEST refuses to start unless they are all such marked first cuts."""
+        return self.background_commit and not final and self.buffer_watermark is None
 
     def _drop_unpointed(self, cut_id: str) -> None:
         import shutil
@@ -461,6 +502,7 @@ class RoundCutCheckpoint:
         except Exception as error:  # noqa: BLE001 - the previous cut stays the pointed one
             self._drop_unpointed(info["cut_id"])
             self._unstage(deferred.get("staged"))
+            deferred["guard"].release()
             return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
                     "error": repr(error)[:2000]}
         self._commit_in_background(deferred, commit_manifest)
@@ -505,12 +547,30 @@ class RoundCutCheckpoint:
                 return
             box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
 
-        thread = threading.Thread(target=run, name=f"yeto-cut-commit-{cut_id}", daemon=True)
+        def run_held() -> None:
+            try:
+                run()
+            finally:  # committed, or failed and dropped: nothing uncommitted is left
+                deferred["guard"].release()
+
+        thread = threading.Thread(target=run_held, name=f"yeto-cut-commit-{cut_id}", daemon=True)
         self._commit = (thread, box)
         thread.start()
 
     def save(self, driver: Any, *, rollout_id: int, final: bool = False,
              trigger: str | None = None) -> dict[str, Any] | None:
+        """:meth:`_save`, and the cut's critical-path seconds handed to the interval
+        (a timed interval sizes the next gap from them)."""
+        info = self._save(driver, rollout_id=rollout_id, final=final, trigger=trigger)
+        if info is not None:
+            cost = float(info.get("total_s") or 0.0)
+            if info.get("prepared_before_offload"):
+                cost += float(info.get("save_s") or 0.0)  # taken before the safe point
+            self.interval.record_cut(int(rollout_id), cost_s=cost)
+        return info
+
+    def _save(self, driver: Any, *, rollout_id: int, final: bool = False,
+              trigger: str | None = None) -> dict[str, Any] | None:
         """Cut the trainer at the safe point before rollout ``rollout_id`` (= the published
         version), point the state dir at it, sync the store. Returns the pointer, or None
         when nothing was cut (not due, no publication yet, already cut at this rollout,
@@ -526,11 +586,8 @@ class RoundCutCheckpoint:
         a stop the trainer scheduler ordered); a periodic cut takes none."""
         import time
 
-        from yeto.rl.engine.resume import directory_bytes
-
         if trigger is not None and (not final or trigger not in FINAL_TRIGGERS):
             raise RoundCutError(f"cut trigger {trigger!r} needs final=True and one of {FINAL_TRIGGERS}")
-        ctl = self.controller
         prepared, self._prepared = self._prepared, None
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             self._abandon(prepared)
@@ -551,14 +608,39 @@ class RoundCutCheckpoint:
         self.join_commit(driver, wait=final)  # the final cut leaves nothing running
         started = time.monotonic()
         context = self.source.context(self._cut_id(rollout_id))
-        progress = context.progress
-        offloaded = False
         defer = self._defer(final)
         used_prepared = prepared is not None and prepared.matches(int(rollout_id), context)
         if used_prepared:
-            save_s, pending = prepared.save_s, prepared.pending  # taken before the trainer offloaded
+            guard = prepared.guard
+            taken = (prepared.save_s, prepared.pending)  # taken before the trainer offloaded
         else:
             self._abandon(prepared)
+            guard, taken = self._hold_writer(), None
+        try:
+            return self._save_held(driver, rollout_id=rollout_id, final=final, trigger=trigger,
+                                   context=context, started=started, defer=defer, guard=guard,
+                                   prepared=taken)
+        except BaseException:
+            guard.release()
+            raise
+
+    def _save_held(self, driver: Any, *, rollout_id: int, final: bool, trigger: str | None,
+                   context: Any, started: float, defer: bool, guard: Any,
+                   prepared: tuple[float, Any] | None) -> dict[str, Any]:
+        """:meth:`_save` from the trainer cut on, under the store writer
+        ``guard``: released here for an inline cut, by the background commit for
+        a deferred one, and by the caller when this raises."""
+        import time
+
+        from yeto.rl.engine.resume import directory_bytes
+
+        ctl = self.controller
+        progress = context.progress
+        offloaded = False
+        used_prepared = prepared is not None
+        if used_prepared:
+            save_s, pending = prepared
+        else:
             # a failed prepare or an earlier attempt left files under this id; no pointer
             # names them (_skip), and cuts are immutable: drop them
             self._drop_unpointed(context.cut_id)
@@ -610,12 +692,13 @@ class RoundCutCheckpoint:
             # in the background after later rounds have changed it
             staged = self._stage(cut_id)
             self._deferred = {"info": info, "cut": cut, "pending": pending, "rollout_id": int(rollout_id),
-                              "staged": staged}
+                              "staged": staged, "guard": guard}
             return {**info, **extra, "store_commit": "deferred", "store_synced": None,
                     "total_s": round(time.monotonic() - started, 3)}
         if pending is not None:
             self.trainer.finish_cut(pending)
         saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
+        guard.release()  # the store sync committed (or failed): nothing uncommitted is left
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
@@ -643,12 +726,16 @@ class RoundCutCheckpoint:
         """A prepared cut the safe point does not keep: wait for its writer, drop its files."""
         if prepared is None:
             return
-        if prepared.pending is not None:
-            try:
-                self.trainer.finish_cut(prepared.pending)
-            except Exception:  # noqa: BLE001 - dropped below either way
-                pass
-        self._drop_unpointed(prepared.context.cut_id)
+        try:
+            if prepared.pending is not None:
+                try:
+                    self.trainer.finish_cut(prepared.pending)
+                except Exception:  # noqa: BLE001 - dropped below either way
+                    pass
+            self._drop_unpointed(prepared.context.cut_id)
+        finally:
+            if prepared.guard is not None:
+                prepared.guard.release()
 
     def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any], *,
                         defer: bool = False, staged: Path | None = None) -> dict[str, Any]:
@@ -830,11 +917,13 @@ def _cut_data_cursor(manifest: Any) -> dict[str, int] | None:
 
 
 def wire_round_cuts(driver: Any, *, controller: Any, source: Any, **options: Any) -> RoundCutCheckpoint | None:
-    """Give a :class:`~..bridges.LocalOnlySync` driver round cuts when a checkpoint store is
-    configured (other syncs own the policy: their syncer is authoritative)."""
-    from .bridges import LocalOnlySync
+    """Give a driver round cuts when a checkpoint store is configured and its sync
+    takes them (:class:`~.bridges.RoundCutHooks`): :class:`~.bridges.LocalOnlySync`
+    resumes from them; a synced island (S27 R-2) only writes them, its syncer stays
+    authoritative for the policy at start."""
+    from .bridges import RoundCutHooks
 
-    if getattr(controller, "checkpoint_store", None) is None or not isinstance(driver.sync, LocalOnlySync):
+    if getattr(controller, "checkpoint_store", None) is None or not isinstance(driver.sync, RoundCutHooks):
         return None
     checkpoint = RoundCutCheckpoint(controller=controller, source=source, trainer=driver.trainer, **options)
     driver.sync.round_cuts = checkpoint

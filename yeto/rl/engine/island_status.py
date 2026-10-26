@@ -1,10 +1,11 @@
-"""Read the elastic syncer's status snapshot (rl-inter-island-scheduling 0.17/0.18).
+"""Read the syncer's island-pool status snapshot (rl-inter-island-scheduling 0.17/0.18).
 
-The Rust syncer in elastic mode writes ``status.json`` next to ``--event-tape``
-(schema ``yeto.syncer.elastic-status/v1``, see syncer/src/elastic.rs
-``status_json``). This module only reads it: a missing file, unparsable JSON or
-a different schema gives ``None`` -- callers then leave scheduling fields
-``None`` (never estimated). Legacy mode never calls into here.
+With island pool options the Rust syncer writes ``status.json`` next to
+``--event-tape`` (schema ``yeto.syncer.elastic-status/v1``, see
+syncer/src/server.rs ``write_pool_status``). This module only reads it: a
+missing file, unparsable JSON or a different schema gives ``None`` -- callers
+then leave scheduling fields ``None`` (never estimated). A fixed roster never
+calls into here.
 """
 
 from __future__ import annotations

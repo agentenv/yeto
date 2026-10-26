@@ -301,13 +301,13 @@ class ReclaimWatcher:
     30 s), while the island's loop may still be inside a round."""
 
     def __init__(self, reclaimed: Callable[[], bool], on_reclaim: Callable[[], Any], *,
-                 poll_s: float = 0.5) -> None:
+                 poll_s: float = 0.5, name: str = "sampler-reclaim-watcher") -> None:
         self.reclaimed = reclaimed
         self.on_reclaim = on_reclaim
         self.poll_s = float(poll_s)
         self._stop = threading.Event()
         self.fired = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="sampler-reclaim-watcher", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> "ReclaimWatcher":
         self._thread.start()

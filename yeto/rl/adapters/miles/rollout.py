@@ -150,8 +150,10 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
 def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, int] | None:
     """Runs INSIDE the rollout executor actor (``__ray_call__``): move its data
     source to ``cursor`` the way Miles' ``RolloutDataSource.load`` would (the
-    same four fields; re-shuffle for the cursor's epoch when the source
-    shuffles per epoch) and return the cursor it reports afterwards."""
+    same four fields; re-order the rows for the cursor's epoch when the source
+    shuffles per epoch or follows the pass order of ``data_passes``) and return
+    the cursor it reports afterwards."""
+    from .data_passes import order_for_epoch
     from .rollout_meta_hook import _CURSOR_FIELDS
     from .rollout_meta_hook import data_cursor as read_cursor
 
@@ -167,9 +169,10 @@ def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, 
         setattr(source, name, int(cursor[name]))
     args = getattr(source, "args", None)
     dataset = getattr(source, "dataset", None)
-    if (dataset is not None and getattr(args, "rollout_shuffle", False)
-            and int(cursor["epoch_id"]) != previous_epoch):
-        dataset.shuffle(int(cursor["epoch_id"]))
+    epoch = int(cursor["epoch_id"])
+    if dataset is not None and epoch != previous_epoch and not order_for_epoch(source, epoch):
+        if getattr(args, "rollout_shuffle", False):
+            dataset.shuffle(epoch)
     return read_cursor(source)[0]
 
 
@@ -523,6 +526,7 @@ def handle_from_metadata(
         trajectory_rewards=(
             tuple(payload["trajectory_rewards"]) if payload.get("trajectory_rewards") else None
         ),
+        round_data_rows=payload.get("round_data_rows") or None,
         carry_over=_carry_over_fields(payload),
         cross_version_truncated_fraction=(
             float(payload["cross_version_truncated_fraction"])
@@ -680,6 +684,9 @@ class MilesRolloutPool:
         self._args = args
         self._fully_async = bool(getattr(args, "fully_async", False))
         self._prompt_ledger_installed = False
+        # S27 task assignment: an island with a data slot reshuffles every later pass
+        # over its rows (data_passes); installed in the executor before the first draw
+        self._data_passes_pending = bool(getattr(args, "yeto_rl_data_slot", None))
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
@@ -782,6 +789,8 @@ class MilesRolloutPool:
         (same targets as ``live_data_cursor``); returns the cursor read back
         there, None = unknown (the driver then refuses to train)."""
         wanted = {k: int(v) for k, v in dict(cursor).items()}
+        if getattr(self, "_data_passes_pending", False):
+            self._install_data_passes()  # the seek then orders the rows of the cursor's pass
         kind, target = _executor_target(self._executor)
         if kind == "local":
             return seek_executor_cursor(SimpleNamespace(data_source=target), wanted)
@@ -796,19 +805,45 @@ class MilesRolloutPool:
         self._last_cursor = None if landed is None else dict(landed)
         return None if landed is None else dict(landed)
 
+    def _install_data_passes(self) -> None:
+        """Once, before the first draw or seek (``data_passes`` module doc)."""
+        if not self._data_passes_pending:
+            return
+        from .data_passes import install
+
+        self._in_executor(install, seed=int(getattr(self._args, "seed", 0) or 0))
+        self._data_passes_pending = False
+
     def _in_executor(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
         """Run ``fn(executor, ...)`` inside the rollout executor's process (same
         targets as ``live_data_cursor``); raises when it cannot."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+
+    def _in_executor_from_thread(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
+        """:meth:`_in_executor` for a thread other than the driver's: it waits on the
+        Ray reference itself instead of the driver's event loop (which may be running)."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        import ray
+
+        return ray.get(remote(fn, *fn_args, **fn_kwargs))
+
+    def _executor_call(self) -> tuple[Any, Any]:
+        """(local executor view, None) or (None, the actor's ``__ray_call__.remote``)."""
         kind, target = _executor_target(self._executor)
         if kind == "local":
-            return fn(SimpleNamespace(data_source=target), *fn_args, **fn_kwargs)
+            return SimpleNamespace(data_source=target), None
         if kind != "ray":
             raise RuntimeError("rollout executor %s is neither a local executor nor a Ray "
                                "actor (handle)" % type(self._executor).__name__)
         remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
         if not callable(remote):
             raise RuntimeError("Ray actor handle %s has no __ray_call__" % type(target).__name__)
-        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+        return None, remote
 
     def late_cross_version_fraction(self, rollout_id: int) -> float | None:
         """E1: the deferred cross-version IS estimate of ``rollout_id`` (fully_async),
@@ -866,6 +901,7 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
             setter(token)
+        self._install_data_passes()
         if self._fully_async and not self._prompt_ledger_installed:
             # P0-S: account for the prompts the background worker draws
             from .fully_async_prompts import install as install_prompt_ledger

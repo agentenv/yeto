@@ -79,7 +79,7 @@ def upstream_add_arguments(monkeypatch):
 def _agent_argv() -> list[str]:
     c = sub(make_config(), "agent",
             custom_generate_function_path=cfg.AGENTIC_TOOL_CALL_GENERATE,
-            custom_agent_function_path="yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
+            custom_agent_function_path="yeto.rl.adapters.miles.harbor_agent.run",
             agent_max_seq_len=8192, use_session_server=True, tito_model="qwen35")
     return list(cfg.translate_run_config(c, AlgorithmSpec(), tito_parser_resolver=lambda m: ("qwen3", "qwen")).argv)
 
@@ -93,7 +93,7 @@ def test_pinned_add_arguments_recognises_the_ir1_flags(upstream_add_arguments):
     agent_flags = argv[i:i + 2] + argv[j:j + 2]
     ns, unknown = parser.parse_known_args(agent_flags)
     assert unknown == []
-    assert ns.custom_agent_function_path == "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run"
+    assert ns.custom_agent_function_path == "yeto.rl.adapters.miles.harbor_agent.run"
     assert ns.max_seq_len == 8192
     # The launcher-level spelling (--agent-max-seq-len) is NOT an upstream flag:
     # config.py must keep mapping agent_max_seq_len to --max-seq-len.

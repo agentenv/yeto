@@ -11,7 +11,14 @@ import shlex
 
 import pytest
 
-from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
+from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
+from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
+
+
+def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
+    """These tests pin the strict control (--rl-sync-mode strict); the async
+    defaults are covered in test_rl_sync_mode.py."""
+    return _provenance_launcher_args(engine, ("--rl-sync-mode", "strict", *extra), gpu=gpu)
 
 LAYOUT = "e" * 64
 TWO_ISLANDS = "modal:2xh100,modal:2xh100"
@@ -88,7 +95,7 @@ def test_lora_island_command_is_unchanged():
         (("--rl-placement", "colocated"), "fixed-partition"),
         (("--rl-parameter-layout-sha256", "nope"), "rl-parameter-layout-sha256"),
         (("--local-rl-rounds-per-sync", "2"), "H=1"),
-        (("--rl-island-scheduling", "elastic"), "elastic"),
+        (("--rl-sync-island-lease-s", "30"), "membership options need --rl-sync-full-parameter-rounds async"),
     ],
 )
 def test_dense_full_refusals(extra, message, monkeypatch):
@@ -130,27 +137,6 @@ def test_island_entry_accepts_the_dense_island_command():
     assert (parsed.parameter_mode, parsed.sync_preset) == ("full", "full-parameter")
     assert (parsed.num_learners, parsed.learner_id) == (2, 1)
     island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
-
-
-@pytest.mark.parametrize(
-    ("reward_function", "kind"),
-    (
-        ("yeto.rl.harness.codex.reward:reward_func", "secrlenv"),
-        ("yeto.rl.gsm8k_reward:score", "reward-function"),
-        ("yeto.rl.math_reward:reward_func", "reward-function"),
-    ),
-)
-def test_dense_island_evidence_kind_follows_its_reward_function(reward_function, kind):
-    from types import SimpleNamespace
-
-    from yeto.rl.adapters.miles import island_entry
-    from yeto.rl.trajectory_evidence import EVIDENCE_KINDS
-
-    chosen = island_entry._trajectory_evidence_kind(
-        SimpleNamespace(reward_function=reward_function)
-    )
-    assert chosen == kind
-    assert chosen in EVIDENCE_KINDS
 
 
 EXPERT_FULL = (

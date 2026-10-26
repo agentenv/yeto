@@ -23,9 +23,14 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+
+from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
 from . import run_config_rules
@@ -64,9 +69,9 @@ def parse_args(argv):
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
     p.add_argument("--rl-algorithm-spec", default=None)
-    p.add_argument("--rl-island-scheduling", default="legacy")
+    p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
-    p.add_argument("--rl-island-lease-s", type=float, default=None)
+    p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
     # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
@@ -75,6 +80,15 @@ def parse_args(argv):
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
+    # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
+    # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
+    p.add_argument("--rl-sampler-node", default=None)
+    p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
+    p.add_argument("--rl-sampler-data-slot", default=None)
+    # S27 task assignment: this training island's row slot of --data (data_split)
+    p.add_argument("--rl-data-slot", default=None)
+    p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
+    p.add_argument("--rl-sampler-min-round-seconds", type=float, default=None)
     # S25 C3: a synced trainer island (syncer, learner m of N) reads lane m of the
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
@@ -85,6 +99,8 @@ def parse_args(argv):
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
+    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
+    p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -195,9 +211,16 @@ def _threshold_card(manifest: dict) -> str:
     return "H100" if "H100" in smi else smi
 
 
-def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64) -> tuple[str, str]:
+def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
+                 slot: Any = None) -> tuple[str, str]:
+    """``data``'s train and test splits as verl parquet files. ``slot``
+    (``data_split.DataSlot``, S27 task assignment): the train file keeps only the
+    slot's rows, in data order, each with its row number in the unsplit data as
+    ``extra_info["yeto_data_row"]``; the validation rows stay whole."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
+
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
 
     root.mkdir(parents=True, exist_ok=True)
     out = {}
@@ -213,10 +236,27 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
+        elif slot is not None and not slot.whole:
+            rows = [{**row, "extra_info": {**row["extra_info"], DATA_ROW_KEY: number}}
+                    for number, row in slot.numbered(rows)]
         path = root / f"{split}.parquet"
         pd.DataFrame(rows).to_parquet(path)
         out[split] = str(path)
     return out["train"], out["test"]
+
+
+def island_data_slot(args: Any) -> Any:
+    """The training island's ``--rl-data-slot`` (``data_split.DataSlot``), None when
+    it reads every row; refused on a sampler island (it reads
+    ``--rl-sampler-data-slot``)."""
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.data_split import DataSlot
+
+    if not getattr(args, "rl_data_slot", None):
+        return None
+    if sample_roles.sample_role(args) != sample_roles.BOTH:
+        raise SystemExit("--rl-data-slot belongs to a training island that generates and trains")
+    return DataSlot.parse(args.rl_data_slot)
 
 
 MIN_RAY_CPUS = 32  # logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
@@ -230,6 +270,16 @@ def _ray_resources(address: str) -> dict:
         if line.startswith("YETO_RAY_RES "):
             return json.loads(line[len("YETO_RAY_RES "):])
     return {}
+
+
+def island_gpus(ray_info: Mapping[str, Any]) -> int:
+    """GPUs of this single-node island: the island-local Ray's ``GPU`` resource
+    (the launcher starts it with every card of the container), else 1.
+
+    S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
+    trained on one rank (e9-g3-a); every card now joins the FSDP2 group."""
+    resources = ray_info.get("after") or ray_info.get("before") or {}
+    return max(1, int(resources.get("GPU", 0)))
 
 
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
@@ -291,6 +341,15 @@ def main(argv=None) -> int:
     if manifest["problems"]:
         print(f"[yeto-verl] runtime check failed: {manifest['problems']}", file=sys.stderr, flush=True)
         return 2
+    from yeto.rl.engine import sample_roles
+
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:  # S26 E9.4: no verl trainer here
+        from .sampler_entry import SamplerIslandError, run_sampler_island
+
+        try:
+            return run_sampler_island(args, manifest=manifest, card=_threshold_card(manifest), output=OUTPUT)
+        except SamplerIslandError as error:  # the island flags are incomplete
+            raise SystemExit(str(error)) from None
 
     ray_info = ensure_ray_cpus()
     (OUTPUT / f"verl-ray-{lid}.json").write_text(json.dumps(ray_info, indent=1))
@@ -303,7 +362,8 @@ def main(argv=None) -> int:
 
     model_path = snapshot_download(args.model, revision=args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
-    train_file, val_file = prepare_data(args.data, args.data_revision, work / "data")
+    train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
+                                        slot=island_data_slot(args))
     spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
@@ -320,17 +380,18 @@ def main(argv=None) -> int:
         # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
         tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
         gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
+        max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
-        experiment_name=f"yeto-verl-{lid}")
+        n_gpus=island_gpus(ray_info), experiment_name=f"yeto-verl-{lid}")
     overrides = vconf.build_overrides(run) + [
         "actor_rollout_ref.rollout.agent.num_workers=2",
         "reward.num_workers=2",
     ]
     if args.rl_single_island_no_sync:
         sync = "none"
-    elif args.rl_island_scheduling == "elastic":
-        sync = "elastic"
+    elif args.rl_island_pool:
+        sync = "pool"
     else:
         sync = "strict"
     if sync != "none" and not args.syncer:
@@ -342,6 +403,9 @@ def main(argv=None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
+    quant_overrides, quant_summary = rollout_quant_overrides(
+        args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
+    overrides += quant_overrides
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
         append_correction_record(args, spec_dict)
@@ -362,14 +426,16 @@ def main(argv=None) -> int:
         "bcast_delta": bool(args.bcast_delta),
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
                            _threshold_card(manifest)],
-        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_island_lease_s,
+        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
+        "data_slot": args.rl_data_slot,  # S27 task assignment (rl_driver_start)
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),
         "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
+        "rollout_quant": quant_summary,
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))
@@ -389,15 +455,51 @@ def main(argv=None) -> int:
     cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
-    with log.open("a") as handle:
-        proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            handle.write(line)
-        code = proc.wait()
+    stop_releaser = threading.Event()
+    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # S26 E6 tier 2: BF16 releases -> FP8 releases
+        start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
+    try:
+        with log.open("a") as handle:
+            proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                handle.write(line)
+            code = proc.wait()
+    finally:
+        stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:
+    """S26 E6: rollout quantization on a verl island; returns the vLLM overrides (none) and
+    the plan record. Tier 1 on a colocated island is refused before verl starts
+    (``tiers.VERL_TIER1_REFUSAL``: LoRA syncs never re-quantize the base). On a buffer
+    trainer the rollout runs on the sampler island, so nothing is added; tier 2 starts
+    the releaser instead. ``model_path`` is kept for the tier 1 plan once a full-parameter
+    verl path exists (``tiers.vllm_online_overrides``)."""
+    from yeto.rl.quant import tiers
+
+    summary: dict = {"tier": tier, "name": tiers.TIER_NAMES[tier]}
+    if tier == tiers.TIER_ONLINE_FP8 and colocated:
+        raise SystemExit(f"[yeto-verl] {tiers.VERL_TIER1_REFUSAL}")
+    return [], summary
+
+
+def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template_dir: Path,
+                           stop: threading.Event) -> threading.Thread:
+    """S26 E6 tier 2 on a buffer trainer: convert every BF16 release of the store into an
+    FP8 release (``yeto.rl.quant.release.scoped_releaser``) in a thread of this process."""
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
+    from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
+
+    if not buffer_section:
+        raise SystemExit("--rl-rollout-quant-tier 2 needs --rl-sample-role trainer on a verl island")
+    store = store_for(buffer_section.get("release_store") or buffer_section["store"])
+    releaser = scoped_releaser(store, base_dir, template_dir, FP8_FFN_CHANNEL)
+    return start_scoped_releaser(releaser, stop)
 
 
 def sample_buffer_section(args) -> dict | None:
@@ -409,9 +511,11 @@ def sample_buffer_section(args) -> dict | None:
     role = sample_roles.sample_role(args)
     if role == sample_roles.BOTH:
         return None
+    if role == sample_roles.SAMPLER:
+        return None  # main() runs the engine sampler (.sampler_entry) instead of verl
     if role != sample_roles.TRAINER:
-        raise SystemExit(f"--rl-sample-role {role}: a verl island only trains from the buffer; "
-                         "run the sampler as the engine sampler island (yeto.rl.engine.engine_sampler)")
+        raise SystemExit(f"--rl-sample-role {role}: a verl island trains from the buffer or "
+                         "runs the engine sampler (role sampler)")
     if int(args.rl_max_policy_age or 0) < 1:
         raise SystemExit("--rl-sample-role trainer needs --rl-max-policy-age >= 1 (the fully_async path)")
     try:
@@ -420,7 +524,8 @@ def sample_buffer_section(args) -> dict | None:
     except ValueError as error:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
-    return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env()}
+    return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
+            **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):

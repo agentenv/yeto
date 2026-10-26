@@ -17,7 +17,7 @@ import pytest
 
 from yeto import runs
 from yeto.launch import trainer_loop as launch_loop
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine.journal import Journal
 from yeto.rl.engine.trainer_lifecycle import (
     BacklogStats,

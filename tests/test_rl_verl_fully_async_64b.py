@@ -57,6 +57,11 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert not any(o.startswith(("trainer.use_v1=", "trainer.v1.trainer_mode=")) for o in out)
     assert sum(o.startswith("trainer.n_gpus_per_node=") for o in out) == 1
     assert "actor_rollout_ref.actor.ppo_mini_batch_size=8" in out  # require_batches * 8 = one round
+    assert not any("multi_turn" in o for o in out)  # no agent loop configured
+    agentic = far.fully_async_run_overrides(
+        [*sync, "actor_rollout_ref.rollout.agent.agent_loop_config_path=/x/loops.yaml"], 1,
+        groups_per_round=8, rounds=5)
+    assert "actor_rollout_ref.rollout.multi_turn.enable=True" in agentic
     with pytest.raises(PolicyAgeError):
         far.fully_async_run_overrides(sync, 0, groups_per_round=8, rounds=5)
     # sync path at limit 0 unchanged (6.3)

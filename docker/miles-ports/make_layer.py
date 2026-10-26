@@ -47,7 +47,10 @@ SITE = "opt/sglang/lib/python3.12/site-packages"
 # editable-installed packages (plus tests/docs).  Anything else -- setup.py,
 # pyproject.toml, setup.cfg, requirements*, sgl-kernel/**, rust/**, csrc,
 # .cu/.cpp -- changes what a real install builds and needs a docker build.
-EXEMPT_PREFIXES = ("test/", "tests/", "docs/")
+# Not installed and not imported by the package: tests, docs, and standalone
+# scripts under tools/ (e.g. Miles tools/convert_hf_to_fp8.py), which the
+# layer still ships as plain files in the archived tree.
+EXEMPT_PREFIXES = ("test/", "tests/", "docs/", "tools/")
 # Megatron-Bridge as the base installs it (pip, not editable) and the file the
 # layer writes over its package __init__ (see megatron_bridge_init.py).
 MEGATRON_BRIDGE_COMMIT = "8cd3466d14d2337c8492827b3712482c2b3e4866"
@@ -173,7 +176,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
 
-    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, ("miles/", "miles_plugins/"))
+    # tools/: stand-alone scripts run from the checkout (e.g. convert_hf_to_fp8.py), nothing built
+    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, ("miles/", "miles_plugins/", "tools/"))
     check_pure_python(a.sglang_src, a.sglang_base_commit, a.sglang_commit, ("python/sglang/",))
 
     entries: dict[str, tuple[str, bytes | None, int, str | None]] = {}

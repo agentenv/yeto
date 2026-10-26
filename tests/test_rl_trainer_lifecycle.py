@@ -9,7 +9,7 @@ import pytest
 import torch
 from test_rl_engine_driver import NAME, PROFILE, _driver
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine import recovery
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import RoundFailedError

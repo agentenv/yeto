@@ -13,6 +13,15 @@ to run inside it.  A boat sandbox is a VM with Docker, so this class:
 5. deletes the VM in :meth:`close`.  :meth:`close` is idempotent and also runs
    when :meth:`start` fails, so a failed or cancelled trial leaves no VM.
 
+S26 E8: :attr:`BoatSandbox.timings` records how long each start phase took
+(``create_s``, ``ready_s``, ``pull_s``, ``run_s``), and a started VM can be
+reused for the next task (:meth:`BoatSandbox.recycle` then
+:meth:`BoatSandbox.reuse`, driven by :class:`~.boat_pool.BoatSandboxPool`).
+With a :class:`CodexCache`, the pinned Codex build is fetched once per VM
+(checksum-checked, in parallel with the image pull), mounted read-only into
+the task container and put on its PATH as ``codex``; Harbor's codex agent
+then finds the pinned version and skips its own install (apt + nvm + npm).
+
 The boat client is synchronous; calls run in a worker thread.
 """
 
@@ -23,6 +32,7 @@ import contextlib
 import io
 import logging
 import shlex
+import time
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -65,6 +75,122 @@ class ContainerSpec:
 
 
 @dataclass(frozen=True)
+class CodexCache:
+    """A Codex build plus a Node build kept on the VM, mounted at :data:`CODEX_MOUNT`.
+
+    Layout: the Codex npm package at the root, the wrapper at ``bin/codex``,
+    Node (official linux-x64 tarball) under ``node/``.
+    """
+
+    version: str
+    url: str
+    sha512: str
+    node_version: str
+    node_url: str
+    node_sha256: str
+
+    @property
+    def host_dir(self) -> str:
+        return f"{CODEX_CACHE_ROOT}/{self.version}-node{self.node_version}"
+
+    def fetch_command(self) -> str:
+        """VM shell line: fetch, check and unpack the build once (atomic rename); exit 0 when ready."""
+        d = shlex.quote(self.host_dir)
+        musl = f"{CODEX_MOUNT}/vendor/x86_64-unknown-linux-musl"
+        wrapper = (f"#!/bin/sh\nPATH=\"{musl}/codex-path:$PATH\"\nexport PATH\n"
+                   f"exec {musl}/bin/codex \"$@\"\n")
+        return (
+            f"[ \"$(uname -m)\" = x86_64 ] && {{ [ -x {d}/bin/codex ] || {{ "
+            f"t=$(mktemp -d) && curl -fsSL --retry 3 -o $t/c.tgz {shlex.quote(self.url)} && "
+            f"echo {shlex.quote(self.sha512)}\"  $t/c.tgz\" | sha512sum -c --quiet && "
+            f"curl -fsSL --retry 3 -o $t/n.tgz {shlex.quote(self.node_url)} && "
+            f"echo {shlex.quote(self.node_sha256)}\"  $t/n.tgz\" | sha256sum -c --quiet && "
+            f"sudo -n mkdir -p $t/x/bin $t/x/node && sudo -n tar -xzf $t/c.tgz -C $t/x --strip-components=1 && "
+            f"sudo -n tar -xzf $t/n.tgz -C $t/x/node --strip-components=1 && "
+            f"printf {shlex.quote(wrapper)} | sudo -n tee $t/x/bin/codex >/dev/null && "
+            f"sudo -n chmod -R a+rX $t/x && sudo -n chmod 755 $t/x/bin/codex && "
+            f"sudo -n mkdir -p {CODEX_CACHE_ROOT} && sudo -n mv -T $t/x {d}; "
+            f"rc=$?; sudo -n rm -rf $t; [ $rc = 0 ]; }}; }}"
+        )
+
+
+# On a cache hit the container must end up with the same commands, in the same
+# places, as Harbor's own codex install (agents/installed/codex.py).  Measured
+# on boat (SESSION26/logs/E8/tools-compare-merge2.jsonl): on glibc images
+# Harbor leaves curl and ripgrep on the plain PATH (what a verifier's test.sh
+# sees), while node, npm and codex live only under ``~/.nvm`` and are on PATH
+# only after ``. ~/.nvm/nvm.sh`` (what Harbor's codex run does).  Harbor's
+# root symlink step finds nothing because root's shell never loads nvm.
+#
+# Step 1, CODEX_CACHE_SETUP, as root:
+# * rg: from the Codex bundle, when the image lacks it;
+# * curl: installed the way Harbor installs it, when the image lacks it;
+# * musl (Alpine): ``apk add nodejs npm`` as Harbor does, and codex on the
+#   plain PATH (Harbor's ``npm install -g`` puts it there);
+# * glibc: only check that the cached Node runs (the image's glibc may be too old).
+# It prints ``yeto-libc=musl`` or ``yeto-libc=glibc`` last.
+# Step 2, CODEX_CACHE_NVM (glibc only), as the task's default user: a minimal
+# ``~/.nvm`` whose nvm.sh puts the cached node, npm, npx and codex on PATH.
+# Either step failing leaves no codex reachable, so Harbor's version probe
+# misses and it runs its full install.
+_MUSL = "/opt/yeto-codex/vendor/x86_64-unknown-linux-musl"
+_NODE = "/opt/yeto-codex/node/bin"
+_LIBC_MARK = "yeto-libc="
+CODEX_CACHE_SETUP = (
+    "set -e; mkdir -p /usr/local/bin; "
+    "if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then musl=1; else musl=0; fi; "
+    "command -v rg >/dev/null 2>&1 || ln -sf " + _MUSL + "/codex-path/rg /usr/local/bin/rg; "
+    "if ! command -v curl >/dev/null 2>&1; then "
+    "if [ $musl = 1 ]; then apk add --no-cache curl; "
+    "elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl; "
+    "elif command -v yum >/dev/null 2>&1; then yum install -y curl; fi; fi; "
+    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 || exit 1; "
+    "if [ $musl = 1 ]; then "
+    "{ command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; } || apk add --no-cache nodejs npm; "
+    "node --version >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && "
+    "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex || { rm -f /usr/local/bin/codex; exit 1; }; "
+    "echo " + _LIBC_MARK + "musl; "
+    "else " + _NODE + "/node --version >/dev/null 2>&1 || exit 1; echo " + _LIBC_MARK + "glibc; fi"
+)
+
+
+def codex_cache_nvm(node_version: str) -> str:
+    """Step 2 (glibc): a minimal ``~/.nvm`` for the default user; refuses an image that already has one."""
+    bin_rel = f"versions/node/v{node_version}/bin"
+    nvm_sh = (f'export NVM_DIR="$HOME/.nvm"\n'
+              f'case ":$PATH:" in *":$NVM_DIR/{bin_rel}:"*) ;; *) PATH="$NVM_DIR/{bin_rel}:$PATH" ;; esac\n'
+              f"export PATH\n")
+    return (
+        'set -e; [ -n "$HOME" ] && [ ! -e "$HOME/.nvm" ] || exit 1; t="$HOME/.nvm.yeto-tmp"; rm -rf "$t"; '
+        f'mkdir -p "$t/{bin_rel}"; '
+        f'for b in node npm npx; do [ -e {_NODE}/$b ] && ln -s {_NODE}/$b "$t/{bin_rel}/$b"; done; '
+        f'ln -s /opt/yeto-codex/bin/codex "$t/{bin_rel}/codex"; '
+        f"printf {shlex.quote(nvm_sh)} > \"$t/nvm.sh\"; "
+        'mv -T "$t" "$HOME/.nvm"; '
+        '( . "$HOME/.nvm/nvm.sh" && node --version && command -v npm && codex --version ) >/dev/null 2>&1 '
+        '|| { rm -rf "$HOME/.nvm"; exit 1; }'
+    )
+
+
+CODEX_CACHE_ROOT = "/var/cache/yeto-codex"  # outside the staging dir: recycle keeps it
+CODEX_MOUNT = "/opt/yeto-codex"
+
+
+def pinned_codex_cache() -> CodexCache:
+    from .pins import (
+        CODEX_LINUX_X64_SHA512,
+        CODEX_LINUX_X64_URL,
+        CODEX_VERSION,
+        NODE_LINUX_X64_SHA256,
+        NODE_LINUX_X64_URL,
+        NODE_VERSION,
+    )
+
+    return CodexCache(version=CODEX_VERSION, url=CODEX_LINUX_X64_URL, sha512=CODEX_LINUX_X64_SHA512,
+                      node_version=NODE_VERSION, node_url=NODE_LINUX_X64_URL, node_sha256=NODE_LINUX_X64_SHA256)
+
+
+@dataclass(frozen=True)
 class ExecOutput:
     stdout: str
     stderr: str
@@ -75,7 +201,9 @@ class BoatSandbox:
     def __init__(self, client: BoatClient, quota: BoatQuota, *, name: str,
                  machine_type: str = "small", ttl_s: int = DEFAULT_TTL_S,
                  ready_timeout_s: float = 300.0, pull_timeout_s: float = 1800.0,
-                 poll_interval_s: float = 1.0, sleep: Callable[[float], object] = asyncio.sleep) -> None:
+                 poll_interval_s: float = 1.0, ready_poll_s: float = 0.5, codex_cache: CodexCache | None = None,
+                 sleep: Callable[[float], object] = asyncio.sleep) -> None:
+        self._codex_cache = codex_cache
         self._client = client
         self._quota = quota
         self._name = name
@@ -84,24 +212,49 @@ class BoatSandbox:
         self._ready_timeout_s = ready_timeout_s
         self._pull_timeout_s = pull_timeout_s
         self._poll_s = poll_interval_s
+        self._ready_poll_s = ready_poll_s
         self._sleep = sleep
         self._holds_slot = False
         self.sandbox_id: str | None = None
         self.usage_seconds: float | None = None
+        self.machine_type = machine_type
+        self.image: str | None = None  # image of the current (or last) task container
+        self.timings: dict[str, float] = {}
+        self.reuse_count = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self, spec: ContainerSpec) -> None:
+        await self._start(spec, run=True)
+
+    async def start_vm(self, spec: ContainerSpec | None = None) -> None:
+        """Start the VM without a task container; pull ``spec.image`` when given (pool prewarm)."""
+        await self._start(spec, run=False)
+
+    async def _start(self, spec: ContainerSpec | None, *, run: bool) -> None:
         if self._holds_slot:
             raise BoatError("boat sandbox already started")
+        self.timings = {}
         await self._quota.acquire()
         self._holds_slot = True
         try:
+            started = time.monotonic()
             await self._create()
+            self.timings["create_s"] = time.monotonic() - started
             logger.info("boat sandbox %s created for %s (%s)", self.sandbox_id, self._name,
                         self._machine_type)
+            started = time.monotonic()
             await self._wait_ready()
-            await self._run_container(spec)
+            self.timings["ready_s"] = time.monotonic() - started
+            if run:
+                assert spec is not None
+                await self._run_container(spec)
+            elif spec is not None:
+                await self._pull(spec.image)
         except BaseException:
             await self.close()
             raise
@@ -132,7 +285,7 @@ class BoatSandbox:
             if loop.time() > deadline:
                 raise BoatError(f"boat sandbox {self.sandbox_id} not ready after "
                                 f"{self._ready_timeout_s:.0f} s (state {state})")
-            await self._sleep(2.0)
+            await self._sleep(self._ready_poll_s)
 
     async def _run_container(self, spec: ContainerSpec) -> None:
         image = shlex.quote(spec.image)
@@ -147,14 +300,118 @@ class BoatSandbox:
             run += ["-w", shlex.quote(spec.workdir)]
         for key, value in (spec.env or {}).items():
             run += ["-e", shlex.quote(f"{key}={value}")]
+        cache = self._codex_cache
+        if cache is None:
+            fetch, wait = "", "m= && c=0 && "
+        else:
+            # The fetch runs beside the pull; if it fails the task runs without the
+            # cache and Harbor installs Codex itself (slower, same version).
+            fetch = f"( {cache.fetch_command()} ) >/tmp/yeto-codex-fetch.log 2>&1 & f=$! ; "
+            wait = (f"if wait $f; then m={shlex.quote(f'-v {cache.host_dir}:{CODEX_MOUNT}:ro')}; c=1; "
+                    f"else m=; c=0; fi && ")
+            run += ["$m"]
         run += [image, "sh", "-c", shlex.quote("sleep infinity")]
-        command = f"{DOCKER} pull -q {image} >/dev/null && {' '.join(run)}"
+        # One VM command (one poll loop); the VM clock splits the phases.
+        command = (f"{fetch}s=$(date +%s%N) && {DOCKER} pull -q {image} >/dev/null && p=$(date +%s%N) && "
+                   f"{wait}q=$(date +%s%N) && {' '.join(run)} >/dev/null && e=$(date +%s%N) && "
+                   f"echo {_PHASE_MARK} $((p-s)) $((e-q)) $((q-p)) $c")
+        started = time.monotonic()
         result = await self.vm_exec(command, timeout_s=self._pull_timeout_s)
         if result.return_code != 0:
             raise BoatError(f"docker run {spec.image} failed ({result.return_code}): "
                             f"{(result.stderr or result.stdout)[-2000:]}")
+        self.timings["container_s"] = time.monotonic() - started
+        self.timings.update(_parse_phase_mark(result.stdout))
+        self.image = spec.image
+        if self.timings.get("codex_cache") == 1.0:
+            started = time.monotonic()
+            linked = await self.exec(CODEX_CACHE_SETUP, user="root", timeout_s=600,
+                                     env={"DEBIAN_FRONTEND": "noninteractive"})
+            if linked.return_code == 0 and f"{_LIBC_MARK}glibc" in linked.stdout:
+                linked = await self.exec(codex_cache_nvm(cache.node_version), timeout_s=60)
+            self.timings["codex_link_s"] = time.monotonic() - started
+            if linked.return_code != 0:
+                # No codex on PATH now: Harbor runs its full install (curl and ripgrep included).
+                logger.warning("boat Codex cache: setup failed on %s; Harbor will install Codex: %s",
+                               self.sandbox_id, (linked.stderr or linked.stdout)[-500:])
+                self.timings["codex_cache"] = 0.0
+        elif cache is not None:
+            logger.warning("boat Codex cache: fetch failed on %s (see /tmp/yeto-codex-fetch.log on the VM); "
+                           "Harbor will install Codex", self.sandbox_id)
         if spec.workdir:
             await self.exec(f"mkdir -p {shlex.quote(spec.workdir)}", user="root", timeout_s=60)
+
+    async def _pull(self, image: str) -> None:
+        started = time.monotonic()
+        await self._checked(f"{DOCKER} pull -q {shlex.quote(image)} >/dev/null", f"docker pull {image}",
+                            timeout_s=self._pull_timeout_s)
+        self.timings["pull_s"] = time.monotonic() - started
+        self.image = image
+
+    # -- reuse (S26 E8) -----------------------------------------------------
+
+    async def recycle(self) -> None:
+        """Remove the task container and every trace of the task on the VM.
+
+        Removed: all containers (with their anonymous volumes), all volumes,
+        user-defined networks, the staging directory.  Kept: the pulled
+        images (the reason to reuse) and the VM itself.  Raises
+        :class:`BoatError` when the VM still shows task state afterwards;
+        the caller must then :meth:`close` it instead of reusing it.
+        """
+        self._require_started()
+        await self._checked(
+            f"ids=$({DOCKER} ps -aq) && {{ [ -z \"$ids\" ] || {DOCKER} rm -f -v $ids >/dev/null; }} && "
+            f"{DOCKER} volume prune -af >/dev/null && {DOCKER} network prune -f >/dev/null && "
+            f"sudo -n rm -rf {STAGING_DIR}", "recycle", timeout_s=120.0)
+        await self._verify_clean()
+
+    async def _verify_clean(self) -> None:
+        result = await self.vm_exec(
+            f"echo c=$({DOCKER} ps -aq | wc -l) v=$({DOCKER} volume ls -q | wc -l) "
+            f"s=$([ -e {STAGING_DIR} ] && echo 1 || echo 0)", timeout_s=60.0)
+        if result.return_code != 0 or result.stdout.split() != ["c=0", "v=0", "s=0"]:
+            raise BoatError(f"boat sandbox {self.sandbox_id} not clean after recycle: "
+                            f"{(result.stdout or result.stderr)[-500:]!r}")
+
+    async def reuse(self, spec: ContainerSpec, *, name: str, codex_cache: CodexCache | None = None) -> None:
+        """Run a fresh task container on this (recycled) VM for the task ``name``.
+
+        The VM must have passed :meth:`recycle`.  The new container starts
+        from the image, so no file of the previous task survives.  On
+        failure the VM is deleted, as in :meth:`start`.
+        """
+        self._require_started()
+        self._name = name
+        self._codex_cache = codex_cache  # the new task's choice (a cached build stays on the VM either way)
+        self.timings = {"create_s": 0.0, "ready_s": 0.0}
+        try:
+            await self._verify_clean()
+            await self._run_container(spec)
+        except BaseException:
+            await self.close()
+            raise
+        self.reuse_count += 1
+
+    @property
+    def ttl_s(self) -> int:
+        """The auto-stop TTL a task on this VM runs under."""
+        return self._ttl_s
+
+    async def set_ttl(self, ttl_s: int) -> None:
+        """Move the VM's auto-stop deadline to now + ``ttl_s`` (no-op without a VM)."""
+        if self.sandbox_id is not None:
+            await asyncio.to_thread(self._client.set_ttl, self.sandbox_id, ttl_s)
+
+    def delete_now(self) -> None:
+        """Delete the VM from a synchronous context (process exit); errors are logged."""
+        sandbox_id, self.sandbox_id = self.sandbox_id, None
+        if sandbox_id is None:
+            return
+        try:
+            self._client.delete(sandbox_id)
+        except Exception:
+            logger.exception("boat sandbox %s delete at exit failed; its TTL stops it", sandbox_id)
 
     async def close(self) -> None:
         """Delete the VM (idempotent).  Errors are logged: the caller is often unwinding."""
@@ -295,6 +552,24 @@ class BoatSandbox:
         if self.sandbox_id is None:
             raise BoatError("boat sandbox is not started (or already deleted)")
         return self.sandbox_id
+
+
+_PHASE_MARK = "yeto-boat-phases"
+
+
+def _parse_phase_mark(stdout: str) -> dict[str, float]:
+    """``pull_s``/``run_s`` from the VM's phase line; empty when it is missing or garbled."""
+    for line in reversed(stdout.splitlines()):
+        fields = line.split()
+        if len(fields) in (3, 5) and fields[0] == _PHASE_MARK:
+            try:
+                out = {"pull_s": int(fields[1]) / 1e9, "run_s": int(fields[2]) / 1e9}
+                if len(fields) == 5:  # codex_fetch_wait_s: fetch time not hidden behind the pull
+                    out.update(codex_fetch_wait_s=int(fields[3]) / 1e9, codex_cache=float(int(fields[4])))
+                return out
+            except ValueError:
+                return {}
+    return {}
 
 
 def docker_exec_command(command: str, *, cwd: str | None, env: Mapping[str, str] | None,

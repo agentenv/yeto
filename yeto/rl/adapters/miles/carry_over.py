@@ -39,6 +39,8 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from yeto.rl.agentic.suspend import TIMEOUT_AFTER_SUSPENSION_REASON
+from yeto.rl.agentic.types import OUTCOME_KEY
 from yeto.rl.engine.offpolicy_correction import (
     GATE_GROUP_DROPPED,
     GATE_DROPPED_LENGTHS,
@@ -462,13 +464,18 @@ SUSPEND_STATS_ATTR = "rollout_suspend_stats"  # Miles fork, set at the cut-off
 RESUME_STATS_ATTR = "rollout_resume_stats"  # Miles fork, set at rollout start
 SUSPEND_EXPIRED_PREFIX = "CodexSuspendExpired"
 POLICY_AGE_EXCEEDED_PREFIX = "policy_age_exceeded"
+# Sample metadata key of an infrastructure failure reason (set by the agent function).
+INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
 
 
 def _infrastructure_reason(sample: Any) -> str:
-    from yeto.rl.harness.codex.tbench_reward import INFRASTRUCTURE_KEY
-
+    """The legacy key, else the reason of a Harbor-path ABORTED outcome (S26 E9.5)."""
     meta = getattr(sample, "metadata", None)
-    reason = meta.get(INFRASTRUCTURE_KEY) if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        return ""
+    reason = meta.get(INFRASTRUCTURE_KEY)
+    if not reason and meta.get(OUTCOME_KEY) == "aborted":
+        reason = meta.get("outcome_reason")
     return str(reason) if reason else ""
 
 
@@ -507,7 +514,7 @@ def suspend_fields(args: Any, all_samples: Sequence[Sequence[Any]]) -> dict[str,
     retried = 0
     for sample in _flat(list(all_samples)):
         reason = _infrastructure_reason(sample)
-        expired += reason.startswith(SUSPEND_EXPIRED_PREFIX)
+        expired += reason.startswith((SUSPEND_EXPIRED_PREFIX, TIMEOUT_AFTER_SUSPENSION_REASON))
         over_age += reason.startswith(POLICY_AGE_EXCEEDED_PREFIX)
         if _agent_metric(sample, "suspensions") > 0:
             parked += 1

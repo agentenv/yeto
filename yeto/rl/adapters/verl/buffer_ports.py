@@ -140,15 +140,16 @@ class BufferReleasePublisher:
         merge: dict[str, Any] = {}
         release = None
         position = self.feed.read_cursor()
+        shards = self.feed.read_shards()
         released = self._release_version(state)
         if released is not None and not is_base_adapter(released, tensors):
             def write(directory: Path) -> None:
                 merge.update(self.merge(self.base_dir, tensors, directory))
 
             release = self.releases.release(released, digest, write, buffer_selected=position,
-                                            weights=FULL, origin=self._origin(state))
+                                            buffer_shards=shards, weights=FULL, origin=self._origin(state))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
-                  "released": release is not None, "buffer_selected": position,
+                  "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
                   "version_map": isl.vmap.to_dict()}
         if self.lane is not None:
@@ -212,4 +213,4 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
     publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane)
-    return FullyAsyncRolloutPool(island), publisher, BufferPlacement()
+    return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

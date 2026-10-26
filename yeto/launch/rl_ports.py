@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shlex
+import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
@@ -15,9 +16,9 @@ from ..rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pa
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
 from .topology import rl_island_count, rl_island_placement_args
-from .syncer import island_lease_s, island_scheduling_mode, island_syncer_epoch
+from .syncer import island_lease_s, island_pool, island_syncer_epoch, rl_dense_sweep
 from .storage import ELASTIC_ISLAND_STATE_DIR, rl_checkpoint_store_plan
-from .island_tasks import _check_island_tasks
+from .island_tasks import _check_data_split, _check_island_tasks
 
 
 def _prepare_ports_algorithm(args) -> None:
@@ -64,7 +65,7 @@ def _prepare_ports_algorithm(args) -> None:
         problems += launch_problems(spec, {
             "rollout_batch_size": getattr(args, "rollout_batch_size", None),
             "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
-            "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+            "context_parallel_size": int(getattr(args, "context_parallel", 1) or 1),
             "multi_lora": False,
             # rl-algo-critic-family 2.3 (critic run-level rejections)
             "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
@@ -242,32 +243,138 @@ RESTART_LOOP_FN = (
 )
 
 
+_CUT_LAUNCH_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                     ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                     ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+                     ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"))
+# what turns on the round cuts of a synced launch (S27 R-2)
+_ISLAND_CUT_TRIGGERS = ("rl_cut_every", "rl_cut_auto_mtbf_s")
+
+
+def island_cuts_requested(args) -> bool:
+    """S27 R-2: a synced launch (a syncer, no ``--rl-elastic``) with
+    ``--rl-checkpoint-store`` and a cut interval: every island writes its own round
+    cuts under ``<store>/island-cuts`` (forwarded as ``--rl-island-cut-store``)."""
+    return (bool(getattr(args, "rl_checkpoint_store", None))
+            and not getattr(args, "rl_elastic", False)
+            and not getattr(args, "rl_single_island_no_sync", False)
+            and any(getattr(args, name, None) is not None for name in _ISLAND_CUT_TRIGGERS))
+
+
+def data_positions_kept(args) -> bool:
+    """S27 task assignment (``yeto.rl.engine.data_position``): a synced
+    full-parameter island that generates and trains keeps its data position in
+    ``--rl-checkpoint-store`` (forwarded as ``--rl-data-position-store``), so a
+    relaunched island continues at its next row. Its round counter restarts at 0
+    in every process, so nothing else tells it where it was."""
+    from ..rl.engine import sample_roles
+
+    return (bool(getattr(args, "rl_checkpoint_store", None))
+            and rl_dense_sweep(args)
+            and not getattr(args, "rl_elastic", False)
+            and not getattr(args, "rl_single_island_no_sync", False)
+            and sample_roles.sample_role(args) == sample_roles.BOTH)
+
+
+def island_cut_store(store_path: str) -> str:
+    """Where the islands of a synced launch keep their round cuts (one subdir each)."""
+    return f"{store_path.rstrip('/')}/island-cuts"
+
+
+def hf_exports_requested(args) -> bool:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``) names a round."""
+    from ..rl.engine.hf_export import ExportRounds
+
+    return bool(ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None)))
+
+
+def _synced_launch_uses_store(args) -> bool:
+    """A synced launch (no ``--rl-elastic``, no ``--rl-single-island-no-sync``) keeps
+    something in ``--rl-checkpoint-store``: the buffer and releases of synced
+    trainers, island round cuts, peer snapshots or HF exports."""
+    from ..rl.engine.sample_roles import is_synced_trainer
+
+    return (is_synced_trainer(args) or island_cuts_requested(args)
+            or bool(getattr(args, "rl_peer_recovery", False)) or hf_exports_requested(args))
+
+
+def _check_hf_export_launch_flags(args) -> None:
+    """``--rl-export-hf-rounds``: Miles training islands with a checkpoint store.
+    A round past the expected local rounds of an island (``--total-steps`` x
+    ``--local-rl-rounds-per-sync``) is a warning: an asynchronous island may
+    train more rounds than that, a strict one never reaches it."""
+    from ..rl.engine import sample_roles
+    from ..rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if not rounds:
+        return
+    if not getattr(args, "rl_checkpoint_store", None):
+        raise ValueError(f"{EXPORT_HF_FLAG} needs --rl-checkpoint-store (the exports go to <store>/hf)")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles only")
+    if getattr(args, "rl_elastic", False):
+        raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
+    if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)
+            or sample_roles.is_convertible_pool(args)):
+        raise ValueError(f"{EXPORT_HF_FLAG} needs islands that generate and train (sample role both)")
+    expected = int(args.total_steps) * int(getattr(args, "local_rl_rounds_per_sync", 1) or 1)
+    late = [r for r in rounds.numbers if r > expected]
+    if late:
+        print(f"[launcher] WARNING: {EXPORT_HF_FLAG}: rounds {late} are past the {expected} rounds "
+              "an island is expected to train (--total-steps x --local-rl-rounds-per-sync); "
+              "an island that stops earlier exports nothing for them", file=sys.stderr, flush=True)
+
+
+def hf_export_flags(args) -> str:
+    """The island flags of ``--rl-export-hf-rounds`` ("" when off)."""
+    if not hf_exports_requested(args):
+        return ""
+    from ..rl.engine.hf_export import HF_EXPORT_DIR, ExportRounds
+
+    rounds = ExportRounds.parse(args.rl_export_hf_rounds)
+    store = f"{rl_checkpoint_store_plan(args)[0].rstrip('/')}/{HF_EXPORT_DIR}"
+    return f" --rl-export-hf-rounds {rounds} --rl-export-hf-store {shlex.quote(store)}"
+
+
 def _check_resume_launch_flags(args) -> bool:
     """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
     resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
+    from ..rl.engine.cut_interval import cut_interval_for
+
     store = getattr(args, "rl_checkpoint_store", None)
     elastic = bool(getattr(args, "rl_elastic", False))
-    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+    for name, flag in _CUT_LAUNCH_FLAGS:
         value = getattr(args, name, None)
-        if value is not None and value < 1:
-            raise ValueError(f"{flag} must be >= 1")
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive" if isinstance(value, float) else f"{flag} must be >= 1")
         if value is not None and not store:
             raise ValueError(f"{flag} needs --rl-checkpoint-store")
     if getattr(args, "rl_resume_allow_config_change", False) and not store:
         raise ValueError("--rl-resume-allow-config-change needs --rl-checkpoint-store")
-    from ..rl.engine.sample_roles import is_synced_trainer
-
-    if store and not elastic and is_synced_trainer(args):
+    cut_interval_for(every=getattr(args, "rl_cut_every", None),
+                     auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
+                     max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
+    if store and not elastic and not getattr(args, "rl_single_island_no_sync", False):
         # S25 C3: the store holds the sample buffer and the releases of synced trainers
-        # (forwarded as --rl-sample-store); multi-island round cuts do not exist
-        for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                           ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
-            if getattr(args, name, None) is not None:
-                raise ValueError(f"{flag}: synced trainers write no round cuts (multi-island "
-                                 "resume: rl-resume-from-checkpoint 3.3)")
-        if getattr(args, "rl_resume_allow_config_change", False):
-            raise ValueError("--rl-resume-allow-config-change: synced trainers write no round cuts")
+        # (forwarded as --rl-sample-store). S27 R-2: with a cut interval every synced
+        # island also writes its own round cuts there; it does not resume from them
+        # (the syncer is authoritative), so the resume switches stay refused.
+        for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                           ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
+            if getattr(args, name, None):
+                raise ValueError(f"{flag}: a synced launch does not resume from round cuts (the "
+                                 "syncer is authoritative; multi-island resume: rl-resume-from-checkpoint 3.3)")
+        # S27 E-3: --rl-peer-recovery keeps its peer snapshots in the store
+        if not _synced_launch_uses_store(args):
+            raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-single-island-no-sync, "
+                             "synced trainers, a cut interval (--rl-cut-every / --rl-cut-auto-mtbf-s: "
+                             "island round cuts), HF exports (--rl-export-hf-rounds) or --rl-peer-recovery")
+        if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
+            raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
+        if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
+            raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
+                             "launch) are wired for --rl-backend miles only")
         rl_checkpoint_store_plan(args)  # validates the form
         return False
     if elastic:
@@ -277,11 +384,10 @@ def _check_resume_launch_flags(args) -> bool:
         return False
     if not store:
         return False
-    if not getattr(args, "rl_single_island_no_sync", False):
-        raise ValueError("--rl-checkpoint-store without --rl-elastic needs "
-                         "--rl-single-island-no-sync (multi-island resume: rl-resume-from-checkpoint 3.3)")
-    rl_checkpoint_store_plan(args)  # validates the form
+    rl_checkpoint_store_plan(args)  # validates the form (single island, no sync)
     return True
+
+
 _EVAL_LAUNCH_FLAGS = rl_option_pairs(
     "rl_eval_data", "rl_eval_dataset_name", "rl_eval_samples_per_prompt", layer=CLI,
 )
@@ -353,7 +459,7 @@ def _check_ports_infra_switches(args) -> None:
     from ..rl.engine.execution_profile import UNKNOWN, check_elastic_placement, check_overlap_eval
 
     placements = island_placement.check(args, rl_island_count(args),
-                                        island_scheduling=island_scheduling_mode(args))
+                                        island_scheduling="elastic" if island_pool(args) else "legacy")
     # The checks below need a fixed partition; any colocated island fails them.
     placement = (island_placement.FIXED_PARTITION
                  if all(p.placement == island_placement.FIXED_PARTITION for p in placements)
@@ -361,6 +467,7 @@ def _check_ports_infra_switches(args) -> None:
     _check_test_tool_delay(args)
     eval_interval = _check_ports_eval(args)
     _check_island_tasks(args, eval_interval)
+    _check_data_split(args)
     if getattr(args, "rl_overlap_eval", False):
         # Same check the island's execution profile applies, run before any
         # resource is provisioned, on the values the launcher really forwards:
@@ -416,8 +523,9 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
     resume_store = _check_resume_launch_flags(args)
+    _check_hf_export_launch_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and not resume_store \
-            and not sample_roles.is_synced_trainer(args):
+            and not _synced_launch_uses_store(args):
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
@@ -533,6 +641,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_debug_dump", False):
         flags += " --rl-debug-dump"
+    if getattr(args, "rl_profile_trainer", False):
+        flags += " --rl-profile-trainer"
+    if getattr(args, "rl_verify_every_round", False):
+        flags += " --rl-verify-every-round"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
@@ -550,31 +662,48 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-boot-only"
     if getattr(args, "rl_max_policy_age", 0):  # 0 (default) adds nothing
         flags += f" --rl-max-policy-age {int(args.rl_max_policy_age)}"
+    if getattr(args, "rl_async_buffer_rounds", None) is not None:  # None adds nothing
+        flags += f" --rl-async-buffer-rounds {int(args.rl_async_buffer_rounds)}"
     from ..rl.engine.sample_roles import island_flags as sample_role_flags
     from ..rl.engine.sample_roles import is_synced_trainer as sample_role_is_synced_trainer
 
     flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
-    if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
-        flags += (" --rl-island-scheduling elastic"
+    if island_pool(args):  # a fixed roster adds nothing
+        flags += (" --rl-island-pool"
                   f" --rl-syncer-epoch {island_syncer_epoch(args)}"
-                  f" --rl-island-lease-s {island_lease_s(args)!r}")
+                  f" --rl-sync-island-lease-s {island_lease_s(args)!r}")
     resume_store = (rl_checkpoint_store_plan(args)
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)
+    if resume_store is not None and data_positions_kept(args):
+        # S27 task assignment: a relaunched full-parameter island continues at its row
+        flags += f" --rl-data-position-store {shlex.quote(resume_store[0])}"
+    if resume_store is not None and island_cuts_requested(args):
+        # S27 R-2: every synced island writes its round cuts (island<learner id> below)
+        flags += f" --rl-island-cut-store {shlex.quote(island_cut_store(resume_store[0]))}"
+        if getattr(args, "rl_cut_keep", None) is not None:
+            flags += f" --rl-cut-keep {int(args.rl_cut_keep)}"
     if resume_store is not None and sample_role_is_synced_trainer(args):
-        # S25 C3: synced trainers mount the store for the buffer and the releases only
+        # S25 C3: synced trainers mount the store for the buffer and the releases
         flags += (f" --rl-sample-store {shlex.quote(resume_store[0])}"
-                  f" --rl-sample-lanes {rl_island_count(args)}")
+                  f" --rl-sample-lanes {getattr(args, 'rl_synced_trainers', None) or rl_island_count(args)}")
         resume_store = None
+    if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
+        resume_store = None  # a synced launch: island cuts only (above)
     if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
         flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
             if getattr(args, name, None) is not None:
                 flags += f" {flag} {int(getattr(args, name))}"
+    flags += hf_export_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_cut_every", None) is not None:
         flags += f" --rl-cut-every {int(args.rl_cut_every)}"
+    for name, flag in (("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+                       ("rl_cut_max_interval_s", "--rl-cut-max-interval-s")):
+        if getattr(args, "rl_checkpoint_store", None) and getattr(args, name, None) is not None:
+            flags += f" {flag} {float(getattr(args, name))!r}"
     if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_resume_allow_config_change", False):
         flags += " --rl-resume-allow-config-change"
     if getattr(args, "rl_elastic", False):

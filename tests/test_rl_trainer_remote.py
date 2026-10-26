@@ -29,7 +29,7 @@ from yeto.launch.trainer_island import (
     modal_binding,
 )
 from yeto.rl import event_echo
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine import recovery
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.fake_lifecycle import BufferFedFakeRollout, FakeRoundCuts, FakeSampler, cuttable_fake_engine

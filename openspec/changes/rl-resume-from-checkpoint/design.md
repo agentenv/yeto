@@ -79,6 +79,7 @@ Modal 文档：退出处理函数有 30 秒宽限，被抢占时也调用；GPU 
 - **单岛切点**（沿用格式）：adapter、优化器、学习率调度器、随机数、iteration、consumed_samples、pointer（下一轮号、策略版本、策略哈希、启动序号）+ 新增 `run_fingerprint`（算法、模型、LoRA 形状、并行布局、学习率配置、数据集指纹与洗牌种子）与 `lr_at_next_round`（下一轮应使用的学习率）与 `consumed_prompt_ids_digest`（已用题号集合的摘要，详细列表放账本）。
 - **多岛**：每个岛存自己的切点（同上，路径 `<store>/islands/<岛名>/`）；syncer 检查点同步到 `<store>/syncer/`；切点 pointer 多记 `outer_version`。
 - **频率**：`--rl-cut-every N`（默认：0.6B 为 1，FN 为 2）；最后一轮、收到"我方停机"时总是存一次。
+- **Default since 2026-10-21 (E1)**: `--rl-cut-every` defaults to 4; publication checks (policy hash, engine read-back) run on the first publication and every 4th round; `--rl-verify-every-round` restores per-round checks. See the requirement "Round-cut interval and publication checks" in specs/rl-resume-from-checkpoint/spec.md.
 - **保留**：`--rl-cut-keep K`（默认 2）；新切点 MANIFEST 落盘并提交后才删旧的。
 - **目录**：`<store>/<运行名>/cuts/<轮号>/{shards…, manifest.json, MANIFEST.sha256}` + `<store>/<运行名>/LATEST`（最后写，指向最近完整切点）。
 

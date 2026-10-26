@@ -168,8 +168,9 @@ def resolve_syncer_for_modal(syncer_addr: str, public_override: str | None) -> s
     reachable from Modal and no `--syncer-public-addr` was given."""
     if public_override:
         return public_override
-    host = syncer_addr.rsplit(":", 1)[0].strip("[]")
-    if is_public_address(host):
+    # a sharded head (--syncer-shards N) is a comma-separated list, one address per shard
+    hosts = [addr.rsplit(":", 1)[0].strip("[]") for addr in syncer_addr.split(",")]
+    if all(is_public_address(host) for host in hosts):
         return syncer_addr
     raise ValueError(
         f"syncer at {syncer_addr} is not reachable from Modal (private or unresolvable "
@@ -220,12 +221,6 @@ class ModalIslandConfig:
     # links CONTAINER_WORKDIR to it).
     workdir: str | None = str(REPO_ROOT)
     python_version: str = "3.12"
-    # Stock Codex run bundle (ports engine, signed Codex agent): a local dir
-    # holding the attested binary / package manifest / app-server schema,
-    # mounted read-only at ``codex_mount`` (= ``/opt/yeto/codex``, the
-    # CODEX_CONTAINER_BINARY_PATH parent) the same way sky file_mounts does.
-    codex_dir: str | None = None
-    codex_mount: str | None = None
     # Other sky file_mounts (container path -> local file or dir), mounted
     # read-only at start-up like the workdir.
     extra_mounts: dict[str, str] = field(default_factory=dict)
@@ -248,6 +243,9 @@ class ModalIslandConfig:
     # Host resource overrides (None = per-GPU defaults below).
     cpu_override: int | None = None
     memory_gib_override: int | None = None
+    # Container disk in GiB (None = Modal's default). Ray spills its object
+    # store here (see yeto.launch.modal_islands.modal_ephemeral_disk_gib).
+    ephemeral_disk_gib: int | None = None
 
     @property
     def function_name(self) -> str:
@@ -272,6 +270,8 @@ class ModalIslandConfig:
 
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
+        if self.ephemeral_disk_gib is not None and self.ephemeral_disk_gib < 1:
+            raise ValueError("ephemeral_disk_gib must be >= 1")
         if self.training_mode == "rl":
             if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
                                           or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
@@ -298,10 +298,6 @@ class ModalIslandConfig:
             raise ValueError("model_volume_name and model_volume_mount go together")
         if self.model_volume_name and self.model_volume_name in (self.volume_name, self.tape_volume_name):
             raise ValueError("the model volume must differ from the checkpoint/tape volumes")
-        if (self.codex_dir is None) != (self.codex_mount is None):
-            raise ValueError("codex_dir and codex_mount go together")
-        if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
-            raise ValueError(f"codex_dir {self.codex_dir} is not a directory")
         for target, source in self.extra_mounts.items():
             if not target.startswith("/"):
                 raise ValueError(f"extra_mounts target {target} must be absolute")
@@ -449,7 +445,7 @@ class TapeSync:
         # names its copies "<stem>.inc<k><suffix>" (k = 0 keeps the old names).
         self.incarnation: int | None = None
 
-    def _claim_incarnation(self) -> int:
+    def claim_incarnation(self) -> int:
         if self.incarnation is None:
             self.dst.mkdir(parents=True, exist_ok=True)
             taken = sorted(self.dst.glob("INCARNATION-*.txt"))
@@ -462,7 +458,7 @@ class TapeSync:
         return self.incarnation
 
     def _target_name(self, name: str) -> str:
-        k = self._claim_incarnation()
+        k = self.claim_incarnation()
         if k == 0:
             return name
         for suffix in TAPE_SUFFIXES:
@@ -472,7 +468,7 @@ class TapeSync:
 
     def sync_once(self) -> int:
         self.dst.mkdir(parents=True, exist_ok=True)
-        self._claim_incarnation()
+        self.claim_incarnation()
         for name, text in list(self.extra.items()):
             (self.dst / self._target_name(name)).write_text(text, encoding="utf-8")
             del self.extra[name]
@@ -872,6 +868,9 @@ def island_main(cfg_json: str) -> int:
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
             _volume_commit(cfg.tape_volume_name), mirror_globs=TAPE_MIRROR_GLOBS,
         )
+        # 0 for the island's first container, k for its k-th re-run (test-only
+        # fault injection exits only in the first one).
+        env["YETO_MODAL_INCARNATION"] = str(tape.claim_incarnation())
     hostmem = None
     interval = hostmem_interval_s(cfg)
     if interval is not None:
@@ -895,6 +894,37 @@ def island_main(cfg_json: str) -> int:
                   flush=True)
 
 
+EPHEMERAL_PORT_RANGE = "/proc/sys/net/ipv4/ip_local_port_range"
+# Linux's default ephemeral range. A Modal (gVisor) container starts with 16000-65535,
+# which covers the ports Miles hands to engines, routers and the trainer master
+# (20000+) after probing them free: a connection opened in between (NCCL, torch
+# c10d, a health check) can take one, and the engine's later bind fails with
+# "[Errno 98] address already in use" (S27 G-AT s27-at-a: 3 of 3 sampler island
+# starts; CPU probe: about 1.5% of outgoing connections got a port in 20000-20999).
+LINUX_EPHEMERAL_PORTS = (32768, 60999)
+
+
+def narrow_ephemeral_ports(path: str = EPHEMERAL_PORT_RANGE,
+                           target: tuple[int, int] = LINUX_EPHEMERAL_PORTS) -> str:
+    """Move the container's ephemeral port range to ``target`` when it starts below
+    it (the container is the island's own; Ray's worker ports 10002-19999 and
+    Miles' ports stay outside). Returns a line for the island log; a range that
+    cannot be read or written is reported, not fatal."""
+    try:
+        before = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports: unreadable ({exc})"
+    if before[0] >= target[0]:
+        return f"ephemeral ports {before[0]}-{before[1]}: kept"
+    try:
+        with open(path, "w") as handle:
+            handle.write(f"{target[0]} {target[1]}")
+        after = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports {before[0]}-{before[1]}: not narrowed ({exc})"
+    return f"ephemeral ports {before[0]}-{before[1]} -> {after[0]}-{after[1]}"
+
+
 def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dict,
                  env: dict, tape: "TapeSync | None") -> int:
     try:
@@ -915,6 +945,7 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
     if cfg.gpu_name:
         check_gpu_model(cfg.gpu_name, names, cfg.gpus_per_node)
+    print(f"[modal-island {cfg.learner_id}] {narrow_ephemeral_ports()}", flush=True)
     if cfg.setup_script:
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:
@@ -970,22 +1001,124 @@ def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=t
     marker file the learner's watcher thread picks up. Nothing is signalled: the
     learner and the Ray processes keep running until the platform kills the
     container, so the rollout executor can answer the in-flight export."""
-    proc = popen(cmd, env=env)
     path = env.get("YETO_SPOT_RECLAIM_MARKER") or "/tmp/yeto-reclaim-requested"
+    rank, node_ips = _node_rank_and_ips(env)
+    relay = None
+    if rank == 0 and len(node_ips) > 1:
+        # S26 E9.1: the driver runs on rank 0; a reclaim of a rank>0 container reaches
+        # it only through this relay (the peer runner sends its signal over the cluster net)
+        relay = ReclaimRelay(lambda num, peer: _write_reclaim_marker(path, num, clock, from_rank=peer),
+                             port=reclaim_relay_port(env)).start()
+    proc = popen(cmd, env=env)
 
     def forward(num, _frame):
-        try:
-            tmp = f"{path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"signal": int(num), "time": clock()}) + "\n")
-            os.replace(tmp, path)
-            print(f"[modal-island] signal {num}: reclaim marker {path} written for the learner", flush=True)
-        except OSError as exc:
-            print(f"[modal-island] signal {num}: reclaim marker not written ({exc})", flush=True)
+        _write_reclaim_marker(path, num, clock, from_rank=rank)
+        if rank > 0 and node_ips:
+            send_reclaim_to_rank0(node_ips[0], reclaim_relay_port(env), num, rank)
 
     for name in ("SIGINT", "SIGTERM"):
         sig.signal(getattr(sig, name), forward)
-    return proc.wait()
+    try:
+        return proc.wait()
+    finally:
+        if relay is not None:
+            relay.stop()
+
+
+RECLAIM_RELAY_PORT_ENV = "YETO_RECLAIM_RELAY_PORT"
+RECLAIM_RELAY_PORT_DEFAULT = 29417
+
+
+def reclaim_relay_port(env: dict) -> int:
+    return int(env.get(RECLAIM_RELAY_PORT_ENV) or RECLAIM_RELAY_PORT_DEFAULT)
+
+
+def _node_rank_and_ips(env: dict) -> tuple[int, list[str]]:
+    """This container's rank and the cluster's node ips (from :func:`skypilot_env`)."""
+    ips = [ip for ip in (env.get("SKYPILOT_NODE_IPS") or "").splitlines() if ip.strip()]
+    return int(env.get("SKYPILOT_NODE_RANK") or 0), ips
+
+
+def _write_reclaim_marker(path: str, num: int, clock, *, from_rank: int) -> None:
+    """Write the reclaim marker the learner's watcher polls; report, never raise
+    (it runs in a signal handler or the relay thread)."""
+    try:
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            record = {"signal": int(num), "time": clock()}
+            if from_rank:  # relayed from a rank>0 container (the driver names it)
+                record["rank"] = int(from_rank)
+            fh.write(json.dumps(record) + "\n")
+        os.replace(tmp, path)
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker {path} written for the learner",
+              flush=True)
+    except OSError as exc:
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker not written ({exc})", flush=True)
+
+
+def send_reclaim_to_rank0(host: str, port: int, num: int, rank: int, *, timeout_s: float = 2.0,
+                          attempts: int = 3) -> bool:
+    """A rank>0 runner tells rank 0's relay that this container is being reclaimed.
+    Short timeouts: it runs inside Modal's grace window. Returns True once acked."""
+    msg = (json.dumps({"signal": int(num), "rank": int(rank)}) + "\n").encode()
+    for attempt in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s) as conn:
+                conn.sendall(msg)
+                conn.settimeout(timeout_s)
+                if conn.recv(16).startswith(b"ok"):
+                    print(f"[modal-island] signal {num}: relayed to rank 0 at {host}:{port}", flush=True)
+                    return True
+        except OSError as exc:
+            print(f"[modal-island] signal {num}: relay to rank 0 failed (attempt {attempt + 1}: {exc})",
+                  flush=True)
+            time.sleep(0.2)
+    return False
+
+
+class ReclaimRelay:
+    """On rank 0 of a multi-node island: accept reclaim messages from peer runners
+    and hand each to ``on_reclaim(signal, rank)`` (which writes the local marker)."""
+
+    def __init__(self, on_reclaim, *, port: int, host: str = "0.0.0.0") -> None:
+        self.on_reclaim, self.host, self.port = on_reclaim, host, port
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self) -> "ReclaimRelay":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(8)
+        sock.settimeout(0.5)
+        self._sock, self.port = sock, sock.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, name="reclaim-relay", daemon=True)
+        self._thread.start()
+        print(f"[modal-island] reclaim relay listening on port {self.port}", flush=True)
+        return self
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            with conn:
+                try:
+                    conn.settimeout(2.0)
+                    doc = json.loads(conn.makefile("r", encoding="utf-8").readline())
+                    self.on_reclaim(int(doc["signal"]), int(doc["rank"]))
+                    conn.sendall(b"ok\n")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    print(f"[modal-island] reclaim relay: bad message ({exc})", flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            self._sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 class ModalOps:
@@ -1041,9 +1174,6 @@ class ModalOps:
                 copy=False,
                 ignore=MODAL_WORKDIR_IGNORE,
             )
-        if cfg.codex_dir and cfg.codex_mount:
-            # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
-            image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)
         for target, source in sorted(cfg.extra_mounts.items()):
             source = os.path.expanduser(source)
             if os.path.isdir(source):
@@ -1079,6 +1209,8 @@ class ModalOps:
         )
         if cfg.region:
             kwargs["region"] = cfg.region
+        if cfg.ephemeral_disk_gib is not None:
+            kwargs["ephemeral_disk"] = cfg.ephemeral_disk_gib * 1024  # MiB
         volumes = {}
         if cfg.volume_name and cfg.volume_mount:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
@@ -1162,15 +1294,19 @@ class ModalOps:
         return None
 
     def list_container_ids(self) -> set[str] | None:
-        """Running container ids of this run's app (``modal container list --json``);
-        None when the list cannot be read."""
+        """Started container ids of this run's app (``modal container list --json``);
+        None when the list cannot be read.
+
+        A row whose start time is "Pending" (a task queued for a GPU, no code runs and
+        nothing is billed yet) is left out; a row without a start-time field counts."""
         proc = subprocess.run([sys.executable, "-m", "modal", "container", "list", "--json"],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             return None
         rows = json.loads(proc.stdout or "[]")
         return {str(r.get("Container ID") or r.get("container_id")) for r in rows
-                if (r.get("App Name") or r.get("app_name")) == self.app_name}
+                if (r.get("App Name") or r.get("app_name")) == self.app_name
+                and not _pending_start(r)}
 
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
@@ -1212,6 +1348,29 @@ class ModalOps:
         modal = self._modal()
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
+
+    def stream_container_logs(self, container_id: str):
+        """The log lines of one container (``modal container logs``; follows while it
+        runs). The function-call stream of :meth:`stream_logs` does not deliver the
+        lines of a container that Modal started after a reschedule (S25 C1)."""
+        proc = subprocess.Popen([sys.executable, "-m", "modal", "container", "logs", str(container_id)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            assert proc.stdout is not None
+            yield from proc.stdout
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+
+
+def _pending_start(row: dict) -> bool:
+    """True when a ``modal container list --json`` row has a start-time field that is
+    empty or "Pending" (the task was not started)."""
+    for key in ("Start Time", "start_time"):
+        if key in row:
+            value = row[key]
+            return value is None or str(value).strip().lower() in ("", "pending")
+    return False
 
 
 CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
@@ -1256,15 +1415,25 @@ class ContainerSetPoller:
     and the function-call log stream never delivered the new container's lines, so
     :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
 
-    Every ``interval_s`` it lists the app's running containers. Once ``expected``
-    distinct ids were seen (all islands up), that set is the baseline; any later id
-    outside it trips the guard and calls ``on_change(message)`` once. A failed list
-    is skipped (never trips)."""
+    ``modal container list`` does not say which function (island) a container runs.
+    The island itself says so: its first log line ``[modal-island N] rank R container
+    ta-...`` (``attributed()`` returns those first ids, container id -> (island, rank)).
 
-    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0) -> None:
+    Every ``interval_s`` it lists the app's started containers. ``expected`` is the
+    number of (island, rank) slots. A slot is taken once a container printed its line
+    for it. A listed container that no island claimed yet may be the late first
+    container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
+    that is not a change. The guard trips (``on_change(message)`` once) when the
+    listed unclaimed containers outnumber the free slots, so at least one of them
+    must be a second container of a taken slot. An unclaimed container that left the
+    list never ran island code (as far as the logs show) and is not counted. A failed
+    list is skipped (never trips)."""
+
+    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
+                 attributed=None) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
-        self.baseline: set[str] | None = None
+        self.attributed = attributed if attributed is not None else dict
         self.seen: set[str] = set()
         self.changes: list[str] = []
         self.expected = False  # launcher.container_changed(): a change here is never expected
@@ -1283,15 +1452,21 @@ class ContainerSetPoller:
         if ids is None:
             return
         ids = set(ids)
-        if self.baseline is None:
-            self.seen |= ids
-            if len(self.seen) >= self.expected_count:
-                self.baseline = set(self.seen)
-            return
-        new = sorted(ids - self.baseline)
-        if new and not self.changes:
-            msg = (f"Modal app has a new container {', '.join(new)} besides "
-                   f"{', '.join(sorted(self.baseline))} (an island was rescheduled)")
+        self.seen |= ids
+        try:
+            claimed = dict(self.attributed() or {})
+        except Exception as exc:  # noqa: BLE001 - no attribution: every slot stays free
+            print(f"[launcher] container attribution failed: {exc}", flush=True)
+            claimed = {}
+        taken = set(claimed.values())
+        free = max(0, self.expected_count - len(taken))
+        unclaimed = sorted(ids - set(claimed))
+        if len(unclaimed) > free and not self.changes:
+            owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
+                               for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
+            msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
+                   f"claimed, with {free} of {self.expected_count} island slot(s) still free "
+                   f"(claimed: {owners}) (an island was rescheduled)")
             self.changes.append(msg)
             if self.on_change is not None:
                 self.on_change(msg)
@@ -1304,6 +1479,94 @@ class ContainerSetPoller:
 
     def start(self) -> "ContainerSetPoller":
         threading.Thread(target=self.run, daemon=True, name="modal-container-set").start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class ContainerLogFollower:
+    """Follows the logs of the Modal containers the call log streams miss (S26 E9.3).
+
+    After ``modal container stop`` (or a real reclaim) Modal runs the island's
+    input again in a new container, and the function-call log stream never
+    delivers that container's lines (S19, S25 C1), so the launcher showed only
+    the first container. Every ``interval_s`` this lists the app's running
+    containers; the first ``expected`` ids are the baseline (the call streams
+    show them); for every later id it prints one launcher warning and streams
+    that container's own log (``stream_container(id)``) on a daemon thread.
+
+    Each line is printed with a ``[<label>]`` prefix. The label is
+    ``container <id>`` until the container prints its island line
+    (``[modal-island N] rank R container ID``); then ``route(N)`` may name the
+    island and give its event collector (``(label, collector)`` or None), and
+    later lines go to that collector as well."""
+
+    def __init__(self, list_ids, stream_container, expected: int, *, route=None,
+                 interval_s: float = 30.0, out=None) -> None:
+        self.list_ids, self.stream_container = list_ids, stream_container
+        self.expected_count = max(1, int(expected))
+        self.route = route or (lambda _learner: None)
+        self.interval_s = float(interval_s)
+        self.out = out
+        self.baseline: set[str] | None = None
+        self.seen: set[str] = set()
+        self.followed: list[str] = []
+        self.threads: list[threading.Thread] = []
+        self._stop = threading.Event()
+
+    def _print(self, text: str) -> None:
+        print(text, file=self.out if self.out is not None else sys.stdout, flush=True)
+
+    def poll_once(self) -> list[str]:
+        """List once; returns the container ids it started to follow."""
+        try:
+            ids = self.list_ids()
+        except Exception as exc:  # noqa: BLE001 - a failed list is skipped
+            self._print(f"[launcher] container list failed: {exc}")
+            return []
+        if ids is None:
+            return []
+        ids = set(ids)
+        if self.baseline is None:
+            self.seen |= ids
+            if len(self.seen) >= self.expected_count:
+                self.baseline = set(self.seen)
+            return []
+        new = sorted(ids - self.baseline - set(self.followed))
+        for cid in new:
+            self.followed.append(cid)
+            self._print(f"[launcher] WARNING: new Modal container {cid} (an island was rescheduled); "
+                        "following its log")
+            thread = threading.Thread(target=self.follow, args=(cid,), daemon=True,
+                                      name=f"modal-container-log-{cid}")
+            thread.start()
+            self.threads.append(thread)
+        return new
+
+    def follow(self, cid: str) -> None:
+        label, collector = f"container {cid}", None
+        try:
+            for line in self.stream_container(cid):
+                text = str(line).rstrip("\n")
+                m = CONTAINER_LINE_RE.search(text)
+                if m and m.group(3) == cid and collector is None:
+                    routed = self.route(int(m.group(1)))
+                    if routed is not None:
+                        label, collector = routed
+                for part in text.split("\n"):
+                    self._print(f"[{label}] {part.rstrip()}")
+                if collector is not None:
+                    collector.feed(text)
+        except Exception as exc:  # noqa: BLE001 - the run goes on without this log
+            self._print(f"[launcher] log of container {cid} ended: {exc}")
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self.poll_once()
+
+    def start(self) -> "ContainerLogFollower":
+        threading.Thread(target=self.run, daemon=True, name="modal-container-logs").start()
         return self
 
     def stop(self) -> None:
@@ -1346,17 +1609,37 @@ class ModalIslandOps:
 
     def relaunch(self, task: ModalIslandConfig, name: str):
         """Re-spawn with the SAME learner id (the config carries it);
-        returns the new call id, or None when Modal refused."""
+        returns the new call id, or None when Modal refused (the controller
+        retries). Raises ``RelaunchBlocked`` when the run's app no longer runs (a
+        teardown stopped it): no later attempt can succeed."""
         try:
             call_id = self.ops.spawn(task)
         except Exception as exc:  # noqa: BLE001 - controller retries next poll
             print(f"[modal] relaunch of {name} failed: {exc}", file=sys.stderr)
+            # Modal: "App '<name>' not found" once the app is stopped; ask the app list
+            stopped = self._app_stopped() if "not found" in str(exc).lower() else None
+            if stopped is not None:
+                from .launch.fleet import RelaunchBlocked
+
+                raise RelaunchBlocked(f"{stopped}; a relaunch cannot succeed") from exc
             return None
         self.calls[name] = call_id
         # The call id is the handle for `modal.FunctionCall.from_id(..).cancel()`
         # (kill/resume tests) and for reading one island's logs.
         print(f"[modal] {name}: function call {call_id}", flush=True)
         return call_id
+
+    def _app_stopped(self) -> str | None:
+        """Why the run's app cannot take a relaunch (stopped, or no longer listed);
+        None when it runs or its state cannot be read (then a retry may succeed)."""
+        try:
+            status = self.ops.app_status()
+        except Exception:  # noqa: BLE001 - unverified: not a reason to give up
+            return None
+        if status is None:
+            return f"Modal app {self.ops.app_name} is not listed"
+        state, _tasks = status
+        return f"Modal app {self.ops.app_name} is {state}" if state == "stopped" else None
 
     def down(self, name: str) -> None:
         call_id = self.calls.get(name)

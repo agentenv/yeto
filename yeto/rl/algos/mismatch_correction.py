@@ -59,6 +59,9 @@ from yeto.rl.engine.algorithm import (
 OBSERVE_PATH = "yeto.rl.algos.mismatch_observe.observe_mismatch"
 ICEPOP_PATH = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
 MIS_PATH = "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp"
+# S26 E2: adaptive TIS (AIS), yeto.rl.algos.adaptive_tis; CPU-tested, not declared on any
+# engine until a GPU run shows it takes effect (declaration policy, entry.MILES_DECLARED).
+ADAPTIVE_TIS_PATH = "yeto.rl.algos.adaptive_tis.ais_tis_function"
 # SHA256 of miles/backends/training_utils/loss_hub/corrections.py at
 # MILES_NEXT_COMMIT (checked against the source by
 # tests/test_rl_mismatch_observe.py in miles-next-venv). The Miles module is
@@ -78,6 +81,7 @@ CORRECTION_MECHANISMS = (
     "opsm_rollout",
     "mis",
     "mis_mask",
+    "adaptive_tis",
 )
 # Mechanisms whose masking may legitimately zero a whole round (design D7).
 MASKING_MECHANISMS = frozenset({"icepop", "opsm_trainer", "opsm_rollout", "mis_mask"})
@@ -113,6 +117,8 @@ def selected_corrections(spec: AlgorithmSpec) -> tuple[str, ...]:
         out.append("icepop")
     if fn == MIS_PATH:
         out.append("mis_mask" if c.mis_mode == "mask" else "mis")
+    if fn == ADAPTIVE_TIS_PATH:
+        out.append("adaptive_tis")
     if c.ratio_mask == "mis":  # neutral MIS ratio mask (rl-offpolicy-correction D3)
         out.append("mis_mask")
     if _uses_opsm(spec):
@@ -186,7 +192,8 @@ if hasattr(_algorithm, "register_named_correction_function"):
     # function is named too, claimed by ("corrections", "icepop").
     for _path, _owners in ((OBSERVE_PATH, ("mismatch_observe",)),
                            (MIS_PATH, ("mis", "mis_mask")),
-                           (ICEPOP_PATH, ("icepop",))):
+                           (ICEPOP_PATH, ("icepop",)),
+                           (ADAPTIVE_TIS_PATH, ("adaptive_tis",))):
         _algorithm.register_named_correction_function(_path, mechanisms=_owners)
 
 for _name in CORRECTION_MECHANISMS:
