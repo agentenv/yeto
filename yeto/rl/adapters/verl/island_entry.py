@@ -608,7 +608,16 @@ def main(argv=None) -> int:
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
     chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
-    max_prompt = 512
+    # 512 is enough for a single-turn data prompt (one question). On the agentic
+    # path the row's prompt is only a label: what verl receives as the prompt is
+    # the joined agent conversation, which is tens of thousands of tokens, so the
+    # cap comes from the sequence budget as it does on the Megatron path
+    # (:func:`megatron_island_plan`). S27 G-FS run s27-fs-3 hit this: with the 512
+    # cap every one of 8 trajectories was ABORTED with prompt_exceeds_prompt_length
+    # (the agent's own n_input_tokens were 7 585 to 64 960), the batch then had no
+    # trainable token, and verl refused the training step.
+    max_prompt = (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
+                  if agentic_island(args) else 512)
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None

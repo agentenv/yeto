@@ -675,3 +675,28 @@ def test_records_proxy_environment_is_derived_from_the_island_config(monkeypatch
     monkeypatch.delenv(records_env.TEMPLATE_ENV)
     with pytest.raises(SystemExit, match=records_env.TEMPLATE_ENV):
         island_entry.agentic_records_env(run, model_path="/snap/model", card="H200")
+
+
+def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
+    """On the agentic path the row's prompt is a label; the real prompt is the
+    joined agent conversation, so the 512-token cap of a single-turn data prompt
+    aborts every sample (S27 G-FS run s27-fs-3: 8 of 8 ABORTED with
+    prompt_exceeds_prompt_length, agent n_input_tokens 7585..64960, after which
+    verl refused the step -- "response_mask must contain at least one valid token").
+    """
+    from yeto.rl.adapters.verl import island_entry
+
+    source = Path(island_entry.__file__).read_text()
+    # the rule itself, read off the module: the agentic branch uses the budget
+    assert "if agentic_island(args) else 512" in source
+    agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
+    plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
+
+    def cap(args):  # the expression at island_entry.py's max_prompt
+        return (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
+                if island_entry.agentic_island(args) else 512)
+
+    assert cap(agentic) == 81920 - 8192
+    assert cap(plain) == 512  # a math run is unchanged
+    tiny = argparse.Namespace(rl_agentic_harbor=True, seq_len=1024, rollout_max_response_len=8192)
+    assert cap(tiny) == 512  # never below the floor
