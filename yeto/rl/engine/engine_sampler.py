@@ -203,16 +203,25 @@ class EngineRound:
                     provenance=record, group_index=position,
                     index=position * self.sampling.n + j))
             scored.append((item, samples))
+        self._write_scored(rollout_id, version, scored, finish=finish, tokens=tokens, record=record)
+
+    def _write_scored(self, rollout_id: int, version: int, scored: Sequence[tuple[PromptItem, list[dict]]], *,
+                      finish: Mapping[str, int], tokens: int, record: Mapping[str, str],
+                      samples: int | None = None, extra: Mapping[str, Any] | None = None) -> int:
+        """Write one round's scored groups (after the reclaim marker none) and its
+        round event; returns the groups written. ``samples``: the round's sample
+        count (default: the finish counts); ``extra``: more round-event fields."""
+        rollout_id = int(rollout_id)
         prefix = "" if self.incarnation is None else f"{self.incarnation}-"
         written = 0
         dispensed: list[int] = []
-        for position, (item, samples) in enumerate(scored):
+        for position, (item, group) in enumerate(scored):
             if self.reclaimed():  # leaving: the replacement owns the shard from now on
                 self.dropped_groups += len(scored) - position
                 break
             spot = item.metadata.get(DISPENSE_POSITION_KEY)
             spot = spot if isinstance(spot, int) and not isinstance(spot, bool) else None
-            self.writer.write(samples, group_key=f"{prefix}r{rollout_id}-{item.prompt_id}",
+            self.writer.write(group, group_key=f"{prefix}r{rollout_id}-{item.prompt_id}",
                               provenance=record,
                               sampler_round=self._round_record(rollout_id, position == len(scored) - 1,
                                                                spot))
@@ -223,9 +232,10 @@ class EngineRound:
         if written and self.guard is not None:
             self.guard.written(rollout_id)
         self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version,
-                  groups=written, samples=sum(finish.values()), response_tokens=tokens,
-                  finish=dict(sorted(finish.items())), source=self.provenance.key(),
-                  dropped_groups=len(scored) - written)
+                  groups=written, samples=sum(finish.values()) if samples is None else int(samples),
+                  response_tokens=tokens, finish=dict(sorted(finish.items())), source=self.provenance.key(),
+                  dropped_groups=len(scored) - written, **dict(extra or {}))
+        return written
 
 
 @dataclass
@@ -271,11 +281,14 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                          incarnation: str | None = None, resume: SamplerResume | None = None,
                          data_cursor: Callable[[int], Mapping[str, int]] | None = None,
                          reclaimed: Callable[[], bool] | None = None,
+                         make_round: Callable[..., EngineRound] | None = None,
                          ) -> EngineSamplerIsland:
     """Check the sampling against the engine, start it on the base weights,
     run the post-load checks, and return the wired island (module doc).
     ``should_stop``: the loop starts no new round. ``reclaimed``: also stop
-    writing the current round's groups (default: ``should_stop``)."""
+    writing the current round's groups (default: ``should_stop``). ``make_round``:
+    builds the round instead of :class:`EngineRound` with the same arguments
+    (S28 G-120: :class:`~.agentic_round.AgenticRound`, bound to its own settings)."""
     sampling = config.sampling.check()
     check_sampling_fits(sampling, engine, max_prompt_tokens=config.max_prompt_tokens)
     provenance = Provenance.of(engine.identity, sampler_id=config.sampler_id, sampling=sampling)
@@ -292,7 +305,7 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
         raise SamplerLoadFatal(f"the engine failed its start checks: {error}") from error
     follower = PolicyFollower(releases, loader, version=int(config.base_version),
                               live_update=updates_during_generation(engine))
-    engine_round = EngineRound(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
+    engine_round = (make_round or EngineRound)(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
                                loop_guard=config.loop_guard, incarnation=incarnation,
                                resume=resume, data_cursor=data_cursor,

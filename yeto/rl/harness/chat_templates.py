@@ -195,6 +195,12 @@ register_template(TemplateSpec(
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
     template_kwargs={"enable_thinking": True, "preserve_thinking": True},
     verified="Qwen3.8-27B@1d4bf0f2 tokenizer (S25 T-G2)", merge_leading_system=True))
+register_template(TemplateSpec(
+    name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
+    stop_tokens=("<|im_end|>",),
+    template_kwargs={"enable_thinking": True, "truncate_history_thinking": False},
+    verified="Nemotron-3.5-Super-VL-120B tokenizer + chat template (S28 G-120, CPU alignment test)",
+    merge_leading_system=True))
 
 
 # ---------------------------------------------------------------------- template
