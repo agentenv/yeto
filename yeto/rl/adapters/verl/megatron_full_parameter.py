@@ -114,6 +114,44 @@ def _pp_probe() -> None:
     print(f"[yeto-pp-probe] rank {rank} barrier ok", flush=True)
 
 
+def router_bias_dump(chunks: Sequence[Any], tag: str) -> None:
+    """S27 G-FT diagnostic, off unless ``YETO_MEGATRON_ROUTER_BIAS_DUMP`` names a path.
+
+    The MoE router bias (``mlp.router.expert_bias``) is a persistent buffer, so no
+    optimizer master backs it and the full-parameter layout does not hold it
+    (:func:`layout_map`).  Whether leaving it outside the outer sync costs anything
+    depends on one fact -- does training change it? -- and that needs a run that
+    reaches a training step.  This writes a per-rank summary of every such buffer
+    (no tensor leaves the card beyond a scalar reduction), so the same run answers it."""
+
+    import json
+    import os
+
+    path = os.environ.get("YETO_MEGATRON_ROUTER_BIAS_DUMP")
+    if not path:
+        return
+    import torch
+
+    rows = []
+    with torch.no_grad():
+        for chunk in chunks:
+            for name, buffer in chunk.named_buffers():
+                if "expert_bias" not in name:
+                    continue
+                values = buffer.detach().to(dtype=torch.float32)
+                rows.append({"name": str(name), "dtype": str(buffer.dtype), "numel": int(values.numel()),
+                             "sum": float(values.sum().item()), "absmax": float(values.abs().max().item()),
+                             "l2": float(values.norm().item()),
+                             "head": [float(v) for v in values.reshape(-1)[:4].tolist()]})
+    try:
+        with open(f"{path}-rank{_rank()}-{tag}.json", "w") as handle:
+            json.dump(rows, handle)
+    except OSError as error:  # a diagnostic must not fail the island
+        print(f"[yeto-megatron-boundary] router bias dump failed: {error}", flush=True)
+        return
+    print(f"[yeto-megatron-boundary] rank {_rank()} router bias dump {tag}: {len(rows)} buffer(s)", flush=True)
+
+
 def remote_megatron_manifest(worker_dict) -> dict:
     """This rank's conversion tasks and master dtypes (no tensor moves)."""
 
@@ -122,6 +160,7 @@ def remote_megatron_manifest(worker_dict) -> dict:
     _trace("engine")
     bridge, chunks, optimizer = _engine(worker_dict)
     _pp_probe()
+    router_bias_dump(chunks, "manifest")
     _trace(f"conversion tasks ({len(chunks)} chunk(s))")
     record = boundary.manifest(bridge, chunks, optimizer)
     _trace(f"built {len(record['tasks'])} task(s), {len(record['refused'])} refused")
@@ -148,6 +187,7 @@ def remote_megatron_export_flat(worker_dict, indices: Sequence[int], units: Sequ
     started = time.perf_counter()
     fragment = fp.FlatFragment(units, numel, reader=fp._is_reader())
     bridge, chunks, optimizer = _engine(worker_dict)
+    router_bias_dump(chunks, "export")
     sink = boundary.LayoutSink(layout or boundary.IDENTITY, fragment.add_part, want=set(fragment.names))
     with torch.no_grad():
         boundary.export_hf(bridge, chunks, optimizer, [int(i) for i in indices], sink)
