@@ -126,9 +126,10 @@ def remote_megatron_grad_checks(worker_dict) -> dict:
 def remote_ascend_plugin_report(worker_dict) -> dict:
     """S27 G-FL: what the Ascend plugin stack installed in this worker process.
 
-    ``verl_main.setup_worker`` installed it before verl built the model; this only
-    reads the record back for the island log. ``{"installed": False}`` when the worker
-    never ran the install (the switch is off, or the setup hook did not run)."""
+    ``ascend_plugin_stack.setup_worker`` armed it and verl's ``Worker.__init__`` ran it,
+    before verl built the model (S27 G-FY); this only reads the record back for the
+    island log. ``{"ran": False}`` when the worker never ran the install (the switch is
+    off, the setup hook did not run, or it never found a card to install for)."""
     import os
 
     from yeto.rl import ascend_plugin_stack
