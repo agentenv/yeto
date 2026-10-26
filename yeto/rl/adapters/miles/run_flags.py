@@ -176,6 +176,12 @@ _ROLLOUT_ENGINE = (
         "micro batches",
     ),
     shared_flag(
+        "--rl-gradient-accumulation-fusion",
+        action="store_true",
+        help="ports: Megatron gradient-accumulation fusion (the Miles recipes' "
+        "default). Off by default (--no-gradient-accumulation-fusion)",
+    ),
+    shared_flag(
         "--rl-optimizer-offload-fraction",
         type=float,
         default=0.0,
@@ -314,6 +320,30 @@ _ISLAND = (
     island_flag("--fragments", type=int, default=1),
     island_flag("--parameter-layout-sha256", default=None),
     island_flag(
+        "--sweep-push-dtype",
+        choices=("f32", "bf16", "int8"),
+        default="f32",
+        help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
+    ),
+    island_flag(
+        "--sweep-push-int8-block",
+        type=int,
+        default=128,
+        help="full-parameter sweep, int8 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-overlap",
+        action="store_true",
+        help="full-parameter sweep: train the next round while the sweep syncs, then "
+        "rebase onto the new global weights (rollout policy age stays 0)",
+    ),
+    island_flag(
+        "--bcast-delta",
+        action="store_true",
+        help="strict-avg / full-parameter sweep: accept bf16 downlink deltas against the "
+        "shared f32 anchor (the syncer runs --bcast-delta-full-every)",
+    ),
+    island_flag(
         "--syncer-profile-sha256",
         default=None,
         help="full-parameter mode: the launcher-computed syncer semantic profile hash "
@@ -392,6 +422,11 @@ _ISLAND = (
     island_flag("--seq-len", type=int, required=True),
     island_flag("--seed", type=int, required=True),
     island_flag("--wan-streams", type=int, default=4),
+    island_flag("--wan-stream-schedule", choices=("rr", "adaptive"), default="rr"),
+    island_flag("--wan-stall-timeout", type=float, default=0.0),
+    island_flag("--wan-probe-min-mbps", type=float, default=0.0),
+    island_flag("--wan-probe-min-down-mbps", type=float, default=0.0),
+    island_flag("--wan-probe-mib", type=int, default=256),
     island_flag("--miles-root", required=True),
     island_flag(
         "--miles-commit",

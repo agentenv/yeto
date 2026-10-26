@@ -240,12 +240,12 @@ def island_learner(args: Any, island: int, num_learners: int) -> tuple[int, int]
 
 
 def buffer_full_parameter(args: Any) -> bool:
-    """``--tuning full`` on sampler/trainer islands (single or pair, no-sync): the
-    island trains every parameter without the full-parameter sync, since a buffer
-    island has no syncer; the policy reaches the sampler as a store release."""
+    """``--tuning full`` on a no-sync island: the island trains every parameter
+    without the full-parameter sync, since it has no syncer. A sampler/trainer
+    island (single or pair) passes the policy to the sampler as a store release;
+    a single island with both roles (S26 E11) updates its own engines in place."""
     return (getattr(args, "tuning", "lora") == "full"
-            and bool(getattr(args, "rl_single_island_no_sync", False))
-            and (is_pair(args) or sample_role(args) != BOTH))
+            and bool(getattr(args, "rl_single_island_no_sync", False)))
 
 
 def check_pair(args: Any, num_islands: int) -> None:

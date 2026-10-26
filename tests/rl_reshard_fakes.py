@@ -66,7 +66,7 @@ class ShardedBackend:
     def is_adapter(self, name):
         return "lora" in name
 
-    def export_optimizer(self, optimizer, named):
+    def export_optimizer(self, optimizer, named, *, on_device=False):  # clones stay on their device
         optimizer.init_state()
         hyper = {k: v for k, v in optimizer.param_groups[0].items() if k != "params"}
         entries = {}

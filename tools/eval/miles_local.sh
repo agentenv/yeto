@@ -9,7 +9,10 @@
 #      ARGS (launcher args; the store is modal-volume://$STOREVOL/$P), SARGS (optional),
 #      ISLANDS (containers before the GPU lock is released), HARD (s), STOREVOL, TAPEVOL,
 #      RECLAIM_LABEL (e.g. "l0") + RECLAIM_ROUND (rollout id written before the stop),
-#      PY (python with modal + the launcher deps), DRY (non-empty: --dry-run only)
+#      PY (python with modal + the launcher deps), DRY (non-empty: --dry-run only),
+#      EXTRA_FILES (optional: files copied into the checkout root and committed),
+#      STALL_S / FIRST_STEP_S (optional: stop the apps when no Miles training step line
+#      reaches the launch log for STALL_S s, or before the first one for FIRST_STEP_S s)
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${ARGS:?}" "${STOREVOL:?}" "${PY:?}"
 HARD=${HARD:-3000}; ISLANDS=${ISLANDS:-1}; TAPEVOL=${TAPEVOL:-yeto-event-tapes}
@@ -22,7 +25,9 @@ mkdir -p $R/tapes $R/store
 # a real clone: the code pack needs a git checkout
 git clone -q --no-local $REPO $CLONE && git -C $REPO rev-parse HEAD > $R/yeto_sha.txt
 cp $REPO/yeto/rl/gsm8k_reward.py $CLONE/gsm8k_reward.py
-(cd $CLONE && git add -f gsm8k_reward.py && git -c user.email=eval@yeto -c user.name=t-eval commit -qm 'run inputs')
+# EXTRA_FILES: run inputs the launcher reads from its checkout (e.g. a local task file)
+for f in ${EXTRA_FILES:-}; do cp "$f" $CLONE/; done
+(cd $CLONE && git add -f gsm8k_reward.py $(for f in ${EXTRA_FILES:-}; do basename "$f"; done) && git -c user.email=eval@yeto -c user.name=t-eval commit -qm 'run inputs')
 eval "$(/usr/bin/python3 - <<'PYC'
 import shlex, tomllib
 t = tomllib.load(open("/home/michael/.modal.toml", "rb"))
@@ -68,6 +73,21 @@ for i in $(seq 1 120); do
   kill -0 $SUB 2>/dev/null || break; sleep 10
 done
 exec 9>&-
+# no-progress watchdog (tools/eval/efficiency/modal_eff.py STALL_S): stop the apps when the
+# count of Miles training step lines stops growing
+if [ -n "${STALL_S:-}" ]; then
+( cd /tmp; last=0; since=$(date +%s); limit=${FIRST_STEP_S:-1800}
+  while kill -0 $SUB 2>/dev/null; do
+    sleep 15
+    n=$(grep -ac "'train/step'" $R/launch.ts.log 2>/dev/null)
+    if [ "${n:-0}" -gt "$last" ]; then last=$n; since=$(date +%s); limit=$STALL_S; fi
+    if [ $(( $(date +%s) - since )) -gt "$limit" ]; then
+      echo "$(date -u +%FT%TZ) no training step for $(( $(date +%s) - since )) s (limit $limit s, steps $last): stopping apps" > $R/STALL_FIRED
+      for a in $APP $SAPP; do timeout 120 $MODAL app stop -y $a; done >> $R/STALL_FIRED 2>&1
+      exit 0
+    fi
+  done ) 9>&- &
+fi
 # one reclaim: island $RECLAIM_LABEL wrote rollout $RECLAIM_ROUND -> stop its container
 if [ -n "${RECLAIM_LABEL:-}" ]; then
 ( cd /tmp
