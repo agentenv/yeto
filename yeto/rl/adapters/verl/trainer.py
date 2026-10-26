@@ -193,28 +193,12 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
     the cut from the trainer workers as before (``VerlIsland.call_workers`` reaches
     the trainer pool only), and the publication goes over verl's NCCL checkpoint
     engine (``separate.SeparatePublisher``)."""
-    from yeto.rl.engine.bridges import LocalOnlySync
-    from yeto.rl.local_learner import ComponentIdentity
-
-    from .full_parameter_stream import (DEFAULT_MAX_FRAGMENT_BYTES, VerlFullParameterGroup,
-                                        VerlFullParameterLocalState, build_full_parameter_sync)
+    from .full_parameter_stream import full_parameter_policy
     from .ports_impl import VerlFullParameterPublisher
 
     if plan.get("publish_selftest"):
         raise ValueError("the publish self-test checks a LoRA read-back; a full-parameter island has none")
-    island.full_group = VerlFullParameterGroup(island)
-    if plan["sync"] == "none":
-        component = ComponentIdentity(role="actor", model_revision=plan["model_revision"].lower(),
-                                      config_hash=plan["model_config_sha256"])
-        policy_state = VerlFullParameterLocalState(island.full_group, component=component,
-                                                   max_fragment_bytes=DEFAULT_MAX_FRAGMENT_BYTES)
-        island.layout_hash = policy_state.layout_hash
-        sync = LocalOnlySync(int(plan["global_rounds"]))
-    else:
-        if not plan.get("full_parameter"):
-            raise ValueError("a synced full-parameter verl island needs the full-parameter sync plan")
-        sync, policy_state, _stream = build_full_parameter_sync(
-            island, plan, backend_identity_sha256=identity_sha256)
+    sync, policy_state = full_parameter_policy(island, plan, backend_identity_sha256=identity_sha256)
     from .separate import full_parameter_publisher
 
     return sync, policy_state, full_parameter_publisher(island, plan, VerlFullParameterPublisher)
@@ -281,16 +265,21 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
     identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    # S27 G-EV: a policy-age limit (rollout ahead) is part of the island's contract, as on
+    # Miles (agentic-rollout-utilization 2.1); limit 0 leaves the identity unchanged
+    from yeto.rl.engine.policy_age import bind_policy_age
+
+    identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
     if full:
-        sync, policy_state, publisher = _full_parameter_ports(island, plan, identity.sha256())
+        sync, policy_state, publisher = _full_parameter_ports(island, plan, identity_sha)
         layout_hash = island.layout_hash
     else:
         sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
-                          identity_sha256=identity.sha256(), compat_group=identity.compat_group)
+                          identity_sha256=identity_sha, compat_group=identity.compat_group)
         policy_state = VerlPolicyState(island)
         publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
-                 "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
+                 "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "parameter_mode": "full" if full else "lora", "init_seconds": time.time() - t0})
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
@@ -303,19 +292,39 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         from .separate import driver_options as separate_driver_options
 
         driver_options.update(separate_driver_options(plan, spec, driver_options["capabilities"]))
+    dispense = None
+    if plan.get("dispense"):  # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        from .task_dispense import install as install_dispense
+
+        dispense = install_dispense(trainer, plan["dispense"],
+                                    emit=lambda event, **f: tape.append({"event": event, **f}))
     driver = IslandDriver(
-        learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
+        learner_id=learner_id, rollout=VerlRolloutPool(island, dispense=dispense),
+        trainer=VerlTrainerGroup(island),
         policy_state=policy_state,
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape,
                                      rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         algorithm=spec, sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
         **driver_options,
         **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
-    driver.data_slot = plan.get("data_slot")  # S27 task assignment
+    driver.data_slot = plan.get("data_slot")  # S27 task assignment ("dispense" with the dispenser)
+    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #25, #26, #35)
+
+    wire_verify(driver, policy_state, plan)
+    wire_debug(island, plan)
+    if dispense is not None and plan["dispense"].get("data_streams"):
+        driver.data_streams = plan["dispense"]["data_streams"]  # S27 P3 streams (rl_driver_start)
     if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
+        from .separate import wire_rollout_ahead
 
         wire_full_parameter_extras(driver, island, plan)
+        wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
+    if full and plan.get("separate"):  # S27 G-EW: engine outage (VERL-PARITY #16; nothing without the budget)
+        from .engine_recovery import arm_verl_engine_outage
+        from .full_parameter_stream import _LoopRunner
+
+        arm_verl_engine_outage(driver, trainer, plan, run=_LoopRunner().run)
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",
@@ -342,7 +351,11 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     placement)``; the trainer port and the policy state stay the fully_async ones.
 
     ``seek_rollouter(prompts)``: skips prompts of the rollouter's data before it
-    starts (round cuts with ``--rl-resume-store``, S26 E9.2; :mod:`.fully_async_cut`)."""
+    starts (round cuts with ``--rl-resume-store``, S26 E9.2; :mod:`.fully_async_cut`).
+
+    A full-parameter plan (S27 G-EW, :mod:`.fully_async_full`): the identity, the
+    sync and the policy state of the synchronous full-parameter island over the
+    trainer actor's workers; only the buffer trainer publishes it (VERL-PARITY #14)."""
     from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.driver import EventTape, IslandDriver
@@ -350,10 +363,11 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
     from .entry import verl_capabilities
-    from .fully_async_ports import (FullyAsyncIsland, FullyAsyncPlacement, FullyAsyncPublisher,
-                                    FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
+    from .fully_async_ports import (FullyAsyncFullParameterPublisher, FullyAsyncIsland, FullyAsyncPlacement,
+                                    FullyAsyncPublisher, FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
     from . import round_cuts
     from .fully_async_cut import optimizer_steps_per_round
+    from .fully_async_full import full_parameter_hashes, full_parameter_ports, is_full_parameter
     from .fully_async_round import execution_profile_for
     from .identity import backend_identity
     from .ports_impl import VerlPolicyState
@@ -362,10 +376,15 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     learner_id = int(plan["learner_id"])
     limit = int(plan["max_policy_age"])
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
-    specs = derive_peft_lora_specs(plan["model_path"], None, rank=int(plan["lora_rank"]),
-                                   targets=plan["lora_targets"])
-    layout_hash = canonical_layout_hash(specs)
-    lora_hash = canonical_lora_config_hash(rank=int(plan["lora_rank"]), target_modules=adapter_targets(specs))
+    full = is_full_parameter(plan)  # S27 G-EW
+    if full:
+        specs = ()
+        layout_hash, lora_hash = full_parameter_hashes(plan)
+    else:
+        specs = derive_peft_lora_specs(plan["model_path"], None, rank=int(plan["lora_rank"]),
+                                       targets=plan["lora_targets"])
+        layout_hash = canonical_layout_hash(specs)
+        lora_hash = canonical_lora_config_hash(rank=int(plan["lora_rank"]), target_modules=adapter_targets(specs))
     tape = EventTape(plan["event_tape"], learner_id)
     island = FullyAsyncIsland(
         call, learner_id=learner_id, limit=limit, required=int(plan["groups_per_round"]),
@@ -381,20 +400,28 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     identity_sha = bind_policy_age(identity.sha256(), limit)
+    if full:  # S27 G-EW: sets island.full_group (and the local layout hash without a syncer)
+        sync, policy_state = full_parameter_ports(island, plan, backend_identity_sha256=identity_sha)
+        layout_hash = island.layout_hash
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "fully_async": True, "max_policy_age": limit, "init_seconds": time.time() - t0,
-                 **({"sample_role": "trainer"} if buffer_ports is not None else {})})
-    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha,
-                      compat_group=identity.compat_group)
+                 **({"sample_role": "trainer"} if buffer_ports is not None else {}),
+                 **({"parameter_mode": "full"} if full else {})})
+    if not full:
+        sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha,
+                          compat_group=identity.compat_group)
+        policy_state = VerlPolicyState(island)
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
     if buffer_ports is None:
-        rollout, publisher, placement = (FullyAsyncRolloutPool(island),
-                                         FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))),
-                                         FullyAsyncPlacement())
+        # S27 G-EV (VERL-PARITY #11): a full-parameter island pushes its whole weights to
+        # the rollouter (no LoRA read-back); a LoRA island keeps the read-back publisher
+        publisher = (FullyAsyncFullParameterPublisher(island) if full
+                     else FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))))
+        rollout, placement = FullyAsyncRolloutPool(island), FullyAsyncPlacement()
     else:
         rollout, publisher, placement = buffer_ports(island)
     if buffer_ports is not None and plan.get("resume"):
@@ -403,10 +430,14 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
-        policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
+        policy_state=policy_state, publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile, ledger=None if resume is None else resume.ledger)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
+    if full:  # S27 G-EW: observation only (exports and data positions are refused, .fully_async_full)
+        from .driver_extras import wire_full_parameter_extras
+
+        wire_full_parameter_extras(driver, island, plan)
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)

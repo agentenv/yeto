@@ -375,18 +375,16 @@ def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
     no policy releases (the samplers follow the syncer as subscribers)."""
     import tempfile
 
-    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, RELAY_PREFETCH_ENV
+    from yeto.rl.spot_rollout.relay_buffer import trainer_relay_env
 
     from .buffer_rollout import BUFFER_ROOT_ENV
 
-    host, port = _syncer_address(args.syncer)
     root = Path(tmp_root or tempfile.gettempdir()) / "yeto-relay-buffer" / f"island{int(args.learner_id)}"
     root.mkdir(parents=True, exist_ok=True)
-    prefetch = getattr(args, "rl_sample_relay_prefetch", None)
-    if prefetch is None:
-        prefetch = 2 * int(args.groups_per_round)
-    return {BUFFER_ROOT_ENV: str(root), RELAY_ADDR_ENV: f"{host}:{port}",
-            RELAY_CHANNEL_ENV: str(int(args.learner_id)), RELAY_PREFETCH_ENV: str(int(prefetch))}
+    return {BUFFER_ROOT_ENV: str(root),
+            **trainer_relay_env(_syncer_address(args.syncer), int(args.learner_id),
+                                groups_per_round=int(args.groups_per_round),
+                                prefetch=getattr(args, "rl_sample_relay_prefetch", None))}
 
 
 def _cut_auto(args) -> dict[str, float]:

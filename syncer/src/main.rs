@@ -241,6 +241,13 @@ struct Args {
     /// while rounds, heartbeats and leases are served.
     #[arg(long, default_value_t = false)]
     inline_resend: bool,
+    /// Send every merged fragment to each learner from the scheduler itself,
+    /// waiting on a slow learner's link (the behavior before S27 G-FD).
+    /// Default: a learner whose send queues cannot take the broadcast now
+    /// gets it, and later versions, from a forwarder task, while the other
+    /// learners' rounds and PULLs go on.
+    #[arg(long, default_value_t = false)]
+    inline_broadcast: bool,
     /// Dynamic membership: after total_steps wait this many seconds for the
     /// islands still connected to acknowledge the final cut, then finish
     /// without the missing ones. Unset = every island at the final cut must
@@ -477,6 +484,7 @@ fn main() -> anyhow::Result<()> {
         membership,
         recovery,
         inline_resend: args.inline_resend,
+        inline_broadcast: args.inline_broadcast,
         weighted_fold: args.weighted_fold.parse()?,
         shard,
         expert_token_weights: args.expert_token_weights,

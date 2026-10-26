@@ -545,6 +545,62 @@ def test_pack_hands_the_state_over_in_one_buffer_and_unpacks_it_exactly():
     assert back["b"][0].untyped_storage().data_ptr() != flat.untyped_storage().data_ptr()  # own copies
 
 
+class _ManyParams(torch.nn.Module):
+    """A full-parameter rank of many 1 MiB FP32 parameters (heap-sized tensors)."""
+
+    def __init__(self, count: int, numel: int) -> None:
+        super().__init__()
+        self.weights = torch.nn.ParameterList(torch.nn.Parameter(torch.full((numel,), 0.01)) for _ in range(count))
+
+    def forward(self, x):
+        return sum((w[: x.numel()] * x).sum() for w in self.weights)
+
+
+def test_host_background_write_gives_the_host_copy_back(tmp_path, capsys):
+    """S27 G-EY: once a host background write is finished, its host copy is no
+    longer resident (s27-elastic-c: the donor container stayed at 692 of its
+    736 GiB peak after the snapshot). Heap-sized tensors need ``malloc_trim``,
+    and ``torch.save`` before 2.13 holds the saved storages in a reference
+    cycle; ``_release_capture`` handles both before the summary is ready."""
+    import time
+    from types import SimpleNamespace
+
+    from tests.rl_cut_fakes import GBS, Scheduler, TorchCutBackend
+    from yeto.rl.engine import host_memory
+
+    if host_memory.anonymous_rss_mib() is None or host_memory._malloc_trim() is None:
+        pytest.skip("needs /proc and glibc malloc_trim")
+    # Freeing a 30 MiB mmapped chunk raises glibc's mmap threshold to 30 MiB, as a
+    # trainer's own large temporaries do: the 1 MiB tensors below come from the heap.
+    scratch = torch.empty(30 << 20, dtype=torch.uint8)
+    del scratch
+    module = _ManyParams(160, 1 << 18)
+    optimizer = torch.optim.Adam(module.parameters(), lr=1e-3)
+    rank = SimpleNamespace(args=SimpleNamespace(fp16=False, bf16=False, global_batch_size=GBS), model=[module],
+                           optimizer=optimizer, opt_param_scheduler=Scheduler(optimizer),
+                           _yeto_cut_backend=TorchCutBackend())
+    module(torch.ones(4)).backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    host_memory.release_host_memory()
+    before = host_memory.anonymous_rss_mib()
+    copy_mib = 4 * 160  # the parameters, the FP32 masters and two Adam moments, 1 MiB each
+    started = cp.save_cut_shard(rank, directory=str(tmp_path), cut_id="c1", background=cp.HOST_BACKGROUND)
+    assert started["pending"] == "c1"
+    assert host_memory.anonymous_rss_mib() - before > copy_mib * 3 // 4, "the host copy was taken"
+    deadline = time.monotonic() + 60
+    while not cp.poll_cut_shard(rank, cut_id="c1")["done"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    summary = cp.finish_cut_shard(rank, cut_id="c1")
+    assert "refused" not in summary, summary
+    after = host_memory.anonymous_rss_mib()
+    print(f"anonymous RSS {before} MiB before the capture, {after} MiB after the write")
+    assert after - before < copy_mib // 4
+    released = [line for line in capsys.readouterr().out.splitlines() if "host memory released c1" in line]
+    assert len(released) == 1 and '"malloc_trim": true' in released[0]
+
+
 def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
     """S27 G-EL peer snapshots (``background="host"``): the state is copied to the
     host at the step boundary and a thread of the rank writes it; the shard, its

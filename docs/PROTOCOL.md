@@ -239,6 +239,33 @@ catch-up is one BCAST_FRAGMENT per fragment at its newest version, which may
 skip rounds; the client keeps at most the newest version per fragment, so an
 island applies such a jump at once (alpha = 0).
 
+Bulk resends (a catch-up, or the replay of a peer recovery below) go out on a
+forwarder task per learner, at the pace of its link, while rounds keep merging
+(`--inline-resend`: the scheduler sends them itself and waits on the link).
+Versions published meanwhile go to the same forwarder, and the newest version
+of a fragment replaces an older pending one. The versions owed when the
+resend starts are sent first; once each of them (or a newer version of that
+fragment) is in the learner's send queue, the resend's tail runs: a catch-up
+records the versions handed over as the fence and rebinds the learner's
+pulls, a recovery sends RECOVERY_DONE. The learner then joins rounds again;
+its broadcasts stay on the forwarder until nothing is pending and are sent
+inline after that, so one learner never has two senders.
+
+Slow downlinks (S27 G-FD). The scheduler sends a merged fragment inline to a
+learner only if the learner's send queues take the whole frame now (every
+chunk's slot is reserved first); it never waits on a learner's link.
+Otherwise the learner is handed to the same kind of forwarder (no tail: it
+keeps getting PULLs and joining rounds), which sends this and the later
+versions at its link's pace, the newest pending version of a fragment
+replacing an older one. A learner answers a PULL only once it holds the
+round's base (`version == global_step - fragments`), so it skips the rounds
+it cannot reach and catches up with the newest versions. On a bf16-downlink
+session (`--bcast-delta-full-every`) the forwarder sends every version as a
+FULL carrying the shared anchor (digest as in a resend), because the learner
+may have skipped deltas; once inline again, the next delta applies on that
+anchor. `--inline-broadcast` restores the old behavior (each broadcast waits
+for every learner's queue; one slow link stalls every merge and PULL).
+
 With any membership option the fragment-round server starts its first round
 once the launch quorum (K, or `q_min` of a capacity quorum) is connected and
 initialized; without one it waits for all `--learners`.
@@ -269,7 +296,11 @@ flag):
    newer than the held version (broadcasts overwrite, so this equals
    replaying every update since the donor's snapshot; no update log is kept),
    sends RECOVERY_DONE, puts the island on the roster and rebinds its
-   unanswered pulls. The `recovery` event-tape record holds the steps from
+   unanswered pulls. The replay is a bulk resend (above): RECOVERY_DONE goes
+   out once the replayed versions are in the island's send queue, carries the
+   current versions, and the versions published during the replay are sent
+   next; the island applies broadcasts until it holds at least the versions
+   RECOVERY_DONE names. The `recovery` event-tape record holds the steps from
    the clock to DONE and whether they exceeded `--recovery-bound-steps`.
 
 With no donor, after `--recovery-max-donor-tries` donors, or outside the

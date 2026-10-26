@@ -51,8 +51,8 @@ def megatron_problems(args) -> list[str]:
         problems.append("--rl-single-island-no-sync")
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
-        problems.append("--rl-max-policy-age 0")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0 and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
+        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1")  # S27 G-EV: rollout ahead
     return problems
 
 
@@ -145,9 +145,12 @@ def check_eval(args) -> None:
     if megatron_run(args):
         raise ValueError("--rl-eval-interval on verl does not cover the Megatron island "
                          "(TP/PP/EP > 1): it has no evaluate hook")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) > 0:
-        raise ValueError("--rl-eval-interval on verl needs --rl-max-policy-age 0: verl's _validate runs "
-                         "on the synchronous trainer; the fully_async path has no evaluate hook")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) > 0 and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
+        # S27 G-EV: rollout ahead keeps the synchronous trainer; the evaluation runs after
+        # the publication, while no batch generates (the driver joined it before)
+        raise ValueError("--rl-eval-interval on verl needs --rl-max-policy-age 0 (or --rl-rollout-ahead 1): "
+                         "verl's _validate runs on the synchronous trainer; the fully_async path has no "
+                         "evaluate hook")
     if ((getattr(args, "rl_sample_role", None) or "both") != "both"
             or getattr(args, "rl_island_sample_role", None)):
         raise ValueError("--rl-eval-interval on verl does not cover sampler / buffer-trainer islands "

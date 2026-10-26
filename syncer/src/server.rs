@@ -179,6 +179,13 @@ pub struct Config {
     /// lease. Off (default): a forwarder task per learner sends them while
     /// the scheduler serves rounds. Wire timing only, not in the profile hash.
     pub inline_resend: bool,
+    /// S27 G-FD: send each published fragment to every learner from the
+    /// scheduler, waiting on each learner's link (the behavior before the
+    /// slow-downlink spill): one slow downlink then stalls every round and
+    /// PULL. Off (default): a broadcast that does not fit in a learner's send
+    /// queues now goes to that learner's forwarder (`BulkResends::spill`).
+    /// Wire timing only, not in the profile hash.
+    pub inline_broadcast: bool,
     /// S27 P4b: how rounds that the exact fold cannot reproduce (partial
     /// quorum, token weights) reduce pushes.  Numerics only (the result is
     /// within f32 rounding of the buffered merge), so not in the profile
@@ -426,6 +433,87 @@ impl Group {
         values: &[f32],
         chunk_size: usize,
     ) -> Result<()> {
+        let frame = TensorFrame::new(msg_type, prefix, dtype, values, chunk_size)?;
+        let streams = self.chunk_streams();
+
+        let msg_id = self.msg_id.fetch_add(1, Ordering::Relaxed);
+        for index in 0..frame.chunks() {
+            let chunk = frame.chunk(msg_id, index)?;
+            let idx = self.rr.fetch_add(1, Ordering::Relaxed) % streams.len();
+            streams[idx]
+                .send(chunk)
+                .await
+                .map_err(|_| OutboundStreamClosed {
+                    member: self.member,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// S27 G-FD: queue one tensor frame like `send_tensor_large`, but only
+    /// when every chunk fits in the writer queues now: the permits of all
+    /// chunks are reserved first, so this never waits on the learner's link.
+    /// `Ok(false)`: it does not fit and nothing was queued. A closed stream
+    /// is `OutboundStreamClosed`, as for `send_tensor_large`.
+    fn try_send_tensor_now(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+    ) -> Result<bool> {
+        self.try_send_tensor_now_chunked(msg_type, prefix, dtype, values, CHUNK_SIZE)
+    }
+
+    fn try_send_tensor_now_chunked(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+        chunk_size: usize,
+    ) -> Result<bool> {
+        let frame = TensorFrame::new(msg_type, prefix, dtype, values, chunk_size)?;
+        let streams = self.chunk_streams();
+        let chunks = frame.chunks();
+        // Chunk i goes to stream (first + i) % n, as in send_tensor_large.
+        let first = self.rr.load(Ordering::Relaxed) % streams.len();
+        let mut permits = Vec::with_capacity(streams.len());
+        for (offset, stream) in streams.iter().enumerate() {
+            let slot = (offset + streams.len() - first) % streams.len();
+            let count = chunks / streams.len() + usize::from(slot < chunks % streams.len());
+            match stream.try_reserve_many(count) {
+                Ok(reserved) => permits.push(reserved),
+                Err(mpsc::error::TrySendError::Full(())) => return Ok(false),
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    return Err(OutboundStreamClosed { member: self.member }.into())
+                }
+            }
+        }
+        self.rr.fetch_add(chunks, Ordering::Relaxed);
+        let msg_id = self.msg_id.fetch_add(1, Ordering::Relaxed);
+        for index in 0..chunks {
+            let chunk = frame.chunk(msg_id, index)?;
+            let idx = (first + index) % streams.len();
+            let permit = permits[idx].next().context("reserved chunk permit missing")?;
+            permit.send(chunk);
+        }
+        Ok(true)
+    }
+}
+
+/// One model-sized tensor frame (`header + prefix + tensor`) cut into CHUNK
+/// envelopes; a chunk is encoded only when it is taken.
+struct TensorFrame<'a> {
+    fixed: Vec<u8>,
+    dtype: u8,
+    values: &'a [f32],
+    total: usize,
+    chunk_size: usize,
+}
+
+impl<'a> TensorFrame<'a> {
+    fn new(msg_type: u8, prefix: &[u8], dtype: u8, values: &'a [f32], chunk_size: usize) -> Result<Self> {
         if chunk_size == 0 {
             bail!("tensor chunk size must be positive");
         }
@@ -438,7 +526,7 @@ impl Group {
             .checked_add(payload_len)
             .context("tensor inner-frame length overflow")?;
         let payload_len_u64 = u64::try_from(payload_len).context("tensor payload is too large")?;
-        let total_u64 = u64::try_from(total).context("tensor inner frame is too large")?;
+        u64::try_from(total).context("tensor inner frame is too large")?;
 
         let mut fixed = Vec::new();
         fixed
@@ -448,50 +536,46 @@ impl Group {
         fixed.push(msg_type);
         fixed.extend_from_slice(&payload_len_u64.to_le_bytes());
         fixed.extend_from_slice(prefix);
+        Ok(Self { fixed, dtype, values, total, chunk_size })
+    }
 
-        let streams = self.chunk_streams();
+    fn chunks(&self) -> usize {
+        self.total.div_ceil(self.chunk_size)
+    }
 
-        let msg_id = self.msg_id.fetch_add(1, Ordering::Relaxed);
-        let mut offset = 0usize;
-        while offset < total {
-            let end = offset.saturating_add(chunk_size).min(total);
-            let mut chunk = Vec::new();
-            chunk
-                .try_reserve_exact(end - offset)
-                .context("cannot allocate tensor wire chunk")?;
-            if offset < fixed.len() {
-                chunk.extend_from_slice(&fixed[offset..end.min(fixed.len())]);
-            }
-            if end > fixed.len() {
-                let tensor_start = offset.saturating_sub(fixed.len());
-                let tensor_end = end - fixed.len();
-                append_tensor_bytes(
-                    dtype,
-                    values,
-                    tensor_start,
-                    tensor_end - tensor_start,
-                    &mut chunk,
-                )?;
-            }
-            debug_assert_eq!(chunk.len(), end - offset);
-
-            let mut head = Vec::with_capacity(24);
-            head.extend_from_slice(&msg_id.to_le_bytes());
-            head.extend_from_slice(&total_u64.to_le_bytes());
-            head.extend_from_slice(&(offset as u64).to_le_bytes());
-            let idx = self.rr.fetch_add(1, Ordering::Relaxed) % streams.len();
-            streams[idx]
-                .send(OutFrame {
-                    msg_type: MSG_CHUNK,
-                    parts: vec![bytes::Bytes::from(head), bytes::Bytes::from(chunk)],
-                })
-                .await
-                .map_err(|_| OutboundStreamClosed {
-                    member: self.member,
-                })?;
-            offset = end;
+    /// The CHUNK envelope `index` of message `msg_id`.
+    fn chunk(&self, msg_id: u64, index: usize) -> Result<OutFrame> {
+        let offset = index * self.chunk_size;
+        let end = offset.saturating_add(self.chunk_size).min(self.total);
+        let fixed = &self.fixed;
+        let mut chunk = Vec::new();
+        chunk
+            .try_reserve_exact(end - offset)
+            .context("cannot allocate tensor wire chunk")?;
+        if offset < fixed.len() {
+            chunk.extend_from_slice(&fixed[offset..end.min(fixed.len())]);
         }
-        Ok(())
+        if end > fixed.len() {
+            let tensor_start = offset.saturating_sub(fixed.len());
+            let tensor_end = end - fixed.len();
+            append_tensor_bytes(
+                self.dtype,
+                self.values,
+                tensor_start,
+                tensor_end - tensor_start,
+                &mut chunk,
+            )?;
+        }
+        debug_assert_eq!(chunk.len(), end - offset);
+
+        let mut head = Vec::with_capacity(24);
+        head.extend_from_slice(&msg_id.to_le_bytes());
+        head.extend_from_slice(&(self.total as u64).to_le_bytes());
+        head.extend_from_slice(&(offset as u64).to_le_bytes());
+        Ok(OutFrame {
+            msg_type: MSG_CHUNK,
+            parts: vec![bytes::Bytes::from(head), bytes::Bytes::from(chunk)],
+        })
     }
 }
 
@@ -3710,6 +3794,7 @@ async fn scheduler(
                         &cfg,
                         &st,
                         &registry,
+                        &mut resends,
                         &mut last_sync_secs,
                         pending,
                         &budget_cutoff,
@@ -3725,6 +3810,7 @@ async fn scheduler(
                         &cfg,
                         &st,
                         &registry,
+                        &mut resends,
                         &mut last_sync_secs,
                         committed,
                         None,
@@ -3740,6 +3826,7 @@ async fn scheduler(
                     &cfg,
                     &mut st,
                     &registry,
+                    &mut resends,
                     &mut last_sync_secs,
                     completed,
                     &budget_cutoff,
@@ -3988,6 +4075,7 @@ async fn scheduler(
                         &cfg,
                         &st,
                         &registry,
+                        &mut resends,
                         &mut last_sync_secs,
                         pending,
                         &budget_cutoff,
@@ -4017,7 +4105,9 @@ async fn scheduler(
                 }
             }
             Some(CatchUpStep::Done(done)) => {
-                if !finish_catch_up(&cfg, &st, &registry, &done.group, done.tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await {
+                if !finish_catch_up(&cfg, &st, &registry, &done.group, done.tail, &st.versions, dynamic, &mut inflight, fixed_roster, &budget_cutoff)
+                    .await
+                {
                     cutoff_established = true;
                     break 'outer;
                 }
@@ -4025,7 +4115,8 @@ async fn scheduler(
         }
         // S27 G-EL: background resends (catch-ups and recovery replays sent by
         // a forwarder task per learner). The scheduler only checks which ones
-        // are drained and runs their tails here.
+        // have handed over the versions they owed (S27 G-EY) and runs their
+        // tails here.
         for member in resends.drop_superseded(&registry) {
             warn!(
                 learner_id = member.learner_id,
@@ -4033,14 +4124,15 @@ async fn scheduler(
                 "superseded learner resend dropped"
             );
         }
-        for done in resends.take_drained(&registry) {
-            let finished = match done.tail {
-                ResendTail::CatchUp(tail) => {
-                    finish_catch_up(&cfg, &st, &registry, &done.group, tail, dynamic, &mut inflight, fixed_roster, &budget_cutoff).await
+        for due in resends.take_due(&registry, &st) {
+            let finished = match due {
+                DueTail::CatchUp { group, tail, floor } => {
+                    finish_catch_up(&cfg, &st, &registry, &group, tail, &floor, dynamic, &mut inflight, fixed_roster, &budget_cutoff)
+                        .await
                 }
-                ResendTail::Recovery { replayed } => {
+                DueTail::Recovery { group, replayed } => {
                     finish_recovery_replay(
-                        &cfg, &st, &registry, &mut recovery, &done.group, replayed, dynamic, &mut inflight, fixed_roster, &budget_cutoff,
+                        &cfg, &st, &registry, &mut recovery, &group, replayed, dynamic, &mut inflight, fixed_roster, &budget_cutoff,
                     )
                     .await
                 }
@@ -4135,6 +4227,7 @@ async fn scheduler(
                     &cfg,
                     &st,
                     &registry,
+                    &mut resends,
                     &mut last_sync_secs,
                     pending.committed,
                     pending.write_started,
@@ -4361,6 +4454,7 @@ async fn scheduler(
                                 &cfg,
                                 &st,
                                 &registry,
+                                &mut resends,
                                 &mut last_sync_secs,
                                 pending,
                                 &budget_cutoff,
@@ -4409,6 +4503,7 @@ async fn scheduler(
                                 &cfg,
                                 &st,
                                 &registry,
+                                &mut resends,
                                 &mut last_sync_secs,
                                 pending,
                                 &budget_cutoff,
@@ -4450,6 +4545,7 @@ async fn scheduler(
                             &cfg,
                             &st,
                             &registry,
+                            &mut resends,
                             &mut last_sync_secs,
                             pending,
                             &budget_cutoff,
@@ -4468,9 +4564,10 @@ async fn scheduler(
                         }
                     };
                     if background_resend {
-                        // S27 G-EL: a forwarder task sends the replay; merges go on
-                        // and offer it every newer version until it is drained,
-                        // then the tail promotes the island (`take_drained`).
+                        // S27 G-EL: a forwarder task sends the replay while merges go
+                        // on. Once the replayed versions are handed over, the tail
+                        // promotes the island (`take_due`, S27 G-EY); the versions
+                        // published meanwhile follow on the same forwarder.
                         resends.start(&registry, &st, member, group, replay.iter().copied(),
                                       ResendTail::Recovery { replayed: replay.len() });
                         continue;
@@ -4581,6 +4678,7 @@ async fn scheduler(
                                             &cfg,
                                             &st,
                                             &registry,
+                                            &mut resends,
                                             &mut last_sync_secs,
                                             pending,
                                             &budget_cutoff,
@@ -5639,10 +5737,12 @@ struct CommittedRound {
 /// Commit an already-computed round. Called only for the contiguous t prefix,
 /// so Nesterov, versions, ledger, event tape, checkpoint, and broadcast all
 /// share one deterministic order even when SVD completion is out of order.
+#[allow(clippy::too_many_arguments)]
 async fn commit_round(
     cfg: &Config,
     st: &mut GlobalState,
     registry: &Registry,
+    bulk: &mut BulkResends,
     last_sync_secs: &mut f64,
     completed: ComputedRound,
     budget_cutoff: &BudgetCutoff,
@@ -5657,7 +5757,7 @@ async fn commit_round(
             info!(step = committed.t, path = %path.display(), "checkpoint committed");
         }
     }
-    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await
+    publish_round(cfg, st, registry, bulk, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await
 }
 
 /// Apply the merge, version, step, and ledger updates of the next contiguous
@@ -5739,10 +5839,12 @@ fn apply_round_commit(
 /// Expose a committed round: BCAST its fragment, log it, append its tape
 /// record, and write the periodic (non-per-round) checkpoint. A per-round
 /// checkpoint must already be durable when this is called.
+#[allow(clippy::too_many_arguments)]
 async fn publish_round(
     cfg: &Config,
     st: &GlobalState,
     registry: &Registry,
+    bulk: &mut BulkResends,
     last_sync_secs: &mut f64,
     committed: CommittedRound,
     checkpoint_ms: Option<u64>,
@@ -5772,74 +5874,7 @@ async fn publish_round(
     // The terminal round is the sole exception: finalize_learners publishes
     // its exact f32 cut immediately after the scheduler reaches quiescence.
     if t < st.schedule().last_step(cfg.total_steps) {
-        let dtype = bulk_dtype(st.wire_dtype);
-        // bf16 downlink: encode this version once (advancing the shared
-        // anchor) and send the same bytes to every learner.
-        let published = match &st.downlink {
-            Some(anchors) => {
-                // The last version of each fragment is also its FINAL version.
-                // Islands key stored fragments by (fragment, version) and
-                // refuse a second copy with other bytes, so that broadcast
-                // must carry the exact f32 masters (FULL), not a bf16 delta.
-                let last_version = st.schedule().next_merge_of_fragment(t) > cfg.total_steps;
-                let mut anchors = anchors.lock().unwrap();
-                Some(if last_version {
-                    anchors.publish_full(p, st.versions[p], &st.params[p])
-                } else {
-                    anchors.publish(p, st.versions[p], &st.params[p])?
-                })
-            }
-            None => None,
-        };
-        // S27 G-EA: offer this version to the subscribers first (no await);
-        // their forwarders send it while the learners are served below.
-        let subscribers = registry.lock().unwrap().subscribers.clone();
-        if let Some(hub) = subscribers {
-            hub.publish(st, p);
-        }
-        // S27 G-EL: learners being resent in the background get this version
-        // offered to their forwarder (no await) instead of sent inline.
-        let resends: Vec<Arc<ResendConn>> = registry.lock().unwrap().resends.values().cloned().collect();
-        for conn in &resends {
-            conn.offer(p, st.versions[p], st.params[p].clone());
-        }
-        for group in current_groups(registry) {
-            if resends.iter().any(|conn| conn.group.member == group.member) {
-                continue;
-            }
-            let sent = match &published {
-                Some(encoded) => {
-                    send_tensor_until_cutoff(
-                        &group,
-                        MSG_BCAST_FRAGMENT,
-                        &encoded.prefix,
-                        encoded.dtype,
-                        &encoded.values,
-                        budget_cutoff,
-                    )
-                    .await
-                }
-                None => {
-                    send_fragment_until_cutoff(st, &group, p, MSG_BCAST_FRAGMENT, dtype, budget_cutoff)
-                        .await
-                }
-            };
-            match sent
-            {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
-                    learner_id = group.member.learner_id,
-                    generation = group.member.generation,
-                    fragment = p,
-                    %error,
-                    "updated fragment broadcast skipped for closed learner stream"
-                ),
-                Err(error) => {
-                    return Err(error.context(format!("cannot broadcast updated fragment {p}")));
-                }
-            }
-        }
+        broadcast_round(cfg, st, registry, bulk, p, budget_cutoff).await?;
     }
     *last_sync_secs = compute_secs + sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
@@ -5891,6 +5926,137 @@ async fn publish_round(
     Ok(())
 }
 
+/// BCAST the newly committed version of fragment `p` to every current
+/// learner (`publish_round`). S27 G-FD: without `--inline-broadcast`, a
+/// learner gets it inline only if its writer queues take it now; otherwise
+/// (and while its forwarder has anything pending) the learner's forwarder
+/// sends it, so this never waits on a learner's link.
+async fn broadcast_round(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    bulk: &mut BulkResends,
+    p: usize,
+    budget_cutoff: &BudgetCutoff,
+) -> Result<()> {
+    // The committed step is the fragment's new version.
+    let t = st.versions[p];
+    let dtype = bulk_dtype(st.wire_dtype);
+    // bf16 downlink: encode this version once (advancing the shared
+    // anchor) and send the same bytes to every learner.
+    let published = match &st.downlink {
+        Some(anchors) => {
+            // The last version of each fragment is also its FINAL version.
+            // Islands key stored fragments by (fragment, version) and
+            // refuse a second copy with other bytes, so that broadcast
+            // must carry the exact f32 masters (FULL), not a bf16 delta.
+            let last_version = st.schedule().next_merge_of_fragment(t) > cfg.total_steps;
+            let mut anchors = anchors.lock().unwrap();
+            Some(if last_version {
+                anchors.publish_full(p, st.versions[p], &st.params[p])
+            } else {
+                anchors.publish(p, st.versions[p], &st.params[p])?
+            })
+        }
+        None => None,
+    };
+    // S27 G-EA: offer this version to the subscribers first (no await);
+    // their forwarders send it while the learners are served below.
+    let subscribers = registry.lock().unwrap().subscribers.clone();
+    if let Some(hub) = subscribers {
+        hub.publish(st, p);
+    }
+    // S27 G-FD: on a bf16-downlink session a forwarder sends the FULL with
+    // the shared anchor at this version (its learner may have skipped
+    // deltas). Cheap: the anchor was just set to this version.
+    let forwarded_full = st
+        .downlink
+        .as_ref()
+        .map(|anchors| anchors.lock().unwrap().resend(p, st.versions[p], &st.params[p]));
+    // S27 G-EL: learners being resent in the background get this version
+    // offered to their forwarder (no await) instead of sent inline.
+    // S27 G-FD: so do learners whose downlink was too slow (`spill`).
+    let resends: Vec<Arc<ResendConn>> = registry.lock().unwrap().resends.values().cloned().collect();
+    for conn in &resends {
+        conn.offer_published(p, st.versions[p], &st.params[p], forwarded_full.as_ref());
+    }
+    for group in current_groups(registry) {
+        if resends.iter().any(|conn| conn.group.member == group.member) {
+            continue;
+        }
+        if !cfg.inline_broadcast {
+            // S27 G-FD: send inline only what the learner's writer queues
+            // take now; otherwise its forwarder sends it, so one slow
+            // downlink cannot hold the merges and PULLs of the others.
+            if budget_cutoff.enabled && budget_cutoff.deadline().is_some() {
+                break;
+            }
+            let queued = match &published {
+                Some(encoded) => group.try_send_tensor_now(
+                    MSG_BCAST_FRAGMENT,
+                    &encoded.prefix,
+                    encoded.dtype,
+                    &encoded.values,
+                ),
+                None => group.try_send_tensor_now(
+                    MSG_BCAST_FRAGMENT,
+                    &crate::resend::bcast_prefix(p, st.versions[p]),
+                    dtype,
+                    &st.params[p],
+                ),
+            };
+            match queued {
+                Ok(true) => {}
+                Ok(false) => bulk.spill(registry, st, group, p, forwarded_full.as_ref()),
+                Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
+                    learner_id = group.member.learner_id,
+                    generation = group.member.generation,
+                    fragment = p,
+                    %error,
+                    "updated fragment broadcast skipped for closed learner stream"
+                ),
+                Err(error) => {
+                    return Err(error.context(format!("cannot broadcast updated fragment {p}")));
+                }
+            }
+            continue;
+        }
+        let sent = match &published {
+            Some(encoded) => {
+                send_tensor_until_cutoff(
+                    &group,
+                    MSG_BCAST_FRAGMENT,
+                    &encoded.prefix,
+                    encoded.dtype,
+                    &encoded.values,
+                    budget_cutoff,
+                )
+                .await
+            }
+            None => {
+                send_fragment_until_cutoff(st, &group, p, MSG_BCAST_FRAGMENT, dtype, budget_cutoff)
+                    .await
+            }
+        };
+        match sent
+        {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
+                learner_id = group.member.learner_id,
+                generation = group.member.generation,
+                fragment = p,
+                %error,
+                "updated fragment broadcast skipped for closed learner stream"
+            ),
+            Err(error) => {
+                return Err(error.context(format!("cannot broadcast updated fragment {p}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A committed round whose per-round checkpoint is being written by a
 /// blocking task (`--async-checkpoint`). Its fragment stays busy and its
 /// BCAST is withheld until the write is durable, so no learner can observe
@@ -5926,10 +6092,12 @@ fn start_async_checkpoint(
 /// Wait for a pending per-round checkpoint, then publish its round. A failed
 /// write fails the coordinator before the round becomes visible; the
 /// previous checkpoint stays the resume point.
+#[allow(clippy::too_many_arguments)]
 async fn settle_pending_publish(
     cfg: &Config,
     st: &GlobalState,
     registry: &Registry,
+    bulk: &mut BulkResends,
     last_sync_secs: &mut f64,
     pending: PendingPublish,
     budget_cutoff: &BudgetCutoff,
@@ -5944,6 +6112,7 @@ async fn settle_pending_publish(
         cfg,
         st,
         registry,
+        bulk,
         last_sync_secs,
         committed,
         write_started,
@@ -5959,6 +6128,7 @@ async fn finish_pending_publish(
     cfg: &Config,
     st: &GlobalState,
     registry: &Registry,
+    bulk: &mut BulkResends,
     last_sync_secs: &mut f64,
     committed: CommittedRound,
     write_started: Instant,
@@ -5974,7 +6144,7 @@ async fn finish_pending_publish(
     if let Some(path) = cfg.checkpoint_path.as_ref() {
         info!(step = t, path = %path.display(), "checkpoint committed");
     }
-    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await?;
+    publish_round(cfg, st, registry, bulk, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await?;
     if !busy_fragments.remove(&p) {
         bail!("fragment {p} lost its busy ownership at publish");
     }
@@ -5998,7 +6168,8 @@ async fn complete_round(
         compute_secs: compute_start.elapsed().as_secs_f64(),
     };
     let cutoff = BudgetCutoff::new(false, Duration::ZERO);
-    commit_round(cfg, st, registry, last_sync_secs, completed, &cutoff).await
+    let mut bulk = BulkResends::new();
+    commit_round(cfg, st, registry, &mut bulk, last_sync_secs, completed, &cutoff).await
 }
 
 /// Test twin of `complete_round` through the `--async-checkpoint` path.
@@ -6020,12 +6191,13 @@ async fn complete_round_async(
     };
     let cutoff = BudgetCutoff::new(false, Duration::ZERO);
     let mut busy = HashSet::from([completed.round.p]);
+    let mut bulk = BulkResends::new();
     let committed = apply_round_commit(cfg, st, completed)?;
     if !persist_before_broadcast(cfg, committed.t) {
-        return publish_round(cfg, st, registry, last_sync_secs, committed, None, &cutoff).await;
+        return publish_round(cfg, st, registry, &mut bulk, last_sync_secs, committed, None, &cutoff).await;
     }
     let pending = start_async_checkpoint(cfg, st, committed)?;
-    settle_pending_publish(cfg, st, registry, last_sync_secs, pending, &cutoff, &mut busy).await
+    settle_pending_publish(cfg, st, registry, &mut bulk, last_sync_secs, pending, &cutoff, &mut busy).await
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
@@ -6748,10 +6920,17 @@ const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// S27 G-EL: one learner connection whose catch-up or recovery replay a
 /// forwarder task sends (`resend.rs`). Publications offer it every newer
-/// version (no await) instead of sending to it inline.
+/// version (no await) instead of sending to it inline. S27 G-EY: the
+/// versions owed at the start are targets; the tail runs once they are
+/// handed over, and the forwarder then keeps sending newer versions until
+/// nothing is pending.
 struct ResendConn {
     group: Arc<Group>,
     dtype: u8,
+    /// S27 G-FD: a bf16-downlink session. The learner may have skipped
+    /// deltas, so every version goes out as a FULL with the shared anchor
+    /// (`ResendState::full_headers`), never as a delta.
+    downlink: bool,
     state: Mutex<ResendState>,
     notify: tokio::sync::Notify,
     stop: tokio::sync::watch::Sender<bool>,
@@ -6762,6 +6941,12 @@ struct ResendState {
     pending: crate::resend::Pending,
     /// A fragment was popped and is not yet in the writer queues.
     in_flight: bool,
+    /// That fragment met a target when it was popped.
+    target_in_flight: bool,
+    /// bf16-downlink sessions: the FULL header (`downlink::PREFIX_LEN`
+    /// bytes, carrying the anchor digest) of the pending version of each
+    /// fragment, as `DownlinkAnchors::resend` encoded it when offered.
+    full_headers: HashMap<usize, (u64, Vec<u8>)>,
     /// The forwarder ended (stopped, or its stream failed: `error`).
     ended: bool,
     error: Option<String>,
@@ -6770,6 +6955,22 @@ struct ResendState {
 }
 
 impl ResendConn {
+    fn new(st: &GlobalState, group: Arc<Group>) -> (Arc<Self>, tokio::sync::watch::Receiver<bool>) {
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let conn = Arc::new(ResendConn {
+            group,
+            dtype: bulk_dtype(st.wire_dtype),
+            downlink: st.downlink.is_some(),
+            state: Mutex::new(ResendState {
+                pending: crate::resend::Pending::new(st.params.len()),
+                ..ResendState::default()
+            }),
+            notify: tokio::sync::Notify::new(),
+            stop,
+        });
+        (conn, stop_rx)
+    }
+
     fn offer(&self, p: usize, version: u64, values: Arc<Vec<f32>>) {
         let queued = {
             let mut state = self.state.lock().unwrap();
@@ -6780,10 +6981,74 @@ impl ResendConn {
         }
     }
 
+    /// Offer a newly published version: the f32 masters, or on a
+    /// bf16-downlink session the FULL that carries the shared anchor (S27
+    /// G-FD; `full`, from `DownlinkAnchors::resend` at this version).
+    fn offer_published(&self, p: usize, version: u64, params: &Arc<Vec<f32>>, full: Option<&crate::downlink::EncodedBcast>) {
+        let Some(full) = full.filter(|_| self.downlink) else {
+            return self.offer(p, version, params.clone());
+        };
+        let queued = {
+            let mut state = self.state.lock().unwrap();
+            let queued = !state.ended && state.pending.offer(p, version, full.values.clone());
+            if queued {
+                state.full_headers.insert(p, (version, full.prefix.clone()));
+            }
+            queued
+        };
+        if queued {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Offer the current value of each fragment in `fragments` and make every
+    /// pending entry a target. Returns (offered fragments, their bytes).
+    fn owe(&self, st: &GlobalState, fragments: impl IntoIterator<Item = usize>) -> (usize, usize) {
+        let (mut count, mut bytes) = (0usize, 0usize);
+        {
+            let mut state = self.state.lock().unwrap();
+            for p in fragments {
+                if p < st.params.len() && state.pending.offer(p, st.versions[p], st.params[p].clone()) {
+                    count += 1;
+                    bytes += tensor_nbytes(self.dtype, st.params[p].len()).unwrap_or(0);
+                }
+            }
+            state.pending.require_pending();
+        }
+        self.notify.notify_one();
+        (count, bytes)
+    }
+
+    /// Make the versions still pending targets, so they go out before any
+    /// later publication (the recovery tail names them in RECOVERY_DONE).
+    fn owe_pending(&self) {
+        self.state.lock().unwrap().pending.require_pending();
+    }
+
+    /// Every target is in the writer queues, or the forwarder ended.
+    fn caught_up(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.ended || (state.pending.unmet() == 0 && !state.target_in_flight)
+    }
+
     /// Every offered version is in the writer queues, or the forwarder ended.
     fn drained(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.ended || (state.pending.is_empty() && !state.in_flight)
+    }
+
+    /// `current` with each fragment that still has a newer version pending
+    /// lowered to the version already handed over (0: none): what the
+    /// learner is sure to receive before anything else this forwarder sends.
+    fn handed_over(&self, current: &[u64]) -> Vec<u64> {
+        let state = self.state.lock().unwrap();
+        let mut versions = current.to_vec();
+        for (p, version) in versions.iter_mut().enumerate() {
+            if state.pending.is_pending(p) {
+                *version = state.pending.sent(p).unwrap_or(0);
+            }
+        }
+        versions
     }
 }
 
@@ -6796,26 +7061,46 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
         }
         let next = {
             let mut state = conn.state.lock().unwrap();
+            let unmet = state.pending.unmet();
             let next = state.pending.pop();
             state.in_flight = next.is_some();
-            next
+            state.target_in_flight = state.pending.unmet() < unmet;
+            // S27 G-FD: the FULL header offered with this version.
+            let header = match &next {
+                Some((p, version, _)) if conn.downlink => {
+                    Some(state.full_headers.remove(p).filter(|(offered, _)| offered == version).map(|(_, h)| h))
+                }
+                _ => None,
+            };
+            next.map(|next| (next, header))
         };
-        let Some((p, version, values)) = next else {
+        let Some(((p, version, values), header)) = next else {
             tokio::select! {
                 _ = conn.notify.notified() => {}
                 _ = stop.changed() => {}
             }
             continue;
         };
-        let prefix = crate::resend::bcast_prefix(p, version);
+        let (prefix, dtype) = match header {
+            None => (crate::resend::bcast_prefix(p, version).to_vec(), conn.dtype),
+            Some(Some(header)) => (header, DTYPE_F32),
+            Some(None) => {
+                // A delta session needs the anchor's FULL; never send a
+                // frame the learner cannot decode.
+                let mut state = conn.state.lock().unwrap();
+                state.error = Some(format!("fragment {p} version {version} has no downlink FULL header"));
+                break;
+            }
+        };
         let result = conn
             .group
-            .send_tensor_large(MSG_BCAST_FRAGMENT, &prefix, conn.dtype, &values)
+            .send_tensor_large(MSG_BCAST_FRAGMENT, &prefix, dtype, &values)
             .await;
-        let bytes = tensor_nbytes(conn.dtype, values.len()).unwrap_or(0) as u64;
+        let bytes = tensor_nbytes(dtype, values.len()).unwrap_or(0) as u64;
         drop(values);
         let mut state = conn.state.lock().unwrap();
         state.in_flight = false;
+        state.target_in_flight = false;
         match result {
             Ok(()) => {
                 state.sent += 1;
@@ -6829,10 +7114,11 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
     }
     let mut state = conn.state.lock().unwrap();
     state.in_flight = false;
+    state.target_in_flight = false;
     state.ended = true;
 }
 
-/// What a drained background resend still owes its learner.
+/// What a caught-up background resend still owes its learner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResendTail {
     /// Rejoin catch-up: the same tail as an inline `CatchUps` entry.
@@ -6846,9 +7132,21 @@ struct BulkResend {
     group: Arc<Group>,
     conn: Arc<ResendConn>,
     task: tokio::task::JoinHandle<()>,
-    tail: ResendTail,
+    /// The tail still owed; None once it ran (the forwarder then sends the
+    /// versions published meanwhile until nothing is pending).
+    tail: Option<ResendTail>,
     started: Instant,
     fragments: usize,
+    /// S27 G-FD: started by `spill` (a slow downlink), not by a resend.
+    spilled: bool,
+}
+
+/// The tail of a background resend whose targets are handed over.
+enum DueTail {
+    /// `floor`: the versions handed over, recorded as the learner's catch-up
+    /// versions (`finish_catch_up`).
+    CatchUp { group: Arc<Group>, tail: CatchUpTail, floor: Vec<u64> },
+    Recovery { group: Arc<Group>, replayed: usize },
 }
 
 /// The background resends owned by the scheduler. Like `CatchUps`, a
@@ -6866,13 +7164,16 @@ impl BulkResends {
         self.entries.is_empty()
     }
 
+    /// The learner still owes a tail (it joins no new round meanwhile).
     fn holds(&self, member: Member) -> bool {
-        self.entries.iter().any(|entry| entry.member == member)
+        self.entries.iter().any(|entry| entry.member == member && entry.tail.is_some())
     }
 
     /// Offer the current value of every fragment in `fragments` to a new
-    /// forwarder of `member` (the pending publication must be durable).
-    /// A second catch-up for the same generation only adds its tail.
+    /// forwarder of `member` (the pending publication must be durable); those
+    /// versions are its targets. A second catch-up for the same generation
+    /// offers its fragments too, makes every version still pending a target
+    /// and adds its tail (or owes that tail again when the first one ran).
     fn start(
         &mut self,
         registry: &Registry,
@@ -6883,30 +7184,20 @@ impl BulkResends {
         tail: ResendTail,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.member == member) {
-            if let (ResendTail::CatchUp(existing), ResendTail::CatchUp(more)) = (&mut entry.tail, tail) {
-                existing.rejoin |= more.rejoin;
-                existing.rebind |= more.rebind;
+            let ResendTail::CatchUp(more) = tail else { return };
+            match &mut entry.tail {
+                Some(ResendTail::CatchUp(existing)) => {
+                    existing.rejoin |= more.rejoin;
+                    existing.rebind |= more.rebind;
+                }
+                Some(ResendTail::Recovery { .. }) => return,
+                None => entry.tail = Some(tail),
             }
+            entry.conn.owe(st, fragments);
             return;
         }
-        let dtype = bulk_dtype(st.wire_dtype);
-        let mut pending = crate::resend::Pending::new(st.params.len());
-        let mut count = 0usize;
-        let mut bytes = 0usize;
-        for p in fragments {
-            if p < st.params.len() && pending.offer(p, st.versions[p], st.params[p].clone()) {
-                count += 1;
-                bytes += tensor_nbytes(dtype, st.params[p].len()).unwrap_or(0);
-            }
-        }
-        let (stop, stop_rx) = tokio::sync::watch::channel(false);
-        let conn = Arc::new(ResendConn {
-            group: group.clone(),
-            dtype,
-            state: Mutex::new(ResendState { pending, ..ResendState::default() }),
-            notify: tokio::sync::Notify::new(),
-            stop,
-        });
+        let (conn, stop_rx) = ResendConn::new(st, group.clone());
+        let (count, bytes) = conn.owe(st, fragments);
         registry.lock().unwrap().resends.insert(member, conn.clone());
         let task = tokio::spawn(resend_forwarder(conn.clone(), stop_rx));
         info!(
@@ -6917,19 +7208,79 @@ impl BulkResends {
             kind = ?tail,
             "background resend started"
         );
-        self.entries.push(BulkResend { member, group, conn, task, tail, started: Instant::now(), fragments: count });
+        self.entries.push(BulkResend {
+            member,
+            group,
+            conn,
+            task,
+            tail: Some(tail),
+            started: Instant::now(),
+            fragments: count,
+            spilled: false,
+        });
+    }
+
+    /// S27 G-FD: the writer queues of `group`'s learner cannot take the
+    /// broadcast of fragment `p` now (a slow downlink). Hand the learner to a
+    /// forwarder that sends this version, and the versions published after
+    /// it, at the pace of its link (newest version per fragment wins), while
+    /// the scheduler keeps merging and sending PULLs. The entry has no tail:
+    /// the learner keeps joining rounds (it answers a PULL once it holds the
+    /// round's base). Once nothing is pending, `take_due` removes it and
+    /// publications go inline again, so the learner never has two senders.
+    /// `full`: on a bf16-downlink session, the FULL with the shared anchor
+    /// at this version (`DownlinkAnchors::resend`).
+    fn spill(
+        &mut self,
+        registry: &Registry,
+        st: &GlobalState,
+        group: Arc<Group>,
+        p: usize,
+        full: Option<&crate::downlink::EncodedBcast>,
+    ) {
+        let member = group.member;
+        if let Some(entry) = self.entries.iter().find(|entry| entry.member == member) {
+            // publish_round offers to every forwarder before it sends inline,
+            // so this is not reached; offering keeps the one-sender rule.
+            entry.conn.offer_published(p, st.versions[p], &st.params[p], full);
+            return;
+        }
+        let (conn, stop_rx) = ResendConn::new(st, group.clone());
+        conn.offer_published(p, st.versions[p], &st.params[p], full);
+        registry.lock().unwrap().resends.insert(member, conn.clone());
+        let task = tokio::spawn(resend_forwarder(conn.clone(), stop_rx));
+        info!(
+            learner_id = member.learner_id,
+            generation = member.generation,
+            fragment = p,
+            version = st.versions[p],
+            downlink_full = full.is_some(),
+            "slow downlink: the learner's send queues are full; its broadcasts go to a forwarder"
+        );
+        self.entries.push(BulkResend {
+            member,
+            group,
+            conn,
+            task,
+            tail: None,
+            started: Instant::now(),
+            fragments: 1,
+            spilled: true,
+        });
     }
 
     /// Stop and drop the resends whose learner is no longer the generation
-    /// they were started for (no tail runs); returns those learners.
+    /// they were started for (no tail runs); returns those learners. Before
+    /// its tail a recovery replay belongs to the recovering generation;
+    /// otherwise a resend belongs to the current one.
     fn drop_superseded(&mut self, registry: &Registry) -> Vec<Member> {
         let mut dropped = Vec::new();
         {
             let mut registry = registry.lock().unwrap();
             self.entries.retain(|entry| {
                 let keep = match entry.tail {
-                    ResendTail::CatchUp(_) => registry.current.get(&entry.member.learner_id) == Some(&entry.member),
-                    ResendTail::Recovery { .. } => registry.is_recovering(entry.member),
+                    Some(ResendTail::Recovery { .. }) => registry.is_recovering(entry.member),
+                    _ => registry.current.get(&entry.member.learner_id) == Some(&entry.member),
                 };
                 if !keep {
                     let _ = entry.conn.stop.send(true);
@@ -6942,14 +7293,56 @@ impl BulkResends {
         dropped
     }
 
-    /// Remove the drained resends (their learners get publications inline
-    /// again) and return them, oldest first, for their tails.
-    fn take_drained(&mut self, registry: &Registry) -> Vec<BulkResend> {
-        let mut drained = Vec::new();
+    /// Take the tails whose targets are handed over (oldest resend first),
+    /// and remove the resends with nothing pending after their tail (their
+    /// learners get publications inline again).
+    fn take_due(&mut self, registry: &Registry, st: &GlobalState) -> Vec<DueTail> {
+        let mut due = Vec::new();
         let mut registry = registry.lock().unwrap();
         let mut i = 0;
         while i < self.entries.len() {
-            if !self.entries[i].conn.drained() {
+            let entry = &mut self.entries[i];
+            if let Some(tail) = entry.tail {
+                if !entry.conn.caught_up() {
+                    i += 1;
+                    continue;
+                }
+                entry.tail = None;
+                let group = entry.group.clone();
+                due.push(match tail {
+                    ResendTail::CatchUp(tail) => {
+                        DueTail::CatchUp { group, tail, floor: entry.conn.handed_over(&st.versions) }
+                    }
+                    ResendTail::Recovery { replayed } => {
+                        // RECOVERY_DONE names the current versions: send the
+                        // ones still pending before any later publication.
+                        entry.conn.owe_pending();
+                        DueTail::Recovery { group, replayed }
+                    }
+                });
+                let state = entry.conn.state.lock().unwrap();
+                match &state.error {
+                    None => info!(
+                        learner_id = entry.member.learner_id,
+                        generation = entry.member.generation,
+                        fragments = entry.fragments,
+                        sent = state.sent,
+                        bytes = state.bytes,
+                        pending = state.pending.len(),
+                        seconds = entry.started.elapsed().as_secs_f64(),
+                        "background resend caught up; its tail runs"
+                    ),
+                    Some(error) => warn!(
+                        learner_id = entry.member.learner_id,
+                        generation = entry.member.generation,
+                        sent = state.sent,
+                        %error,
+                        "background resend ended early; its tail still runs"
+                    ),
+                }
+                drop(state);
+            }
+            if !entry.conn.drained() {
                 i += 1;
                 continue;
             }
@@ -6957,8 +7350,8 @@ impl BulkResends {
             registry.resends.remove(&entry.member);
             let _ = entry.conn.stop.send(true);
             let state = entry.conn.state.lock().unwrap();
-            match &state.error {
-                None => info!(
+            match (&state.error, entry.spilled) {
+                (None, false) => info!(
                     learner_id = entry.member.learner_id,
                     generation = entry.member.generation,
                     fragments = entry.fragments,
@@ -6968,18 +7361,26 @@ impl BulkResends {
                     seconds = entry.started.elapsed().as_secs_f64(),
                     "background resend drained"
                 ),
-                Some(error) => warn!(
+                (None, true) => info!(
+                    learner_id = entry.member.learner_id,
+                    generation = entry.member.generation,
+                    sent = state.sent,
+                    bytes = state.bytes,
+                    coalesced = state.pending.coalesced,
+                    seconds = entry.started.elapsed().as_secs_f64(),
+                    "slow downlink drained; broadcasts go inline again"
+                ),
+                (Some(error), true) => warn!(
                     learner_id = entry.member.learner_id,
                     generation = entry.member.generation,
                     sent = state.sent,
                     %error,
-                    "background resend ended early; its tail still runs"
+                    "slow downlink forwarder ended early"
                 ),
+                (Some(_), false) => {}
             }
-            drop(state);
-            drained.push(entry);
         }
-        drained
+        due
     }
 
     /// End of the round loop: every forwarder hands over the fragment it is
@@ -7008,7 +7409,12 @@ impl BulkResends {
 }
 
 /// Tail of a finished rejoin catch-up (inline `CatchUps` or background
-/// resend). False when the budget cutoff was established.
+/// resend). `floor`: the fragment versions the learner was caught up to; a
+/// re-JOINed learner's push on an older base is fenced. The inline path
+/// passes the current versions (every one is in the writer queues); a
+/// background resend passes the versions its forwarder has handed over,
+/// which are older for fragments republished since (S27 G-EY). False when
+/// the budget cutoff was established.
 #[allow(clippy::too_many_arguments)]
 async fn finish_catch_up(
     cfg: &Config,
@@ -7016,6 +7422,7 @@ async fn finish_catch_up(
     registry: &Registry,
     group: &Arc<Group>,
     tail: CatchUpTail,
+    floor: &[u64],
     dynamic: bool,
     inflight: &mut [Round],
     fixed_roster: bool,
@@ -7026,7 +7433,7 @@ async fn finish_catch_up(
             .lock()
             .unwrap()
             .membership
-            .record_catch_up(group.member, &st.versions);
+            .record_catch_up(group.member, floor);
         if dynamic {
             append_pool_record(
                 cfg.event_tape.as_deref(),
@@ -8037,6 +8444,7 @@ mod tests {
             membership: Default::default(),
             recovery: Default::default(),
             inline_resend: false,
+            inline_broadcast: false,
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
@@ -8746,14 +9154,35 @@ mod tests {
         )
     }
 
+    /// Poll `take_due` (as the scheduler does) until it returns a tail or
+    /// `ready` holds.
+    async fn poll_due(
+        resends: &mut BulkResends,
+        registry: &Registry,
+        st: &GlobalState,
+        ready: impl Fn(&BulkResends) -> bool,
+    ) -> Vec<DueTail> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let due = resends.take_due(registry, st);
+            if !due.is_empty() || ready(resends) || Instant::now() > deadline {
+                return due;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     /// S27 G-EL: the scheduler only offers; a forwarder sends at the link's
-    /// pace. A version published while the link is full replaces the pending
-    /// one, and the resend is drained only once every offer is handed over.
+    /// pace, and a version published while the link is full replaces the
+    /// pending one. S27 G-EY: the tail runs once the versions owed at the
+    /// start are handed over, although a later publication is still pending;
+    /// the learner stays on its forwarder (publications are offered to it)
+    /// until nothing is pending.
     #[tokio::test]
-    async fn background_resend_follows_a_slow_link_and_ends_at_the_newest_versions() {
+    async fn background_resend_tail_runs_at_the_start_versions_and_later_ones_follow() {
         let mut st = resend_test_state(3);
         let learner = member(1, 7);
-        // Queue of one frame: the second fragment waits for the reader.
+        // Queue of one frame: each further fragment waits for the reader.
         let (control, mut frames) = mpsc::channel(1);
         let group = test_group_with_control(learner, control);
         let registry = registry_with_group(group.clone());
@@ -8761,33 +9190,97 @@ mod tests {
         resends.start(&registry, &st, learner, group.clone(), 0..3, ResendTail::Recovery { replayed: 3 });
         assert!(resends.holds(learner) && registry.lock().unwrap().resends.contains_key(&learner));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(resends.take_drained(&registry).is_empty(), "the link has taken one fragment only");
-        // A merge of fragment 2 is published meanwhile (publish_round offers it).
+        assert!(resends.take_due(&registry, &st).is_empty(), "the link has taken one fragment only");
+        // Merges publish fragment 2 (still owed: its pending entry gets the
+        // newer version) and fragment 0 (already handed over at version 0).
+        let conn = registry.lock().unwrap().resends[&learner].clone();
         st.versions[2] = 5;
         st.params[2] = Arc::new(vec![9.0; 4]);
-        let conn = registry.lock().unwrap().resends[&learner].clone();
         conn.offer(2, st.versions[2], st.params[2].clone());
+        st.versions[0] = 6;
+        st.params[0] = Arc::new(vec![8.0; 4]);
+        conn.offer(0, st.versions[0], st.params[0].clone());
         let mut got = Vec::new();
+        for _ in 0..2 {
+            got.push(resent_fragment(&frames.recv().await.unwrap()));
+        }
+        assert_eq!(got, vec![(0, 0, 0.0), (1, 0, 1.0)]);
+        // Fragment 2's version 5 is in the queue and fragment 0's version 6
+        // waits for the reader: every owed version is handed over.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::Recovery { replayed: 3, .. }]));
+        assert!(!resends.holds(learner), "the learner joins rounds again after its tail");
+        assert!(registry.lock().unwrap().resends.contains_key(&learner), "it keeps its forwarder");
+        // After its tail the resend belongs to the current generation (the
+        // promoted island), no longer to the recovering one.
+        assert!(resends.drop_superseded(&registry).is_empty());
+        // A later publication still goes to the forwarder.
+        st.versions[1] = 8;
+        st.params[1] = Arc::new(vec![7.0; 4]);
+        conn.offer(1, st.versions[1], st.params[1].clone());
         for _ in 0..3 {
             got.push(resent_fragment(&frames.recv().await.unwrap()));
         }
-        assert_eq!(got, vec![(0, 0, 0.0), (1, 0, 1.0), (2, 5, 9.0)]);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let drained = loop {
-            let drained = resends.take_drained(&registry);
-            if !drained.is_empty() || Instant::now() > deadline {
-                break drained;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].tail, ResendTail::Recovery { replayed: 3 });
+        assert_eq!(got[2..], [(2, 5, 9.0), (0, 6, 8.0), (1, 8, 7.0)]);
+        // Nothing pending: the resend is removed (publications go inline) and
+        // no second tail runs.
+        assert!(poll_due(&mut resends, &registry, &st, BulkResends::is_empty).await.is_empty());
         assert!(resends.is_empty() && !registry.lock().unwrap().resends.contains_key(&learner));
-        let state = drained[0].conn.state.lock().unwrap();
-        assert_eq!((state.sent, state.pending.coalesced, state.error.is_none()), (3, 1, true));
+        let state = conn.state.lock().unwrap();
+        assert_eq!((state.sent, state.pending.coalesced, state.error.is_none()), (5, 1, true));
         drop(state);
-        // Nothing else was sent: the stale version 0 of fragment 2 never went out.
+        // The stale version 0 of fragment 2 never went out.
         assert!(frames.try_recv().is_err());
+    }
+
+    /// S27 G-EY: a catch-up tail records, as the learner's catch-up floor,
+    /// the versions handed over (older than the current ones where a newer
+    /// version is still pending). A second catch-up after the tail ran owes
+    /// its tail again; after its tail a resend belongs to the current
+    /// generation.
+    #[tokio::test]
+    async fn background_catch_up_floor_second_tail_and_owner_after_the_tail() {
+        let mut st = resend_test_state(3);
+        let learner = member(3, 4);
+        let (control, mut frames) = mpsc::channel(1);
+        let group = test_group_with_control(learner, control);
+        let registry = registry_with_group(group.clone());
+        let mut resends = BulkResends::new();
+        resends.start(&registry, &st, learner, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
+        let conn = registry.lock().unwrap().resends[&learner].clone();
+        let mut publish = |st: &mut GlobalState, p: usize, version: u64| {
+            st.versions[p] = version;
+            st.params[p] = Arc::new(vec![version as f32; 4]);
+            conn.offer(p, version, st.params[p].clone());
+        };
+        // Fragment 0 is in the queue; fragment 1 waits for the reader.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Fragment 2 is not owed; fragment 0 was handed over at version 0.
+        publish(&mut st, 2, 2);
+        publish(&mut st, 0, 3);
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (0, 0, 0.0));
+        // Fragment 1 (owed) is in the queue; fragment 2 is sent next and
+        // fragment 0's version 3 still waits.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        let [DueTail::CatchUp { tail, floor, .. }] = due.as_slice() else { panic!("one catch-up tail") };
+        assert_eq!((*tail, &floor[..2]), (CatchUpTail::REJOIN, &[0, 0][..]));
+        assert!(!resends.holds(learner) && resends.drop_superseded(&registry).is_empty());
+        // The disconnect of an older generation asks for a rebind: the
+        // versions still pending are owed again.
+        resends.start(&registry, &st, learner, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REBIND));
+        assert!(resends.holds(learner));
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (1, 0, 1.0));
+        publish(&mut st, 1, 4);
+        assert_eq!(resent_fragment(&frames.recv().await.unwrap()), (2, 2, 2.0));
+        // Fragment 0's version 3 is in the queue; fragment 1's version 4 is
+        // not owed and waits for the reader.
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::CatchUp { tail: CatchUpTail::REBIND, .. }]));
+        assert!(!resends.is_empty() && !resends.holds(learner));
+        // A newer generation now owns the learner: the resend is dropped.
+        registry.lock().unwrap().register_group(test_group(member(3, 5)), Instant::now()).unwrap();
+        assert_eq!(resends.drop_superseded(&registry), vec![learner]);
+        assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
     }
 
     /// A catch-up for a generation that is no longer current is stopped
@@ -8804,7 +9297,7 @@ mod tests {
         resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
         resends.start(&registry, &st, old, group.clone(), 0..2, ResendTail::CatchUp(CatchUpTail::REBIND));
         assert_eq!(resends.entries.len(), 1);
-        assert_eq!(resends.entries[0].tail, ResendTail::CatchUp(CatchUpTail { rejoin: true, rebind: true }));
+        assert_eq!(resends.entries[0].tail, Some(ResendTail::CatchUp(CatchUpTail { rejoin: true, rebind: true })));
         assert!(resends.drop_superseded(&registry).is_empty());
         let newer = member(2, 2);
         registry.lock().unwrap().register_group(test_group(newer), Instant::now()).unwrap();
@@ -8812,21 +9305,252 @@ mod tests {
         assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
         drop(frames);
 
-        // Closed link: the forwarder ends with the error; the resend is drained.
+        // Closed link: the forwarder ends with the error; the tail is due and
+        // the resend is removed.
         let (control, frames) = mpsc::channel(1);
         drop(frames);
         let group = test_group_with_control(newer, control);
         resends.start(&registry, &st, newer, group, 0..2, ResendTail::CatchUp(CatchUpTail::REJOIN));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let drained = loop {
-            let drained = resends.take_drained(&registry);
-            if !drained.is_empty() || Instant::now() > deadline {
-                break drained;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        let conn = registry.lock().unwrap().resends[&newer].clone();
+        let due = poll_due(&mut resends, &registry, &st, |_| false).await;
+        assert!(matches!(due.as_slice(), [DueTail::CatchUp { tail: CatchUpTail::REJOIN, .. }]));
+        assert!(resends.is_empty() && registry.lock().unwrap().resends.is_empty());
+        assert!(conn.state.lock().unwrap().error.is_some());
+    }
+
+    /// Two learners on one-frame queues (`test_group_with_control`): the
+    /// fast one is read at once, the slow one is read by the test.
+    fn slow_downlink_registry(fast_queue: usize) -> (Registry, mpsc::Receiver<OutFrame>, mpsc::Receiver<OutFrame>, Member) {
+        let (fast_tx, fast_rx) = mpsc::channel(fast_queue);
+        let (slow_tx, slow_rx) = mpsc::channel(1);
+        let slow = member(1, 1);
+        let registry = registry_with_group(test_group_with_control(member(0, 1), fast_tx));
+        registry
+            .lock()
+            .unwrap()
+            .register_group(test_group_with_control(slow, slow_tx), Instant::now())
+            .unwrap();
+        (registry, fast_rx, slow_rx, slow)
+    }
+
+    async fn broadcast_now(cfg: &Config, st: &GlobalState, registry: &Registry, bulk: &mut BulkResends, p: usize) {
+        let cutoff = BudgetCutoff::new(false, Duration::ZERO);
+        tokio::time::timeout(Duration::from_secs(2), broadcast_round(cfg, st, registry, bulk, p, &cutoff))
+            .await
+            .expect("a broadcast never waits on a learner's link")
+            .unwrap();
+    }
+
+    /// S27 G-FD (run s27-fa-r1): a broadcast that does not fit in a
+    /// learner's send queue goes to its forwarder instead of holding the
+    /// scheduler. The learner keeps joining rounds; versions published while
+    /// its link is full coalesce (the newest wins, none goes out of order);
+    /// once nothing is pending it is served inline again.
+    /// `--inline-broadcast` waits on the full queue (the old behavior).
+    #[tokio::test]
+    async fn slow_downlink_goes_to_its_forwarder_and_back_inline() {
+        let cfg = round_test_config(1000);
+        let mut st = resend_test_state(2);
+        let (registry, mut fast_rx, mut slow_rx, slow) = slow_downlink_registry(64);
+        let mut bulk = BulkResends::new();
+        let publish = |st: &mut GlobalState, p: usize, version: u64| {
+            st.versions[p] = version;
+            st.params[p] = Arc::new(vec![version as f32; 4]);
         };
-        assert_eq!(drained.len(), 1);
-        assert!(drained[0].conn.state.lock().unwrap().error.is_some());
+        // Version 1 of fragment 0 fits both queues: inline.
+        publish(&mut st, 0, 1);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 0).await;
+        assert!(bulk.is_empty());
+        // The slow queue is full: fragment 1's version 2 goes to the slow
+        // learner's forwarder; the call does not wait.
+        publish(&mut st, 1, 2);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 1).await;
+        assert!(registry.lock().unwrap().resends.contains_key(&slow));
+        assert!(!bulk.holds(slow), "a slow learner still joins rounds");
+        // Two more versions while its link is full: version 4 replaces 3.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        publish(&mut st, 1, 3);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 1).await;
+        publish(&mut st, 1, 4);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 1).await;
+        let mut fast = Vec::new();
+        while let Ok(frame) = fast_rx.try_recv() {
+            fast.push(resent_fragment(&frame));
+        }
+        assert_eq!(fast, vec![(0, 1, 1.0), (1, 2, 2.0), (1, 3, 3.0), (1, 4, 4.0)]);
+        let mut slow_got = Vec::new();
+        for _ in 0..3 {
+            slow_got.push(resent_fragment(&slow_rx.recv().await.unwrap()));
+        }
+        assert_eq!(slow_got, vec![(0, 1, 1.0), (1, 2, 2.0), (1, 4, 4.0)]);
+        // Nothing pending: the forwarder is removed, the next broadcast is
+        // inline (no new forwarder).
+        assert!(poll_due(&mut bulk, &registry, &st, BulkResends::is_empty).await.is_empty());
+        assert!(bulk.is_empty() && registry.lock().unwrap().resends.is_empty());
+        publish(&mut st, 0, 5);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 0).await;
+        assert!(bulk.is_empty());
+        assert_eq!(resent_fragment(&slow_rx.recv().await.unwrap()), (0, 5, 5.0));
+        assert!(slow_rx.try_recv().is_err(), "version 3 never went out");
+
+        // Old behavior: the scheduler waits on the full queue.
+        let mut inline = round_test_config(1000);
+        inline.inline_broadcast = true;
+        publish(&mut st, 1, 6);
+        broadcast_now(&inline, &st, &registry, &mut bulk, 1).await;
+        publish(&mut st, 0, 7);
+        let cutoff = BudgetCutoff::new(false, Duration::ZERO);
+        let waited = tokio::time::timeout(
+            Duration::from_millis(200),
+            broadcast_round(&inline, &st, &registry, &mut bulk, 0, &cutoff),
+        )
+        .await;
+        assert!(waited.is_err(), "--inline-broadcast waits on the slow link");
+    }
+
+    /// S27 G-FD: `try_send_tensor_now` reserves every chunk's slot on the
+    /// stream the round-robin puts it on, queues the same frames as
+    /// `send_tensor_large`, and queues nothing when one stream is full.
+    #[tokio::test]
+    async fn try_send_tensor_now_reserves_each_stream_and_queues_the_same_frames() {
+        let (control, _control_rx) = mpsc::channel(4);
+        let mut receivers = Vec::new();
+        let mut streams = HashMap::new();
+        for index in 0..3u16 {
+            let (sender, receiver) = mpsc::channel(3);
+            streams.insert(index, sender);
+            receivers.push(receiver);
+        }
+        let group = Group {
+            member: member(0, 1),
+            dtype: DTYPE_F32,
+            layout: Layout { fragments: Vec::new() },
+            layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
+            num_streams: 3,
+            max_init_payload: 0,
+            max_push_payload: 0,
+            expert_tokens: false,
+            max_chunked_inner: u64::MAX,
+            control,
+            data: Mutex::new(streams),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(1),
+            reasm: Mutex::new(HashMap::new()),
+            wire: Arc::new(WireCounter::default()),
+        };
+        let values: Vec<f32> = (0..11).map(|value| value as f32 - 3.0).collect();
+        let prefix = crate::resend::bcast_prefix(2, 9);
+        // 13 + 12 + 44 = 69 bytes in chunks of 16: 5 chunks from stream 1 on
+        // (streams 1, 2, 0, 1, 2), so streams 1 and 2 take 2 and stream 0 one.
+        assert!(group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap());
+        let queued: Vec<usize> = receivers.iter().map(|receiver| receiver.len()).collect();
+        assert_eq!(queued, vec![1, 2, 2]);
+        // Streams 1 and 2 have one free slot each; this frame needs two on
+        // stream 0 or 1 (rr is now 6): nothing is queued.
+        assert!(!group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap());
+        assert_eq!(receivers.iter().map(|receiver| receiver.len()).collect::<Vec<_>>(), queued);
+        // The frames reassemble to the inner frame `send_tensor_large` sends.
+        let mut chunks = Vec::new();
+        for receiver in &mut receivers {
+            while let Ok(frame) = receiver.try_recv() {
+                let offset = u64::from_le_bytes(frame.parts[0][16..24].try_into().unwrap());
+                chunks.push((offset, frame.parts[1].to_vec()));
+            }
+        }
+        chunks.sort();
+        let inner: Vec<u8> = chunks.into_iter().flat_map(|(_, bytes)| bytes).collect();
+        assert_eq!(inner, buffered_tensor_inner(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values));
+        // A closed stream is the same error as on the awaiting path.
+        drop(receivers);
+        let error = group.try_send_tensor_now_chunked(MSG_BCAST_FRAGMENT, &prefix, DTYPE_F32, &values, 16).unwrap_err();
+        assert!(error.downcast_ref::<OutboundStreamClosed>().is_some());
+    }
+
+    /// (version, kind, base, digest, values) of a bf16-downlink BCAST chunk.
+    fn downlink_frame(frame: &OutFrame) -> (u64, u8, u64, [u8; 32], Vec<f32>) {
+        assert_eq!(chunked_inner_type(frame), MSG_BCAST_FRAGMENT);
+        let inner = &frame.parts[1];
+        let prefix = &inner[13..13 + crate::downlink::PREFIX_LEN];
+        let data = &inner[13 + crate::downlink::PREFIX_LEN..];
+        let kind = prefix[12];
+        let values = if kind == crate::downlink::KIND_FULL {
+            data.chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+        } else {
+            data.chunks(2).map(|b| half::bf16::from_le_bytes(b.try_into().unwrap()).to_f32()).collect()
+        };
+        (
+            u64::from_le_bytes(prefix[4..12].try_into().unwrap()),
+            kind,
+            u64::from_le_bytes(prefix[13..21].try_into().unwrap()),
+            prefix[21..53].try_into().unwrap(),
+            values,
+        )
+    }
+
+    /// Apply one downlink BCAST to a learner's anchor as the island does
+    /// (`yeto/downlink.py`): a delta needs its base, the digest must match.
+    fn apply_downlink(anchor: &mut Option<(u64, Vec<f32>)>, frame: &OutFrame) -> (u64, u8) {
+        let (version, kind, base, digest, values) = downlink_frame(frame);
+        let next = if kind == crate::downlink::KIND_FULL {
+            values
+        } else {
+            let (held, current) = anchor.as_ref().expect("a delta needs an anchor");
+            assert_eq!(*held, base, "delta for version {version} needs anchor {base}");
+            current.iter().zip(&values).map(|(a, d)| a + d).collect()
+        };
+        assert_eq!(crate::downlink::digest_f32(&next), digest, "anchor digest of version {version}");
+        *anchor = Some((version, next));
+        (version, kind)
+    }
+
+    /// S27 G-FD: on a bf16-downlink session a slow learner may skip deltas,
+    /// so its forwarder sends each version as a FULL with the shared anchor
+    /// (digest checked as the island does). After it is served inline again,
+    /// the next delta applies on what it holds; both learners end with the
+    /// same anchor bits.
+    #[tokio::test]
+    async fn slow_downlink_on_a_delta_session_gets_fulls_with_the_shared_anchor() {
+        let cfg = round_test_config(1000);
+        let mut st = resend_test_state(1);
+        st.downlink = Some(Mutex::new(crate::downlink::DownlinkAnchors::new(1, 100).unwrap()));
+        let (registry, mut fast_rx, mut slow_rx, slow) = slow_downlink_registry(64);
+        let mut bulk = BulkResends::new();
+        let publish = |st: &mut GlobalState, version: u64| {
+            st.versions[0] = version;
+            st.params[0] = Arc::new((0..4).map(|i| 1.0 + 0.0137 * (version * 7 + i) as f32).collect());
+        };
+        let (mut fast_anchor, mut slow_anchor) = (None, None);
+        for version in 1..=4 {
+            publish(&mut st, version);
+            broadcast_now(&cfg, &st, &registry, &mut bulk, 0).await;
+            if version == 2 {
+                assert!(registry.lock().unwrap().resends.contains_key(&slow));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut fast = Vec::new();
+        while let Ok(frame) = fast_rx.try_recv() {
+            fast.push(apply_downlink(&mut fast_anchor, &frame));
+        }
+        let (full, delta) = (crate::downlink::KIND_FULL, crate::downlink::KIND_DELTA);
+        assert_eq!(fast, vec![(1, full), (2, delta), (3, delta), (4, delta)]);
+        let mut slow_got = Vec::new();
+        for _ in 0..3 {
+            slow_got.push(apply_downlink(&mut slow_anchor, &slow_rx.recv().await.unwrap()));
+        }
+        // Version 1 inline; then FULLs from the forwarder; version 3 was
+        // replaced by 4 while the link was full.
+        assert_eq!(slow_got, vec![(1, full), (2, full), (4, full)]);
+        assert_eq!(slow_anchor, fast_anchor);
+        assert!(poll_due(&mut bulk, &registry, &st, BulkResends::is_empty).await.is_empty());
+        assert!(bulk.is_empty());
+        // Inline again: version 5 is a delta on the anchor of version 4.
+        publish(&mut st, 5);
+        broadcast_now(&cfg, &st, &registry, &mut bulk, 0).await;
+        assert_eq!(apply_downlink(&mut fast_anchor, &fast_rx.recv().await.unwrap()), (5, delta));
+        assert_eq!(apply_downlink(&mut slow_anchor, &slow_rx.recv().await.unwrap()), (5, delta));
+        assert_eq!(slow_anchor, fast_anchor);
     }
 
     #[tokio::test]

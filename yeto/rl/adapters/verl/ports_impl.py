@@ -252,16 +252,70 @@ class VerlIsland:
 
 
 # ----------------------------------------------------------------------------- ports
+@dataclass
+class VerlPendingGeneration:
+    """A batch whose prompts went to the rollout servers (:meth:`VerlRolloutPool.start_generate`):
+    the round, the publication ``(version, hash)`` the servers held at submission,
+    ``prepare_step``'s metrics and the submission time."""
+
+    rollout_id: int
+    published: tuple[int, str]
+    prep_metrics: dict
+    started: float
+    expected_policy_version: str | None = None
+    ahead: bool = False
+    cancelled: bool = False
+    # the submission's error, raised at the join (as a spawned generation's would be):
+    # e.g. the task dispenser's end of the data, met while drawing the prompts
+    failure: BaseException | None = None
+
+
+def _check_expected_token(rollout_id: int, published: tuple[int, str], expected: str | None) -> None:
+    """IR-3 (as Miles' ``_begin_generation``): the driver's token and the publication the
+    servers hold must be the same, before any prompt is submitted."""
+    if expected is None:
+        return
+    token = f"yeto:{published[0]}:{published[1]}"
+    if expected != token:
+        from yeto.rl.engine.driver import PolicyIdentityError  # the driver never imports the adapter
+
+        raise PolicyIdentityError(f"rollout {rollout_id}: driver expects {expected}, the servers hold {token}")
+
+
 class VerlRolloutPool:
-    def __init__(self, island: VerlIsland):
+    def __init__(self, island: VerlIsland, dispense=None):
         from .data_cursor import VerlDataCursor
 
         self.island = island
-        # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
-        self._cursor = VerlDataCursor(island.trainer)
+        # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        # (``task_dispense.VerlDispensedBatches``, installed on the trainer already)
+        self.dispense = dispense
+        if dispense is not None:
+            # the dispenser keeps the data position: nothing to seek (the driver's
+            # restart and rejoin paths skip a pool without a callable seek)
+            self.seek_data_cursor = None
+        else:
+            # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
+            self._cursor = VerlDataCursor(island.trainer)
 
     def data_cursor(self) -> dict[str, int]:
+        if self.dispense is not None:
+            return self.dispense.cursor()
         return self._cursor.cursor()
+
+    def commit_dispensed(self, rollout_id: int) -> dict | None:
+        """S27 G-EU (driver, after the round's sync boundary): report the round's
+        kept rows trained to the dispenser; None without one."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        return self.dispense.commit(int(rollout_id))
+
+    def close_dispensed(self) -> dict | None:
+        """S27 G-EU (driver, finished run): release every row not trained yet."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        self._dispense_closed = True
+        return self.dispense.close()
 
     def seek_data_cursor(self, cursor) -> dict[str, int]:
         landed = self._cursor.seek(cursor)
@@ -269,22 +323,87 @@ class VerlRolloutPool:
         return landed
 
     def generate(self, rollout_id: int, *, expected_policy_version: str | None = None) -> RolloutBatchHandle:
-        import numpy as np
-        import transfer_queue as tq
         from verl.utils.skip import SkipManager
 
         isl, t = self.island, self.island.trainer
         if isl.published is None or isl.published[0] != rollout_id:
             raise RuntimeError(f"rollout {rollout_id} requested without a verified publication")
-        version, digest = isl.published
         t.global_steps = rollout_id + 1
         SkipManager.set_step(t.global_steps)
         t.timing_raw = {}
-        metrics: dict = {}
         started = time.monotonic()
         prep = t.prepare_step()
-        if prep:
-            metrics.update(prep)
+        return self._collect(VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
+                                                   expected_policy_version))
+
+    # -- rollout ahead (driver ``rollout_ahead``, ``yeto.rl.engine.rollout_ahead``; S27 G-EV) --
+    def start_generate(self, rollout_id: int, *,
+                       expected_policy_version: str | None = None) -> VerlPendingGeneration:
+        """Submit the prompts of ``rollout_id`` to the rollout servers with the policy
+        published now (``rollout_id - 1``) and return while they generate.
+
+        Only the separate mode runs it (the vLLM servers have their own cards, so they
+        generate while the trainer trains ``rollout_id - 1``). verl's ``prepare_step``
+        hands the prompts to the agent loop without waiting (fork ``agent_loop_tq``);
+        the prompts carry ``global_steps = rollout_id + 1``, as in :meth:`generate`. The
+        trainer's own step counter goes back to the round it is about to train."""
+        from verl.utils.skip import SkipManager
+
+        isl, t = self.island, self.island.trainer
+        if isl.published is None or isl.published[0] != rollout_id - 1:
+            raise RuntimeError(f"rollout {rollout_id} started ahead without the publication of "
+                               f"v{rollout_id - 1} (published: {isl.published})")
+        _check_expected_token(rollout_id, isl.published, expected_policy_version)
+        training_step = t.global_steps
+        t.global_steps = rollout_id + 1
+        SkipManager.set_step(t.global_steps)
+        started = time.monotonic()
+        failure: BaseException | None = None
+        try:
+            prep = t.prepare_step()
+        except Exception as error:  # noqa: BLE001 - raised by finish_generate (the driver's join)
+            # S27 G-EV: the round being trained must still train and pass its boundary;
+            # the driver then ends on a data end or fails the join (rollout_ahead module)
+            prep, failure = {}, error
+        finally:
+            t.global_steps = training_step
+            SkipManager.set_step(training_step)
+        isl.emit("rl_verl_generate_started", rollout_id=rollout_id, policy_version=isl.published[0],
+                 **({"error": f"{type(failure).__name__}: {failure}"} if failure is not None else {}))
+        return VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
+                                     expected_policy_version, ahead=True, failure=failure)
+
+    def finish_generate(self, pending: VerlPendingGeneration) -> RolloutBatchHandle:
+        """Wait for a batch :meth:`start_generate` submitted (the driver calls it after the
+        previous round trained, before the next publication); the servers are idle after it."""
+        from verl.utils.skip import SkipManager
+
+        if pending.cancelled:
+            raise RuntimeError(f"rollout {pending.rollout_id}: the batch generated ahead was cancelled")
+        if pending.failure is not None:
+            raise pending.failure
+        t = self.island.trainer
+        t.global_steps = pending.rollout_id + 1
+        SkipManager.set_step(t.global_steps)
+        t.timing_raw = {}
+        return self._collect(pending)
+
+    def cancel_generate(self, pending: VerlPendingGeneration) -> None:
+        """A failed round leaves its batch generating: nothing will train it. verl has no
+        per-batch abort on this path; the island stops after the round's error."""
+        pending.cancelled = True
+
+    def _collect(self, pending: VerlPendingGeneration) -> RolloutBatchHandle:
+        """verl steps 1-3 of ``_step_once`` after the prompts were submitted: sample the
+        replay buffer (waits for the batch), rule reward, balance; the batch handle."""
+        import numpy as np
+        import transfer_queue as tq
+
+        isl, t = self.island, self.island.trainer
+        rollout_id = pending.rollout_id
+        version, digest = pending.published
+        metrics: dict = dict(pending.prep_metrics)
+        started = pending.started
         t.on_sample_begin()
         batch, off_policy = t.replay_buffer.sample(global_steps=t.global_steps, partition_id="train",
                                                    batch_size=t.config.data.train_batch_size)
@@ -327,6 +446,9 @@ class VerlRolloutPool:
                 token_count=int(sum(lengths[i] for i in idx)),
             ))
         isl.pending = {"batch": batch, "metrics": metrics, "gen_seconds": gen_seconds}
+        # S27 G-EU: the dispensed rows of the groups the trainer gets wait for the commit
+        data_rows = (None if self.dispense is None else
+                     self.dispense.kept_round(rollout_id, {uid: len(idx) for uid, idx in groups.items()}))
         lens = sorted(lengths)
         summary = {"resp_len_mean": float(np.mean(lengths)) if lengths else None,
                    "resp_len_p95": float(lens[int(0.95 * (len(lens) - 1))]) if lens else None,
@@ -334,7 +456,8 @@ class VerlRolloutPool:
         isl.append_jsonl(f"verl-rollout-{isl.learner_id}.jsonl", {
             "rollout_id": rollout_id, "policy_token": token, "groups": len(metas),
             "samples": len(uids), "reward_mean": float(np.mean(rewards)) if rewards else None,
-            "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version,
+            "gen_seconds": gen_seconds, "expected_policy_version": pending.expected_policy_version,
+            **({"ahead": True} if pending.ahead else {}),
             "prompts_sha256": prompt_sha, "prompt_set_sha256": prompt_set_sha,
             "sample_submit_global_steps": gen_steps,
             "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids,
@@ -343,7 +466,7 @@ class VerlRolloutPool:
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
             batch_summary=summary, data_cursor=self.data_cursor(),
-            backend="verl",
+            backend="verl", round_data_rows=data_rows,
         )
 
     def abort(self) -> None:
@@ -351,6 +474,18 @@ class VerlRolloutPool:
 
     def members(self) -> frozenset[str]:
         return frozenset({MEMBER})
+
+
+def round_base_policy(island, batch: RolloutBatchHandle) -> tuple[int, str]:
+    """(version, hash) of the policy a round's optimizer step starts from: the island's
+    publication of that round. Serial rounds: the policy that generated the batch.
+    Rollout ahead (S27 G-EV): the batch was generated one version earlier, so the
+    receipt names the round's own publication (the full-parameter stream binds it to
+    the round's anchor) and the batch evidence keeps the generating policy."""
+    published = getattr(island, "published", None)
+    if published is not None and int(published[0]) == int(batch.rollout_id) > int(batch.policy_version):
+        return int(published[0]), str(published[1])
+    return int(batch.policy_version), str(batch.policy_hash)
 
 
 class VerlTrainerGroup(CutPorts):
@@ -391,6 +526,8 @@ class VerlTrainerGroup(CutPorts):
         if t.use_reference_policy:
             kv = t._compute_ref_log_prob(kv, metrics=metrics)
         kv = t._compute_advantage(kv, metrics=metrics)
+        if getattr(isl, "debug_dump", False):  # S27 G-EU (VERL-PARITY #35): --rl-debug-dump
+            debug_dump(isl, kv, batch.rollout_id)
         kv = t._update_actor(kv, metrics=metrics)
         try:
             t._compute_metrics(kv, metrics, timing, global_steps=t.global_steps, epoch=0)
@@ -422,9 +559,10 @@ class VerlTrainerGroup(CutPorts):
         if grad_norm is not None:
             self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
+        base_version, base_hash = round_base_policy(isl, batch)
         receipt = LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
-            base_policy_version=batch.policy_version, base_policy_hash=batch.policy_hash,
+            base_policy_version=base_version, base_policy_hash=base_hash,
             input_batch_hash=_sha("|".join(ids)), trajectory_ids=ids,
             trained_tokens=sum(g.token_count for g in batch.groups), optimizer_steps=1,
             optimizer_step_succeeded=grad_norm is not None, parameter_layout_hash=isl.layout_hash,
@@ -632,6 +770,45 @@ class VerlPlacement:
     def describe(self) -> PlacementDescription:
         return PlacementDescription("colocated", ("cuda:0",), ("cuda:0",),
                                     extra={"weight_transport": "verl-colocated-memory"})
+
+
+DEBUG_DUMP_FIELDS = ("uid", "prompts", "responses", "response_mask", "rm_scores", "advantages")
+
+
+def debug_dump(isl: VerlIsland, kv_batch, rollout_id: int, *, get=None, save=None) -> dict:
+    """S27 G-EU (``--rl-debug-dump``, ``train_options.debug_plan``): the round's
+    samples and train data after the advantage step, as
+    ``verl-debug-<id>-r<round>.pt`` at the top of the output dir (the tape mirror
+    picks it up). Archival: a field verl does not hold is skipped and named in the
+    file, an error is recorded on the tape; training never fails on it."""
+    out = isl.out / f"verl-debug-{isl.learner_id}-r{int(rollout_id):04d}.pt"
+    record: dict = {"rollout_id": int(rollout_id), "global_step": int(getattr(isl.trainer, "global_steps", -1))}
+    try:
+        if get is None:
+            import transfer_queue as tq
+
+            def get(fields):
+                return tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id,
+                                       select_fields=list(fields))
+        if save is None:
+            import torch
+
+            save = torch.save
+        tensors, missing = {}, []
+        for name in DEBUG_DUMP_FIELDS:
+            try:
+                data = get([name])
+                value = data.to_padded_tensor()[name] if hasattr(data, "to_padded_tensor") else data[name]
+            except Exception as exc:  # noqa: BLE001 - archival: one field at a time
+                missing.append(f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+            tensors[name] = value.cpu() if hasattr(value, "cpu") else list(value)
+        save({**record, **tensors, "missing": missing}, out)
+        record.update(path=out.name, fields=sorted(tensors), missing=missing)
+    except Exception as exc:  # noqa: BLE001 - archival, training continues
+        record["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+    isl.emit("rl_verl_debug_dump", **record)
+    return record
 
 
 def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:

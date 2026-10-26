@@ -606,6 +606,62 @@ def read_frame(
 HELLO_MAC_DOMAIN = b"yeto-hello-mac-v1\0"
 ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
 
+# Test-only (S27 G-EY): a client started with ``recover=True`` reads its data
+# streams at most this many bytes per second (all streams together) until its
+# initial cut has arrived (``mark_initial_cut_received``: the recovery replay
+# and the versions RECOVERY_DONE names are applied). It puts a link slower
+# than the merges under a recovery replay on a GPU run (``--modal-env``).
+# Unset or not positive: no limit.
+RECOVERY_READ_BPS_ENV = "YETO_SYNC_TEST_RECOVERY_READ_BPS"
+
+
+def recovery_read_bps_from_env(environ=None) -> float | None:
+    import os
+
+    value = (os.environ if environ is None else environ).get(RECOVERY_READ_BPS_ENV, "").strip()
+    if not value:
+        return None
+    bps = float(value)
+    return bps if bps > 0 else None
+
+
+class _ReadRate:
+    """Bytes-per-second budget shared by a client's data streams."""
+
+    CHUNK = 64 * 1024
+
+    def __init__(self, bps: float, active: Callable[[], bool]) -> None:
+        self.bps = bps
+        self.active = active
+        self._lock = threading.Lock()
+        self._next = time.monotonic()
+
+    def spend(self, nbytes: int) -> None:
+        """Wait until reading ``nbytes`` more stays within the budget."""
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now) + nbytes / self.bps
+            delay = self._next - now
+        time.sleep(delay)
+
+
+class _RateLimitedSocket:
+    """A data socket read through a :class:`_ReadRate` while it is active."""
+
+    def __init__(self, sock: socket.socket, rate: _ReadRate) -> None:
+        self._sock = sock
+        self._rate = rate
+
+    def recv_into(self, buffer, nbytes: int = 0, flags: int = 0) -> int:
+        if not self._rate.active():
+            return self._sock.recv_into(buffer, nbytes, flags)
+        got = self._sock.recv_into(buffer, min(nbytes or len(buffer), _ReadRate.CHUNK), flags)
+        self._rate.spend(got)
+        return got
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
 
 def island_hmac_key_from_env(environ=None) -> bytes | None:
     """The island HMAC key (secret-handling-hardening), or None when unset."""
@@ -1101,6 +1157,12 @@ class SyncerClient:
         # the multi-GB INIT upload and initial broadcast must not be reset by
         # the kernel on a slow link (s26-e3b-p06-C32a).
         self._initial_cut_received = threading.Event()
+        # Test-only (S27 G-EY, RECOVERY_READ_BPS_ENV): a slow link under the
+        # recovery replay of this client.
+        bps = recovery_read_bps_from_env() if recover else None
+        self._recovery_read_rate = (
+            None if bps is None else _ReadRate(bps, lambda: not self._initial_cut_received.is_set())
+        )
         self._init_generation: int | None = None
         # Local init: the INIT_DIGEST frame sent after every HELLO until the
         # initial cut arrives, and the INIT_CONFIRM digest it must earn.
@@ -2333,6 +2395,8 @@ class SyncerClient:
                 _close_socket(sock)
 
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
+        if self._recovery_read_rate is not None and self._socks and sock is not self._socks[0]:
+            sock = _RateLimitedSocket(sock, self._recovery_read_rate)
         try:
             while True:
                 msg_type, payload = read_frame(sock, self._incoming_frame_limit)
