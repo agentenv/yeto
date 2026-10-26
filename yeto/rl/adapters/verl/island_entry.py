@@ -105,6 +105,9 @@ def parse_args(argv):
     p.add_argument("--rl-dispense-mix", default=None)
     p.add_argument("--rl-dispense-by-label", action="store_true", default=False)
     p.add_argument("--rl-dispense-labels", default=None)
+    # S27 G-FS (VERL-PARITY #33): the rollout runs Harbor trials; the rows select
+    # yeto's agent loop (``agent_name: yeto_harbor``).
+    p.add_argument("--rl-agentic-harbor", action="store_true", default=False)
     # S27 task assignment: this training island's row slot of --data (data_split)
     p.add_argument("--rl-data-slot", default=None)
     p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
@@ -277,6 +280,18 @@ def _threshold_card(manifest: dict) -> str:
     return "H100" if "H100" in smi else smi
 
 
+def agentic_rows(frame: Any) -> bool:
+    """True when the data file already holds verl agentic rows (S27 G-FS).
+
+    ``task_lists.verl_rows`` writes the format verl's agent loop reads:
+    ``agent_name`` selects the loop and ``extra_info.agent_task`` is the
+    :class:`AgentTask` mapping.  Such rows carry no ``messages`` / ``label``, so
+    the math conversion below would fail on them; they pass through unchanged.
+    """
+    columns = set(getattr(frame, "columns", ()))
+    return "agent_name" in columns and "extra_info" in columns and "messages" not in columns
+
+
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
                  slot: Any = None, number_rows: bool = False) -> tuple[str, str]:
     """``data``'s train and test splits as verl parquet files. ``slot``
@@ -285,7 +300,9 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     ``extra_info["yeto_data_row"]``; the validation rows stay whole.
     ``number_rows`` (the task dispenser, S27 G-EU): every train row keeps its row
     number, and ``root/train-dispense.jsonl`` (``task_dispense.write_rows_file``)
-    is written for the dispenser's row count and fingerprint."""
+    is written for the dispenser's row count and fingerprint.
+    S27 G-FS: a file of agentic rows (:func:`agentic_rows`) is written through
+    unchanged -- the rows are already in verl's schema."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
 
@@ -301,13 +318,17 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         else:
             src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
             frame = pd.read_parquet(src)
-        rows = [{
-            "data_source": "yeto/" + data,
-            "prompt": [{"role": m["role"], "content": m["content"]} for m in row["messages"]],
-            "ability": "math",
-            "reward_model": {"style": "rule", "ground_truth": str(row["label"])},
-            "extra_info": {"split": split, "index": int(i)},
-        } for i, row in frame.iterrows()]
+        if agentic_rows(frame):  # S27 G-FS: already verl's schema, keep every field
+            rows = [{**row, "extra_info": {**(row["extra_info"] or {}), "split": split, "index": int(i)}}
+                    for i, row in frame.iterrows()]
+        else:
+            rows = [{
+                "data_source": "yeto/" + data,
+                "prompt": [{"role": m["role"], "content": m["content"]} for m in row["messages"]],
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": str(row["label"])},
+                "extra_info": {"split": split, "index": int(i)},
+            } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
         elif number_rows:  # S27 G-EU: the dispenser hands out rows by number
@@ -325,6 +346,83 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
         pd.DataFrame(rows).to_parquet(path)
         out[split] = str(path)
     return out["train"], out["test"]
+
+
+# --------------------------------------------------------------------------- agentic (S27 G-FS)
+#
+# VERL-PARITY #33. The pieces already existed and are not rewritten here:
+# ``harbor_agent_loop.HarborAgentLoop`` (the loop), ``rollout_engine`` (the records
+# proxy over verl's own rollout servers) and ``task_lists.verl_rows`` (the row
+# format). What was missing is this island's wiring: the loop's registry entry,
+# the estimator, the row pass-through and the recorder environment.
+AGENT_LOOP_YAML = "agent-loop.yaml"
+# yeto's agent loop class, by name: importing ``harbor_agent_loop`` here would
+# import verl (its registry decorator), which the island entry must not do before
+# the runtime check has run. A test keeps the spelling equal to the class.
+AGENT_LOOP_TARGET = "yeto.rl.adapters.verl.harbor_agent_loop.HarborAgentLoop"
+
+
+def agentic_island(args: Any) -> bool:
+    """``--rl-agentic-harbor``: the rollout runs Harbor trials (``harness_env.is_harbor_agent``)."""
+    return bool(getattr(args, "rl_agentic_harbor", False))
+
+
+def agentic_run_fields(args: Any, *, out_dir: str) -> dict:
+    """``VerlRunConfig`` fields of an agentic island ({} when it is not one).
+
+    Writes the agent-loop registry file verl reads
+    (``rollout.agent.agent_loop_config_path``): one entry whose ``name`` is the
+    ``agent_name`` the rows carry and whose ``_target_`` is yeto's loop class.
+    """
+    if not agentic_island(args):
+        return {}
+    from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
+
+    path = Path(out_dir) / AGENT_LOOP_YAML
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # verl reads it with OmegaConf and keeps the mapping as the registry entry
+    # (agent_loop.py: _agent_loop_registry[name] = config). Written by hand: the
+    # file has two scalar fields and the island image has no yaml dumper guarantee.
+    path.write_text(f"name: {VERL_AGENT_LOOP}\n_target_: {AGENT_LOOP_TARGET}\n")
+    return {"agentic": True, "agent_loop_config": str(path),
+            "agent_loop_workers": int(os.environ.get("YETO_VERL_AGENT_LOOP_WORKERS", "1"))}
+
+
+def agentic_records_env(run: Any, *, model_path: str, card: str) -> dict[str, str]:
+    """Records-proxy environment of the agent-loop workers (``rollout_engine`` module doc).
+
+    The agent talks OpenAI to the proxy; the proxy renders the chat template and
+    asks verl's own rollout servers for tokens.  The sampling it signs is the
+    island's (temperature / top_p / top_k and the response cap), so a reply the
+    proxy accepts was sampled the way the training step assumes.
+    ``YETO_RECORDS_PROXY_PORT`` and ``..._PUBLIC_BASE`` are **not** set here: the
+    island's rank 0 gets them from its Modal tunnel
+    (``modal_runner.harbor_relay_tunnel``), and a value set here would win over it.
+    """
+    from yeto.rl.harness.chat_templates import TEMPLATES
+    from yeto.rl.harness.gateway import records_env
+
+    # The template is a property of the checkpoint, so the launch names it
+    # (--modal-env YETO_RECORDS_TEMPLATE=...); there is no safe default.
+    template = os.environ.get(records_env.TEMPLATE_ENV, "").strip()
+    if template not in TEMPLATES:
+        raise SystemExit(f"agentic verl 岛要 {records_env.TEMPLATE_ENV}=<chat template>"
+                         f"（已知：{sorted(TEMPLATES)}），收到 {template!r}")
+    sampling = {"temperature": run.temperature, "top_p": run.top_p, "top_k": run.top_k,
+                "max_tokens": run.max_response_len}
+    return {
+        records_env.TEMPLATE_ENV: template,
+        "YETO_AGENTIC_RECORDER": "yeto.rl.harness.gateway.recorder:recorder_from_env",
+        records_env.PROXY_ENV: "yeto.rl.adapters.verl.rollout_engine:records_proxy_from_env",
+        records_env.TOKENIZER_ENV: str(model_path),
+        records_env.MODEL_ENV: os.environ.get("YETO_RECORDS_MODEL", Path(model_path).name),
+        records_env.SAMPLING_ENV: json.dumps(sampling, sort_keys=True),
+        records_env.MAX_MODEL_LEN_ENV: str(run.max_model_len or run.max_prompt_len + run.max_response_len),
+        records_env.CARD_ENV: card,
+        # The proxy binds every interface: the Modal tunnel reaches it from outside
+        # the container, and 127.0.0.1 would refuse that connection.
+        records_env.PROXY_HOST_ENV: os.environ.get(records_env.PROXY_HOST_ENV, "0.0.0.0"),
+    }
 
 
 def island_data_slot(args: Any) -> Any:
@@ -624,6 +722,9 @@ def main(argv=None) -> int:
         "data_slot": "dispense" if dispense_plan else args.rl_data_slot,
         **({"dispense": dispense_plan} if dispense_plan else {}),
         **verify,  # S27 G-EU: verify_every / verify_every_round / debug_dump (absent when off)
+        # S27 G-FS: the driver and every Ray worker register yeto_grpo, and the
+        # Harbor environment is forwarded to the agent-loop workers (verl_main).
+        "agentic": bool(run.agentic),
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": int(args.rl_max_policy_age or 0), "fully_async": bool(limit),
@@ -647,6 +748,8 @@ def main(argv=None) -> int:
 
         env[ECHO_ENV] = "1"
     env["YETO_VERL_READBACK_DIR"] = str(readback)
+    if run.agentic:  # S27 G-FS: the recorder environment the agent-loop workers read
+        env.update(agentic_records_env(run, model_path=model_path, card=_threshold_card(manifest)))
     env["VERL_FILE_LOGGER_PATH"] = str(OUTPUT / f"verl-file-logger-{lid}.jsonl")
     readback.mkdir(parents=True, exist_ok=True)
     entry = "main_buffer_trainer" if buffer_section else "main_fully_async" if limit else "main"
@@ -814,14 +917,17 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         # fsdp2 offloads through CPUOffloadPolicy; the two flags above are the FSDP1 path
         offload_policy=offload in ("param", "both"),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
-        experiment_name=f"yeto-verl-{args.learner_id}")
+        experiment_name=f"yeto-verl-{args.learner_id}",
+        **agentic_run_fields(args, out_dir=out_dir))
     overrides = vconf.build_overrides(run)
     if pools is not None and not limit:  # limit > 0: the fully_async pools (fully_async_plan)
         from .separate import with_separate_pools
 
         overrides = with_separate_pools(overrides, pools)
     overrides += [
-        "actor_rollout_ref.rollout.agent.num_workers=2",
+        # S27 G-FS: the agentic island keeps the worker count its run config fixed
+        # (one records proxy per worker, one tunnelled port), so it is not raised here.
+        f"actor_rollout_ref.rollout.agent.num_workers={run.agent_loop_workers if run.agentic else 2}",
         "reward.num_workers=2",
     ]
     from yeto.hw.catalog import device_family

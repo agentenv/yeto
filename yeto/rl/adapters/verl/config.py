@@ -23,6 +23,7 @@ import math
 from dataclasses import asdict, dataclass, field
 
 from .pins import VERL_COMMIT
+from .run_config_rules import AGENTIC_ADV_ESTIMATOR
 
 MODES = ("train", "diagnose")
 SUPPORTED_CORRECTIONS = ("none", "tis")
@@ -111,6 +112,17 @@ class VerlRunConfig:
     # modeling_nemotron_h.py sets it True. Default off: an NVIDIA island is
     # unchanged, and remote code is only run when the launch asks for it.
     trust_remote_code: bool = False
+    # S27 G-FS (VERL-PARITY #33): the agentic island. The rows select yeto's
+    # Harbor agent loop (``agent_name: yeto_harbor``), so the advantage estimator
+    # must be ``yeto_grpo`` (``run_config_rules.AGENTIC_ADV_ESTIMATOR``; the loop
+    # refuses any other one, ``harbor_agent_loop.check_estimator``) and verl must
+    # read the loop's registry entry from ``agent_loop_config`` (a YAML path).
+    agentic: bool = False
+    agent_loop_config: str = ""
+    # Agent-loop worker processes. One by default on the agentic path: every
+    # worker builds its own records proxy on its own port, and only one port is
+    # tunnelled to the sandboxes (``modal_runner.harbor_relay_tunnel``).
+    agent_loop_workers: int = 1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -167,6 +179,13 @@ def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
         raise VerlConfigError("groups_per_round / samples_per_group / total_rounds 必须为正")
     if cfg.n_gpus < 1:
         raise VerlConfigError(f"n_gpus 必须 >= 1（单节点岛的卡数），得到 {cfg.n_gpus}")
+    if cfg.agentic:  # S27 G-FS
+        if not cfg.agent_loop_config:
+            raise VerlConfigError("agentic 岛要 agent_loop_config（yeto_harbor 的注册表 YAML 路径）")
+        if cfg.agent_loop_workers < 1:
+            raise VerlConfigError(f"agent_loop_workers 必须 >= 1，得到 {cfg.agent_loop_workers}")
+    elif cfg.agent_loop_config:
+        raise VerlConfigError("agent_loop_config 只在 agentic 岛上有意义")
     if cfg.model_dtype not in ("fp32", "bf16"):
         raise VerlConfigError(f"model_dtype 必须是 fp32 或 bf16，得到 {cfg.model_dtype!r}")
 
@@ -182,7 +201,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
     o = [
         "trainer.use_v1=True",
         "trainer.v1.trainer_mode=yeto_sync",
-        "algorithm.adv_estimator=grpo",
+        f"algorithm.adv_estimator={AGENTIC_ADV_ESTIMATOR if cfg.agentic else 'grpo'}",
         "algorithm.norm_adv_by_std_in_grpo=True",
         "algorithm.use_kl_in_reward=False",
         f"algorithm.rollout_correction.bypass_mode={cfg.bypass_mode}",
@@ -246,6 +265,9 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "trainer.total_epochs=1000",
         "ray_kwargs.ray_init.runtime_env.py_executable=null",
     ]
+    if cfg.agentic:  # S27 G-FS: the rows name the loop; verl needs its registry entry
+        o += [f"actor_rollout_ref.rollout.agent.agent_loop_config_path={cfg.agent_loop_config}",
+              f"actor_rollout_ref.rollout.agent.num_workers={cfg.agent_loop_workers}"]
     if cfg.correction == "tis":
         o += ["algorithm.rollout_correction.rollout_is=token",
               f"algorithm.rollout_correction.rollout_is_threshold={cfg.tis_upper}"]

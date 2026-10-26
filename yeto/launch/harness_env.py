@@ -37,8 +37,48 @@ def modal_sandbox_secret_name(args, spec) -> str | None:
 
 
 def is_harbor_agent(args) -> bool:
-    """True when the run's custom agent is yeto's Harbor agent (``harbor_agent.run``)."""
-    return getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION
+    """True when the run's rollout runs Harbor trials.
+
+    Two spellings, one meaning: Miles names the agent callable
+    (``--custom-agent-function-path harbor_agent.run``), while verl selects the
+    agent loop per data row and asks for the island pieces with the neutral
+    ``--rl-agentic-harbor`` (S27 G-FS).  Both give the island the Harbor image
+    layer, the sandbox-provider environment and the tunnelled callback port.
+    """
+    return (getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION
+            or bool(getattr(args, "rl_agentic_harbor", False)))
+
+
+def harbor_callback_port_env(args) -> str:
+    """Environment name of the port the island's rank 0 tunnels for the sandboxes.
+
+    Miles: the gate relay in front of its session server.  verl: the records
+    proxy the agent-loop worker serves (``gateway.recorder``); it is the proxy
+    itself that holds a call, so verl needs no gate relay.
+    """
+    from ..rl.harness.gateway import records_env, relay_env
+
+    if getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
+        return relay_env.RELAY_PORT_ENV
+    return records_env.PROXY_PORT_ENV
+
+
+def harbor_callback_base_env(args) -> str:
+    """Environment name that carries the tunnel URL back to the island (see above)."""
+    from ..rl.harness.gateway import records_env, relay_env
+
+    if getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
+        return relay_env.RELAY_PUBLIC_BASE_ENV
+    return records_env.PROXY_PUBLIC_BASE_ENV
+
+
+def harbor_callback_secret_env(args) -> str:
+    """Environment name of the file holding the callback path secret (see above)."""
+    from ..rl.harness.gateway import records_env, relay_env
+
+    if getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
+        return relay_env.RELAY_SECRET_FILE_ENV
+    return records_env.PROXY_SECRET_FILE_ENV
 
 
 def harbor_example_pythonpath(args, miles_root: str = "$HOME/miles") -> str:
@@ -48,40 +88,48 @@ def harbor_example_pythonpath(args, miles_root: str = "$HOME/miles") -> str:
     return "".join(f"{miles_root}/{d}:" for d in HARBOR_EXAMPLE_DIRS)
 
 
-def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None) -> dict[str, str]:
+def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None,
+                       port_env: str | None = None, base_env: str | None = None) -> dict[str, str]:
     """Environment a Modal Harbor island adds to ``envs`` (which it does not change).
 
     * ``BOAT_API_KEY`` when the sandbox provider is boat (``HARBOR_ENV_TYPE=boat``)
       and the launch did not give one: the token of the launching machine
       (``boat_client.load_token``: ``BOAT_API_KEY``, else the boat CLI config).
       It travels as a Modal Secret like ``HF_TOKEN`` and is never printed.
-    * ``YETO_HARBOR_GATE_RELAY_PORT`` (default :data:`DEFAULT_HARBOR_RELAY_PORT`)
-      unless the launch set a public relay base itself: the island's rank 0
-      forwards that port through a Modal tunnel (``harbor_relay_tunnel_port``).
+    * the callback port (default :data:`DEFAULT_HARBOR_RELAY_PORT`) unless the
+      launch set a public base itself: the island's rank 0 forwards that port
+      through a Modal tunnel (``harbor_relay_tunnel_port``).  ``port_env`` /
+      ``base_env`` name it (Miles: the gate relay; verl: the records proxy,
+      ``harbor_callback_port_env``).
     """
     from ..rl.harness.gateway import relay_env
 
+    port_env = port_env or relay_env.RELAY_PORT_ENV
+    base_env = base_env or relay_env.RELAY_PUBLIC_BASE_ENV
     out: dict[str, str] = {}
     if str(envs.get("HARBOR_ENV_TYPE", "")).strip().lower() == "boat" and not envs.get("BOAT_API_KEY"):
         if load_boat_token is None:
             from ..rl.harness.harbor.boat_client import load_token as load_boat_token
         out["BOAT_API_KEY"] = load_boat_token()
-    if not envs.get(relay_env.RELAY_PUBLIC_BASE_ENV) and not envs.get(relay_env.RELAY_PORT_ENV):
-        out[relay_env.RELAY_PORT_ENV] = str(DEFAULT_HARBOR_RELAY_PORT)
+    if not envs.get(base_env) and not envs.get(port_env):
+        out[port_env] = str(DEFAULT_HARBOR_RELAY_PORT)
     return out
 
 
-def harbor_relay_tunnel_port(envs: dict[str, str]) -> int | None:
-    """The relay port rank 0 forwards through a Modal tunnel, or None (the launch
-    gave its own ``YETO_HARBOR_GATE_RELAY_PUBLIC_BASE``, or no relay port).
-    The tunnel URL names one port, so a port range is refused."""
+def harbor_relay_tunnel_port(envs: dict[str, str], *, port_env: str | None = None,
+                             base_env: str | None = None) -> int | None:
+    """The callback port rank 0 forwards through a Modal tunnel, or None (the launch
+    gave its own public base, or no port).  The tunnel URL names one port, so a
+    port range is refused."""
     from ..rl.harness.gateway import relay_env
 
-    raw = str(envs.get(relay_env.RELAY_PORT_ENV, "") or "").strip()
-    if not raw or envs.get(relay_env.RELAY_PUBLIC_BASE_ENV):
+    port_env = port_env or relay_env.RELAY_PORT_ENV
+    base_env = base_env or relay_env.RELAY_PUBLIC_BASE_ENV
+    raw = str(envs.get(port_env, "") or "").strip()
+    if not raw or envs.get(base_env):
         return None
     if not raw.isdigit() or not 0 < int(raw) <= 65535:
-        raise ValueError(f"{relay_env.RELAY_PORT_ENV}={raw!r}: a Modal tunnel forwards one fixed port")
+        raise ValueError(f"{port_env}={raw!r}: a Modal tunnel forwards one fixed port")
     return int(raw)
 
 

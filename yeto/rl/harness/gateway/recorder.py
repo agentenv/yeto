@@ -52,14 +52,17 @@ from typing import Any
 from yeto.rl.agentic import HarnessConfigError, TokenAlignmentError, TokenTurn
 
 from .proxy import RecordsProxy
+from . import records_env
 from .records import sampling_params
 
-PROXY_ENV = "YETO_RECORDS_PROXY"
-HOST_ENV = "YETO_RECORDS_PROXY_HOST"
-PORT_ENV = "YETO_RECORDS_PROXY_PORT"
-PUBLIC_HOST_ENV = "YETO_RECORDS_PROXY_PUBLIC_HOST"
-PUBLIC_BASE_ENV = "YETO_RECORDS_PROXY_PUBLIC_BASE"
-SECRET_FILE_ENV = "YETO_RECORDS_PROXY_SECRET_FILE"
+# The names themselves live in ``records_env`` (dependency-free, so the launch
+# layer can read them); this module keeps its own spellings as aliases.
+PROXY_ENV = records_env.PROXY_ENV
+HOST_ENV = records_env.PROXY_HOST_ENV
+PORT_ENV = records_env.PROXY_PORT_ENV
+PUBLIC_HOST_ENV = records_env.PROXY_PUBLIC_HOST_ENV
+PUBLIC_BASE_ENV = records_env.PROXY_PUBLIC_BASE_ENV
+SECRET_FILE_ENV = records_env.PROXY_SECRET_FILE_ENV
 MIN_SECRET_CHARS = 24
 
 # verl sampling keys -> SamplingParams fields; other keys (``logprobs``) do not change sampling.

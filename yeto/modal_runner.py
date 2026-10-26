@@ -99,6 +99,9 @@ TAPE_SOURCE_DIR = "/root/yeto-output"
 # The Miles ports image's interpreter (the one Ray and Miles run), as the S26
 # E0.4 Miles Harbor layer used it.
 HARBOR_LAYER_PYTHON = "$(command -v python)"
+# S27 G-FS: engine images Modal builds itself can carry the Harbor layer too; the
+# backend's ``image`` module names its own interpreter (``HARBOR_LAYER_PYTHON``).
+HARBOR_LAYER_BACKENDS = ("verl",)
 HARBOR_RELAY_SECRET_PATH = "/root/.yeto-harbor-relay-secret"
 TAPE_SYNC_INTERVAL_S = 30.0
 # Files outside the tape directory that the tape also mirrors (flattened to
@@ -264,6 +267,12 @@ class ModalIslandConfig:
     # outside Modal (boat) reach the Miles session server.
     harbor_layer: bool = False
     harbor_relay_port: int | None = None
+    # S27 G-FS: which environment names the tunnel writes back. Miles' gate relay
+    # (the default when unset) or verl's records proxy; ``harness_env``'s
+    # ``harbor_callback_*_env`` chooses them from the run's flags.
+    harbor_port_env: str | None = None
+    harbor_base_env: str | None = None
+    harbor_secret_env: str | None = None
 
     @property
     def function_name(self) -> str:
@@ -297,8 +306,19 @@ class ModalIslandConfig:
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
                 )
-        if self.harbor_layer and (self.training_mode != "rl" or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref or "")):
-            raise ValueError("the Harbor layer goes on a Miles registry image (RL islands only)")
+        # S27 G-FS: the layer goes on a Miles registry image or on an engine image
+        # Modal builds itself whose backend has a Harbor layer recipe
+        # (``harbor.image_layer.BACKENDS``; ``docker/harbor-layer/versions.json``
+        # carries the per-backend constraint decisions). Before G-FS this refused
+        # every engine-built image, which is exactly the verl one.
+        if self.harbor_layer:
+            if self.training_mode != "rl":
+                raise ValueError("the Harbor layer goes on an island image (RL islands only)")
+            built = ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref or "")
+            if built and built["backend"] not in HARBOR_LAYER_BACKENDS:
+                raise ValueError(
+                    f"no Harbor layer recipe for the {built['backend']!r} engine image "
+                    f"(known: {sorted(HARBOR_LAYER_BACKENDS)})")
         if self.harbor_relay_port is not None and not self.harbor_layer:
             raise ValueError("harbor_relay_port is for Harbor agent islands (harbor_layer)")
         if self.harbor_relay_port is not None and not 0 < int(self.harbor_relay_port) <= 65535:
@@ -1157,6 +1177,11 @@ def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=No
     from yeto.rl.harness.gateway.relay_env import (
         RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_SECRET_FILE_ENV)
 
+    # S27 G-FS: the verl islands tunnel the records proxy instead of the gate
+    # relay; the config names which environment the tunnel writes back.
+    port_env = cfg.harbor_port_env or RELAY_PORT_ENV
+    base_env = cfg.harbor_base_env or RELAY_PUBLIC_BASE_ENV
+    secret_env = cfg.harbor_secret_env or RELAY_SECRET_FILE_ENV
     if forward is None:
         import modal
 
@@ -1165,9 +1190,9 @@ def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=No
         fd = os.open(HARBOR_RELAY_SECRET_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write(secrets.token_urlsafe(24))
-        env[RELAY_PORT_ENV] = str(int(cfg.harbor_relay_port))
-        env[RELAY_PUBLIC_BASE_ENV] = tunnel.url
-        env[RELAY_SECRET_FILE_ENV] = HARBOR_RELAY_SECRET_PATH
+        env[port_env] = str(int(cfg.harbor_relay_port))
+        env[base_env] = tunnel.url
+        env[secret_env] = HARBOR_RELAY_SECRET_PATH
         print(f"[modal-island {cfg.learner_id}] harbor relay port {cfg.harbor_relay_port} "
               f"tunnelled at {tunnel.url}", flush=True)
         yield
@@ -1423,7 +1448,12 @@ class ModalOps:
             from yeto.rl.engine import backends
 
             variant = {"variant": built["variant"]} if built["variant"] else {}
-            image = backends.module("image", built["backend"]).modal_image(modal, built["commit"], **variant)
+            image_module = backends.module("image", built["backend"])
+            image = image_module.modal_image(modal, built["commit"], **variant)
+            if cfg.harbor_layer:  # S27 G-FS: the same layer as on the Miles image
+                from yeto.rl.harness.harbor.image_layer import modal_harbor_layer
+
+                image = modal_harbor_layer(image, built["backend"], image_module.HARBOR_LAYER_PYTHON)
         elif cfg.training_mode == "rl":
             creds = cfg.registry_creds or (
                 registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
