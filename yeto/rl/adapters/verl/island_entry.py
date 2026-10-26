@@ -138,6 +138,9 @@ def parse_args(argv):
     p.add_argument("--rl-ascend-plugin-stack", default=None)
     # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
+    # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
+    # launcher already forwards; megatron_engine.optimizer_memory_overrides maps it)
+    p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -823,7 +826,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         gpu_memory_utilization=pools.gpu_memory_utilization,
         num_experts=int(num_experts) if num_experts else None,
         grad_nan_check=not args.rl_no_grad_nan_check,
-        rollout_pool=not buffer_trainer)
+        rollout_pool=not buffer_trainer,
+        optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0))
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,

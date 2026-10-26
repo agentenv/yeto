@@ -50,6 +50,36 @@ ROUTER_REPLAY_MODES = ("disabled", "R3")
 RECOMPUTE_MODULES = ("core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts")
 
 
+# S27 G-FN: Megatron's own optimizer-memory keys, written when the engine-neutral
+# --rl-optimizer-offload-fraction asks for host memory. verl's own
+# engine.optimizer_offload is a DIFFERENT switch and does not set Megatron's CPU
+# offload: G-FJ2 read it back off the resolved OptimizerConfig (optimizer_cpu_offload
+# stayed False) and the per-card peak did not move
+# (SESSION27/VERL-ASCEND-MEGATRON.md conclusion B). So the fraction writes the real
+# keys and leaves verl's key alone, which is what that report recommended.
+# Measured on 910B3 with the whole state in host memory: 8 cards at TP=1/PP=2/EP=4
+# peak at 41.97 GB per card (VERL-MEGATRON-PP.md section 7.9); the state it moves off
+# the card is about 29 GB per rank there.
+def optimizer_memory_overrides(fraction: float) -> dict[str, str]:
+    """Megatron optimizer keys for an offload fraction in (0, 1]; {} at 0.
+
+    The offload runs Megatron's precision-aware path, so the Adam moments and the
+    gradient-accumulation buffer go to bf16 with it (the same pairing Miles documents
+    for this flag, ``adapters.miles.config``, and the one the Ascend SFT recipe runs)."""
+    if not fraction:
+        return {}
+    return {
+        "optim.use_precision_aware_optimizer": "True",
+        "optim.main_grads_dtype": "bf16",
+        "optim.exp_avg_dtype": "bf16",
+        "optim.exp_avg_sq_dtype": "bf16",
+        "++optim.override_optimizer_config.optimizer_cpu_offload": "True",
+        "++optim.override_optimizer_config.optimizer_offload_fraction": repr(float(fraction)),
+        "++optim.override_optimizer_config.use_torch_optimizer_for_cpu_offload": "True",
+    }
+
+
+
 class MegatronShapeError(ValueError):
     """The verl Megatron island cannot run this shape."""
 
@@ -132,6 +162,9 @@ class MegatronShape:
     # exists to separate training cards from rollout cards, which is a requirement of
     # verl's separate mode, not of the Megatron engine.
     rollout_pool: bool = True
+    # S27 G-FN: host share of the Megatron optimizer state
+    # (--rl-optimizer-offload-fraction); 0 keeps all of it on the card
+    optimizer_offload_fraction: float = 0.0
 
     @property
     def trainer_gpus(self) -> int:
@@ -204,6 +237,9 @@ def validate(shape: MegatronShape) -> None:
     unknown = sorted(set(s.recompute_modules) - set(RECOMPUTE_MODULES))
     if unknown:
         raise MegatronShapeError(f"未知的 selective 重算模块 {unknown}（可选 {RECOMPUTE_MODULES}）")
+    if not 0.0 <= float(s.optimizer_offload_fraction) <= 1.0:
+        raise MegatronShapeError("optimizer_offload_fraction 必须在 [0, 1]，"
+                                 f"得到 {s.optimizer_offload_fraction}")
 
 
 def validate_run(cfg: vconf.VerlRunConfig) -> None:
@@ -289,6 +325,13 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.
     for field, value in grad_checks.ddp_overrides(check_for_nan_in_grad=shape.grad_nan_check).items():
         out.append(f"++{meg}.override_ddp_config.{field}={value}")
+    # S27 G-FN: the optimizer-state memory keys, under the actor's optimizer config
+    # ("optim.x" becomes actor_rollout_ref.actor.optim.x; a "++" prefix
+    # stays in front of the whole key, as Hydra wants it)
+    actor = "actor_rollout_ref.actor"
+    for key, value in optimizer_memory_overrides(float(shape.optimizer_offload_fraction)).items():
+        path = key.removeprefix("++")
+        out.append(f"{'++' if path != key else ''}{actor}.{path}={value}")
     if shape.router_replay == "R3":
         # R3 replays the experts vLLM routed (``enable_return_routed_experts``)
         out.append("actor_rollout_ref.rollout.enable_rollout_routing_replay=True")

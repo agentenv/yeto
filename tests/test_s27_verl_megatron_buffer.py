@@ -337,3 +337,42 @@ def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
     quiet = _OneRank(True)
     megatron_ports.island_megatron_checks(quiet, {"megatron": {"grad_nan_check": True}}, _Tape())
     assert quiet.calls == ["remote_megatron_grad_checks"]
+
+
+# ----------------------------------------------------------------------------- the optimizer-state memory
+def test_the_optimizer_offload_fraction_writes_the_engine_keys_and_is_off_by_default(tmp_path):
+    """S27 G-FN (B9): on 64 GB cards a PP=2 Nano island does not fit with the whole
+    optimizer state on the card. The engine-neutral --rl-optimizer-offload-fraction is
+    reused for it (the launcher already forwards that flag and Miles already honours it);
+    it writes Megatron's own keys, because the engine's idle-time offload switch does not
+    set them (VERL-ASCEND-MEGATRON.md conclusion B: the resolved config kept
+    optimizer_cpu_offload False and the per-card peak did not move). Off by default, so a
+    GPU island is unchanged."""
+    off = _plan(tmp_path)
+    assert off["shape"]["optimizer_offload_fraction"] == 0.0
+    assert not [o for o in off["overrides"] if "override_optimizer_config" in o]
+    assert not [o for o in off["overrides"] if "use_precision_aware_optimizer" in o]
+    assert me.optimizer_memory_overrides(0.0) == {}
+
+    on = _plan(tmp_path, extra=["--rl-optimizer-offload-fraction", "1.0"])
+    assert on["shape"]["optimizer_offload_fraction"] == 1.0
+    actor = "actor_rollout_ref.actor"
+    assert f"{actor}.optim.use_precision_aware_optimizer=True" in on["overrides"]
+    assert f"{actor}.optim.main_grads_dtype=bf16" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_dtype=bf16" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_sq_dtype=bf16" in on["overrides"]
+    assert f"++{actor}.optim.override_optimizer_config.optimizer_cpu_offload=True" in on["overrides"]
+    assert f"++{actor}.optim.override_optimizer_config.optimizer_offload_fraction=1.0" in on["overrides"]
+    assert (f"++{actor}.optim.override_optimizer_config.use_torch_optimizer_for_cpu_offload=True"
+            in on["overrides"])
+    # the engine's own idle-time offload keys keep their values: this does not change
+    # what they mean (G-FJ2 recommended against remapping them)
+    assert f"{actor}.megatron.optimizer_offload=False" in on["overrides"]
+    assert f"{actor}.megatron.param_offload=False" in on["overrides"]
+    # a half fraction passes the value through
+    half = me.optimizer_memory_overrides(0.5)
+    assert half["++optim.override_optimizer_config.optimizer_offload_fraction"] == "0.5"
+    # out of range is refused by the shape, not passed to hydra
+    with pytest.raises(me.MegatronShapeError, match="optimizer_offload_fraction"):
+        me.validate(me.MegatronShape(tp=1, pp=2, ep=4, rollout_pool=False,
+                                     optimizer_offload_fraction=1.5))
