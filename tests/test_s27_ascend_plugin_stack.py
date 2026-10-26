@@ -324,3 +324,86 @@ def test_the_table_covers_the_recipes_own_plugin_directory():
     assert set(stack.PLUGINS) <= present, sorted(set(stack.PLUGINS) - present)
     # EXCLUDED also names a file outside the directory (the optimizer timing injector)
     assert set(stack.EXCLUDED) - present == {"optimizer_phase_timing_inject.py"}
+
+
+@pytest.fixture
+def fake_torch_npu(monkeypatch):
+    """A stand-in ``torch`` whose ``npu.set_device`` records the devices it is given.
+
+    The real call is what the S28 G-PIN contrast switches off
+    (``plugins/ascend_mamba2_kernels.py:352-356`` and ``:290``), so the test needs a
+    seam with the same name that it can watch."""
+    import sys
+    import types
+
+    torch = types.ModuleType("torch")
+    torch.npu = types.SimpleNamespace()
+    torch.npu.bound: list[object] = []
+    torch.npu.set_device = lambda device=None: torch.npu.bound.append(device)
+    real = torch.npu.set_device
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch_npu", types.ModuleType("torch_npu"))
+    return torch, real
+
+
+def _set_device_calling_plugin(directory: Path, name: str = "device_setter.py") -> str:
+    """A stand-in for the delivery's plugin: on import it calls ``torch.npu.set_device``
+    with this rank's card, the way ``ascend_mamba2_kernels.apply`` does."""
+    (directory / name).write_text(
+        "import os, torch\n"
+        "torch.npu.set_device(int(os.environ.get('LOCAL_RANK', 0)))\n")
+    return name
+
+
+def test_the_plugins_still_bind_their_card_when_the_switch_is_not_set(
+        tmp_path, monkeypatch, armable, fake_torch_npu):
+    """Default behaviour is the delivery's: the switch is off by default, so a plugin's
+    ``set_device`` reaches torch. The contrast must change one thing, not two."""
+    torch, _ = fake_torch_npu
+    monkeypatch.delenv(stack.SET_DEVICE_ENV, raising=False)
+    monkeypatch.setattr(stack, "PLUGINS", (_set_device_calling_plugin(tmp_path),))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    stack.setup_worker()
+    armable(local_rank="6")
+    assert torch.npu.bound == [6]
+
+
+def test_the_switch_keeps_the_plugins_off_set_device_and_puts_it_back(
+        tmp_path, monkeypatch, armable, fake_torch_npu):
+    """With the switch at 0 no plugin reaches ``torch.npu.set_device`` during the
+    import, the plugins still install, and the real function is in place afterwards."""
+    torch, real = fake_torch_npu
+    monkeypatch.setenv(stack.SET_DEVICE_ENV, "0")
+    name = _set_device_calling_plugin(tmp_path)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    stack.setup_worker()
+    armable(local_rank="6")
+    assert torch.npu.bound == [], "the switch was set to 0 and a plugin still bound a card"
+    assert stack.LAST_REPORT is not None and stack.LAST_REPORT["installed"] == [name]
+    assert torch.npu.set_device is real, "the real set_device was not restored"
+    torch.npu.set_device(3)
+    assert torch.npu.bound == [3]
+
+
+def test_the_switch_reports_every_call_it_swallowed(tmp_path, monkeypatch, fake_torch_npu):
+    """The island log has to say whether the switch changed anything, otherwise a run
+    with no plugin calling ``set_device`` is indistinguishable from a working bypass."""
+    import torch
+
+    monkeypatch.setenv(stack.SET_DEVICE_ENV, "0")
+    lines: list[str] = []
+    with stack._set_device_neutralised(lines.append):
+        torch.npu.set_device(4)
+    text = "\n".join(lines)
+    assert "swallowed torch.npu.set_device(4)" in text
+    assert "restored torch.npu.set_device after 1 swallowed call(s) [4]" in text
+
+
+def test_only_the_documented_values_turn_the_switch_off(monkeypatch):
+    """An unreadable value must keep the delivery's behaviour, not silently bypass it."""
+    for value in ("0", "false", "FALSE", "no"):
+        assert stack.set_device_is_allowed({stack.SET_DEVICE_ENV: value}) is False
+    for value in ("1", "true", "", "yes", "nope"):
+        assert stack.set_device_is_allowed({stack.SET_DEVICE_ENV: value}) is True
+    assert stack.set_device_is_allowed({}) is True

@@ -54,6 +54,7 @@ imports them.  It never edits the delivery.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib
 import os
@@ -77,6 +78,17 @@ RANK_ENV = "LOCAL_RANK"
 # ``:275-280``), and every verl worker class chains to it. It runs before
 # ``init_model`` builds the model, which is the deadline the plugins have to meet.
 VERL_WORKER = ("verl.single_controller.base.worker", "Worker")
+
+# The one-variable switch of the S28 G-PIN contrast. The delivery's
+# ``ascend_mamba2_kernels.apply`` calls ``torch.npu.set_device(_local_device())`` on its
+# kern-stack path (``plugins/ascend_mamba2_kernels.py:352-356``) and again before its
+# prewarm (``:290``). Those calls run inside ``Worker.__init__`` once the install is
+# deferred (:func:`install_when_rank_known`), that is, inside the Ray actor's
+# constructor. Set this variable to ``0`` and yeto replaces ``torch.npu.set_device``
+# with a recorder **for the duration of the plugin import only**, then puts the real
+# function back. Nothing of the delivery is edited: the switch lives here.
+# Default ``1`` keeps the delivery's own behaviour.
+SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 
 # The rewrite items the recipe enables in the Mamba2 SSD stack. ``clamp`` is not one
 # of them and must never be added, and this entry must stay in RECIPE_ENV: the
@@ -278,6 +290,52 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
     return report
 
 
+def set_device_is_allowed(environ: Mapping[str, str] | None = None) -> bool:
+    """False when the island asked yeto to keep the plugins off ``set_device``.
+
+    See :data:`SET_DEVICE_ENV` for what the switch is for. Only the exact values
+    ``0``, ``false`` and ``no`` turn it off, so an unset or unreadable value keeps the
+    delivery's own behaviour."""
+
+    where = os.environ if environ is None else environ
+    return str(where.get(SET_DEVICE_ENV, "1")).strip().lower() not in ("0", "false", "no")
+
+
+@contextlib.contextmanager
+def _set_device_neutralised(say):
+    """Replace ``torch.npu.set_device`` with a recorder while the plugins import.
+
+    The recorder prints every call it swallows, so the island log says whether the
+    switch changed anything at all. ``torch`` or ``torch_npu`` missing is not an
+    error here: then no plugin can call ``set_device`` either, and the block runs
+    unchanged."""
+
+    try:
+        import torch
+        import torch_npu  # noqa: F401 - registers torch.npu
+        real = torch.npu.set_device
+    except BaseException as error:  # noqa: BLE001 - a diagnostic switch must not stop the island
+        say(f"[yeto-ascend-stack] {SET_DEVICE_ENV}=0 asked for, but torch.npu.set_device is not "
+            f"reachable ({type(error).__name__}: {error}); importing the plugins unchanged")
+        yield
+        return
+    calls: list[Any] = []
+
+    def recorder(device=None, *args, **kwargs):
+        calls.append(device)
+        say(f"[yeto-ascend-stack]   swallowed torch.npu.set_device({device!r}) "
+            f"({SET_DEVICE_ENV}=0)")
+        return None
+
+    torch.npu.set_device = recorder
+    try:
+        yield
+    finally:
+        torch.npu.set_device = real
+        say(f"[yeto-ascend-stack] {SET_DEVICE_ENV}=0: restored torch.npu.set_device after "
+            f"{len(calls)} swallowed call(s) {calls}")
+
+
 def rank_is_known(environ: Mapping[str, str] | None = None) -> bool:
     """True when this process has been told which card of the node it owns.
 
@@ -306,8 +364,12 @@ def _install_once(root: str, *, log=None) -> dict[str, Any] | None:
             f"binds a card at import time would bind card 0 (S27 G-FW: eight ranks on card 0)")
         return None
     say(f"[yeto-ascend-stack] installing with {RANK_ENV}={os.environ.get(RANK_ENV)} "
-        f"ASCEND_RT_VISIBLE_DEVICES={os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '<unset>')}")
-    return install(root)
+        f"ASCEND_RT_VISIBLE_DEVICES={os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '<unset>')} "
+        f"{SET_DEVICE_ENV}={'1' if set_device_is_allowed() else '0'}")
+    if set_device_is_allowed():
+        return install(root, log=log)
+    with _set_device_neutralised(say):
+        return install(root, log=log)
 
 
 def install_when_rank_known(root: str, *, log=None) -> str:
