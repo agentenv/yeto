@@ -651,14 +651,19 @@ class _ReadRate:
 # streams together) for SECONDS seconds, from the first PULL it gets for a
 # syncer step >= FROM_STEP. Other learners read at full speed. The control
 # stream (PULLs) is never limited. Unset or empty: no limit.
+# S27 G-FH: FROM_STEP "connect" opens the window when the client starts (its
+# initial cut is then slow), and several comma-separated specs may name
+# different learners (at most one each), e.g. "1:3e6:connect:240,0:1.5e6:60:600".
 DOWNLINK_READ_LIMIT_ENV = "YETO_SYNC_TEST_DOWNLINK_READ_LIMIT"
+DOWNLINK_FROM_CONNECT = "connect"
 
 
 class _DownlinkWindow:
     """The time window of the test-only downlink limit (DOWNLINK_READ_LIMIT_ENV)."""
 
-    def __init__(self, learner_id: int, bps: float, from_step: int, seconds: float) -> None:
-        if not (bps > 0 and seconds > 0 and from_step >= 0):
+    def __init__(self, learner_id: int, bps: float, from_step: int | None, seconds: float) -> None:
+        """``from_step`` None: the window opens at :meth:`see_connect`."""
+        if not (bps > 0 and seconds > 0 and (from_step is None or from_step >= 0)):
             raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV}: BPS and SECONDS must be positive, FROM_STEP >= 0")
         self.learner_id = learner_id
         self.bps = bps
@@ -669,15 +674,23 @@ class _DownlinkWindow:
         self._ended = False
         self.pulls_in_window: list[int] = []  # steps of the PULLs read while it is on
 
+    def _open(self, why: str) -> None:
+        with self._lock:
+            if self._started is None:
+                self._started = time.monotonic()
+                _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:g}s, "
+                             f"{why} (learner {self.learner_id})")
+
+    def see_connect(self) -> None:
+        """S27 G-FH: FROM_STEP "connect": start the window as the client starts."""
+        if self.from_step is None and self._started is None:
+            self._open("from connect")
+
     def see_pull(self, step: int) -> None:
         """Start the window at the first PULL for a step >= FROM_STEP; count
         the PULLs read while it is on."""
-        if self._started is None and step >= self.from_step:
-            with self._lock:
-                if self._started is None:
-                    self._started = time.monotonic()
-                    _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:g}s, "
-                                 f"PULL step {step} (learner {self.learner_id})")
+        if self._started is None and self.from_step is not None and step >= self.from_step:
+            self._open(f"PULL step {step}")
         started = self._started
         if started is not None and time.monotonic() - started < self.seconds:
             self.pulls_in_window.append(step)
@@ -705,12 +718,21 @@ def downlink_read_limit_from_env(learner_id: int, environ=None) -> _DownlinkWind
     value = (os.environ if environ is None else environ).get(DOWNLINK_READ_LIMIT_ENV, "").strip()
     if not value:
         return None
-    parts = value.split(":")
-    if len(parts) != 4:
-        raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} must be LEARNER:BPS:FROM_STEP:SECONDS, got {value!r}")
-    if int(parts[0]) != learner_id:
-        return None
-    return _DownlinkWindow(learner_id, float(parts[1]), int(parts[2]), float(parts[3]))
+    mine = None
+    named = set()
+    for spec in value.split(","):
+        parts = spec.strip().split(":")
+        if len(parts) != 4:
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} must be LEARNER:BPS:FROM_STEP:SECONDS[,...], got {value!r}")
+        learner = int(parts[0])
+        if learner in named:
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} names learner {learner} twice: {value!r}")
+        named.add(learner)
+        from_step = None if parts[2] == DOWNLINK_FROM_CONNECT else int(parts[2])
+        window = _DownlinkWindow(learner, float(parts[1]), from_step, float(parts[3]))
+        if learner == learner_id:
+            mine = window
+    return mine
 
 
 class _RateLimitedSocket:
@@ -1357,6 +1379,8 @@ class SyncerClient:
         raise ConnectionError(f"cannot reach syncer at {self.addr} after {attempts} attempt(s): {last}")
 
     def start(self) -> None:
+        if self._downlink_window is not None:
+            self._downlink_window.see_connect()
         self._connect_group(patient=True)
         self._supervisor = threading.Thread(target=self._supervise, name="yeto-supervisor", daemon=True)
         self._supervisor.start()
