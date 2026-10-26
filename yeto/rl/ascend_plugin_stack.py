@@ -362,7 +362,10 @@ def _set_device_neutralised(say):
 
     try:
         import torch
-        import torch_npu  # noqa: F401 - registers torch.npu
+
+        from yeto import accel
+
+        accel.register_backends()  # the one place that imports torch_npu (yeto/accel.py:43)
         real = torch.npu.set_device
     except BaseException as error:  # noqa: BLE001 - a diagnostic switch must not stop the island
         say(f"[yeto-ascend-stack] {SET_DEVICE_ENV}=0 asked for, but torch.npu.set_device is not "
