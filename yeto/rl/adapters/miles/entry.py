@@ -672,14 +672,20 @@ def _is_full_parameter_sync(sync: Any) -> bool:
     return isinstance(sync, FullParameterSync)
 
 
-def _policy_state_for(sync: Any, **lora: Any) -> Any:
-    """The full-parameter actor cut for a FullParameterSync island, else LoRA state."""
+def _policy_state_for(sync: Any, *, full_parameter: bool = False, **lora: Any) -> Any:
+    """The full-parameter actor cut for a FullParameterSync island; a trainer-side
+    full-parameter digest for a no-sync full-parameter island (L4.6); else LoRA state."""
 
     from .full_parameter.session import MilesFullParameterPolicyState
-    from .state import MilesPolicyState
+    from .state import MilesFullParameterLocalPolicyState, MilesPolicyState
 
     if _is_full_parameter_sync(sync):
         return MilesFullParameterPolicyState(sync)
+    if full_parameter:
+        return MilesFullParameterLocalPolicyState(
+            actor_model=lora["actor_model"], base_model_revision=lora["base_model_revision"],
+            config_hash=lora["config_hash"], expected_layout_hash=lora["expected_layout_hash"],
+            runner=lora.get("runner"))
     return MilesPolicyState(**lora)
 
 
@@ -745,8 +751,11 @@ def compose_island(
             raise DriverError("rollout requested before any complete publication")
         return parse_policy_snapshot_token(driver.expected_token)
 
+    full_parameter = _is_full_parameter_sync(sync) or getattr(
+        miles_args, "yeto_rl_parameter_mode", None) == "full"
     policy_state = _policy_state_for(
         sync,
+        full_parameter=full_parameter,
         actor_model=actor_model,
         base_model_revision=base_model_revision,
         config_hash=lora_config_hash,
@@ -785,7 +794,7 @@ def compose_island(
             critic_model=critic_model,
             release_refs=release_refs,
             runner=runner,
-            install_actor_recorders=_is_full_parameter_sync(sync),
+            install_actor_recorders=full_parameter,
         ),
         policy_state=policy_state,
         publisher=MilesPublisher(
@@ -876,6 +885,10 @@ def compose_island(
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)
+    from .sampler_island import wire_policy_releases
+
+    # L4.6: a trainer island (--rl-sample-role trainer) releases every publish to the samplers
+    wire_policy_releases(driver, miles_args=miles_args, actor_model=actor_model, runner=runner)
     # rl-spot-cost-saving 4.1 (opt-in, YETO_SPOT_INFLIGHT_SAVE_DIR): timed in-flight save
     from .inflight_save import install as _install_inflight_save
 
@@ -1022,13 +1035,43 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
     )
     config = getattr(miles_args, "yeto_rl_resume", None) or {}
-    wire_round_cuts(driver, controller=controller, source=source,
-                    every=int(getattr(elastic, "every", None) or config.get("every")
-                              or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
-                    fingerprint=run_fingerprint_of(miles_args, algorithm),
-                    allow_config_change=bool(getattr(elastic, "allow_config_change", False)
-                                             or config.get("allow_config_change", False)),
-                    next_lr=next_lr_for(miles_args))
+    checkpoint = wire_round_cuts(
+        driver, controller=controller, source=source,
+        every=int(getattr(elastic, "every", None) or config.get("every")
+                  or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+        fingerprint=run_fingerprint_of(miles_args, algorithm),
+        allow_config_change=bool(getattr(elastic, "allow_config_change", False)
+                                 or config.get("allow_config_change", False)),
+        next_lr=next_lr_for(miles_args))
+    _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:
+    """L4.5: a trainer whose rollout reads the durable sample buffer writes the
+    consumed watermark into each round cut and continues there after a restore
+    (also a convertible node, L7.5, whose rollout function reads in trainer mode)."""
+    from .buffer_rollout import READER_FUNCTION_PATHS, wire_sample_buffer
+
+    if getattr(miles_args, "rollout_function_path", None) not in READER_FUNCTION_PATHS:
+        return
+    if checkpoint is None:
+        raise RuntimeError("a trainer that reads the sample buffer needs round cuts "
+                           "(a checkpoint store and no outer syncer) to keep its watermark")
+    wire_sample_buffer(checkpoint, driver.rollout)
+
+
+def run_commanded_trainer(driver: Any) -> Any:
+    """One incarnation of a trainer the head's scheduler starts and stops
+    (``trainer_remote``): commands come through the round-cut store."""
+    from yeto.rl.engine.trainer_remote import run_commanded_island
+
+    controller = getattr(getattr(driver.sync, "round_cuts", None), "controller", None)
+    store = getattr(controller, "store", None)
+    if store is None:
+        raise RuntimeError("a trainer started by the head's scheduler needs round cuts "
+                           "(a checkpoint store and no outer syncer)")
+    run_commanded_island(driver, store=store)
+    return driver.published_state
 
 
 def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
@@ -1295,6 +1338,16 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
     for key in (OVERRIDE_ENV, NEGATIVE_RUN_ENV):  # launch-preflight-guards: negative-test island
         if environ.get(key):  # (identity_test_salt is read where the sync client is built)
+            env_vars[key] = environ[key]
+    from yeto.rl.engine.resume import STORE_ENV_PREFIX, STORE_IMPL_ENV
+
+    from .buffer_rollout import ISLAND_ENVS as SAMPLE_BUFFER_ENVS
+
+    for key in (*SAMPLE_BUFFER_ENVS, STORE_IMPL_ENV):  # L4.6: the buffer rollout functions
+        if environ.get(key):  # open the store inside the rollout executor actor
+            env_vars[key] = environ[key]
+    for key in environ:  # the store's own settings (yeto.cloud.*: Volume name, s3 URI/credentials)
+        if key.startswith(STORE_ENV_PREFIX) and environ[key]:
             env_vars[key] = environ[key]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
@@ -2003,46 +2056,63 @@ def run_ports_island(
             return {}
 
         groups = {"actor": actor} if critic is None else {"actor": actor, "critic": critic}
-        sync, progress = build_sync(
-            miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
-        )
-        driver = compose_island(
-            miles_args=miles_args,
-            launch=launch,
-            algorithm=algorithm,
-            inference_controller=controller,
-            rollout_executor=executor,
-            actor_model=actor,
-            learner_id=learner_id,
-            base_model_revision=base_model_revision,
-            lora_config_hash=lora_config_hash,
-            layout_hash=layout_hash,
-            sync=sync,
-            progress=progress,
-            metadata=RayMetadataSink(),
-            capabilities=capabilities,
-            runner=runner,
-            evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
-            eval_interval=getattr(miles_args, "eval_interval", None),
-            profile=profile,
-            observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
-            evaluate_start=(
-                loop_eval_starter(runner, evaluate, time.monotonic)
-                if profile.execution_mode == "partitioned-overlap"
-                else None
-            ),
-            elastic=elastic,
-            critic_model=critic,
-        )
-        # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
-        driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
-        driver.resource_sample_interval_s = getattr(
-            miles_args, "yeto_rl_resource_sample_interval_s", None)
-        eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
-        driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
-        driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
-        driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
-        driver.start_phases = start_phases  # L0: first_step_done
+
+        def build_driver() -> Any:
+            """A fresh island driver over the components (one per trainer incarnation
+            of a convertible node, rl-trainer-start-stop L7.5; once otherwise)."""
+            sync, progress = build_sync(
+                miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
+            )
+            driver = compose_island(
+                miles_args=miles_args,
+                launch=launch,
+                algorithm=algorithm,
+                inference_controller=controller,
+                rollout_executor=executor,
+                actor_model=actor,
+                learner_id=learner_id,
+                base_model_revision=base_model_revision,
+                lora_config_hash=lora_config_hash,
+                layout_hash=layout_hash,
+                sync=sync,
+                progress=progress,
+                metadata=RayMetadataSink(),
+                capabilities=capabilities,
+                runner=runner,
+                evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
+                eval_interval=getattr(miles_args, "eval_interval", None),
+                profile=profile,
+                observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
+                evaluate_start=(
+                    loop_eval_starter(runner, evaluate, time.monotonic)
+                    if profile.execution_mode == "partitioned-overlap"
+                    else None
+                ),
+                elastic=elastic,
+                critic_model=critic,
+            )
+            # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
+            driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
+            driver.resource_sample_interval_s = getattr(
+                miles_args, "yeto_rl_resource_sample_interval_s", None)
+            eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
+            driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+            driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
+            driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
+            driver.start_phases = start_phases  # L0: first_step_done
+            return driver
+
+        from .convertible import convertible_node_name
+
+        if convertible_node_name(miles_args) is not None:
+            # rl-trainer-start-stop L7.5: rollout node until the head converts it
+            from .convertible import run_convertible_node
+
+            startup.__exit__(None, None, None)
+            return run_convertible_node(miles_args, build_driver=build_driver,
+                                        controller=controller, executor=executor, actor=actor,
+                                        runner=runner)
+        driver = build_driver()
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 
@@ -2053,6 +2123,10 @@ def run_ports_island(
             ))
             return driver.published_state
         startup.__exit__(None, None, None)  # the driver's own heartbeat starts in run()
+        from yeto.rl.engine import trainer_remote
+
+        if trainer_remote.commanded():  # rl-trainer-start-stop L5.3c: the head starts/stops us
+            return run_commanded_trainer(driver)
         return driver.run()
     except BaseException as exc:
         error = exc

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 
@@ -35,6 +36,28 @@ def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
         else sky_cluster_name(f"{prefix}-l{m}-{spec.region or spec.cloud}")
         for m, spec in enumerate(specs)
     ]
+
+
+def submit_island_launch(sky, args, spec: ClusterSpec, task, name: str):
+    """Submit ``sky.launch`` of one island cluster and return the request id.
+
+    An RL island on a cloud with a model-store file system gets the sky config
+    that attaches it; the request snapshots the client config at submit, so the
+    override only has to hold for the submit call."""
+    from .storage import model_store_filesystem, model_store_sky_config
+
+    store_fs = (model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
+                if getattr(args, "training_mode", "sft") == "rl" else None)
+    if store_fs:
+        from sky import skypilot_config
+
+        store_cfg = skypilot_config.override_skypilot_config(
+            model_store_sky_config(store_fs, spec.region))
+    else:
+        store_cfg = contextlib.nullcontext()
+    with store_cfg:
+        return sky.launch(task, cluster_name=name,
+                          retry_until_up=bool(getattr(args, "retry_until_up", False)))
 
 
 def maybe_install_nebius_reclaim_hook(task, launched, name: str) -> bool | None:

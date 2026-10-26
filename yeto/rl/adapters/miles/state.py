@@ -18,7 +18,14 @@ from typing import Any
 from yeto.rl.engine.policy_digest import WeightsChanged
 from yeto.rl.engine.trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
 from . import LoopRunner
-from .state_plugin import APPLY_STATE, EXPORT_DIGEST, EXPORT_STATE, OPTIMIZER_MODES, WEIGHTS_VERSION
+from .state_plugin import (
+    APPLY_STATE,
+    EXPORT_DIGEST,
+    EXPORT_FULL_DIGEST,
+    EXPORT_STATE,
+    OPTIMIZER_MODES,
+    WEIGHTS_VERSION,
+)
 
 
 class PolicyStateError(RuntimeError):
@@ -284,6 +291,99 @@ class MilesPolicyState:
             raise PolicyStateError(f"ranks disagree on apply result: {results!r:.300}")
         self.policy_version = lora.policy_version
 
+
+
+class MilesFullParameterLocalPolicyState(MilesPolicyState):
+    """``PolicyState`` of a no-sync full-parameter island (L4.6 sampler/trainer).
+
+    The island has no outer sync, so nothing outside the trainer reads the
+    weights: the rollout engines get them through Miles ``update_weights``.
+    The state is only a trainer-resident handle whose policy hash is a content
+    digest of every model parameter (each rank hashes its shard on the trainer,
+    see ``state_plugin.export_full_digest``).  There is no LoRA export and no
+    apply.  The layout hash is the full-parameter identity bound by run_miles.
+    """
+
+    def __init__(self, *, actor_model: Any, base_model_revision: str, config_hash: str,
+                 expected_layout_hash: str | None, policy_version: int = 0,
+                 runner: LoopRunner | None = None) -> None:
+        from yeto.rl.engine.policy_digest import RESIDENT_LAYOUTS
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
+
+        if expected_layout_hash is None:
+            raise PolicyStateError("a full-parameter island needs its bound layout hash")
+        super().__init__(actor_model=actor_model, base_model_revision=base_model_revision,
+                         config_hash=config_hash, expected_layout_hash=expected_layout_hash,
+                         policy_version=policy_version, runner=runner)
+        self.layout = require_supported_layout(LAYOUT_FRAGMENTS, RESIDENT_LAYOUTS)
+
+    def export(self, *, policy_version: int | None = None):
+        return self.export_digest(policy_version=policy_version)
+
+    async def aexport(self, *, policy_version: int | None = None):
+        return self.export_digest(policy_version=policy_version)
+
+    def export_digest(self, *, policy_version: int | None = None):
+        from yeto.rl.engine.policy_digest import TrainerResidentState
+
+        version = self._export_version(policy_version)
+        digest, weights = self._full_digest(self._plugin(EXPORT_FULL_DIGEST, {"policy_version": version}),
+                                            version)
+        return TrainerResidentState(
+            layout=self.layout,
+            base_model_revision=self._revision,
+            config_hash=self._config_hash,
+            layout_hash=self.layout_hash,
+            policy_version=version,
+            digest=digest,
+            materialize_fn=_no_full_parameter_export,
+            weights_mark=weights,
+            holds_fn=self.check_holds,
+        )
+
+    def _current_digest(self, version: int):
+        digest, _ = self._full_digest(self._plugin(EXPORT_FULL_DIGEST, {"policy_version": version}), version)
+        return digest
+
+    def _full_digest(self, results: list[Any], version: int):
+        """Combine the per-rank shard digests (``run_plugin`` order) into one."""
+
+        import hashlib
+
+        from yeto.rl.engine.policy_digest import POLICY_TENSOR_PREFIX, PolicyDigest
+
+        if any(not isinstance(r, dict) or r.get("policy_version") != version for r in results):
+            raise PolicyStateError("full-parameter digest: a rank returned no digest for this version")
+        marks = [r["weights"] for r in results if r.get("weights")]
+        if len(marks) != 1:
+            raise PolicyStateError(f"expected exactly one main-rank weights version, got {len(marks)}")
+        policy = hashlib.sha256(POLICY_TENSOR_PREFIX)
+        for part in (self._revision, self._config_hash, self.layout_hash):
+            policy.update(part.encode("ascii"))
+        for rank, result in enumerate(results):
+            policy.update(f"{rank}:{result['shard_hash']}".encode("ascii"))
+        tensor_hash = policy.hexdigest()
+        payload_bytes = sum(int(r["shard_bytes"]) for r in results)
+        digest = PolicyDigest(
+            policy_tensor_hash=tensor_hash,
+            payload_hash=hashlib.sha256(f"full-parameter-payload:{tensor_hash}".encode("ascii")).hexdigest(),
+            payload_bytes=payload_bytes,
+            specs=(),
+            hash_seconds=max(float(r.get("hash_seconds", 0.0)) for r in results),
+        )
+        print(f"[rl] full-parameter digest v{version}: ranks={len(results)} bytes={payload_bytes} "
+              f"hash={digest.hash_seconds:.1f}s", flush=True)
+        return digest, dict(marks[0])
+
+    def apply(self, state: Any, *, optimizer: str, local_step: int) -> None:
+        raise PolicyStateError("a no-sync full-parameter island never applies an outside policy")
+
+    async def aapply(self, state: Any, *, optimizer: str, local_step: int) -> None:
+        self.apply(state, optimizer=optimizer, local_step=local_step)
+
+
+def _no_full_parameter_export(_policy_version: int):
+    raise PolicyStateError("full-parameter tensors stay in the trainer (no-sync island)")
 
 def _describe_tensors(tensors: Any, limit: int = 400) -> str:
     items = []

@@ -342,6 +342,36 @@ def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
     return flatten_inference_engine_checksums
 
 
+def engine_checksum_digest(body: dict[str, Any]) -> str:
+    """One engine's flattened weight checksum body as one sha256 (key-sorted JSON):
+    the value a convertible node compares after loading a published version."""
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def weight_view_digest(bodies: list[dict[str, Any]], *, lora: bool) -> str | None:
+    """The digest a policy release records and its sampler compares: of the whole
+    checksum body (full parameter) or of its ``lora:*`` keys (LoRA: the base is the
+    same HF checkpoint on both sides). None when there is no body, the engines
+    disagree, or a LoRA body holds no adapter key (the adapter was never served)."""
+    views = [lora_keys(dict(b)) if lora else dict(b) for b in bodies]
+    if not views or not views[0] or any(v != views[0] for v in views):
+        return None
+    return engine_checksum_digest(views[0])
+
+
+async def read_engine_checksums(controller: Any, flatten: Callable[[Any], list[dict[str, Any]]]
+                                | None = None) -> list[dict[str, Any]]:
+    """Every rollout engine's flattened weight checksum body (``check_weights``)."""
+    raw = await controller.check_weights(action="checksum")
+    try:
+        return [dict(b) for b in (flatten or _default_flatten())(raw)]
+    except AssertionError as exc:
+        raise PublicationError(f"engine weight checksum failed: {exc}",
+                               cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+
+
 async def _maybe_await(value: Any) -> Any:
     """The trainer hook may be sync (tests, fakes) or a coroutine (real Miles
     policy state, which must not block the running loop)."""
@@ -373,6 +403,8 @@ class MilesPublisher:
         self._runner = runner or LoopRunner()
         self.last_engine_checksums: dict[str, dict[str, Any]] | None = None
         self._published_once = False
+        # (engines, ids, members) stamped by the last load_version (convertible node)
+        self._loaded_engines: tuple[list[Any], list[str], frozenset[str]] | None = None
         # (token, per-engine checksum body) of the last full publication whose
         # engines all reported the same body: the payload reference (3.5).
         self._reference: tuple[str, dict[str, Any]] | None = None
@@ -469,6 +501,35 @@ class MilesPublisher:
         )
         return PublicationResult(manifest=manifest, members=frozenset(members))
 
+    async def _stamp_version(self, version: int, label: str) -> tuple[list[Any], list[str], frozenset[str]]:
+        """Under the controller's update lock, stamp ``version`` on every running
+        engine and read it back. Returns the engines, their ids and the members."""
+        info = await self._controller.start_update_weights()
+        ok = False
+        try:
+            engines = list(info.rollout_engines)
+            updated = frozenset(_member(c) for c in info.snapshot_cell_id_to_hashes)
+            members = updated & await running_members(self._controller)
+            if not engines or not members:
+                raise PublicationError("no rollout engines are eligible for publication")
+            ids = [_engine_id(e, i) for i, e in enumerate(engines)]
+            failed, cause = await _stamp_engine_version(engines, ids, version)
+            if failed:
+                raise PublicationError(
+                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {label}: "
+                    f"{sorted(failed)}",
+                    frozenset(failed), cause=cause, engine_ids=failed,
+                )
+            ok = True
+        finally:
+            if ok:
+                await self._controller.end_update_weights(
+                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
+                )
+            else:
+                await self._controller.abort_update_weights()
+        return engines, ids, members
+
     async def _publish(
         self, version: int, token: str
     ) -> tuple[frozenset[str], dict[str, Any] | None]:
@@ -486,40 +547,11 @@ class MilesPublisher:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
         self._published_once = True
-
-        info = await self._controller.start_update_weights()
-        ok = False
-        try:
-            engines = list(info.rollout_engines)
-            updated = frozenset(_member(c) for c in info.snapshot_cell_id_to_hashes)
-            members = updated & await running_members(self._controller)
-            if not engines or not members:
-                raise PublicationError("no rollout engines are eligible for publication")
-            ids = [_engine_id(e, i) for i, e in enumerate(engines)]
-            failed, cause = await _stamp_engine_version(engines, ids, version)
-            if failed:
-                raise PublicationError(
-                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {token}: "
-                    f"{sorted(failed)}",
-                    frozenset(failed), cause=cause, engine_ids=failed,
-                )
-            ok = True
-        finally:
-            if ok:
-                await self._controller.end_update_weights(
-                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
-                )
-            else:
-                await self._controller.abort_update_weights()
+        engines, ids, members = await self._stamp_version(version, token)
 
         checksums = None
         if self._verify_checksums:
-            raw = await self._controller.check_weights(action="checksum")
-            try:
-                bodies = (self._flatten or _default_flatten())(raw)
-            except AssertionError as exc:
-                raise PublicationError(f"engine weight checksum failed: {exc}",
-                                       cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+            bodies = await read_engine_checksums(self._controller, self._flatten)
             if len(bodies) != len(engines):
                 raise PublicationError(
                     f"{len(engines) - len(bodies)} engines returned no weight checksum"
@@ -527,6 +559,56 @@ class MilesPublisher:
             checksums = {ids[i]: dict(sorted(b.items())) for i, b in enumerate(bodies)}
         return members, checksums
 
+
+    # -- convertible node (rl-trainer-start-stop L7.2) --------------------------
+    @property
+    def published_checksum(self) -> str | None:
+        """Digest of the weight checksum every engine reported at the last full
+        publication (None: no publication yet, checksums off, or engines differed)."""
+        return None if self._reference is None else engine_checksum_digest(self._reference[1])
+
+    def load_version(self, version: int) -> None:
+        """Load the trainer's weights of published ``version`` into this node's
+        engines and stamp the version.
+
+        For a convertible node going back to rollout: the caller has offloaded the
+        trainer (``update_weights`` reads its host backups) and given the engines
+        their weight memory back; KV onload and admission stay with the caller.
+        Read the result with :meth:`served_checksum` once the KV cache is back."""
+        self._runner.run(self._load_version(version))
+
+    async def _load_version(self, version: int) -> None:
+        update_weights = self._update_weights_to(version)
+        try:
+            await update_weights(self._args, self._actor, self._executor, self._controller)
+        except Exception as exc:
+            raise PublicationError(f"upstream update_weights failed: {exc}",
+                                   cause=PublicationCause.UPDATE_FAILED) from exc
+        self._loaded_engines = await self._stamp_version(version, f"version {version}")
+
+    def served_checksum(self) -> str:
+        """Digest of the weight checksum the engines of the last :meth:`load_version`
+        serve; all engines must report the same one.
+
+        Needs the KV cache back: in LoRA mode the adapter is first loaded into
+        each engine's LoRA pool by one generate (as for a member publication),
+        so the checksum covers it (G-L7.4: a generate with the KV cache released
+        crashed the engine scheduler)."""
+        if self._loaded_engines is None:
+            raise PublicationError("served_checksum needs a load_version first")
+        return self._runner.run(self._served_checksum(*self._loaded_engines))
+
+    async def _served_checksum(self, engines: list[Any], ids: list[str],
+                               members: frozenset[str]) -> str:
+        if lora_mode(self._args):
+            await self._warm_up_lora(engines, ids, [], sorted(members))
+        bodies = await read_engine_checksums(self._controller, self._flatten)
+        digests = {engine_checksum_digest(b) for b in bodies}
+        if len(digests) != 1:
+            raise PublicationError(
+                f"{len(bodies)} engines reported {len(digests)} different weight checksums",
+                cause=PublicationCause.PAYLOAD_MISMATCH)
+        return digests.pop()
 
     # -- member publication (3.5) ---------------------------------------------
     def publish_members(

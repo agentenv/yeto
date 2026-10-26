@@ -464,6 +464,11 @@ LEAF_POLICY: dict[str, _Check] = {
     # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
     "edge_costs_path": _ok,
     "elastic_window_s": _ok,
+    # L4.6: the buffer rollout functions (translate_run_config); the island
+    # environment and the sampler loop read the rest.
+    "sample_buffer": _ok,
+    **{f"sample_buffer.{name}": _ok
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
 }
 
 
@@ -776,7 +781,24 @@ def translate_run_config(
     agent = config.agent
     columns = config.data.columns
     request = placement_request(config)
-    rollout_overlap = max_policy_age > 0 and request.kind != "colocated"
+    sample_buffer = getattr(config, "sample_buffer", None)
+    from .buffer_rollout import CONVERTIBLE
+
+    if sample_buffer is not None and sample_buffer.role == CONVERTIBLE:
+        # L7.5: trainer and engines share the GPUs; the converted node loads its own
+        # trained weights into its engines (no release through the store)
+        if trainable.parameter_mode != "lora" or request.kind != "colocated":
+            raise MilesConfigError("--rl-sample-role convertible needs LoRA on a colocated island")
+    elif (sample_buffer is not None and sample_buffer.role == "trainer"
+            and trainable.parameter_mode == "lora" and request.kind == "colocated"
+            and request.trainer_gpus != 1):
+        # A colocated trainer is asleep (process groups destroyed) when it publishes;
+        # release_plugin reloads them for the LoRA export as Miles' update_weights
+        # does. GPU-verified on one rank only (T-LSMP i); more ranks stay refused.
+        raise MilesConfigError("--rl-sample-role trainer with LoRA and a colocated placement "
+                               "supports one trainer GPU only; use --rl-placement fixed-partition")
+    # a buffer island selects its own rollout function, so never Miles' fully_async
+    rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -928,6 +950,8 @@ def translate_run_config(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
     values.extend(critic_load_argv(config, algorithm))
+    if sample_buffer is not None:
+        values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))
 
     evaluation = config.eval
     if evaluation is not None:
@@ -1121,6 +1145,30 @@ def translate_run_config(
     )
 
 
+# Miles builds the HF snapshot exporter (actor.export_hf) only when one of its HF
+# outputs is set. yeto never calls save_model, so this path is never written; the
+# trainer's policy releases call export_hf with their own directory.
+RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
+
+
+SAMPLER_ONLY_FLAG = "--debug-rollout-only"
+
+
+def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
+    """L4.6: a sampler writes the buffer and builds no trainer model
+    (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
+    a trainer reads the buffer and can export HF snapshots for its releases; a
+    convertible node (L7.5) does both with one switchable rollout function."""
+    from .buffer_rollout import CONVERTIBLE, SAMPLER, rollout_argv
+
+    argv = rollout_argv(role, max_policy_age=max_policy_age)
+    if role == SAMPLER:
+        return (*argv, SAMPLER_ONLY_FLAG)
+    if role == CONVERTIBLE:  # L7.5: trainer and engines on the same GPUs, no release export
+        return argv
+    return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
+
+
 def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:
     """Keep every FP32 master whole in full-parameter mode.
 
@@ -1190,6 +1238,11 @@ def validate_parsed_args(
     cells = counter(args)
     if cells != 1:
         raise SingleCellError(f"actor TrainGroup would have {cells} cells; ports require exactly 1")
+    if SAMPLER_ONLY_FLAG in launch.argv:
+        # A sampler island (L4.6) asked for --debug-rollout-only: Miles places the
+        # rollout engines only and builds no trainer, so the trainer partition of the
+        # request is unused by design, not rewritten.
+        return
     check_placement_not_rewritten(launch.placement, args)
 
 

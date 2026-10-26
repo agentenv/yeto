@@ -124,9 +124,16 @@ class CheckpointStore:
     (no-op locally) and returns the seconds it took; ``reload`` makes what another
     writer committed visible here. Backends override ``kind`` and, when the medium
     needs it, ``commit``/``reload``. Saving and restoring code takes a store and
-    never branches on the backend."""
+    never branches on the backend.
+
+    ``objects``: the same store addressed by object key
+    (:class:`~yeto.rl.engine.object_store.ObjectStore`), or None. A backend whose
+    mount cannot carry state that one host rewrites while another reads it (a
+    bucket mount) sets it; the sample buffer, the trainer commands and the policy
+    release pointer then use it instead of the files under ``root``."""
 
     kind = "local"
+    objects: Any = None
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root).expanduser()
@@ -154,6 +161,7 @@ class BucketMountStore(CheckpointStore):
 
 
 STORE_IMPL_ENV = "YETO_RL_STORE_IMPL"  # "package.module:callable", exported by the launch layer
+STORE_ENV_PREFIX = "YETO_RL_STORE_"  # the implementation's own settings (read from the environ)
 _STORE_IMPLS: dict[str, Callable[..., CheckpointStore]] = {}
 
 

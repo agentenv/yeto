@@ -366,6 +366,10 @@ class RayMetadataSink:
     def sink_spec(self) -> str:
         return f"ray:{self.name}"
 
+    def discard(self) -> int:
+        """Drop every pushed record (a sampler island has no consumer); returns the count."""
+        return len(self._ray.get(self._actor.take_all.remote()))
+
     def set_policy_token(self, token: str) -> None:
         self._ray.get(self._actor.set_token.remote(token))
 
@@ -1032,6 +1036,11 @@ class MilesRolloutPool:
         from yeto.rl.engine.tool_wait import _call, _resolve
 
         _resolve(_call(source, method, sorted(members)))
+
+    def set_admission(self, open_: bool) -> None:
+        """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
+        harness admission to this pool's running members (no-op without a board)."""
+        self._harness_admission("open_admission" if open_ else "close_admission", self.members())
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

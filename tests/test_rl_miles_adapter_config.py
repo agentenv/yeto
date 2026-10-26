@@ -323,6 +323,8 @@ def test_leaf_policy_matches_run_config_fields():
     leaves |= {"eval", "geometry.moe", "algorithm.lr_schedule"}  # the None variants
     # rl-algo-critic-family 2.4: critic run config (None here) and its leaves
     leaves |= {"algorithm.critic", "algorithm.critic.critic_load", "algorithm.critic.init_sha256"}
+    # L4.6: the sample buffer config (None here) and its leaves
+    leaves |= {f"sample_buffer.{f.name}" for f in dataclasses.fields(rc.SampleBufferConfig)}
     assert leaves == set(mc.LEAF_POLICY)
 
 

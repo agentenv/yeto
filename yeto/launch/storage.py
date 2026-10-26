@@ -89,6 +89,26 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
         raise ValueError("--rl-checkpoint-store must be a bucket URI or an absolute / ~/ path on the island")
     return value.rstrip("/") or "/", None
+def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
+    """The environment of a sky island with a sample role (sampler or trainer)
+    and an ``s3://`` store: the sample buffer, the trainer commands and the policy
+    release pointer then go through the store's object API, not the bucket mount
+    (``yeto.cloud.s3_store``); on a one-node island the round cuts and policy
+    releases too (staged on local disk, uploaded by object). {} otherwise (Modal
+    Volume, shared path, no role).
+    Raises ValueError when the launcher has no store credentials."""
+    from ..rl.engine import sample_roles
+
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if cloud == "modal" or not store.startswith("s3://"):
+        return {}
+    if not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
+        return {}
+    from ..cloud.s3_store import island_envs
+
+    return island_envs(store, stage=int(num_nodes) == 1)
+
+
 RL_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter"
 RL_HEAD_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter-src"
 

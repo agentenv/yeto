@@ -60,10 +60,12 @@ def parse_args(argv=None):
         SAO_STREAMING_SYNC_PRESET,
     )
 
-    if args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS:
+    if (args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS
+            and not _buffer_island(args)):
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
-            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or a no-sync "
+            "--rl-sample-role sampler / trainer island"
         )
     if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
         parser.error(
@@ -228,6 +230,25 @@ def _elastic_cells(value: str | None) -> tuple[str, ...]:
     return tuple(c.strip() for c in (value or "").split(",") if c.strip())
 
 
+def apply_sample_role(args, miles_args, environ=None) -> None:
+    """L4.6 (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
+    and the environment of the buffer rollout functions (forwarded to the Ray
+    workers by ``connect_island_ray``). Role ``both`` sets nothing."""
+    from yeto.rl.engine import sample_roles
+
+    from .buffer_rollout import island_env
+
+    if sample_roles.sample_role(args) == sample_roles.BOTH:
+        return
+    config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    miles_args.yeto_rl_sample_buffer = config
+    node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
+    (os.environ if environ is None else environ).update(island_env(
+        config.role, store_root=config.store, sampler_id=node or f"island{int(args.learner_id)}",
+        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
+        shard=node))
+
+
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
     process starts. Without them nothing is set (default path unchanged)."""
@@ -248,6 +269,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
                    recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    apply_sample_role(args, miles_args, environ)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
@@ -638,6 +660,23 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
+    """``(layout hash, config hash)`` of a full-parameter island: no LoRA layout,
+    the model config is the identity."""
+
+    return model_config_sha256, _canonical_sha256(
+        {"schema": "yeto-full-parameter-mode-v1", "model_config_sha256": model_config_sha256}
+    )
+
+
+def _buffer_island(args) -> bool:
+    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
+    parameter mode runs without the full-parameter sync preset."""
+    from yeto.rl.engine.sample_roles import BOTH, sample_role
+
+    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+
+
 def _full_parameter_mode(args, sync_preset: str) -> bool:
     """True for a full-parameter island.
 
@@ -650,8 +689,9 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
     full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    if full_mode and not full_preset:
-        raise ValueError("full parameter mode needs a full-parameter sync preset")
+    if full_mode and not full_preset and not _buffer_island(args):
+        raise ValueError("full parameter mode needs a full-parameter sync preset "
+                         "(or a no-sync --rl-sample-role sampler / trainer island)")
     if full_preset and not _trains_base_parameters(args):
         raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
     if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:
@@ -1670,7 +1710,7 @@ def run_miles(
     # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
-    if _trains_base_parameters(args) and not full_parameter_sync:
+    if _trains_base_parameters(args) and not full_parameter_sync and not _buffer_island(args):
         raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
     sao_runtime = None
     if dense_full:
@@ -1837,13 +1877,7 @@ def run_miles(
                     args, miles_argv, model_config_sha256=model_config_hash
                 )
         if full_parameter:
-            layout_hash = model_config_hash
-            lora_config_hash = _canonical_sha256(
-                {
-                    "schema": "yeto-full-parameter-mode-v1",
-                    "model_config_sha256": model_config_hash,
-                }
-            )
+            layout_hash, lora_config_hash = _full_parameter_identity(model_config_hash)
         else:
             from yeto.rl.core import canonical_layout_hash
 
@@ -2027,6 +2061,17 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    if full_parameter and not yeto_policy_sync:
+        # A no-sync buffer island (L4.6) trains every parameter without the sync
+        # block above: bind the same full-parameter identity for _run_ports.
+        from yeto.provenance import file_sha256
+
+        model_config_path = Path(model_path) / "config.json"
+        if not model_config_path.is_file():
+            raise ValueError("full-parameter model has no config.json")
+        miles_args.yeto_rl_parameter_mode = parameter_mode
+        miles_args.yeto_rl_layout_hash, miles_args.yeto_rl_lora_config_hash = (
+            _full_parameter_identity(file_sha256(model_config_path)))
     miles_args.yeto_rl_code_pack_digest = code_pack_digest
     if getattr(args, "code_pack_digest", None):
         from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
@@ -2225,6 +2270,13 @@ def _run_ports(
     miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
     if _run_test_debug_rollout_replay(args, miles_args):
+        return
+    from yeto.rl.engine.sample_roles import SAMPLER, sample_role
+
+    if sample_role(args) == SAMPLER:  # L4.6: generate into the sample buffer, never train
+        from yeto.rl.adapters.miles.sampler_island import run_sampler_island
+
+        run_sampler_island(miles_args)
         return
     run_ports_island(
         miles_args,
