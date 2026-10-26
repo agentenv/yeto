@@ -93,6 +93,26 @@ def test_install_refuses_a_switch_set_that_names_clamp(tmp_path):
                       plugins=[], log=lambda line: None)
 
 
+def test_install_overwrites_an_inherited_stack_rewrites_that_names_clamp(tmp_path, monkeypatch):
+    """S27 G-FW: the write is the layer that keeps ``clamp`` out, so it must win.
+
+    A Ray worker of an already-running cluster inherits the raylet's environment, and
+    the delivery reads the variable with a default that DOES name clamp
+    (``kern-stack/mamba2_stack.py:87``: ``cumsum,squeeze,clamp``). So an inherited
+    value must be replaced, and replaced before the first plugin import reads it."""
+    monkeypatch.setenv("STACK_REWRITES", "cumsum,squeeze,clamp")
+    marker = tmp_path / "read_by_plugin.txt"
+    (tmp_path / "reader.py").write_text(
+        "import os, pathlib\n"
+        f"pathlib.Path({str(marker)!r}).write_text(os.environ['STACK_REWRITES'])\n")
+    report = stack.install(str(tmp_path), plugins=["reader.py"], log=lambda line: None)
+    assert marker.read_text() == "cumsum,squeeze"
+    assert os.environ["STACK_REWRITES"] == "cumsum,squeeze"
+    assert report["env"]["STACK_REWRITES"] == "cumsum,squeeze"
+    # the entry has to be in the table at all; without it nothing is written
+    assert "STACK_REWRITES" in stack.RECIPE_ENV
+
+
 def test_the_worker_hook_does_nothing_without_the_switch(monkeypatch, tmp_path):
     monkeypatch.delenv(stack.ENV, raising=False)
     monkeypatch.setattr(stack, "LAST_REPORT", None)

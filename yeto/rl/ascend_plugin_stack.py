@@ -16,10 +16,26 @@ and reports one line per plugin.  It is **opt-in and off by default**
 What this module deliberately does **not** do, and why (every reason read from the
 recipe or from the plugin source, S27 G-FL):
 
-* ``clamp`` never reaches ``STACK_REWRITES``.  The recipe exports
-  ``STACK_REWRITES=cumsum,squeeze``; the ``clamp`` rewrite deletes the decay clamp
-  in ``ssd_recompute_patch._ddAcs``, whose own comment says that produces ``inf``
-  for large ``dt`` (S27 G-FK).  :func:`install` refuses any value that names it.
+* ``clamp`` never reaches ``STACK_REWRITES``, and the step that keeps it out is the
+  **write**, not the refusal (S27 G-FW, read off the delivery on npu1 n3).
+  :func:`install` puts ``STACK_REWRITES=cumsum,squeeze`` into the worker environment
+  **before it imports the first plugin**, because the delivery's own default is the
+  opposite value.  ``ascend_mamba2_kernels.apply`` delegates to
+  ``/data/work/kern-stack/mamba2_stack.py`` whenever that directory exists on the node,
+  and calls ``mamba2_stack.apply(stages=...)`` with no ``rewrites=`` argument, so the
+  items come from that module's line 87:
+  ``REWRITES = os.environ.get("STACK_REWRITES", "cumsum,squeeze,clamp")``.  An unset
+  variable therefore **asks for** the clamp rewrite.
+  That rewrite deletes the decay clamp in ``ssd_recompute_patch._ddAcs``.  With the
+  clamp gone the margin is zero: S27 G-FR measured about 1.1e5x over the overflow
+  bound, independent of the token distribution (a full-vocabulary sweep of layer 0 put
+  a single ``'</'`` token 5x over), so the overflow is certain, not unlikely.
+  Two further layers stand behind the write: :func:`check_env` refuses any value that
+  names ``clamp``, and the delivery's own ``apply_rewrites`` raises unless
+  ``KRC_ALLOW_CLAMP_REWRITE=1`` (``kern-recompute/ssd_recompute_patch.py:587-593``,
+  a name no ``verl_main.FORWARD_ENV_PREFIXES`` prefix forwards).
+  **Do not drop ``STACK_REWRITES`` from :data:`RECIPE_ENV` on the grounds that it is
+  "the default anyway": it is not.**
 * three plugins are left out (:data:`EXCLUDED`): two import ms-swift at module
   level and cannot be imported without it, one does so under its own switch.  Each
   carries the file and line that says so.
@@ -46,7 +62,9 @@ ENV = "YETO_ASCEND_PLUGIN_STACK"
 SETUP_HOOK = "yeto.rl.ascend_plugin_stack.setup_worker"
 
 # The rewrite items the recipe enables in the Mamba2 SSD stack. ``clamp`` is not one
-# of them and must never be added (see the module docstring).
+# of them and must never be added, and this entry must stay in RECIPE_ENV: the
+# delivery's default (kern-stack/mamba2_stack.py:87) is "cumsum,squeeze,clamp", so
+# leaving the variable unset enables the item we refuse (see the module docstring).
 STACK_REWRITES = "cumsum,squeeze"
 REFUSED_REWRITES = ("clamp",)
 
@@ -206,6 +224,9 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
     where = os.environ if environ is None else environ
     say = log if log is not None else (lambda line: print(line, flush=True))
     report = plan(root, extra_env=extra_env)
+    # Assignment, never setdefault: a Ray worker of an already-running cluster
+    # inherits the raylet's environment, and an inherited STACK_REWRITES that names
+    # clamp has to lose to the recipe's value (module docstring, first bullet).
     for key, value in report["env"].items():
         where[key] = value
     say(f"[yeto-ascend-stack] root={report['root']} switches={len(report['env'])} "
