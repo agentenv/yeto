@@ -916,19 +916,32 @@ def test_the_launcher_refuses_what_a_synced_megatron_island_cannot_run(change, m
         run_config_rules.check_engine_shape(Namespace(**values))
 
 
-def test_the_launcher_accepts_pipeline_parallelism(tmp_path):
-    """S27 G-FL: PP > 1 is no longer refused (the boundary writes the tied embedding's
-    second copy itself, ``megatron_hf_boundary.tied_output_copies``)."""
+def test_pipeline_parallelism_is_gated_and_the_gate_names_the_cause(tmp_path):
+    """S27 G-FL: the boundary handles PP (CPU-verified), but a PP > 1 island does not
+    start on cards (run s27-fl-1: the stage-1 trainer rank segfaults at the manifest
+    step), so the launcher refuses the shape by default and says why.
+    ``--rl-allow-pipeline-parallel-sync`` lifts the gate; the code stays in place."""
     from argparse import Namespace
 
     from yeto.rl.adapters.verl import megatron_engine, run_config_rules
 
     values = dict(tuning="lora", rl_single_island_no_sync=False, rl_sync_preset="full-parameter",
                   rl_placement="fixed-partition", rl_max_policy_age=0, tensor_parallel=1, pipeline_parallel=2,
-                  expert_parallel=1, rl_peer_recovery=False)
-    assert megatron_engine.sync_problems(Namespace(**values)) == []
-    assert run_config_rules.megatron_problems(Namespace(**values)) == []
-    run_config_rules.check_engine_shape(Namespace(**values))  # does not raise
+                  expert_parallel=1, rl_peer_recovery=False, rl_allow_pipeline_parallel_sync=False)
+    (problem,) = megatron_engine.sync_problems(Namespace(**values))
+    assert "s27-fl-1" in problem and "VERL-MEGATRON-PP.md" in problem
+    assert "--rl-allow-pipeline-parallel-sync" in problem
+    with pytest.raises(ValueError, match="--pipeline-parallel 1"):
+        run_config_rules.check_engine_shape(Namespace(**values))
+    lifted = {**values, "rl_allow_pipeline_parallel_sync": True}
+    assert megatron_engine.sync_problems(Namespace(**lifted)) == []
+    assert run_config_rules.megatron_problems(Namespace(**lifted)) == []
+    run_config_rules.check_engine_shape(Namespace(**lifted))  # does not raise
+    # PP == 1 is unaffected either way
+    for allow in (False, True):
+        single = {**values, "pipeline_parallel": 1, "tensor_parallel": 2,
+                  "rl_allow_pipeline_parallel_sync": allow}
+        assert megatron_engine.sync_problems(Namespace(**single)) == []
 
 
 # ----------------------------------------------------------------------------- the island driver over the Megatron wiring

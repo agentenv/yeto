@@ -522,6 +522,14 @@ _PLACEMENT = (
 )
 
 _RUNTIME = (
+    # S27 G-FL: pipeline parallelism in a full-parameter session is gated because the
+    # stage-1 trainer rank segfaults at start on a GPU island; this retries it anyway.
+    shared_flag("--rl-allow-pipeline-parallel-sync", action="store_true", default=False,
+                help="island with model parallelism in a full-parameter session: allow "
+                "--pipeline-parallel > 1, which is refused by default because the trainer rank of "
+                "the second pipeline stage segfaults while the island reads its parameter boundary "
+                "(run s27-fl-1). The boundary code itself is verified on CPU; pass this to retry "
+                "the shape on cards, for example after the upstream behaviour changes"),
     # S27 G-FL: islands with model parallelism check every gradient bucket for
     # non-finite values by default (the trainer's own bucket check); this turns it off.
     shared_flag("--rl-no-grad-nan-check", action="store_true", default=False,

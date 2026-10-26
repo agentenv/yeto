@@ -249,6 +249,8 @@ def make_miles_island_task(
         + (f" --rl-ascend-plugin-stack {args.rl_ascend_plugin_stack}"
            if getattr(args, "rl_ascend_plugin_stack", None) else "")
         + (" --rl-no-grad-nan-check" if getattr(args, "rl_no_grad_nan_check", False) else "")
+        + (" --rl-allow-pipeline-parallel-sync"
+           if getattr(args, "rl_allow_pipeline_parallel_sync", False) else "")
         + (f" --rl-optimizer-offload-fraction {float(args.rl_optimizer_offload_fraction)!r}"
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + (f" --rl-dp-optimizer {args.rl_dp_optimizer}"
@@ -462,6 +464,11 @@ def make_miles_island_task(
                 "NVTE_GROUPED_LINEAR_SINGLE_PARAM": "0",
             }
         )
+    # S27 G-FL: one-run diagnostics of the pipeline-parallel sync island
+    # (megatron_full_parameter._pp_probe); absent unless set on the launching shell.
+    for name in ("YETO_MEGATRON_PP_PROBE", "NCCL_DEBUG"):
+        if os.environ.get(name):
+            envs[name] = os.environ[name]
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if os.environ.get("CYBERGYM_API_KEY"):

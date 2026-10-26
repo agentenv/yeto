@@ -63,12 +63,25 @@ def sync_problems(args) -> list[str]:
       (``peer_recovery.VerlRankShards``); a Megatron island rejoins by catch-up
       (the syncer's broadcast of the current fragments) instead.
 
-    S27 G-FL: pipeline parallelism (PP > 1) is accepted. Bridge's conversion
-    tasks span every stage and broadcast over the PP group; the HF boundary
-    writes the tied embedding's second copy on the last stage itself
-    (``megatron_hf_boundary.tied_output_copies``).  See
-    ``SESSION27/VERL-MEGATRON-PP.md``."""
+    S27 G-FL: pipeline parallelism (PP > 1) is **gated**, not unimplemented. The HF
+    boundary handles PP -- Bridge's conversion tasks span every stage and broadcast
+    over the PP group, and the boundary writes the tied embedding's second copy on
+    the last stage itself (``megatron_hf_boundary.tied_output_copies``), all of it
+    verified against real Megatron-Core and real Megatron-Bridge on gloo. On a GPU
+    island it does not start: in run ``s27-fl-1`` the trainer rank of pipeline stage
+    1 segfaulted on both islands during the manifest step, before the syncer saw a
+    single learner. The gate is ours and temporary: it stops a shape that cannot
+    start from taking other people's cards, and it names the cause instead of
+    leaving a segfault with no Python frame. ``--rl-allow-pipeline-parallel-sync``
+    lifts it for whoever retries. Details: ``SESSION27/VERL-MEGATRON-PP.md`` §7.2."""
     problems = []
+    if int(getattr(args, "pipeline_parallel", 1) or 1) != 1 and not getattr(
+            args, "rl_allow_pipeline_parallel_sync", False):
+        problems.append(
+            "--pipeline-parallel 1 (PP > 1 does not start on a GPU island: the stage-1 trainer rank "
+            "segfaults during the manifest step, run s27-fl-1; the HF boundary itself is verified on "
+            "CPU, SESSION27/VERL-MEGATRON-PP.md section 7.2. --rl-allow-pipeline-parallel-sync retries "
+            "it anyway)")
     if (getattr(args, "rl_peer_recovery", False) or getattr(args, "rl_peer_recovery_store", None)
             or getattr(args, "rl_peer_recover", False)):
         problems.append("no peer recovery (the Megatron island rejoins by catch-up: --rl-island-state-source "

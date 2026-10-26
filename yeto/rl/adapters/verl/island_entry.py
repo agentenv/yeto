@@ -138,6 +138,8 @@ def parse_args(argv):
     p.add_argument("--rl-ascend-plugin-stack", default=None)
     # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
+    # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
+    p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)

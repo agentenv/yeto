@@ -62,11 +62,69 @@ def _rank() -> int:
     return int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0
 
 
+_TRACED = False
+
+
+def _trace(step: str) -> None:
+    """One line per step of the first manifest, with Python fault frames armed.
+
+    S27 G-FL: under PP > 1 the first manifest is also the first cross-stage collective
+    (Megatron-Bridge gathers the global parameter names over the pipeline group), and a
+    crash there reaches the log as Ray's C++ fiber stack with no Python frame. The lines
+    below say how far the rank got; ``faulthandler`` adds the Python stack of every
+    thread if a fatal signal arrives."""
+
+    global _TRACED
+
+    if _TRACED:
+        return
+    import faulthandler
+
+    try:
+        faulthandler.enable()
+    except (ValueError, OSError):  # a closed or redirected stderr
+        pass
+    print(f"[yeto-megatron-boundary] rank {_rank()} manifest: {step}", flush=True)
+
+
+def _pp_probe() -> None:
+    """S27 G-FL diagnostic, off unless ``YETO_MEGATRON_PP_PROBE=1``.
+
+    Runs the collective Megatron-Bridge runs first under PP > 1 -- an object all-gather
+    over the pipeline group (``_megatron_global_param_names_all_pp_ranks``) -- on its
+    own, so a crash there is attributed without Bridge in the frame."""
+
+    import os
+
+    if os.environ.get("YETO_MEGATRON_PP_PROBE") != "1":
+        return
+    import torch.distributed as dist
+    from megatron.core import parallel_state as mpu
+
+    rank = _rank()
+    group = mpu.get_pipeline_model_parallel_group()
+    size = int(dist.get_world_size(group=group))
+    print(f"[yeto-pp-probe] rank {rank} pp_group size={size} backend={dist.get_backend(group)} "
+          f"pp_rank={mpu.get_pipeline_model_parallel_rank()}", flush=True)
+    gathered: list = [None] * size
+    dist.all_gather_object(gathered, f"rank-{rank}", group=group)
+    print(f"[yeto-pp-probe] rank {rank} all_gather_object ok -> {gathered}", flush=True)
+    dist.barrier(group=group)
+    print(f"[yeto-pp-probe] rank {rank} barrier ok", flush=True)
+
+
 def remote_megatron_manifest(worker_dict) -> dict:
     """This rank's conversion tasks and master dtypes (no tensor moves)."""
 
+    global _TRACED
+
+    _trace("engine")
     bridge, chunks, optimizer = _engine(worker_dict)
+    _pp_probe()
+    _trace(f"conversion tasks ({len(chunks)} chunk(s))")
     record = boundary.manifest(bridge, chunks, optimizer)
+    _trace(f"built {len(record['tasks'])} task(s), {len(record['refused'])} refused")
+    _TRACED = True
     record["rank"] = _rank()
     return record
 
