@@ -522,6 +522,16 @@ _PLACEMENT = (
 )
 
 _RUNTIME = (
+    # S27 G-FL: the Ascend SFT recipe's plugin stack, opt-in and off by default
+    # (yeto.rl.ascend_plugin_stack). Only an island with model parallelism honours it.
+    shared_flag("--rl-ascend-plugin-stack", default=None, metavar="ISLAND_DIR",
+                help="Ascend island with model parallelism (TP/PP/EP > 1): install the SFT "
+                "recipe's plugin stack from ISLAND_DIR (the recipe's plugins directory ON THE "
+                "ISLAND) in every trainer worker, with the recipe's ASCEND_* switches. Off by "
+                "default. The clamp rewrite is never enabled (STACK_REWRITES=cumsum,squeeze, as "
+                "the recipe); the recipe's per-stage recompute policy and HCCL_BUFFSIZE stay "
+                "unset (they belong to its three-stage pipeline layout). The island log lists "
+                "every switch and every plugin it did or did not install"),
     shared_flag("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                 help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                 "persistent volume mount); default ~/yeto-rl/elastic-state"),

@@ -76,8 +76,19 @@ class _Mapping:
         q, k, v = torch.split(weights, [4, 2, 2], dim=0)
         return {self.hf_param["q"]: q, self.hf_param["k"]: k, self.hf_param["v"]: v}
 
+    def _target(self, module):
+        """Bridge's ``get_module_and_param_from_name``: the whole name, else a suffix of
+        it (so the embedding mapping can also write the tied output layer)."""
+        parts = self.megatron_param.split(".")
+        for start in range(len(parts)):
+            try:
+                return module.get_parameter(".".join(parts[start:]))
+            except AttributeError:
+                continue
+        raise AssertionError(f"{self.megatron_param} is not in {type(module).__name__}")
+
     def hf_to_megatron(self, hf_weights, module):
-        target = module.get_parameter(self.megatron_param)  # Bridge casts to the module parameter's dtype
+        target = self._target(module)  # Bridge casts to the module parameter's dtype
         if isinstance(self.hf_param, str):
             return hf_weights.to(target.dtype)
         return torch.cat([hf_weights["q"], hf_weights["k"], hf_weights["v"]], dim=0).to(target.dtype)
@@ -248,6 +259,48 @@ def test_the_task_index_refuses_a_boundary_bridge_does_not_cover():
         boundary.HfTaskIndex.from_manifests([bad], HF_SHAPES)
 
 
+def test_the_task_index_joins_two_pipeline_stages(monkeypatch):
+    """S27 G-FL: each stage reports every task, with the master dtype only for the ones
+    it owns (``param_weight is None`` elsewhere). The index is the union, so the
+    boundary covers the whole model and ``master_dtypes`` names every tensor."""
+    engines = _pipeline_engines(seed=0)
+    records = [boundary.manifest(engine.bridge, engine.module, engine.optimizer) for engine in engines]
+    assert all(len(record["tasks"]) == len(MEGATRON) and record["refused"] == [] for record in records)
+    owned = [sorted(name for _i, names, dtype in record["tasks"] if dtype for name in names)
+             for record in records]
+    assert owned[0] and owned[1] and set(owned[0]).isdisjoint(owned[1])
+    index = boundary.HfTaskIndex.from_manifests(records, HF_SHAPES)
+    assert sorted(index.by_name) == sorted(HF_SHAPES)
+    assert sorted(index.master_dtypes(records)) == sorted(HF_SHAPES)
+    # one stage alone still names every tensor (the task list spans all stages), but it
+    # reports no master for the other stage's
+    assert sorted(boundary.HfTaskIndex.from_manifests(records[:1], HF_SHAPES).by_name) == sorted(HF_SHAPES)
+    assert sorted(index.master_dtypes(records[:1])) == owned[0]
+
+
+def test_the_tied_output_copy_is_found_only_on_the_last_stage():
+    """S27 G-FL: ``tied_output_copies`` names the output-layer weight no conversion task
+    carries; a single-stage island has none, and a copy without an FP32 master is
+    refused in the manifest (at island start, not mid-run)."""
+    single = _Engine()
+    tasks = boundary.conversion_tasks(single.bridge, single.module)
+    assert boundary.tied_output_copies(single.module, tasks) == []
+    assert boundary.embedding_task_index(tasks) == 0
+
+    first, last = _pipeline_engines(seed=0)
+    assert boundary.tied_output_copies(first.module, boundary.conversion_tasks(
+        first.bridge, first.module)) == []
+    found = boundary.tied_output_copies(last.module, boundary.conversion_tasks(last.bridge, last.module))
+    assert len(found) == 1 and found[0] is last.model.output_layer.weight
+
+    bare = _PipelineEngine(0, 1)
+    bare.optimizer = SimpleNamespace(chained_optimizers=[])  # no distributed optimizer, no main_param
+    record = boundary.manifest(bare.bridge, bare.module, bare.optimizer)
+    assert record["refused"][0] == "output_layer.weight (the tied embedding's pipeline copy)"
+    with pytest.raises(boundary.MegatronHfBoundaryError, match="FP32 optimizer master"):
+        boundary.HfTaskIndex.from_manifests([record], HF_SHAPES)
+
+
 def test_expert_tasks_of_one_index_are_one_task_over_the_expert_ranks():
     """Two EP ranks: task 0 names expert 0 on rank 0 and expert 1 on rank 1; one
     fragment that needs expert 1 runs task 0 on both ranks (Bridge gathers over EP)."""
@@ -339,6 +392,200 @@ def test_offload_is_refused_on_the_worker():
         mfp.remote_megatron_manifest(SimpleNamespace(actor=SimpleNamespace(engine=engine)))
 
 
+# ----------------------------------------------------------------------------- a two-stage (PP2) fake
+PIPELINE = (("embedding.word_embeddings.weight", "decoder.layers.0.input_layernorm.weight"),
+            ("decoder.layers.0.self_attention.linear_qkv.weight", "decoder.final_layernorm.weight"))
+EMBEDDING = "embedding.word_embeddings.weight"
+TIED_OUTPUT = "output_layer.weight"
+
+
+class _PipelineModel(torch.nn.Module):
+    """One of two pipeline stages of :class:`_Model` (S27 G-FL): it registers only its
+    own parameters and, on the last stage, the tied embedding's second copy
+    ``output_layer.weight`` (which Megatron fills over the embedding group and no
+    Bridge conversion task carries)."""
+
+    def __init__(self, seed: int, stage: int):
+        super().__init__()
+        self.share_embeddings_and_output_weights = True
+        self.pre_process, self.post_process = stage == 0, stage == 1
+        generator = torch.Generator().manual_seed(seed)
+        for name, (_hf, shape, dtype) in MEGATRON.items():
+            value = torch.randn(shape, generator=generator).to(dtype)  # drawn for every stage: same v0
+            if name not in PIPELINE[stage]:
+                continue
+            module = self
+            *path, leaf = name.split(".")
+            for part in path:
+                if not hasattr(module, part):
+                    module.add_module(part, torch.nn.Module())
+                module = getattr(module, part)
+            module.register_parameter(leaf, torch.nn.Parameter(value))
+        if stage == 1:
+            self.add_module("output_layer", torch.nn.Module())
+            self.output_layer.register_parameter(
+                "weight", torch.nn.Parameter(torch.zeros(MEGATRON[EMBEDDING][1], dtype=MEGATRON[EMBEDDING][2])))
+
+
+class _PipelineBridge:
+    """``get_conversion_tasks`` / ``export_hf_weights`` of one stage: every stage's
+    tasks, with ``param_weight`` and ``megatron_module`` None for the other stage's
+    (as Bridge fills them), and an export that stands in for Bridge's PP broadcast by
+    reading the owning stage's FP32 master."""
+
+    def __init__(self, stage: int):
+        self.stage, self.peers = stage, []  # peers: [(model, optimizer)], set once both stages exist
+
+    def get_conversion_tasks(self, modules):
+        (model,) = modules
+        mine = dict(model.named_parameters())
+        return [SimpleNamespace(global_param_name=name, mapping=_Mapping(name, hf), param_weight=mine.get(name),
+                                megatron_module=model if name in mine else None)
+                for name, (hf, _shape, _dtype) in MEGATRON.items()]
+
+    def _broadcast(self, name: str):
+        for model, optimizer in self.peers:
+            param = dict(model.named_parameters()).get(name)
+            if param is not None:
+                return megatron_masters.full_masters(optimizer, [param])[0]
+        raise AssertionError(f"no pipeline stage owns {name}")
+
+    def export_hf_weights(self, modules, cpu=False, show_progress=True, conversion_tasks=None,
+                          merge_adapter_weights=True):
+        for task in conversion_tasks:
+            weights = task.param_weight
+            if weights is None:  # Bridge's broadcast_from_pp_rank: the owner's value
+                weights = self._broadcast(task.global_param_name)
+            yield from task.mapping.megatron_to_hf(weights.detach(), task.megatron_module).items()
+
+
+class _PipelineEngine(_Engine):
+    def __init__(self, seed: int, stage: int):
+        self.model = _PipelineModel(seed, stage)
+        bf16 = [p for p in self.model.parameters() if p.dtype == torch.bfloat16]
+        leaf = _DistributedLeaf(bf16, dp_rank=0, dp_size=1, group=None, seed=7 + seed)
+        self.module, self.bridge = [self.model], _PipelineBridge(stage)
+        self.optimizer = SimpleNamespace(chained_optimizers=[leaf])
+
+
+def _tied_output(engine) -> torch.nn.Parameter | None:
+    layer = getattr(engine.model, "output_layer", None)
+    return None if layer is None else layer.weight
+
+
+def _set_masters(engine, values: dict) -> None:
+    """Write whole FP32 values into this stage's masters and model copies."""
+    params = {name: param for name, param in engine.model.named_parameters() if name in values}
+    plist = list(params.values())
+    targets = [values[name] for name in params]
+    with torch.no_grad():
+        megatron_masters.write_masters(engine.optimizer, plist, targets)
+        for param, target in zip(plist, targets, strict=True):
+            param.data.copy_(target.to(param.dtype))
+
+
+def _pipeline_engines(seed: int = 0) -> list:
+    """Two stages holding the checkpoint ``_Engine(seed)`` holds, with the last stage's
+    tied copy equal to the embedding (Megatron's start-up all-reduce)."""
+    reference = _Engine(seed=seed)
+    masters = {name: megatron_masters.full_masters(reference.optimizer, [param])[0].detach().clone()
+               for name, param in reference.model.named_parameters()}
+    engines = [_PipelineEngine(seed, stage) for stage in (0, 1)]
+    peers = [(engine.model, engine.optimizer) for engine in engines]
+    for engine in engines:
+        engine.bridge.peers = peers
+        _set_masters(engine, masters)
+        tied = _tied_output(engine)
+        if tied is not None:
+            _set_masters(engine, {TIED_OUTPUT: masters[EMBEDDING]})
+            assert tied.shape == masters[EMBEDDING].shape
+    return engines
+
+
+def _pipeline_hf_values(engines) -> dict:
+    """What the pipeline trainer holds in HF names, read through stage 0 (the reading
+    rank): its own masters plus what the broadcast delivers."""
+    out: dict = {}
+    engine = engines[0]
+    tasks = boundary.conversion_tasks(engine.bridge, engine.module)
+    boundary.export_hf(engine.bridge, engine.module, engine.optimizer, list(range(len(tasks))),
+                       lambda name, tensor: out.__setitem__(name, tensor.detach().clone()))
+    return out
+
+
+def _pipeline_train(engines, delta: dict) -> None:
+    """One optimizer step stand-in per stage. The tied copy takes the embedding's step,
+    as Megatron's embedding-group gradient all-reduce makes it."""
+    for engine in engines:
+        params = dict(engine.model.named_parameters())
+        masters = megatron_masters.full_masters(engine.optimizer, list(params.values()))
+        values = {}
+        for (name, _param), master in zip(params.items(), masters, strict=True):
+            hf = MEGATRON[EMBEDDING][0] if name == TIED_OUTPUT else MEGATRON[name][0]
+            step = delta[hf] if isinstance(hf, str) else torch.cat([delta[QKV[role]] for role in ("q", "k", "v")])
+            values[name] = master.detach().clone() + step
+        _set_masters(engine, values)
+
+
+_READER_INDEX = threading.local()
+
+
+def _is_reader_override() -> bool:
+    """Stand-in for ``full_parameter._is_reader`` (global rank 0) while two in-process
+    islands run in two threads: the index of the worker the island of *this* thread is
+    calling. Thread-local, so a single-worker island in the other thread keeps 0."""
+    return int(getattr(_READER_INDEX, "value", 0)) == 0
+
+
+class _PipelineIsland(_Island):
+    """``VerlIsland.call_workers`` over two in-process Megatron workers, one per
+    pipeline stage. Worker 0 stands in for global rank 0, the reading rank; the test
+    must point ``full_parameter._is_reader`` at :func:`_is_reader_override`."""
+
+    def __init__(self, engines):
+        self.workers = [SimpleNamespace(actor=SimpleNamespace(engine=engine)) for engine in engines]
+        self.calls: list[str] = []
+
+    def call_workers(self, fn, *args):
+        self.calls.append(fn.__name__)
+        out = []
+        for index, worker in enumerate(self.workers):
+            _READER_INDEX.value = index
+            try:
+                out.append(fn(worker, *args))
+            finally:
+                _READER_INDEX.value = 0
+        return out
+
+    call_workers_shared = call_workers
+
+
+class _PipelineHarness:
+    """One PP2 Megatron island's trainer (the harness interface of ``_MegatronHarness``)."""
+
+    names = tuple(HF_SHAPES)
+
+    def __init__(self):
+        self.engines = _pipeline_engines(seed=0)
+        self.island = _PipelineIsland(self.engines)
+        self.island.full_group = mfp.MegatronFullParameterGroup(self.island, shapes=HF_SHAPES, config={})
+
+    def values(self) -> dict:
+        return _pipeline_hf_values(self.engines)
+
+    @staticmethod
+    def checkpoint_values() -> dict:
+        return _pipeline_hf_values(_pipeline_engines(seed=0))
+
+    def train(self, learner_id: int, round_id: int) -> None:
+        _pipeline_train(self.engines, _step(learner_id, round_id))
+
+    def tied_master(self) -> torch.Tensor:
+        """The FP32 master of the last stage's tied output layer."""
+        engine = self.engines[-1]
+        return megatron_masters.full_masters(engine.optimizer, [_tied_output(engine)])[0].detach().clone()
+
+
 # ----------------------------------------------------------------------------- two islands, the real syncer
 def _plan(learner_id: int, port: int, profile: str, *, rounds: int, fragments: int, async_rounds: bool,
           matrix_merge: str, pipeline: int, final_cut: str) -> dict:
@@ -356,8 +603,8 @@ def _plan(learner_id: int, port: int, profile: str, *, rounds: int, fragments: i
                 "local_init": async_rounds, "matrix_merge": matrix_merge, "island_pool": None}}
 
 
-def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> None:
-    harness = _MegatronHarness()
+def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict, harness_cls=None) -> None:
+    harness = (harness_cls or _MegatronHarness)()
     island = harness.island
     sync, _policy_state, _stream = vfs.build_full_parameter_sync(island, plan, backend_identity_sha256="c" * 64)
     driver = _Driver()
@@ -382,7 +629,8 @@ def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> 
                 break
         sync.finish(driver)
         results[learner_id] = {"values": harness.values(), "events": driver.events, "state": state,
-                               "rounds": round_id + 1, "calls": list(island.calls)}
+                               "rounds": round_id + 1, "calls": list(island.calls),
+                               "harness": harness}
     except BaseException as error:  # noqa: BLE001 - reported by the test
         results[learner_id] = error
     finally:
@@ -390,7 +638,7 @@ def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> 
 
 
 def _two_islands(binary, tmp_path, monkeypatch, *, rounds, fragments, async_rounds, extra, matrix_merge="avg",
-                 pipeline=1, final_cut="download", plan_extra=None):
+                 pipeline=1, final_cut="download", plan_extra=None, harnesses=(None, None)):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-megatron-sync-test-key")
     monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
     process, port, profile = _start_syncer(binary, tmp_path, fragments=fragments, rounds=rounds, extra=extra)
@@ -401,7 +649,8 @@ def _two_islands(binary, tmp_path, monkeypatch, *, rounds, fragments, async_roun
         for plan in plans:
             plan[vfs.PLAN_KEY].update(plan_extra or {})
         threads = [threading.Thread(target=_run_island, args=(i, plans[i], rounds if not async_rounds
-                                                               else 20 * rounds, results)) for i in range(2)]
+                                                               else 20 * rounds, results, harnesses[i]))
+                   for i in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -465,6 +714,35 @@ def test_two_megatron_islands_run_a_strict_sweep_with_bf16_broadcast_deltas(sync
 
 
 @needs_cargo
+def test_a_pipeline_parallel_megatron_island_syncs_with_a_single_stage_one(syncer_binary, tmp_path, monkeypatch):
+    """S27 G-FL: island 1 is PP2 (two workers, one per stage, the tied embedding's
+    second copy on the last stage), island 0 is single-stage. Strict sweep with bf16
+    broadcast deltas: both islands end on the exact average of their steps (atol
+    1e-6) and ACK the same final cut, and the tied copy still equals the embedding."""
+    from yeto import downlink
+
+    monkeypatch.setattr(fp, "_is_reader", _is_reader_override)
+    kinds = _counting_kinds(monkeypatch)
+    rounds, fragments = 4, len(_layout().fragments.fragments)
+    results, log = _two_islands(syncer_binary, tmp_path, monkeypatch, rounds=rounds, fragments=fragments,
+                                async_rounds=False, plan_extra={"bcast_delta": True},
+                                harnesses=(None, _PipelineHarness),
+                                extra=("--rl-sync-full-parameter-rounds", "sweep", "--rl-sync-final-cut", "download",
+                                       "--rl-sync-bcast-delta-full-every", "2"))
+    assert downlink.KIND_DELTA in kinds and downlink.KIND_FULL in kinds, kinds
+    expected = _expected_average(rounds)
+    for learner_id in range(2):
+        for name, value in expected.items():
+            assert torch.allclose(results[learner_id]["values"][name], value, atol=1e-6), (learner_id, name)
+        acks = [f for e, f in results[learner_id]["events"] if e == "rl_full_parameter_final_ack"]
+        assert acks == [{"acknowledged": True}], (learner_id, log[-2000:])
+    assert results[0]["state"].policy_tensor_hash() == results[1]["state"].policy_tensor_hash()
+    # the second copy of the embedding went with it, so the last stage's head is current
+    tied = results[1]["harness"].tied_master()
+    assert torch.allclose(tied, expected["model.embed_tokens.weight"], atol=1e-6)
+
+
+@needs_cargo
 def test_two_megatron_islands_run_async_rounds_with_local_init_and_bf16_deltas(syncer_binary, tmp_path,
                                                                               monkeypatch):
     """The async defaults (quorum 1, two rounds in flight, RDA, local INIT) with
@@ -509,18 +787,42 @@ _REAL = {key: os.environ.get(key) for key in ("YETO_MEGATRON_PYTHON", "YETO_MEGA
                                               "YETO_MEGATRON_BRIDGE_PATH")}
 
 
-@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
-@pytest.mark.parametrize("tp,dp", [(2, 1), (1, 2), (2, 2)])
-def test_real_megatron_and_bridge_round_trip(tp, dp, tmp_path):
-    out = tmp_path / "result.json"
-    env = {**os.environ, "OMP_NUM_THREADS": "2"}
+def _round_trip(tmp_path, tp: int, pp: int, dp: int, *, mutate: str = "", timeout: int = 900):
+    out = tmp_path / f"result-{tp}-{pp}-{dp}-{mutate or 'none'}.json"
+    env = {**os.environ, "OMP_NUM_THREADS": "2", "YETO_PP_MUTATE": mutate}
     proc = subprocess.run([_REAL["YETO_MEGATRON_PYTHON"], "-I", str(REPO / "tests/megatron_bridge_roundtrip.py"),
-                           str(tp), str(dp), str(out)], env=env, capture_output=True, text=True, timeout=600)
+                           str(tp), str(pp), str(dp), str(out)], env=env, capture_output=True, text=True,
+                          timeout=timeout)
+    return proc, out
+
+
+@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
+@pytest.mark.parametrize("tp,pp,dp", [(2, 1, 1), (1, 1, 2), (2, 1, 2), (1, 2, 1), (2, 2, 1), (1, 2, 2)])
+def test_real_megatron_and_bridge_round_trip(tp, pp, dp, tmp_path):
+    proc, out = _round_trip(tmp_path, tp, pp, dp)
     assert proc.returncode == 0, proc.stderr[-4000:]
     result = json.loads(out.read_text())
     assert result["ok"] and result["names"] == 24 and result["names_read_from_masters"] == 15
     assert result["partial_changed"] == ["model.layers.0.self_attn.q_proj.weight",
                                          "model.layers.1.input_layernorm.weight"]
+    # S27 G-FL: with PP > 1 and tied embeddings every last-stage rank holds the second
+    # copy of the embedding and writes it; with PP == 1 nobody does.
+    expected = dp * tp if pp > 1 else 0
+    assert result["tied_copies"] == expected and result["tied_outputs_written"] == expected
+
+
+@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
+@pytest.mark.parametrize("mutate", ["no-tied", "stage-local-export"])
+def test_the_pipeline_round_trip_catches_a_broken_cross_stage_step(mutate, tmp_path):
+    """S27 G-FL mutation check: breaking the tied-copy write, or dropping what the PP
+    broadcast delivered, must make the PP2 round trip fail (it passes at PP1, where
+    neither step exists)."""
+
+    broken, _out = _round_trip(tmp_path, 1, 2, 1, mutate=mutate)
+    assert broken.returncode != 0, broken.stdout[-2000:]
+    fine, out = _round_trip(tmp_path, 2, 1, 1, mutate=mutate)
+    assert fine.returncode == 0, fine.stderr[-4000:]
+    assert json.loads(out.read_text())["ok"]
 
 
 # ----------------------------------------------------------------------------- launcher and island entry
@@ -568,6 +870,25 @@ def test_two_synced_megatron_islands_launch_and_their_argv_reaches_the_island_pl
         assert section["async_rounds"] and "peer_recovery" not in section
 
 
+def test_an_fsdp2_island_refuses_the_ascend_plugin_stack():
+    """S27 G-FL: the stack patches Megatron-Core, so only an island with model
+    parallelism takes it; without the flag there is no section at all."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.adapters.verl.megatron_engine import ENGINE_FSDP2, ENGINE_MEGATRON
+
+    off = SimpleNamespace(rl_ascend_plugin_stack=None)
+    assert island_entry.ascend_plugin_stack_section(off, engine=ENGINE_FSDP2) is None
+    assert island_entry.ascend_plugin_stack_section(off, engine=ENGINE_MEGATRON) is None
+    on = SimpleNamespace(rl_ascend_plugin_stack="/data/work/sft-run/plugins")
+    with pytest.raises(SystemExit, match="只接有模型并行"):
+        island_entry.ascend_plugin_stack_section(on, engine=ENGINE_FSDP2)
+    section = island_entry.ascend_plugin_stack_section(on, engine=ENGINE_MEGATRON)
+    assert section["root"] == "/data/work/sft-run/plugins"
+    assert section["env"]["STACK_REWRITES"] == "cumsum,squeeze"
+
+
 def test_peer_recovery_stays_off_for_megatron_islands_with_a_store():
     from yeto.launch.rl_args import _peer_recovery_applies
 
@@ -577,7 +898,6 @@ def test_peer_recovery_stays_off_for_megatron_islands_with_a_store():
 
 
 @pytest.mark.parametrize("change,match", [
-    (dict(pipeline_parallel=2), "--pipeline-parallel 1"),
     (dict(rl_peer_recovery=True), "no peer recovery"),
     (dict(rl_sync_preset="decoupled"), "--rl-sync-preset full-parameter"),
     (dict(rl_single_island_no_sync=True, tuning="lora"), "--tuning full"),
@@ -594,6 +914,21 @@ def test_the_launcher_refuses_what_a_synced_megatron_island_cannot_run(change, m
     values.update(change)
     with pytest.raises(ValueError, match=match):
         run_config_rules.check_engine_shape(Namespace(**values))
+
+
+def test_the_launcher_accepts_pipeline_parallelism(tmp_path):
+    """S27 G-FL: PP > 1 is no longer refused (the boundary writes the tied embedding's
+    second copy itself, ``megatron_hf_boundary.tied_output_copies``)."""
+    from argparse import Namespace
+
+    from yeto.rl.adapters.verl import megatron_engine, run_config_rules
+
+    values = dict(tuning="lora", rl_single_island_no_sync=False, rl_sync_preset="full-parameter",
+                  rl_placement="fixed-partition", rl_max_policy_age=0, tensor_parallel=1, pipeline_parallel=2,
+                  expert_parallel=1, rl_peer_recovery=False)
+    assert megatron_engine.sync_problems(Namespace(**values)) == []
+    assert run_config_rules.megatron_problems(Namespace(**values)) == []
+    run_config_rules.check_engine_shape(Namespace(**values))  # does not raise
 
 
 # ----------------------------------------------------------------------------- the island driver over the Megatron wiring

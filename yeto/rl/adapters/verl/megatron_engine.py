@@ -57,15 +57,16 @@ def sync_problems(args) -> list[str]:
     run ([] when it can). Read from launcher arguments and from island arguments
     alike (the attribute names the two share or that only one of them has).
 
-    * pipeline parallelism: the HF boundary (``yeto.rl.megatron_hf_boundary``)
-      exports through Megatron-Bridge, which handles PP, but a tied embedding
-      over two stages and the PP broadcasts have no test; refused until they do;
     * peer recovery: the verl stream's donor files are FSDP2 rank files
       (``peer_recovery.VerlRankShards``); a Megatron island rejoins by catch-up
-      (the syncer's broadcast of the current fragments) instead."""
+      (the syncer's broadcast of the current fragments) instead.
+
+    S27 G-FL: pipeline parallelism (PP > 1) is accepted. Bridge's conversion
+    tasks span every stage and broadcast over the PP group; the HF boundary
+    writes the tied embedding's second copy on the last stage itself
+    (``megatron_hf_boundary.tied_output_copies``).  See
+    ``SESSION27/VERL-MEGATRON-PP.md``."""
     problems = []
-    if int(getattr(args, "pipeline_parallel", 1) or 1) != 1:
-        problems.append("--pipeline-parallel 1 (PP with the outer sync is not verified)")
     if (getattr(args, "rl_peer_recovery", False) or getattr(args, "rl_peer_recovery_store", None)
             or getattr(args, "rl_peer_recover", False)):
         problems.append("no peer recovery (the Megatron island rejoins by catch-up: --rl-island-state-source "

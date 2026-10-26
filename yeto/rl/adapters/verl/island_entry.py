@@ -134,6 +134,8 @@ def parse_args(argv):
     p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
+    # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
+    p.add_argument("--rl-ascend-plugin-stack", default=None)
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)
@@ -463,6 +465,7 @@ def main(argv=None) -> int:
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
+        ascend_plugin_stack_section(args, engine=engine)  # S27 G-FL: refuses the flag here
         if full and args.rl_rollout_quant_tier:
             raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
         pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
@@ -568,6 +571,9 @@ def main(argv=None) -> int:
         "engine": engine,
         **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
             "store_note": store_note} if megatron is not None else {}),
+        # S27 G-FL: absent unless --rl-ascend-plugin-stack asked for it
+        **({"ascend_plugin_stack": megatron["ascend_plugin_stack"]}
+           if megatron is not None and megatron["ascend_plugin_stack"] else {}),
         **({"separate": pools.to_dict()} if pools is not None else {}),  # S27 G-EK
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
@@ -788,7 +794,27 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
                if rounds else None)
     if args.rl_lr_schedule not in (None, "constant"):
         raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
-    return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports}
+    return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports,
+            "ascend_plugin_stack": ascend_plugin_stack_section(args, engine=megatron_engine.ENGINE_MEGATRON)}
+
+
+def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
+    """S27 G-FL: the plan's ``ascend_plugin_stack`` section; None without the flag.
+
+    Only an island with model parallelism takes it: those plugins patch Megatron-Core
+    (and the model code), which the FSDP2 island does not use."""
+    root = getattr(args, "rl_ascend_plugin_stack", None)
+    if not root:
+        return None
+    if engine != megatron_engine.ENGINE_MEGATRON:
+        raise SystemExit("--rl-ascend-plugin-stack 只接有模型并行的 verl 岛（TP/PP/EP > 1）："
+                         "那组插件改的是 Megatron-Core，FSDP2 岛用不上")
+    from yeto.rl import ascend_plugin_stack
+
+    try:
+        return ascend_plugin_stack.plan(str(root))
+    except ascend_plugin_stack.AscendPluginStackError as error:
+        raise SystemExit(f"--rl-ascend-plugin-stack: {error}") from None
 
 
 def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:

@@ -107,6 +107,24 @@ def remote_megatron_layout(worker_dict) -> list[list]:
     return [[key, list(param.shape), str(param.dtype)] for key, param in owned_parameters(_chunks(worker), coords)]
 
 
+def remote_ascend_plugin_report(worker_dict) -> dict:
+    """S27 G-FL: what the Ascend plugin stack installed in this worker process.
+
+    ``verl_main.setup_worker`` installed it before verl built the model; this only
+    reads the record back for the island log. ``{"installed": False}`` when the worker
+    never ran the install (the switch is off, or the setup hook did not run)."""
+    import os
+
+    from yeto.rl import ascend_plugin_stack
+
+    report = ascend_plugin_stack.LAST_REPORT
+    rank = int(os.environ.get("RANK", 0))
+    if report is None:
+        return {"rank": rank, "ran": False, "root": os.environ.get("YETO_ASCEND_PLUGIN_STACK", "")}
+    return {"rank": rank, "ran": True, "root": report["root"], "installed": report["installed"],
+            "failed": report["failed"], "switches": sorted(report["env"])}
+
+
 def remote_megatron_digest(worker_dict) -> dict:
     """sha256 of every owned parameter's bytes (as the trainer holds them, bf16),
     copied to host and hashed in ``HASH_THREADS`` threads (hashlib releases the GIL)."""
@@ -397,6 +415,36 @@ def driver_options(plan: dict, spec, fingerprint: str) -> dict:
             "profile": _execution_profile(spec, plan), "layout": LAYOUT_FRAGMENTS}
 
 
+def _log_ascend_plugin_stack(trainer, section: dict, tape) -> None:
+    """S27 G-FL: print what every trainer worker installed, and put it on the tape.
+
+    Reading the report back cannot fail the island: a worker that never ran the
+    install reports ``ran: False`` and the line says so."""
+    try:
+        reports = call_workers(trainer, remote_ascend_plugin_report)
+    except Exception as error:  # noqa: BLE001 - a log must not stop the island
+        reports = [{"rank": -1, "ran": False, "error": repr(error)}]
+    print(f"[yeto-verl] ascend plugin stack root={section.get('root')} "
+          f"switches={len(section.get('env') or {})} planned={len(section.get('plugins') or [])}",
+          flush=True)
+    for name, reason in sorted((section.get("excluded") or {}).items()):
+        print(f"[yeto-verl]   excluded {name}: {reason}", flush=True)
+    for name, reason in sorted((section.get("unset") or {}).items()):
+        print(f"[yeto-verl]   unset {name}: {reason}", flush=True)
+    for report in sorted(reports, key=lambda row: int(row.get("rank", 0))):
+        if not report.get("ran"):
+            print(f"[yeto-verl]   rank {report.get('rank')}: the stack did not run "
+                  f"({report.get('error') or 'no report in the worker'})", flush=True)
+            continue
+        print(f"[yeto-verl]   rank {report['rank']}: installed {len(report['installed'])} "
+              f"plugin(s); not installed {sorted(report['failed']) or 'none'}", flush=True)
+        for plugin, reason in sorted(report["failed"].items()):
+            print(f"[yeto-verl]     NOT installed {plugin}: {reason}", flush=True)
+    tape.append({"event": "rl_ascend_plugin_stack", "root": section.get("root"),
+                 "env": section.get("env"), "unset": sorted(section.get("unset") or {}),
+                 "excluded": sorted(section.get("excluded") or {}), "ranks": reports})
+
+
 def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     """The yeto driver over the Megatron ports (``verl_main.YetoTaskRunner``)."""
     from verl.utils.skip import SkipManager
@@ -457,6 +505,8 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         thresholds_key=plan["thresholds_key"], emit=lambda event, **f: tape.append({"event": event, **f}))
     sync, policy_state = sync_ports(island, plan, identity_sha)
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    if plan.get("ascend_plugin_stack"):  # S27 G-FL: one line per switch and per plugin
+        _log_ascend_plugin_stack(trainer, plan["ascend_plugin_stack"], tape)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "engine": "megatron",
                  "backend_identity": identity.to_dict(), "backend_identity_sha256": identity_sha,
                  "layout_hash": layout_hash, "config_hash": identity_hash, "n_specs": len(specs),

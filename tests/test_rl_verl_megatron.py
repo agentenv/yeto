@@ -185,6 +185,21 @@ def test_island_plan_of_the_d0_flags(tmp_path):
     assert _value(plan["overrides"], "data.apply_chat_template_kwargs.enable_thinking") == "False"
 
 
+def test_the_ascend_plugin_stack_is_off_unless_the_flag_asks_for_it(tmp_path):
+    """S27 G-FL: no flag, no section; with the flag the plan carries the switches, the
+    plugin order and the reasons, and never the clamp rewrite."""
+    from yeto.rl import ascend_plugin_stack
+
+    assert _plan(tmp_path)["ascend_plugin_stack"] is None
+    section = _plan(tmp_path, extra=["--rl-ascend-plugin-stack", "/data/work/sft-run/plugins"]
+                    )["ascend_plugin_stack"]
+    assert section["root"] == "/data/work/sft-run/plugins"
+    assert section["env"]["STACK_REWRITES"] == "cumsum,squeeze"
+    assert [row["plugin"] for row in section["plugins"]] == list(ascend_plugin_stack.PLUGINS)
+    assert section["excluded"] and section["unset"]
+    assert all(row["present"] is False for row in section["plugins"])  # not this machine's directory
+
+
 def test_island_plan_with_the_hf_export(tmp_path):
     plan = _plan(tmp_path, extra=["--rl-export-hf-rounds", "final",
                                   "--rl-export-hf-store", "modal-volume://v/run/hf"])
@@ -195,7 +210,6 @@ def test_island_plan_with_the_hf_export(tmp_path):
 @pytest.mark.parametrize("change,match", [
     (dict(parameter_mode="lora"), "--tuning full"),
     # S27 G-FG: a synced Megatron island is allowed; what its outer sync cannot run is refused
-    (dict(rl_single_island_no_sync=False, pipeline_parallel=2), "--pipeline-parallel 1"),
     (dict(rl_single_island_no_sync=False, rl_peer_recovery_store="modal-volume://v/p"), "no peer recovery"),
     (dict(rl_placement="colocated"), "fixed-partition"),
     (dict(rl_max_policy_age=1), "--rl-max-policy-age 0"),

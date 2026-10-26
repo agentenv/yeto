@@ -246,6 +246,8 @@ def make_miles_island_task(
            if getattr(args, "rl_gradient_accumulation_fusion", False) else "")
         + (f" --rl-max-tokens-per-gpu {int(args.rl_max_tokens_per_gpu)}"
            if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
+        + (f" --rl-ascend-plugin-stack {args.rl_ascend_plugin_stack}"
+           if getattr(args, "rl_ascend_plugin_stack", None) else "")
         + (f" --rl-optimizer-offload-fraction {float(args.rl_optimizer_offload_fraction)!r}"
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + (f" --rl-dp-optimizer {args.rl_dp_optimizer}"

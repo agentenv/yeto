@@ -2,11 +2,15 @@
 
 Run by ``tests/test_s27_verl_megatron_sync.py`` in a separate interpreter that
 has Megatron-Core and Megatron-Bridge (paths in ``YETO_MEGATRON_LM_PATH`` and
-``YETO_MEGATRON_BRIDGE_PATH``); not collected by pytest.  Spawns ``world`` gloo
-ranks, builds a small Qwen3-like ``GPTModel`` (local layer spec) and runs
+``YETO_MEGATRON_BRIDGE_PATH``); not collected by pytest.  Takes ``tp pp dp
+out.json``, spawns ``tp * pp * dp`` gloo ranks, builds a small Qwen3-like
+``GPTModel`` (local layer spec, tied embeddings) and runs
 :mod:`yeto.rl.megatron_hf_boundary` against Bridge's Qwen3 mapping:
 
 * ``tp``: tensor parallel size (column/row parallel, fused QKV and gate/up);
+* ``pp``: pipeline parallel size (S27 G-FL); each stage owns part of the tasks
+  and receives the rest over the PP group, and the last stage owns the tied
+  embedding's second copy;
 * ``dp``: data parallel size; the optimizer is a DistributedOptimizer stand-in
   whose FP32 master shards the ranks own by range (``megatron_masters``), so
   ``dp > 1`` exercises the master gather (gloo all-reduce) and range writes.
@@ -18,7 +22,13 @@ Checks, every one bit-exact on every rank:
 3. after an apply each bf16 model parameter equals its master cast to bf16;
 4. a partial apply (one fused input, one replicated norm) changes exactly
    those tensors (the other QKV inputs are read back from the masters);
-5. the task index covers exactly the HF model's parameters (the FSDP2 layout).
+5. the task index covers exactly the HF model's parameters (the FSDP2 layout);
+6. after a full apply the last stage's tied output layer holds the applied
+   embedding (master and bf16 copy);
+7. a partial apply of the embedding alone moves that copy with it.
+
+``YETO_PP_MUTATE`` breaks one piece of the cross-stage work on purpose
+(:func:`_mutate`); the run must then fail.
 
 Prints one JSON line ``{"ok": true, ...}`` from rank 0.
 """
@@ -75,8 +85,9 @@ HF = dict(vocab_size=128, hidden_size=64, intermediate_size=96, num_hidden_layer
           num_key_value_heads=2, head_dim=16, tie_word_embeddings=True)
 
 
-def _model(tp: int):
+def _model(tp: int, pp: int = 1):
     import torch
+    from megatron.core import parallel_state as mpu
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
     from megatron.core.transformer import TransformerConfig
@@ -86,12 +97,28 @@ def _model(tp: int):
                                num_query_groups=HF["num_key_value_heads"], ffn_hidden_size=HF["intermediate_size"],
                                kv_channels=HF["head_dim"], use_cpu_initialization=True, gated_linear_unit=True,
                                add_bias_linear=False, qk_layernorm=True, normalization="RMSNorm",
-                               params_dtype=torch.bfloat16, bf16=True, tensor_model_parallel_size=tp)
+                               params_dtype=torch.bfloat16, bf16=True, tensor_model_parallel_size=tp,
+                               pipeline_model_parallel_size=pp,
+                               pipeline_dtype=torch.bfloat16 if pp > 1 else None)
+    # Bridge reads the tie off the *config* (``_share_embeddings_and_output_weights``),
+    # as Bridge's own GPT provider sets it; without it Bridge would map the last
+    # stage's output layer to ``lm_head.weight``, which a tied HF model does not have.
+    config.share_embeddings_and_output_weights = True
     torch.manual_seed(0)
-    return GPTModel(config=config, transformer_layer_spec=get_gpt_layer_local_spec(qk_layernorm=True,
-                                                                                   normalization="RMSNorm"),
-                    vocab_size=HF["vocab_size"], max_sequence_length=32, share_embeddings_and_output_weights=True,
-                    position_embedding_type="rope")
+    # PP > 1 and tied embeddings: Megatron copies the first stage's embedding into the
+    # last stage's output layer over the embedding group, moving it to CUDA first
+    # (``LanguageModule.setup_embeddings_and_output_layer``). This CPU run keeps it
+    # where it is; the gloo all-reduce itself runs for real.
+    cuda = torch.Tensor.cuda
+    torch.Tensor.cuda = lambda self, *args, **kwargs: self
+    try:
+        return GPTModel(config=config, transformer_layer_spec=get_gpt_layer_local_spec(
+                            qk_layernorm=True, normalization="RMSNorm"),
+                        vocab_size=HF["vocab_size"], max_sequence_length=32,
+                        share_embeddings_and_output_weights=True, position_embedding_type="rope",
+                        pre_process=mpu.is_pipeline_first_stage(), post_process=mpu.is_pipeline_last_stage())
+    finally:
+        torch.Tensor.cuda = cuda
 
 
 class _Range:
@@ -176,7 +203,40 @@ def _delta(name: str, shape, scale: float):
     return scale * torch.randn(tuple(shape), generator=torch.Generator().manual_seed(seed))
 
 
-def _rank_main(rank: int, world: int, tp: int, dp: int, port: int, out_path: str) -> None:
+MUTATIONS = ("", "no-tied", "stage-local-export")
+
+
+def _mutate(boundary) -> None:
+    """``YETO_PP_MUTATE`` breaks one piece of the cross-stage work on purpose, so the
+    checks below can be shown to catch it (S27 G-FL):
+
+    * ``no-tied``: the apply stops writing the tied embedding's second copy, so the
+      last stage keeps a stale output layer (check 6 and 7 must fail);
+    * ``stage-local-export``: the export hands the sink only the names of the tasks
+      this rank owns, i.e. it drops what the PP broadcast delivered (check 1 must
+      fail on every stage that does not own every name).
+    """
+
+    mutation = os.environ.get("YETO_PP_MUTATE", "")
+    if mutation not in MUTATIONS:
+        raise SystemExit(f"YETO_PP_MUTATE must be one of {MUTATIONS}, got {mutation!r}")
+    if mutation == "no-tied":
+        boundary.tied_output_copies = lambda modules, tasks: []
+    elif mutation == "stage-local-export":
+        original = boundary._export_swapped
+
+        def stage_local(bridge, modules, swapped, indices, sink):
+            mine = set()
+            for index in indices:
+                if swapped[index] is not None and swapped[index].param_weight is not None:
+                    mine.update(boundary.task_hf_names(swapped[index]))
+            return original(bridge, modules, swapped, indices,
+                            lambda name, tensor: sink(name, tensor) if name in mine else None)
+
+        boundary._export_swapped = stage_local
+
+
+def _rank_main(rank: int, world: int, tp: int, pp: int, dp: int, port: int, out_path: str) -> None:
     import torch
     import torch.distributed as dist
 
@@ -184,13 +244,15 @@ def _rank_main(rank: int, world: int, tp: int, dp: int, port: int, out_path: str
     dist.init_process_group("gloo", rank=rank, world_size=world)
     from megatron.core import parallel_state as mpu
 
-    mpu.initialize_model_parallel(tensor_model_parallel_size=tp)
-    model = _model(tp)
+    mpu.initialize_model_parallel(tensor_model_parallel_size=tp, pipeline_model_parallel_size=pp)
+    model = _model(tp, pp)
     sys.meta_path.insert(0, _StubFinder())  # after the model: Megatron-Core must not see a TE stand-in
     torch.cuda.current_device = lambda: None  # Bridge's replicated load compares devices with the CUDA one
 
     from yeto.rl import megatron_hf_boundary as boundary
     from yeto.rl import megatron_masters
+
+    _mutate(boundary)
 
     bf16 = [p for p in model.parameters() if p.dtype == torch.bfloat16]
     leaf = _DistributedLeaf(bf16, dp_rank=mpu.get_data_parallel_rank(), dp_size=dp,
@@ -238,10 +300,37 @@ def _rank_main(rank: int, world: int, tp: int, dp: int, port: int, out_path: str
         h1 = export(every)
     bad = sorted(n for n in shapes if not torch.equal(h1[n], target[n]))
     assert not bad, bad
-    masters = megatron_masters.full_masters(optimizer, list(model.parameters()))
-    for param, master in zip(model.parameters(), masters, strict=True):
-        assert torch.equal(param.detach(), master.to(param.dtype)), "model copy differs from its master"
     result["apply_all"] = counts
+
+    # 6. the tied embedding's second copy: the last pipeline stage owns its own
+    # output-layer weight, which no conversion task carries (PP > 1 only). Ground
+    # truth read from the model, not from the production helper, so the mutation
+    # cannot hide the check. Checked before 3, so that a stale copy is named here
+    # rather than by the general master/model comparison.
+    tied = None
+    if getattr(model, "post_process", False) and not getattr(model, "pre_process", False):
+        tied = getattr(getattr(model, "output_layer", None), "weight", None)
+    result["tied_copy"] = tied is not None
+    embed = "model.embed_tokens.weight"
+
+    def shard_of(whole):
+        return whole if tp == 1 else whole.chunk(tp, dim=0)[mpu.get_tensor_model_parallel_rank()]
+
+    def master_by_id():  # collective over each DP group: every rank calls it
+        return {id(param): master for param, master
+                in zip(model.parameters(), megatron_masters.full_masters(
+                    optimizer, list(model.parameters())), strict=True)}
+
+    by_id = master_by_id()
+    if tied is not None:
+        master = by_id[id(tied)]
+        assert torch.equal(master, shard_of(target[embed])), "the tied output layer kept a stale master"
+        assert torch.equal(tied.detach(), master.to(tied.dtype)), "the tied output layer kept a stale copy"
+
+    # 3. every model copy equals its master cast to the model dtype
+    for param in model.parameters():
+        assert torch.equal(param.detach(), by_id[id(param)].to(param.dtype)), \
+            "model copy differs from its master"
 
     # 4. partial apply: q_proj of layer 0 (QKV needs k, v read back) and one replicated norm
     partial = {"model.layers.0.self_attn.q_proj.weight": target["model.layers.0.self_attn.q_proj.weight"] + 1.0,
@@ -262,8 +351,33 @@ def _rank_main(rank: int, world: int, tp: int, dp: int, port: int, out_path: str
     got = export(subset)
     assert set(got) == {"model.layers.1.mlp.gate_proj.weight", "model.layers.1.mlp.up_proj.weight"}, sorted(got)
     assert torch.equal(got["model.layers.1.mlp.up_proj.weight"], h2["model.layers.1.mlp.up_proj.weight"])
+
+    # 7. partial apply of the embedding alone: the tied copy on the last stage follows
+    bump = {embed: target[embed] + 2.0}
+    write, read = index.apply_plan(bump)
+    assert read == [] and len(write) == 1, (write, read)
+    with torch.no_grad():
+        tied_counts = boundary.apply_hf(bridge, modules, optimizer, bump, write, read)
+        h3 = export(every)
+    assert torch.equal(h3[embed], bump[embed]), "the embedding apply did not land"
+    if tied is not None:
+        master = master_by_id()[id(tied)]
+        assert torch.equal(master, shard_of(bump[embed])), "the tied output layer did not follow the embedding"
+        assert torch.equal(tied.detach(), master.to(tied.dtype)), "the tied copy differs from its master"
+    else:
+        master_by_id()
+    result["tied_outputs"] = tied_counts["tied_outputs"]
+    result["pp_rank"] = mpu.get_pipeline_model_parallel_rank()
+    # Rank 0 sits on the first stage, so its own numbers say nothing about the last
+    # stage: the totals below prove the pipeline checks ran somewhere.
+    every_rank = [None] * world
+    dist.all_gather_object(every_rank, result)
     if rank == 0:
         result["ok"] = True
+        result["ranks"] = world
+        result["tied_copies"] = sum(1 for row in every_rank if row["tied_copy"])
+        result["tied_outputs_written"] = sum(int(row["tied_outputs"]) for row in every_rank)
+        result["parameters_written"] = sum(int(row["apply_all"]["parameters_written"]) for row in every_rank)
         Path(out_path).write_text(json.dumps(result, sort_keys=True))
     dist.barrier()
     dist.destroy_process_group()
@@ -274,11 +388,12 @@ def main(argv: list[str]) -> int:
 
     import torch.multiprocessing as mp
 
-    tp, dp, out_path = int(argv[0]), int(argv[1]), argv[2]
+    tp, pp, dp, out_path = int(argv[0]), int(argv[1]), int(argv[2]), argv[3]
+    world = tp * pp * dp
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    mp.spawn(_rank_main, args=(tp * dp, tp, dp, port, out_path), nprocs=tp * dp)
+    mp.spawn(_rank_main, args=(world, tp, pp, dp, port, out_path), nprocs=world)
     print(Path(out_path).read_text())
     return 0
 
