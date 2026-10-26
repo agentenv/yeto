@@ -77,15 +77,12 @@ from yeto.rl.agentic import (
     AgentTask,
     AgentTrajectory,
     HarnessConfigError,
-    Outcome,
-    TokenAlignmentError,
     TokenRecorder,
     TokenSegments,
-    join_turns,
     run_agent_task,
 )
+from yeto.rl.agentic.finish import finish_sample
 from yeto.rl.agentic.loop_local import LoopLocal
-from yeto.rl.agentic.outcome import policy_output_failure
 from yeto.rl.agentic.suspend import SuspendLedger, after_suspension
 from yeto.rl.agentic.types import TokenTurn
 from yeto.rl.engine.sampler_engine import FINISH_LENGTH
@@ -217,23 +214,10 @@ class HarborAgentLoop(AgentLoopBase):
             if tracked:
                 untrack_aborts(recorder, session)
         trajectory = _after_suspension(trajectory, ledger)
-        turns: Sequence[TokenTurn] = ()
-        try:
-            turns = await recorder.close(session)
-        except TokenAlignmentError as exc:
-            if trajectory.outcome is not Outcome.ABORTED:
-                trajectory = _abort(trajectory, f"token_alignment: {exc}")
-        else:
-            trajectory = _policy_output_failure(trajectory, turns)
-
-        segments: TokenSegments | None = None
-        if trajectory.outcome is not Outcome.ABORTED:
-            try:
-                segments = join_turns(turns, max_response_len=self.response_length)
-            except TokenAlignmentError as exc:
-                trajectory = _abort(trajectory, f"token_alignment: {exc}")
-        if segments is not None and len(segments.prompt_ids) > self.prompt_length:
-            trajectory, segments = _abort(trajectory, "prompt_exceeds_prompt_length"), None
+        finished = await finish_sample(trajectory, recorder, session, _gate().metrics,
+                                       max_response_len=self.response_length,
+                                       max_prompt_len=self.prompt_length)
+        trajectory, segments, turns = finished.trajectory, finished.segments, finished.turns
         return self._output(trajectory, segments, turns, steps=weight_steps(recorder, session))
 
     def _output(self, trajectory: AgentTrajectory, segments: TokenSegments | None,
@@ -274,27 +258,12 @@ class HarborAgentLoop(AgentLoopBase):
         return TokenSegments(prompt_ids=(pad,), response_ids=(pad,), response_mask=(0,), response_logprobs=(0.0,))
 
 
-def _policy_output_failure(trajectory: AgentTrajectory, turns: Sequence[TokenTurn]) -> AgentTrajectory:
-    """A malformed model reply that ended the agent is a 0 reward, not ABORTED (N10.9)."""
-    updated = policy_output_failure(trajectory, [t.policy_error for t in turns if t.policy_error])
-    if updated.outcome is not trajectory.outcome:
-        _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
-    return updated
-
-
 def _after_suspension(trajectory: AgentTrajectory, ledger: SuspendLedger) -> AgentTrajectory:
     """Suspension metrics; a time limit after an aborted-and-retried call is ABORTED (S26 E9.5)."""
     updated = after_suspension(trajectory, ledger)
     if updated.outcome is not trajectory.outcome:
         _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
     return updated
-
-
-def _abort(trajectory: AgentTrajectory, reason: str) -> AgentTrajectory:
-    _gate().metrics.reclassify(trajectory.outcome, Outcome.ABORTED)
-    return AgentTrajectory(task=trajectory.task, outcome=Outcome.ABORTED, reward=0.0, reason=reason,
-                           verdict=trajectory.verdict, policy_version=trajectory.policy_version,
-                           extra_metrics=trajectory.extra_metrics)
 
 
 def turn_provenance(turns: Sequence[TokenTurn]) -> Mapping[str, str] | None:

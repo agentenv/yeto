@@ -183,7 +183,13 @@ def group_rows(samples: Sequence[Mapping[str, Any]], *, uid: str, param_versions
         attention = [0] * left + [1] * (len(prompt) + length) + [0] * right
         tensors["prompts"].append([pad] * left + prompt)
         tensors["responses"].append(response + [pad] * right)
-        tensors["response_mask"].append([1] * length + [0] * right)
+        # S28 G-120: a multi-turn (agentic) sample carries its response mask (tool output
+        # and template tokens are 0); a single-turn sample trains every response token
+        mask = sample.get("loss_mask")
+        mask = [1] * length if mask is None else [int(m) for m in mask]
+        if len(mask) != length:
+            raise BufferFeedError(f"{where}: loss_mask has {len(mask)} entries, response_length {length}")
+        tensors["response_mask"].append(mask + [0] * right)
         tensors["input_ids"].append([pad] * left + prompt + response + [pad] * right)
         tensors["attention_mask"].append(attention)
         tensors["position_ids"].append(_position_ids(attention))

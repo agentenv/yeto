@@ -73,7 +73,7 @@ from .sampler_checks import PostLoadChecks
 from .data_split import DataSlot
 from .sampler_engine import Completion, SamplerEngine, SamplingParams
 
-PROMPT_FORMATS = ("text", "chat")
+PROMPT_FORMATS = ("text", "chat", "agentic")
 REWARD_KINDS = ("neutral", "miles")
 
 
@@ -127,7 +127,10 @@ class JsonlPrompts:
     """``prompts(rollout_id)`` over a local JSONL file (module doc)."""
 
     def __init__(self, path: str | Path, *, input_key: str, label_key: str | None, groups_per_round: int,
-                 render: Callable[[Any], str] = str, data_slot: str | None = None) -> None:
+                 render: Callable[[Any], str] = str, data_slot: str | None = None,
+                 task_key: str | None = None) -> None:
+        """``task_key``: the row field holding the agent task mapping (format
+        ``agentic``, S28 G-120); it goes into the item metadata as ``agent_task``."""
         self.path = Path(path)
         rows = list(enumerate(json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
                               if line.strip()))
@@ -146,6 +149,7 @@ class JsonlPrompts:
         self.input_key, self.label_key = input_key, label_key
         self.groups_per_round = int(groups_per_round)
         self.render = render
+        self.task_key = task_key
 
     def cursor(self, rollout_id: int) -> dict[str, int]:
         """The data position after round ``rollout_id`` drew its prompts (the
@@ -160,9 +164,15 @@ class JsonlPrompts:
             row = self.rows[(start + offset) % len(self.rows)]
             if self.input_key not in row:
                 raise SamplerSpecError(f"{self.path} row {index} has no {self.input_key!r}")
+            metadata: dict[str, Any] = {"row": index}
+            if self.task_key is not None:
+                task = row.get(self.task_key)
+                if not isinstance(task, Mapping):
+                    raise SamplerSpecError(f"{self.path} row {index}: {self.task_key!r} is not an agent task mapping")
+                metadata["agent_task"] = dict(task)
             items.append(PromptItem(prompt_id=f"row{index}", prompt=self.render(row[self.input_key]),
                                     label=row.get(self.label_key) if self.label_key else None,
-                                    metadata={"row": index}))
+                                    metadata=metadata))
         return items
 
 
@@ -216,10 +226,13 @@ def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
                                  label_key=prompts.get("label_key"),
                                  groups_per_round=int(_require(prompts, "groups_per_round", "prompts")),
                                  render=render, key=island_hmac_key_from_env(), environ=environ)
+    if (fmt == "agentic") != bool(spec.get("agentic")):
+        raise SamplerSpecError("prompts.format agentic and the spec's agentic section go together")
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
                         groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
-                        data_slot=prompts.get("data_slot"))
+                        data_slot=prompts.get("data_slot"),
+                        task_key=str(prompts.get("task_key", "metadata")) if fmt == "agentic" else None)
 
 
 # ------------------------------------------------------------------- reward
@@ -243,6 +256,8 @@ def miles_reward(score: Callable[..., Any]) -> Reward:
 
 
 def build_reward(spec: Mapping[str, Any]) -> Reward:
+    if spec.get("agentic") and not spec.get("reward"):  # S28 G-120: the Harbor verifier scores
+        return lambda item, completion: 0.0
     kind = str(spec.get("reward_kind", "neutral"))
     if kind not in REWARD_KINDS:
         raise SamplerSpecError(f"reward_kind {kind!r} is not one of {REWARD_KINDS}")
@@ -412,11 +427,16 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
     telemetry = resource_sampler(emit)
     watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
     try:
+        make_round = None
+        if spec.get("agentic"):  # S28 G-120: Harbor trials through the records proxy
+            from .agentic_round import round_factory  # noqa: PLC0415
+
+            make_round = round_factory(spec, engine, env)
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
                                       should_stop=lambda: reclaimed() or (stop is not None and stop()),
                                       reclaimed=reclaimed, incarnation=incarnation, resume=resume,
-                                      data_cursor=getattr(prompts, "cursor", None))
+                                      data_cursor=getattr(prompts, "cursor", None), make_round=make_round)
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
@@ -440,6 +460,12 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         raise
     finally:
         watcher.stop()
+        closer = getattr(getattr(island, "round", None), "close", None)
+        if callable(closer):  # S28 G-120: an agentic round deletes its boat sandboxes
+            try:
+                closer()
+            except Exception as error:  # noqa: BLE001 - the island's own error is the one to report
+                emit("rl_agentic_close", error=f"{type(error).__name__}: {error}")
         close = getattr(prompts, "close", None)
         if callable(close):  # S27 P4: the rows this sampler holds go back to the dispenser
             try:
