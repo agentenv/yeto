@@ -419,3 +419,30 @@ def test_the_island_writes_a_positive_total_training_steps(tmp_path):
     assert key not in _plan(tmp_path)["asserted_keys"]
     # the separate-mode island writes it too
     assert _value(_plan(tmp_path, buffer_role=False)["overrides"], key) == "3"
+
+
+def test_a_buffer_trainer_asks_for_the_naive_weight_transport(tmp_path):
+    """S27 G-FN (B14): a buffer trainer starts no rollouter and no checkpoint engine, so
+    it asks for the always-present 'naive' transport. Every trainer worker validates the
+    configured backend while it builds its model, and the fully_async yaml defaults it to
+    nccl, so leaving the key alone is not enough: runs fn-7 and fn-8 on npu1 died in
+    every worker with 'Checkpoint engine nccl not registered, registered backends:
+    [naive]'. An island that does have a rollouter still asks for nccl."""
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.adapters.verl.fully_async_round import fully_async_run_overrides
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+
+    key = "actor_rollout_ref.rollout.checkpoint_engine.backend"
+    _entry, args = _args(tmp_path, buffer_role=True)
+    base = _plan(tmp_path)["overrides"]
+    spec = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=4),
+                         correction=CorrectionSpec(method="tis", lower=0.0, upper=2.0)).to_dict()
+
+    buffer, _ = island_entry.fully_async_plan(4, base, spec, args, "none", pools=None, trainer_cards=8)
+    assert _value(buffer, key) == "naive"
+    # the rollouter island (no trainer_cards) keeps it
+    rollouter, _ = island_entry.fully_async_plan(4, base, spec, args, "none", pools=None, trainer_cards=None)
+    assert _value(rollouter, key) == "nccl"
+    # the engine-neutral default is unchanged
+    assert key + "=nccl" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2)
+    assert key + "=naive" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2, rollouter=False)

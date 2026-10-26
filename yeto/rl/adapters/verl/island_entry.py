@@ -1031,7 +1031,8 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
                                                    getattr(args, "actor_num_gpus_per_node", None))
         except VerlTranslationError as exc:
             raise SystemExit(str(exc)) from exc
-        sizes = {"trainer_gpus": per_node, "trainer_nodes": nodes}
+        # S27 G-FN: no rollouter on this role, so no weight-transport backend either
+        sizes = {"trainer_gpus": per_node, "trainer_nodes": nodes, "rollouter": False}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds, **sizes)
     out = apply_to_overrides(out, correction_mapping(spec))
