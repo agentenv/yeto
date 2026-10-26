@@ -1828,6 +1828,34 @@ def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:
     return tuple(gpus)
 
 
+TRAINER_ACTOR_INIT_SUFFIX = "TrainRayActor.__init__"
+
+
+def trainer_actor_import_done_unix(list_tasks: Callable[..., Any] | None = None) -> float | None:
+    """When the last trainer actor finished its creation task (Unix seconds).
+
+    Ray runs the actor class import and ``__init__`` in the actor creation
+    task; Miles' trainer ``__init__`` is light (the model is built in
+    ``init``), so its end is the import end.  Read from the Ray state API
+    (dashboard on, see the island run script); ``None`` when Ray has no such
+    record.  Unverified on GPU (L2.6 checks it).
+    """
+
+    try:
+        if list_tasks is None:
+            from ray.util.state import list_tasks
+        tasks = list_tasks(filters=[("type", "=", "ACTOR_CREATION_TASK")], detail=True,
+                           limit=10000, raise_on_missing_output=False)
+    except Exception:  # noqa: BLE001 - a missing record is reported as a missing phase
+        return None
+    ends = [
+        getattr(task, "end_time_ms", None) for task in tasks
+        if str(getattr(task, "name", "")).endswith(TRAINER_ACTOR_INIT_SUFFIX)
+    ]
+    ends = [end for end in ends if end]
+    return max(ends) / 1000.0 if ends else None
+
+
 def run_ports_island(
     miles_args: Any,
     launch: Any,
@@ -1884,6 +1912,13 @@ def run_ports_island(
         heartbeat_interval_s=getattr(miles_args, "yeto_rl_heartbeat_interval_s", None),
         resource_interval_s=getattr(miles_args, "yeto_rl_resource_sample_interval_s", None),
     ).__enter__()  # stopped before driver.run() and in the finally below
+    from yeto.rl.engine.start_phases import StartPhases
+
+    # rl-trainer-cold-start-cost L0: submitted / container_ready / setup_done /
+    # ray_ready come from the launcher env and the setup shell's mark files.
+    start_phases = StartPhases(
+        lambda event, **fields: append_tape_event(miles_args, {"event": event, **fields}))
+    start_phases.replay()
     connect_island_ray(miles_args=miles_args)
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
@@ -1926,6 +1961,13 @@ def run_ports_island(
         startup.step("engine_ready")
         actor, critic = await create_training_models(miles_args, executor)
         startup.step("weights_loaded")
+        imported = trainer_actor_import_done_unix()
+        if imported is None:
+            start_phases.missing("actor_import_done", "Ray state API has no trainer actor creation time")
+        else:
+            start_phases.mark("actor_import_done", imported)
+        start_phases.mark("actor_init_done")
+        start_phases.forward_setup_events()  # e.g. a late model_prefetch_failed
         # rl-algo-critic-family 3.1: Miles creates a critic iff use_critic
         # (estimator ppo); it must agree with the AlgorithmSpec.
         if (critic is not None) != bool(algorithm.execution.needs_critic):
@@ -1998,6 +2040,7 @@ def run_ports_island(
             miles_args, "yeto_rl_resource_sample_interval_s", None)
         eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
         driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+        driver.start_phases = start_phases  # L0: first_step_done
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 
