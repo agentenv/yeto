@@ -405,3 +405,17 @@ def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path
                                       "hybrid_override_pattern": "MEMEM*EMEMEM", declared: 1})
         assert mtp["shape"]["close_mtp_pattern"] is False
         assert not [o for o in mtp["overrides"] if "mtp_hybrid_override_pattern" in o]
+
+
+def test_the_island_writes_a_positive_total_training_steps(tmp_path):
+    """S27 G-FN (B13): the Megatron engine builds Megatron's LR scheduler inside
+    init_model, where Megatron asserts lr_decay_steps > 0; verl derives that from
+    optim.total_training_steps, default -1, and fills it in only after the workers
+    exist. The FSDP2 engine builds no such scheduler, so only a Megatron island trips
+    it (run fn-6 died there in every worker). The island writes the count up front."""
+    key = "actor_rollout_ref.actor.optim.total_training_steps"
+    assert _value(_plan(tmp_path)["overrides"], key) == "3"  # --global-rounds 3 in _args
+    # not asserted: a trainer that recomputes it later must be allowed to win
+    assert key not in _plan(tmp_path)["asserted_keys"]
+    # the separate-mode island writes it too
+    assert _value(_plan(tmp_path, buffer_role=False)["overrides"], key) == "3"

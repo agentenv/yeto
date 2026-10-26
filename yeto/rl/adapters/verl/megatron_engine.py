@@ -339,6 +339,19 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     ]
     if shape.close_mtp_pattern:  # S27 G-FN: MTP_OFF_PATTERN
         out.append(f"{tcfg}.mtp_hybrid_override_pattern={MTP_OFF_PATTERN}")
+    actor = "actor_rollout_ref.actor"
+    # S27 G-FN (B13): the Megatron engine builds its LR scheduler inside init_model,
+    # and Megatron asserts lr_decay_steps > 0 there. verl derives that from
+    # optim.total_training_steps, whose default is -1, and both the synchronous and the
+    # fully_async trainer only fill it in AFTER the workers exist
+    # (ray_trainer.py:447, fully_async_trainer.set_total_train_steps). The FSDP2 engine
+    # does not build that scheduler, so only a Megatron island trips it; run fn-6 on
+    # npu1 died there in every worker. The island knows the count up front, so it writes
+    # it: one yeto round is one parameter version. A trainer that recomputes it later
+    # still wins, which is why this is not an asserted key. The LR itself is constant
+    # (--rl-lr-schedule constant, lr_decay_style=constant), so the value only has to be
+    # positive for the scheduler to build.
+    out.append(f"{actor}.optim.total_training_steps={max(1, int(cfg.total_rounds))}")
     # S27 G-FL: verl's DDP config leaves check_for_nan_in_grad at Megatron's False, and
     # with it off a NaN gradient is scaled into every parameter instead of raising
     # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.
@@ -347,7 +360,6 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     # S27 G-FN: the optimizer-state memory keys, under the actor's optimizer config
     # ("optim.x" becomes actor_rollout_ref.actor.optim.x; a "++" prefix
     # stays in front of the whole key, as Hydra wants it)
-    actor = "actor_rollout_ref.actor"
     for key, value in optimizer_memory_overrides(float(shape.optimizer_offload_fraction)).items():
         path = key.removeprefix("++")
         out.append(f"{'++' if path != key else ''}{actor}.{path}={value}")
