@@ -101,7 +101,10 @@ SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 # "init_model" waits one step longer: the start of the verl call that builds the model
 # (:data:`VERL_MODEL_WORKERS`), so the plugins' imports and Megatron's own device
 # initialisation happen inside the same Ray task rather than in the actor's
-# constructor. S28 G-PIN measured that a single plugin import in the constructor is
+# constructor. "after_init_model" installs when that call returns, that is, after
+# Megatron has built the model and initialised the device. It patches functions, so a
+# patch installed afterwards still reaches the next forward and backward; a patch that
+# had to change how a module was constructed does not. S28 G-PIN measured that a single plugin import in the constructor is
 # enough to make Megatron's first LazySetDevice fail with 507033, with the plugins'
 # own set_device call bypassed and the prewarm off, so where the import happens is
 # the next thing to vary.
@@ -478,7 +481,7 @@ def install_when_rank_known(root: str, *, log=None) -> str:
     return "deferred"
 
 
-def _install_at_model_build(root: str, say) -> str:
+def _install_at_model_build(root: str, say, *, after: bool = False) -> str:
     """Wrap every verl worker method that builds the model, and install there.
 
     Returns ``"deferred"`` when at least one seam of :data:`VERL_MODEL_WORKERS` was
@@ -498,10 +501,14 @@ def _install_at_model_build(root: str, say) -> str:
             wrapped.append(f"{class_name}.{method_name}")
             continue
 
-        def make(original=original):
+        def make(original=original, after=after):
             def method(self, *args, **kwargs):
+                if not after:
+                    _install_once(root)
+                    return original(self, *args, **kwargs)
+                result = original(self, *args, **kwargs)
                 _install_once(root)
-                return original(self, *args, **kwargs)
+                return result
             functools.update_wrapper(method, original)
             method._yeto_ascend_stack = root
             return method
@@ -528,7 +535,9 @@ def setup_worker() -> None:
     root = os.environ.get(ENV, "")
     if not root:
         return
-    if os.environ.get(INSTALL_AT_ENV, "worker_init").strip() == "init_model":
-        _install_at_model_build(root, lambda line: print(line, flush=True))
+    when = os.environ.get(INSTALL_AT_ENV, "worker_init").strip()
+    if when in ("init_model", "after_init_model"):
+        _install_at_model_build(root, lambda line: print(line, flush=True),
+                                after=when == "after_init_model")
         return
     install_when_rank_known(root)

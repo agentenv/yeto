@@ -535,3 +535,28 @@ def test_the_default_is_still_the_worker_constructor(tmp_path, monkeypatch, arma
     stack.setup_worker()
     armable(local_rank="2")
     assert bound.read_text() == "2"
+
+
+def test_after_init_model_installs_once_the_model_exists(tmp_path, monkeypatch, model_building_worker):
+    """The third position: the import happens after the model build returns, which is
+    what distinguishes it from init_model (S28 G-PIN)."""
+    order: list[str] = []
+    (tmp_path / "ordering.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(tmp_path / 'import_marker')!r}).write_text('imported')\n")
+    monkeypatch.setattr(stack, "PLUGINS", ("ordering.py",))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "after_init_model")
+    monkeypatch.setenv(stack.RANK_ENV, "1")
+
+    marker = tmp_path / "import_marker"
+
+    class Watching(model_building_worker):
+        def init_model(self):
+            order.append("model built before import" if not marker.exists() else "imported first")
+
+    monkeypatch.setattr(model_building_worker, "init_model", Watching.init_model)
+    stack.setup_worker()
+    model_building_worker().init_model()
+    assert order == ["model built before import"]
+    assert marker.exists(), "the plugins were never imported"
