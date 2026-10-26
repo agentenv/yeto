@@ -386,7 +386,7 @@ def execution_profile_for(spec: Any, limit: int, *, groups_per_round: int, sampl
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.policy_age import BOUNDED_STALENESS_CONTRACT
 
-    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg"}[sync]
+    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg", "pool": "strict-avg"}[sync]
     return ExecutionProfile(
         name="verl-fully-async", execution_mode=FULLY_ASYNC_MODE, outer_protocol=protocol,
         algorithm_contract=BOUNDED_STALENESS_CONTRACT, max_policy_age=limit,
