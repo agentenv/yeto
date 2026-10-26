@@ -39,6 +39,12 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_GROUP_DROPPED,
+    GATE_DROPPED_LENGTHS,
+    GATE_UNKNOWN_VERSION_DROPPED,
+    TRUNCATED_BY_TURN,
+)
 from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.version_segments import (
     ProvenanceError,
@@ -48,6 +54,7 @@ from yeto.rl.engine.version_segments import (
 )
 
 CARRY_STATS_ATTR = "_yeto_carry_over_stats"
+DROPPED_LENGTHS = "dropped_lengths"
 CARRY_FIELDS = (
     "carried_in_groups",
     "carried_in_trajectories",
@@ -129,12 +136,17 @@ def _trajectories(group: Sequence[Any]) -> int:
     return sum(1 for s in _flat(group) if int(getattr(s, "response_length", 0) or 0) > 0)
 
 
-def _stats_for(args: Any, current_version: int) -> dict[str, int]:
+def _stats_for(args: Any, current_version: int) -> dict[str, Any]:
     stats = getattr(args, CARRY_STATS_ATTR, None)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
-        stats = {"version": current_version, **{k: 0 for k in CARRY_FIELDS}}
+        stats = {"version": current_version, **{k: 0 for k in CARRY_FIELDS},
+                 DROPPED_LENGTHS: {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []}}
         setattr(args, CARRY_STATS_ATTR, stats)
     return stats
+
+
+def _trajectory_lengths(group: Sequence[Any]) -> list[int]:
+    return [n for n in (int(getattr(s, "response_length", 0) or 0) for s in _flat(group)) if n]
 
 
 def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
@@ -150,8 +162,10 @@ def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
         known, unknown = group_versions(group)
         if unknown:
             stats["unknown_version_discarded_groups"] += 1
+            stats[DROPPED_LENGTHS][GATE_UNKNOWN_VERSION_DROPPED] += _trajectory_lengths(group)
             continue
         if known and current_version - min(known) > limit:
+            stats[DROPPED_LENGTHS][GATE_GROUP_DROPPED] += _trajectory_lengths(group)
             stats["over_age_discarded_groups"] += 1
             stats["over_age_discarded_trajectories"] += _trajectories(group)
             stats["over_age_discarded_tokens"] += _response_tokens(group)
@@ -167,14 +181,30 @@ def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
     return selected
 
 
-def take_carry_stats(args: Any, current_version: int | None) -> dict[str, int]:
-    """This round's carry-over counts (zeros when nothing was buffered); consumed."""
+def take_carry_round(args: Any, current_version: int | None
+                     ) -> tuple[dict[str, int], dict[str, list[int]]]:
+    """This round's carry-over counts and the response lengths of the
+    trajectories discarded per ``offpolicy_gate`` reason; consumed."""
     stats = getattr(args, CARRY_STATS_ATTR, None)
     if hasattr(args, CARRY_STATS_ATTR):
         setattr(args, CARRY_STATS_ATTR, None)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
-        return {k: 0 for k in CARRY_FIELDS}
-    return {k: int(stats[k]) for k in CARRY_FIELDS}
+        return ({k: 0 for k in CARRY_FIELDS},
+                {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []})
+    lengths = stats.get(DROPPED_LENGTHS) or {}
+    return ({k: int(stats[k]) for k in CARRY_FIELDS},
+            {reason: list(lengths.get(reason, ()))
+             for reason in (GATE_GROUP_DROPPED, GATE_UNKNOWN_VERSION_DROPPED)})
+
+
+def take_carry_stats(args: Any, current_version: int | None) -> dict[str, Any]:
+    """This round's carry-over counts (zeros when nothing was buffered); consumed.
+
+    Also carries the dropped response lengths under :data:`GATE_DROPPED_LENGTHS`
+    (rl-offpolicy-correction-passthrough D6); the driver turns them into
+    ``offpolicy_gate`` and removes the key from ``rl_rollout_carry_over``."""
+    counts, lengths = take_carry_round(args, current_version)
+    return {**counts, GATE_DROPPED_LENGTHS: lengths}
 
 
 def group_versions_record(group: Sequence[Any]) -> dict[str, Any]:
@@ -293,6 +323,7 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
     unknown_tokens = 0
     near_zero = 0
     near_zero_examples: list[dict[str, Any]] = []
+    by_turn: dict[int, list[int]] = {}  # turn index -> [truncated, cross-version tokens]
 
     def fail(why: str) -> None:
         nonlocal failed
@@ -325,11 +356,16 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
                                          tuple(min(float(p), 0.0) for p in generated))
             corrections.append(cross_version_is(provenance, current, current_version,
                                                 clip_low=clip_low, clip_high=clip_high))
+            turns = turn_indices(sample, len(versions))
             for i, (v, g, c) in enumerate(zip(provenance.versions, provenance.logprobs, current, strict=True)):
                 if v == current_version:
                     continue
                 r = math.exp(float(c) - g)
                 ratios.append(r)
+                if turns[i] is not None:
+                    counts = by_turn.setdefault(turns[i], [0, 0])
+                    counts[0] += not clip_low <= r <= clip_high
+                    counts[1] += 1
                 if r < NEAR_ZERO_RATIO:  # 5.5 follow-up: where do zero ratios come from
                     near_zero += 1
                     if len(near_zero_examples) < NEAR_ZERO_EXAMPLES:
@@ -342,6 +378,8 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
     if unknown_tokens:
         extra["cross_version_unknown_version_tokens"] = unknown_tokens
+    if by_turn:  # rl-offpolicy-correction D6 (absent when none: old key set kept)
+        extra[TRUNCATED_BY_TURN] = {turn: tuple(c) for turn, c in sorted(by_turn.items())}
     if near_zero:  # absent when none (old key set kept)
         extra["cross_version_ratio_near_zero"] = near_zero
         extra["cross_version_ratio_near_zero_examples"] = near_zero_examples
@@ -353,6 +391,22 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         "cross_version_unscored_samples": failed,
         **ratio_quantiles(ratios),
     }
+
+
+def turn_indices(sample: Any, n: int) -> list[int | None]:
+    """Per response token: its model turn (0, 1, ...; runs of ``loss_mask`` 1),
+    None for a token outside the loss (tool output). No mask: one turn."""
+    mask = list(getattr(sample, "loss_mask", None) or ())
+    if len(mask) != n:
+        return [0] * n
+    out: list[int | None] = []
+    turn, inside = -1, False
+    for m in mask:
+        if m and not inside:
+            turn += 1
+        inside = bool(m)
+        out.append(turn if inside else None)
+    return out
 
 
 NEAR_ZERO_RATIO = 1e-6

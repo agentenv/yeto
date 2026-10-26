@@ -596,6 +596,18 @@ def reject_fault_tolerance_flags(tokens: Sequence[str]) -> None:
             )
 
 
+def _refuse_decoupled_ppo_breakers(tokens: Sequence[str]) -> None:
+    """rl-offpolicy-correction-passthrough D2: flags that remove pi_prox or mask
+    tokens by version are refused, with the flag named."""
+    from .offpolicy_correction import refuse_forbidden_argv
+    from yeto.rl.engine.offpolicy_correction import CorrectionConfigError
+
+    try:
+        refuse_forbidden_argv(tokens)
+    except CorrectionConfigError as exc:
+        raise MilesConfigError(str(exc)) from exc
+
+
 def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None = None):
     """Refuse FT/adapter-owned flags; absorb mapped algorithm flags.
 
@@ -606,6 +618,7 @@ def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None 
     """
 
     reject_fault_tolerance_flags(extra_argv)
+    _refuse_decoupled_ppo_breakers(extra_argv)
     mapped = mapped_flags()
     unmapped_objective = objective_flags() - mapped
     for flag in _flags(extra_argv):
@@ -1085,6 +1098,7 @@ def translate_run_config(
                 values.extend((flag, engine))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
+    _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
     # (also re-checked on the parsed namespace by validate_parsed_args).
     check_session_server_partial_rollout(agent.use_session_server, "--partial-rollout" in values)

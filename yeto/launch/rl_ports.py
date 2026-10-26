@@ -115,6 +115,23 @@ def _prepare_ports_algorithm(args) -> None:
     _check_critic_warmup_options(args, spec)
     args.rl_algorithm_spec_json = spec.canonical_json()
     args.rl_expected_algorithm_sha256 = spec.sha256()
+    args._offpolicy_correction_manifest = _offpolicy_correction_manifest(args, spec)
+
+
+def _offpolicy_correction_manifest(args, spec) -> dict:
+    """rl-offpolicy-correction-passthrough D8/L6.5: every island's correction
+    record. A warning (unmappable field, island difference) refuses the launch
+    (phase 2, L6b.2)."""
+
+    from ..rl.engine.offpolicy_correction import (refuse_correction_warnings,
+                                                  run_correction_manifest)
+    from .topology import rl_island_args
+
+    backends = {str(m): getattr(rl_island_args(args, m), "rl_backend", None) or "miles"
+                for m in range(rl_island_count(args))}
+    section = run_correction_manifest(spec, backends)
+    refuse_correction_warnings(section["warnings"])
+    return section
 
 
 def _check_critic_warmup_options(args, spec) -> None:

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import config as vconf
 from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
@@ -287,13 +288,16 @@ def main(argv=None) -> int:
     algo = algorithm_options(spec_dict)
     chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
     max_prompt = 512
+    limit = int(args.rl_max_policy_age or 0)
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
         lora_rank=args.lora_r, lora_alpha=args.lora_r, lr=args.inner_lr,
         groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
         max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
         total_rounds=args.global_rounds, correction=algo["correction"],
-        tis_lower=algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
+        # limit > 0: the correction is mapped by offpolicy_correction in
+        # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
+        tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
         gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
@@ -310,10 +314,10 @@ def main(argv=None) -> int:
         sync = "strict"
     if sync != "none" and not args.syncer:
         raise SystemExit("--syncer is required unless --rl-single-island-no-sync")
-    limit = int(args.rl_max_policy_age or 0)
     asserted_keys = vconf.ASSERTED_KEYS
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
+        append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
     env_exit = os.environ.get("YETO_VERL_TEST_EXIT_AFTER", "")  # TEST ONLY "ISLAND:VERSION[,...]"
@@ -369,12 +373,18 @@ def main(argv=None) -> int:
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
     """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
-    and a TIS correction) so a wrong spec fails before verl starts."""
+    and a TIS correction) so a wrong spec fails before verl starts.
+
+    The ``algorithm.rollout_correction`` overrides come from the correction
+    mapping (rl-offpolicy-correction-passthrough D2/D3): decoupled PPO with
+    ``bypass_mode=False`` written over the fully_async yaml default; a
+    forbidden setting is refused here."""
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
     from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, execution_profile_for,
                                     fully_async_run_overrides)
+    from .offpolicy_correction import apply_to_overrides, correction_mapping
     from .policy_age import SUPPORT
 
     SUPPORT.check(limit)
@@ -384,6 +394,7 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     check_algorithm_contract(profile, spec)
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds)
+    out = apply_to_overrides(out, correction_mapping(spec))
     from yeto.hw.catalog import device_family
 
     if device_family() == "ascend":
@@ -392,6 +403,32 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
         # (S20 ModelArts 2x910B4, runBA_try2_gpures).
         out = [o for o in out if not o.startswith("trainer.device=")] + ["trainer.device=npu"]
     return out, tuple(vconf.ASSERTED_KEYS) + FULLY_ASYNC_ASSERTED_KEYS
+
+
+def append_correction_record(args, spec_dict: dict | None) -> None:
+    """rl-offpolicy-correction-passthrough D8 (as Miles' island entry): the island
+    tape records the full correction group, the verl values and ``prox_anchor``.
+    A field verl cannot map refuses the start (phase 2, L6b.2), after the record
+    and its ``correction_config_warning`` events are on the tape."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.events import append_tape_event
+    from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
+                                                     refuse_correction_warnings)
+
+    from .offpolicy_correction import BACKEND, correction_mapping
+
+    spec = AlgorithmSpec.from_dict(spec_dict) if spec_dict else AlgorithmSpec()
+    if spec.correction.is_default():
+        return  # default tapes unchanged
+    mapping = correction_mapping(spec)
+    tape = SimpleNamespace(yeto_rl_event_tape=args.event_tape,
+                           yeto_rl_learner_id=args.learner_id)
+    append_tape_event(tape, {"event": CORRECTION_RECORD_EVENT,
+                             **correction_record(spec.correction, mapping, backend=BACKEND)})
+    warnings = [warning.event() for warning in mapping.warnings]
+    for warning in warnings:
+        append_tape_event(tape, warning)
+    refuse_correction_warnings(warnings)
 
 
 def _override_value(overrides, key):
