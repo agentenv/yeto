@@ -98,6 +98,10 @@ def add_arguments(group) -> None:
         "--rl-checkpoint-store: modal-volume:// on Modal islands, s3:// or oss:// on sky "
         "islands (not Verda)")
     group.add_argument(
+        "--rl-ssh-trainer-workdir", default=None, metavar="PATH",
+        help="with an ssh: trainer island: the yeto checkout on the inventory's trainer nodes "
+        "(inside the container on runtime: docker nodes); the island's run script runs there")
+    group.add_argument(
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
         "the island events on the head (default 5)")
@@ -234,6 +238,15 @@ def _check_trainer_island(args) -> None:
     if not 0 <= m < len(specs):
         raise SystemExit(f"--rl-trainer-island {m}: --gpu has {len(specs)} island(s)")
     cloud = specs[m].cloud
+    if cloud == "ssh":
+        from .ssh_trainer_island import SshIslandError, inventory_trainer_nodes
+
+        try:
+            inventory_trainer_nodes(args, specs[m])
+        except SshIslandError as error:
+            raise SystemExit(f"--rl-trainer-island {m}: {error}") from None
+        if not getattr(args, "rl_ssh_trainer_workdir", None):
+            raise SystemExit(f"--rl-trainer-island {m} is an ssh: island: it needs --rl-ssh-trainer-workdir")
     if cloud == "verda":
         raise SystemExit(f"--rl-trainer-island {m} is a Verda island; the scheduler launches "
                          "a cluster per trainer start, which the Verda launch path does not do")

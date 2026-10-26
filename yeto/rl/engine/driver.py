@@ -1741,6 +1741,9 @@ class IslandDriver:
             if landed != cut_cursor:
                 raise DriverError(f"restart at rollout {start_rollout_id}: data source seek "
                                   f"to the cut's cursor {cut_cursor} landed on {landed}")
+            confirm = getattr(getattr(self, "trainer", None), "confirm_resumed_data_cursor", None)
+            if callable(confirm):  # S25 N7.6: the landed cursor vs the cut's resume manifest
+                confirm(landed)
             self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source="round_cut",
                       data_cursor=dict(landed))
             return

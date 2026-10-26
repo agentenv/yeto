@@ -104,6 +104,11 @@ def make_miles_island_task(
         f" --model {shlex.quote(args.model)}"
         f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
         + (
+            f" --rl-transformer-impl {args.rl_transformer_impl}"
+            if getattr(args, "rl_transformer_impl", "transformer_engine") != "transformer_engine"
+            else ""
+        )
+        + (
             f" --rl-training-attention-backend {args.rl_training_attention_backend}"
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
@@ -150,6 +155,8 @@ def make_miles_island_task(
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
         + (f" --rl-max-tokens-per-gpu {int(args.rl_max_tokens_per_gpu)}"
            if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
+        + (f" --rl-optimizer-offload-fraction {float(args.rl_optimizer_offload_fraction)!r}"
+           if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
         " --miles-root ~/miles"

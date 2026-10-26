@@ -327,6 +327,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "model_recipe.training_attention_backend": _ok,
     "model_recipe.gdn.gated_delta_net": _ok,
     "model_recipe.gdn.qkv_format": _ok,
+    "model_recipe.transformer_impl": _ok,
     **{f"geometry.{name}": _ok for name in _GEOMETRY_FIELDS},
     **{
         f"geometry.moe.{name}": _ok
@@ -470,6 +471,7 @@ LEAF_POLICY: dict[str, _Check] = {
     # translated below (Megatron full recompute / Miles dynamic batching)
     "train_memory.activation_recompute": _ok,
     "train_memory.max_tokens_per_gpu": _ok,
+    "train_memory.optimizer_offload_fraction": _ok,
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
 }
@@ -714,6 +716,7 @@ def translate_run_config(
     extra_argv: Sequence[str] = (),
     tito_parser_resolver: Callable[[str], tuple[str | None, str | None]] | None = None,
     max_policy_age: int = 0,
+    full_parameter_sync: bool = True,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
 
@@ -723,7 +726,11 @@ def translate_run_config(
     partial rollout (carry-over at the cut-off); a partitioned island overlaps
     rollout with training through Miles' fully_async (P0-S), so the
     all-samples metadata hook and the carry-over buffer filter are not set:
-    the trained-groups hook reports the round instead."""
+    the trained-groups hook reports the round instead.
+
+    ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
+    ports full-parameter sync, which needs whole FP32 masters; False for a
+    no-sync trainer island (``_full_parameter_optimizer_attrs``)."""
 
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
@@ -771,8 +778,14 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from yeto.rl.engine.run_config import RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT
+    from yeto.rl.engine.run_config import (
+        RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_GLM5_NEXT,
+        RECIPE_QWEN3_5,
+        RECIPE_QWEN3_8_NEXT,
+    )
     from .lr_schedule import lr_schedule_argv
+    from .models import glm5_next
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
 
     geometry = config.geometry
@@ -805,6 +818,9 @@ def translate_run_config(
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
+    elif request.trainer_only:
+        # Samples come from the store: Miles starts no engine and syncs no weights.
+        placement_values = ["--debug-train-only"]
     else:
         placement_values = ["--rollout-num-gpus", str(request.rollout_gpus)]
         if trainable.parameter_mode == "lora":
@@ -840,6 +856,8 @@ def translate_run_config(
             "--hidden-dropout",
             "0.0",
         ]
+    elif recipe.name == RECIPE_GLM5_NEXT:
+        model_name = glm5_next.MODEL_NAME  # the model flags replace the geometry below
     elif recipe.name == RECIPE_DEEPSEEK_V4_FLASH:
         model_name = deepseek_v4.MODEL_NAME
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
@@ -1130,6 +1148,10 @@ def translate_run_config(
         for flag in ("--sglang-tp-size", "--sglang-ep-size"):
             if flag not in values:
                 values.extend((flag, engine))
+    if recipe.name == RECIPE_GLM5_NEXT:
+        # the plugin spec replaces the Bridge-geometry model flags
+        values = glm5_next.apply_recipe(values, glm5_next.model_argv(
+            num_layers=geometry.num_layers, transformer_impl=recipe.transformer_impl))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
@@ -1144,7 +1166,8 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
-            **_full_parameter_optimizer_attrs(trainable),
+            **_full_parameter_optimizer_attrs(trainable, config.train_memory,
+                                              full_parameter_sync=full_parameter_sync),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
             **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
                if getattr(config.algorithm, "critic", None) is not None
@@ -1164,9 +1187,18 @@ RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
 SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 
 
+# Megatron's --optimizer-cpu-offload runs a HybridDeviceOptimizer under the
+# distributed optimizer and requires the precision-aware optimizer path (its
+# validate_args asserts it); the FP32 masters and moments stay FP32 (Megatron's
+# default dtypes), which the cut's name-keyed optimizer export carries.
+OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
+                          "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+
+
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
-    """Megatron full uniform recompute (one layer per chunk) and Miles dynamic
-    batching; the same values the validated Flash-Next recipe uses."""
+    """Megatron full uniform recompute (one layer per chunk), Miles dynamic
+    batching (the same values the validated Flash-Next recipe uses) and the
+    optimizer host offload."""
 
     values: list[str] = []
     if memory.activation_recompute:
@@ -1175,6 +1207,9 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
     if memory.max_tokens_per_gpu is not None:
         values.extend(("--use-dynamic-batch-size",
                        "--max-tokens-per-gpu", str(memory.max_tokens_per_gpu)))
+    fraction = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0)
+    if fraction > 0:
+        values.extend((*OPTIMIZER_OFFLOAD_ARGV, "--optimizer-offload-fraction", repr(fraction)))
     return tuple(values)
 
 
@@ -1192,21 +1227,29 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
-def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:
-    """Keep every FP32 master whole in full-parameter mode.
+def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool) -> dict[str, Any]:
+    """Keep every FP32 master whole when the full-parameter sync reads them.
 
-    Miles' ``set_default_megatron_args`` turns the distributed optimizer on for
-    Adam regardless of argv, so ``--no-use-distributed-optimizer`` would be
-    overwritten. Under the distributed optimizer each ``param.main_param`` is a
-    flat slice of the owned range even at DP=1, and the full-parameter shard
-    manifest (Miles ``full_parameter_state._master_parameter``) refuses it as
-    an incomplete master. The attribute is applied in ``preprocess_args``,
-    after Miles' defaults and before Megatron's ``validate_args``. Full mode is
-    DP=1 only (``resolve_rl_run_config``), so no master is DP-sharded either way.
+    The ports full-parameter sync (presets ``full-parameter`` /
+    ``sao-streaming-full``) builds its shard manifest from whole masters (Miles
+    ``full_parameter_state._master_parameter`` refuses the flat owned-range
+    slice that ``param.main_param`` is under the distributed optimizer, even at
+    DP=1). Miles' ``set_default_megatron_args`` turns the distributed optimizer
+    on for Adam regardless of argv, so the attribute is applied in
+    ``preprocess_args``, after Miles' defaults and before Megatron's
+    ``validate_args``.
+
+    A no-sync trainer island (samples from the store, L4.6) has no such reader:
+    it keeps Miles' distributed optimizer, so DP replicas shard the optimizer
+    state, and its cuts carry each rank's owned ranges (``cut_plugin``, N7.1d).
     """
 
-    if trainable.parameter_mode != "full":
+    if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
+    if float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0:
+        raise MilesConfigError(
+            "--rl-optimizer-offload-fraction needs the distributed optimizer; the full-parameter sync "
+            "keeps whole FP32 masters (use a no-sync trainer island)")
     return {"use_distributed_optimizer": False}
 
 

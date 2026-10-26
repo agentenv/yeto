@@ -37,6 +37,10 @@ RECIPE_DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 # Qwen3.8-Flash-Next (qwen4_exp): GDN + QSA + 512-expert MoE through the native
 # Miles plugin (miles_plugins/models/qwen3_8_next), never the Qwen3.5 spec.
 RECIPE_QWEN3_8_NEXT = "qwen3_8_next"
+# GLM5.3-Flash (glm5_next): KDA + DSA MLA + 288-expert MoE through the Miles
+# plugin spec (adapters/miles/models/glm5_next.py), full-parameter.
+RECIPE_GLM5_NEXT = "glm5_next"
+TRANSFORMER_IMPLS = ("transformer_engine", "local")
 GATED_DELTA_NET = "gated_delta_net"
 
 
@@ -132,10 +136,13 @@ class GdnRecipe:
 
 @dataclass(frozen=True)
 class ModelRecipe:
-    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT
+    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT | RECIPE_GLM5_NEXT
     provider_class: str
     training_attention_backend: str
     gdn: GdnRecipe
+    # Megatron --transformer-impl of a recipe that chooses it (glm5_next: the
+    # N7.5 TE-free fallback is "local"); the other recipes keep their own.
+    transformer_impl: str = "transformer_engine"
 
 
 @dataclass(frozen=True)
@@ -237,15 +244,17 @@ class BatchConfig:
 
 @dataclass(frozen=True)
 class TrainMemoryConfig:
-    """Trainer activation-memory knobs (--rl-activation-recompute,
-    --rl-max-tokens-per-gpu). Defaults keep the historical argv: no
-    recompute, fixed micro batches."""
+    """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
+    --rl-optimizer-offload-fraction). Defaults keep the historical argv: no
+    recompute, fixed micro batches, optimizer state on the device."""
 
     # Recompute every layer's activations in backward (keep only layer inputs).
     activation_recompute: bool = False
     # Token budget of one packed micro batch per GPU (dynamic batching);
     # None = fixed micro batches of --micro-batch-size samples.
     max_tokens_per_gpu: int | None = None
+    # Share of the optimizer state kept and updated on the host (0 = none).
+    optimizer_offload_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -533,6 +542,42 @@ def _rules():
     return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
 
 
+def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
+                                  rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH
+                                  ) -> str | None:
+    """Why the Miles full-parameter mode refuses this layout; None when it accepts it.
+
+    Two layouts are accepted:
+
+    * samples from the store (``--rl-sample-role trainer``): a trainer-only
+      island. Any node count and any DP; the island starts no inference engine
+      (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
+    * engines on the island (Milestone 1): one node, DP=1 and dedicated, evenly
+      partitioned engines. A full-parameter trainer never shares its cards with
+      engines (no colocated placement).
+    """
+    if sample_role == sample_roles.TRAINER:
+        if rollout_gpus not in (None, 0):
+            return ("a full-parameter trainer that reads samples from the store starts no "
+                    "inference engine: --rollout-num-gpus must be 0 or absent")
+        return None
+    if data_parallel != 1:
+        return ("dense full-parameter GRPO with engines on the island requires DP=1 "
+                "(read samples from the store, --rl-sample-role trainer, for DP>1)")
+    if (
+        actor_num_nodes != 1
+        or type(rollout_gpus) is not int
+        or rollout_gpus < 1
+        or type(rollout_gpus_per_engine) is not int
+        or rollout_gpus_per_engine < 1
+        or rollout_gpus % rollout_gpus_per_engine
+    ):
+        return ("full-parameter mode with engines on the island requires one node and "
+                "dedicated, evenly partitioned inference engines (never colocated); "
+                "read samples from the store (--rl-sample-role trainer) for more nodes")
+    return None
+
+
 def _resolve_ref_load(args, model_path) -> str:
     """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
     return _rules().resolve_ref_load(args, model_path)
@@ -649,24 +694,18 @@ def resolve_rl_run_config(
             "expert-full tuning requires the DeepSeek V4 recipe and attention LoRA"
         )
     data_parallel = actor_gpus // model_parallel
-    if parameter_mode == "full" and data_parallel != 1:
-        raise ValueError("dense full-parameter GRPO requires DP=1")
     dedicated_rollout_gpus: int | None = None
     if parameter_mode == "full":
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
-        if (
-            args.actor_num_nodes != 1
-            or type(rollout_gpus) is not int
-            or rollout_gpus < 1
-            or type(rollout_gpus_per_engine) is not int
-            or rollout_gpus_per_engine < 1
-            or rollout_gpus % rollout_gpus_per_engine
-        ):
-            raise ValueError(
-                "Milestone-1 dense full-parameter mode requires one node and "
-                "dedicated, evenly partitioned inference engines"
-            )
+        role = sample_roles.sample_role(args)
+        if problem := full_parameter_layout_problem(
+                data_parallel=data_parallel, actor_num_nodes=args.actor_num_nodes,
+                rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine,
+                sample_role=role):
+            raise ValueError(problem)
+        if role == sample_roles.TRAINER:
+            rollout_gpus = 0  # trainer-only island (Miles --debug-train-only): no engine
         if qwen35_recipe and (
             rollout_gpus_per_engine != 1
             or getattr(args, "sglang_tp_size", None) not in {None, 1}
@@ -736,6 +775,11 @@ def resolve_rl_run_config(
                 "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
             )
         recipe_name, attention_backend = RECIPE_DEEPSEEK_V4_FLASH, "flash"
+    elif recipe == RECIPE_GLM5_NEXT:
+        if parameter_mode != "full":
+            raise ValueError("the glm5_next recipe is full-parameter only")
+        # Megatron picks the backend (Miles run_glm5_3_flash.py passes none)
+        recipe_name, attention_backend = RECIPE_GLM5_NEXT, "auto"
     elif fn_variant is not None:
         if parameter_mode != "lora":
             raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
@@ -773,6 +817,13 @@ def resolve_rl_run_config(
                 "(its kernels have no unfused/fused path)"
             )
         attention_backend = backend_override
+
+    transformer_impl = str(getattr(args, "rl_transformer_impl", None) or TRANSFORMER_IMPLS[0])
+    if transformer_impl not in TRANSFORMER_IMPLS:
+        raise ValueError(f"--rl-transformer-impl {transformer_impl!r} is not one of {TRANSFORMER_IMPLS}")
+    if transformer_impl != TRANSFORMER_IMPLS[0] and recipe_name != RECIPE_GLM5_NEXT:
+        raise ValueError(f"--rl-transformer-impl {transformer_impl} is supported by the "
+                         f"{RECIPE_GLM5_NEXT} recipe only")
 
     _validate_callable_spec(args.reward_function)
 
@@ -885,6 +936,7 @@ def resolve_rl_run_config(
             provider_class=type(provider).__name__,
             training_attention_backend=attention_backend,
             gdn=gdn,
+            transformer_impl=transformer_impl,
         ),
         geometry=geometry,
         parallel=ParallelLayout(
@@ -1028,9 +1080,13 @@ def _train_memory(args) -> TrainMemoryConfig:
         raise ValueError(
             f"--rl-max-tokens-per-gpu {max_tokens} is below --seq-len {args.seq_len}"
         )
+    offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
+    if not 0.0 <= offload <= 1.0:
+        raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
+        optimizer_offload_fraction=offload,
     )
 
 

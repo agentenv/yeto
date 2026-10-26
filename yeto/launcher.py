@@ -191,6 +191,15 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     return task
 
 
+def _ssh_trainer_spec(args, spec: ClusterSpec, task):
+    """The SSH spec of a held-back ``ssh:`` trainer island (None on other clouds)."""
+    if spec.cloud != "ssh":
+        return None
+    from .launch.ssh_trainer_island import island_spec_from_inventory
+
+    return island_spec_from_inventory(args, spec, task)
+
+
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
     weight_gb = MODEL_WEIGHT_GB.get(args.model)
     if weight_gb is None:
@@ -659,7 +668,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 args, controller.run,
                 island=None if held_name is None else trainer_loop.TrainerIsland(
                     held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
-                    spec=specs[held], events_dir=events_dir),
+                    spec=specs[held], events_dir=events_dir,
+                    ssh=_ssh_trainer_spec(args, specs[held], held_task)),
                 abort=controller.abort)
         except trainer_loop.TrainerLoopGaveUp as error:
             # the trainer scheduler released the trainer and stopped; the samplers

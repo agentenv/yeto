@@ -39,6 +39,11 @@ def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) 
             f"{over_sampling_batch_size} 必须等于 --rollout-batch-size {rollout_batch_size}")
 
 
+# S25 N10.3b: the advantage estimator the verl agentic path needs
+# (``algorithm.adv_estimator``; registered by ``.advantage`` in the trainer process).
+AGENTIC_ADV_ESTIMATOR = "yeto_grpo"
+
+
 # S25 N10.4: the Miles agentic wiring has no verl spelling.  The verl agentic
 # path is the yeto ``HarborAgentLoop`` (agent loop ``yeto_harbor``), selected per
 # data row, not these flags; passing them used to be ignored without a word.

@@ -56,7 +56,8 @@ def test_startup_steps_events_and_heartbeat_phase():
     hb = [e for e in events if e["event"] == T.HEARTBEAT_EVENT]
     assert hb and hb[0]["phase"] == "startup" and hb[0]["startup_step"] == "begin" and hb[0]["rollout_id"] is None
     res = [e for e in events if e["event"] == T.RESOURCE_EVENT]
-    assert res == [{"event": T.RESOURCE_EVENT, "available": False, "t": 100.0, "reason": "NoNvml: no gpu here",
+    assert res == [{"event": T.RESOURCE_EVENT, "available": False, "t": 100.0, "source": "nvml",
+                    "reason": "NoNvml: no gpu here",
                     "phase": "startup", "island_label": "x"}]
     steps = [e for e in events if e["event"] == T.STARTUP_STEP_EVENT]
     assert [(e["step"], e["seconds"], e["step_s"]) for e in steps] == [

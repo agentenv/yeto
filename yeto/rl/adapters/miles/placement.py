@@ -2,7 +2,9 @@
 
 R0 supports two placements fixed at startup: ``colocated`` (trainer and
 rollout share the same GPUs) and ``fixed-partition`` (disjoint trainer and
-rollout GPU sets). Upstream Miles normalizes its arguments (``--colocate``
+rollout GPU sets). A fixed partition with no rollout GPU is *trainer-only*
+(:attr:`PlacementRequest.trainer_only`): the island reads its samples from the
+store and starts no engine (Miles ``--debug-train-only``). Upstream Miles normalizes its arguments (``--colocate``
 forces ``rollout_num_gpus``; ``--debug-rollout-only`` turns colocate off;
 external engines drop rollout GPUs; ...). The spec forbids running with a
 silently rewritten placement, so :func:`check_placement_not_rewritten`
@@ -61,7 +63,11 @@ class PlacementRequest:
         for name in ("trainer_gpus", "rollout_gpus", "gpus_per_engine"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                if name == "rollout_gpus" and value == 0 and self.kind == "fixed-partition":
+                    continue  # trainer-only
                 raise ValueError(f"placement {name} must be a positive int")
+        if self.trainer_only and (self.standby_gpus or self.rollout_cell_names or self.bundle_map is not None):
+            raise ValueError("a trainer-only placement has no standby GPUs, rollout cells or bundle map")
         if self.kind == "colocated" and self.rollout_gpus != self.trainer_gpus:
             raise ValueError("colocated placement shares one GPU set")
         if self.rollout_gpus % self.gpus_per_engine:
@@ -92,6 +98,11 @@ class PlacementRequest:
                 raise ValueError(f"placement {name} must be a positive int")
         if self.gpus_per_node is not None:
             self._check_nodes()
+
+    @property
+    def trainer_only(self) -> bool:
+        """A fixed partition without rollout GPUs: the island starts no engine."""
+        return self.kind == "fixed-partition" and self.rollout_gpus == 0
 
     @property
     def in_node_parallel(self) -> int:
@@ -264,6 +275,8 @@ def _parsed_layout(args: Any) -> tuple[int, int] | None:
 
     trainer = int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node)
     rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    if getattr(args, "debug_train_only", False):
+        return trainer, trainer  # upstream: no rollout bundles (eval_num_gpus is refused)
     if getattr(args, "colocate", False):
         return max(trainer, rollout), 0
     return trainer + rollout, trainer
@@ -276,8 +289,12 @@ def check_placement_not_rewritten(request: PlacementRequest, args: Any) -> None:
         return  # test-only rollout-dump replay (config._apply_test_debug_rollout): no engines by design
     conflicts: list[str] = []
     for name in ("debug_rollout_only", "debug_train_only", "rollout_external"):
+        if name == "debug_train_only" and request.trainer_only:
+            continue
         if getattr(args, name, False):
             conflicts.append(f"{name}=True")
+    if request.trainer_only and not getattr(args, "debug_train_only", False):
+        conflicts.append("a trainer-only placement needs debug_train_only=True (no engine)")
     if int(getattr(args, "eval_num_gpus", 0) or 0):
         conflicts.append(f"eval_num_gpus={args.eval_num_gpus} adds GPUs to the rollout partition")
     colocate = bool(getattr(args, "colocate", False))

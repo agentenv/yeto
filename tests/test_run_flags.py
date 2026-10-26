@@ -270,6 +270,8 @@ _NON_RL_LITERALS = frozenset({
     # torchrun, tail and the W4A8 re-quantizer CLI in the SSH trainer island (yeto/launch/ssh_trainer_island.py)
     "--awq-scales", "--loop", "--master-addr", "--master-port", "--no-awq", "--node-rank", "--nproc-per-node",
     "--pid", "--poll-seconds", "--recipe", "--store", "--template",
+    # docker run of a runtime: docker SSH trainer node (ssh_trainer_island.py, node_inventory.py example)
+    "--device", "--network",
 })
 
 

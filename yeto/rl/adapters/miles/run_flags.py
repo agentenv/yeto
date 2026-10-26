@@ -39,9 +39,16 @@ _MODE = (
     ),
     shared_flag(
         "--rl-model-recipe",
-        choices=["generic", "deepseek-v4-flash"],
+        choices=["generic", "deepseek-v4-flash", "glm5_next"],
         default="generic",
         help="model-specific Miles memory/kernel contract",
+    ),
+    shared_flag(
+        "--rl-transformer-impl",
+        choices=["transformer_engine", "local"],
+        default="transformer_engine",
+        help="Megatron layer implementation of the glm5_next recipe: transformer_engine "
+        "(default) or local, the TE-free fallback (no grouped GEMM, no permute fusion)",
     ),
     shared_flag(
         "--rl-training-attention-backend",
@@ -167,6 +174,14 @@ _ROLLOUT_ENGINE = (
         help="ports: Miles dynamic batching, packing samples into micro batches of "
         "at most this many tokens per GPU (must be >= --seq-len). Default: fixed "
         "micro batches",
+    ),
+    shared_flag(
+        "--rl-optimizer-offload-fraction",
+        type=float,
+        default=0.0,
+        help="ports: share (0, 1] of the Adam state (FP32 masters and moments) "
+        "that Megatron keeps and updates on the host (--optimizer-cpu-offload, "
+        "with the distributed optimizer). Default 0: all on the device",
     ),
     shared_flag(
         "--rl-distributed-timeout-minutes",

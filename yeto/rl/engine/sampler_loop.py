@@ -12,6 +12,13 @@ buffer (the engine's rollout function does the write). Before each round it:
 With ``require_release`` (a LoRA sampler: its engines serve no adapter until
 the first release is loaded) step 2 also waits until a release is loaded.
 
+A load hook may refuse a release without stopping the island
+(:class:`~.policy_release.ReleaseNotLoaded`: a scheme the engine does not serve,
+a failed post-load check). The loop writes ``rl_sampler_release_not_loaded`` and
+goes on; with ``ready`` (the engine sampler: False while the engine holds
+weights that failed a check) it waits instead of generating, so no sample of
+unchecked weights reaches the buffer.
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
@@ -22,7 +29,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .policy_release import PolicyFollower
+from .policy_release import PolicyFollower, ReleaseNotLoaded
 
 DEFAULT_POLL_S = 5.0
 
@@ -36,7 +43,8 @@ class SamplerLoop:
                  min_round_s: float | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  require_release: bool = False,
-                 loaded_fields: Callable[[], dict[str, Any]] = dict) -> None:
+                 loaded_fields: Callable[[], dict[str, Any]] = dict,
+                 ready: Callable[[], bool] = lambda: True) -> None:
         if int(max_backlog_groups) < 1:
             raise ValueError("max_backlog_groups must be >= 1")
         self.follower = follower
@@ -52,6 +60,8 @@ class SamplerLoop:
         self.clock = clock
         self.require_release = bool(require_release)
         self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
+        self.ready = ready  # False: the engine may not generate (failed post-load check)
+        self._not_loaded: tuple[int, str] | None = None  # (seq, reason) last reported
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -70,7 +80,16 @@ class SamplerLoop:
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self) -> None:
-        loaded = self.follower.refresh()
+        try:
+            loaded = self.follower.refresh()
+        except ReleaseNotLoaded as error:
+            seen = self.follower.last_seen
+            mark = (None if seen is None else seen.seq, error.reason)
+            if mark != self._not_loaded:  # one event per release and cause, not per poll
+                self._not_loaded = mark
+                self.emit("rl_sampler_release_not_loaded", seq=mark[0], reason=error.reason,
+                          detail=str(error)[:300], policy_version=self.follower.version)
+            return
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
@@ -82,7 +101,7 @@ class SamplerLoop:
         waiting_policy_since = None
         while True:
             self._load_newest()
-            if self.require_release and self.follower.release is None:
+            if not self.ready() or (self.require_release and self.follower.release is None):
                 if waiting_policy_since is None:
                     waiting_policy_since = time.monotonic()
                     self.emit("rl_sampler_waiting_policy", rollout_id=rollout_id)

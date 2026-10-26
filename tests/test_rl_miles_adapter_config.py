@@ -237,6 +237,18 @@ def test_full_parameter_mode_emits_no_lora_flags():
 
 
 
+def test_trainer_only_full_parameter_island_starts_no_engine():
+    # S25 T-INTEG2: a full-parameter trainer that reads the store (DP>1, no engine).
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", dedicated_rollout_gpus=0, visible_gpus_per_node=2)
+    assert not cfg.parallel.colocated
+    request = mc.placement_request(cfg)
+    assert request.trainer_only
+    argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
+    assert "--debug-train-only" in argv
+    assert "--colocate" not in argv and "--rollout-num-gpus" not in argv
+
+
 def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     # Miles' set_default_megatron_args forces the distributed optimizer on for
     # Adam, which leaves each FP32 master a flat slice; the full-parameter
@@ -248,6 +260,44 @@ def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     namespace = SimpleNamespace(use_distributed_optimizer=True)
     mc.apply_runtime_attrs(namespace, launch)
     assert namespace.use_distributed_optimizer is False
+
+
+def test_no_sync_full_parameter_trainer_keeps_the_distributed_optimizer():
+    # N7.1d: only the full-parameter sync reads whole masters; a store-fed trainer
+    # island shards the optimizer state over DP and may offload it to the host.
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
+    launch = mc.translate_run_config(cfg, AlgorithmSpec(), full_parameter_sync=False)
+    assert "use_distributed_optimizer" not in launch.runtime_attrs
+    joined = " ".join(launch.argv)
+    assert ("--use-distributed-optimizer --use-precision-aware-optimizer --optimizer-cpu-offload "
+            "--overlap-cpu-optimizer-d2h-h2d --optimizer-offload-fraction 1.0") in joined
+    mc.validate_parsed_args(_parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1)
+
+
+def test_optimizer_offload_with_the_full_parameter_sync_is_refused():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=0.5))
+    with pytest.raises(mc.MilesConfigError, match="needs the distributed optimizer"):
+        mc.translate_run_config(cfg, AlgorithmSpec())
+
+
+def test_build_ports_launch_marks_a_no_sync_trainer_island(monkeypatch):
+    from yeto.rl.adapters.miles import island_entry
+
+    seen = {}
+
+    def translate(config, algorithm, **kw):
+        seen.update(kw)
+        return "launch"
+
+    monkeypatch.setattr(mc, "translate_run_config", translate)
+    args = SimpleNamespace(rl_single_island_no_sync=True, rl_sample_role="trainer", rl_max_policy_age=0)
+    assert island_entry.build_ports_launch(args, make_config()) == "launch"
+    assert seen["full_parameter_sync"] is False
+    args.rl_single_island_no_sync = False
+    island_entry.build_ports_launch(args, make_config())
+    assert seen["full_parameter_sync"] is True
 
 
 def test_lora_mode_leaves_the_distributed_optimizer_to_miles():
@@ -421,6 +471,10 @@ def test_train_memory_from_args_refuses_a_budget_below_seq_len():
     args.rl_max_tokens_per_gpu = 32768
     assert rc._train_memory(args) == rc.TrainMemoryConfig(True, 32768)
     assert rc._train_memory(SimpleNamespace(seq_len=8)) == rc.TrainMemoryConfig()
+    assert rc._train_memory(SimpleNamespace(seq_len=8, rl_optimizer_offload_fraction=1.0)) == \
+        rc.TrainMemoryConfig(optimizer_offload_fraction=1.0)
+    with pytest.raises(ValueError, match="offload-fraction"):
+        rc._train_memory(SimpleNamespace(seq_len=8, rl_optimizer_offload_fraction=1.5))
 
 
 @pytest.mark.ray_local  # upstream parse_args can start Ray on this machine

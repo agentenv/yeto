@@ -118,11 +118,18 @@ class TrialVerdict:
 
 @dataclass(frozen=True)
 class TokenTurn:
-    """One model call as the token recorder saw it (prompt rendered by the sampler)."""
+    """One model call as the token recorder saw it (prompt rendered by the sampler).
+
+    ``policy_version`` and ``provenance`` (the sampler source record,
+    ``Provenance.to_record()``) are what the recorder knows about the call;
+    None when it does not record them.
+    """
 
     prompt_ids: tuple[int, ...]
     completion_ids: tuple[int, ...]
     completion_logprobs: tuple[float, ...]
+    policy_version: int | None = None
+    provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if len(self.completion_ids) != len(self.completion_logprobs):

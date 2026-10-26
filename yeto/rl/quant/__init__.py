@@ -14,10 +14,25 @@ quantization; its per-layer factors are stored next to the checkpoint
 (``awq-scales/<smooth_layer>.pt``), so option R2 reads them instead of
 deriving them.
 
+A second target (N8.5) is the MXFP4 experts artefact
+``yetalabs/apex-flash-1-mxfp4-experts@70e86a0``: compressed-tensors
+``mxfp4-pack-quantized``, routed experts only, ``weight_packed`` (U8, two FP4
+E2M1 codes per byte) + ``weight_scale`` (U8 E8M0, one per 32 inputs), RTN
+without AWQ; all other tensors BF16/F32 as in the source. The converter picks
+the scheme from the template's ``quantization_config.format``.
+
 Modules:
 
 * :mod:`.int4`: per-channel symmetric int4 quantize / dequantize.
+* :mod:`.mxfp4`: MXFP4 group-32 quantize / dequantize, E8M0 scales, FP4 packing.
 * :mod:`.awq`: the fixed AWQ smoothing (R2) and the no-smoothing fallback (R1).
-* :mod:`.requant`: the checkpoint layout, the per-tensor transform, the
-  shard-by-shard converter, and the tensor-by-tensor comparison.
+* :mod:`.requant`: the checkpoint layout and its scheme, the per-tensor
+  transform, the shard-by-shard converter, and the tensor-by-tensor comparison.
+* :mod:`.schemes`: the scheme names and their release directories (no torch).
+* :mod:`.stacked`: the trainer-native stacked expert layout -> per-expert names.
+* :mod:`.shards`: per-rank quantization into part files and their merge (R3).
+* :mod:`.release`: the side process that turns BF16 releases into quantized ones.
+
+Trainer adapters: :mod:`yeto.rl.adapters.miles.quant_shards` (Megatron) and
+:mod:`yeto.rl.adapters.verl.quant_shards` (FSDP2).
 """

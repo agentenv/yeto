@@ -26,7 +26,7 @@ ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
 (DistributedOptimizer) shard is written back only onto identical per-parameter
 ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
 included). Refused like fork-M5: fp16 (loss-scaler state not saved),
-precision-aware optimizer, partial DistOpt instances, CP>1, and a trainer
+precision-aware optimizer (except as the FP32 CPU-offload path), partial DistOpt instances, CP>1, and a trainer
 whose trainable parameters mix LoRA adapters with others; the DP-resharding
 restore also refuses EP>1 and TP/PP>1 with DistOpt. A full-parameter shard
 holds the whole model copy on every DP rank plus this rank's optimizer range
@@ -232,7 +232,7 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if getattr(args, "fp16", False):
         out.append("--fp16 keeps a dynamic loss-scaler state that the cut does not carry")
     if getattr(args, "use_precision_aware_optimizer", False):
-        out.append("--use-precision-aware-optimizer stores scaled/low-precision state (not supported)")
+        out += _precision_aware_problems(args)
     if int(getattr(args, "num_distributed_optimizer_instances", 1) or 1) > 1:
         out.append("--num-distributed-optimizer-instances > 1 (partial DP optimizer groups)")
     cp = int((coord or {}).get("cp_size") or getattr(args, "context_parallel_size", 1) or 1)
@@ -247,6 +247,26 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if reshard and ep > 1:
         out.append("DP resharding with EP>1 is not supported (same-shape cuts are)")
     return out
+
+
+_FP32_NAMES = ("fp32", "float32", "torch.float32")
+
+
+def _precision_aware_problems(args: Any) -> list[str]:
+    """The precision-aware optimizer is carried only as Megatron's CPU-offload path with FP32 state.
+
+    ``--optimizer-cpu-offload`` requires ``--use-precision-aware-optimizer``;
+    its HybridDeviceOptimizer keeps standalone FP32 masters and moments, which
+    the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``,
+    s25-distopt). On the device the precision-aware path keeps scaled or
+    low-precision state, which a cut does not represent.
+    """
+    if not getattr(args, "optimizer_cpu_offload", False):
+        return ["--use-precision-aware-optimizer without --optimizer-cpu-offload stores scaled/low-precision "
+                "state (not supported)"]
+    low = [name for name in ("main_params_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
+           if str(getattr(args, name, "fp32")) not in _FP32_NAMES]
+    return [f"--optimizer-cpu-offload with non-FP32 {low} (not supported)"] if low else []
 
 
 def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, int]:
@@ -499,6 +519,55 @@ def train_state_digest(snap: Mapping[str, Any]) -> str:
     return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
 
 
+def _entry_moments(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Moment tensors of one named-export entry (fork-M5 ``tensors`` or a plain ``state``)."""
+    return entry.get("tensors") or entry.get("state") or {}
+
+
+def _entry_step(entry: Mapping[str, Any]) -> Any:
+    """Adam step of one named-export entry: per-parameter state (torch Adam) or the
+    group hyper-parameters (TE/apex fused Adam); None before the first step."""
+    for source in (entry.get("scalars"), entry.get("state"), entry.get("hyper")):
+        if isinstance(source, Mapping) and source.get("step") is not None:
+            return source["step"]
+    return None
+
+
+def resume_rank_state(actor: Any, optimizer_named: Any) -> dict[str, Any]:
+    """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
+    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6)."""
+    from yeto.rl.engine.resume_manifest import build_rank_state, scheduler_progress_of
+
+    entries = (optimizer_named or {}).get("entries") or {}
+    steps = [s for s in (_entry_step(e) for e in entries.values()) if s is not None]
+    lrs = [float(g["lr"]) for g in getattr(actor.optimizer, "param_groups", ()) if "lr" in g]
+    return build_rank_state(
+        steps_by_group={"named": steps},
+        scheduler_progress=scheduler_progress_of(actor.opt_param_scheduler),
+        lrs=lrs,
+        moments_by_name={n: _entry_moments(e) for n, e in entries.items()},
+    ).to_dict()
+
+
+def resume_state(actor: Any) -> dict[str, Any]:
+    """Plugin: ``{"path": shard name, "resume": rank state}`` of the live trainer (first-step check)."""
+    import torch
+
+    try:
+        backend = _backend(actor)
+        coord = _require(actor, backend)
+        with trainer_resident(actor):
+            named = _adapters(actor, backend)
+            with torch.no_grad():
+                exported = backend.export_optimizer(actor.optimizer, named)
+            return {"path": shard_name(coord), "resume": resume_rank_state(actor, exported)}
+    except Exception as error:  # noqa: BLE001 -- returned, not raised (see save_cut_shard)
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: "failed_before_write"}
+
+
+RESUME_STATE = f"{_MODULE}.resume_state"
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -590,6 +659,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
+        "resume": resume_rank_state(actor, snap["optimizer_named"]),
     }
 
 
@@ -829,6 +899,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
         "components": component_digests({"state": snap, "rng": rng_now}),
+        "resume": resume_rank_state(actor, snap["optimizer_named"]),
     }
     saved_snap = {k: shard.get(k) for k in snap}
     if state_digest(saved_snap) != summary["state_digest"]:
@@ -984,6 +1055,9 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         "rng_digest": state_digest(backend.capture_rng()),
         "optimizer_names": sorted(export.get("entries", {})),
         "adapter_names": sorted(names),
+        # S25 N7.6: run-wide resume assertions (Adam step, scheduler, LRs) at the new DP
+        "path": shard_name(coord),
+        "resume": resume_rank_state(actor, export),
     }
 
 

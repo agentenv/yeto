@@ -10,7 +10,8 @@ Per sample, ``run``:
 1. reads the :class:`~yeto.rl.agentic.AgentTask` from the row
    (``extra_info.agent_task``);
 2. opens a token-recorder session (N10.5) with verl's sampling parameters and
-   hands its OpenAI URL to the agent;
+   hands its OpenAI URL to the agent (the session id is the task's
+   ``trajectory_id`` plus a per-sample suffix: verl repeats a row ``n`` times);
 3. runs one Harbor ``Trial`` through ``run_agent_task``;
 4. joins the recorded calls into prompt / response / mask / logprobs
    (``join_turns``: a call that does not extend the stream is ABORTED, so the
@@ -18,14 +19,17 @@ Per sample, ``run``:
 
 ABORTED on verl: the batch has no per-sample drop, so an ABORTED sample is a
 one-token placeholder with mask 0 and reward 0, flagged in ``extra_fields``.
-It adds no policy-gradient tokens, but it still counts in its GRPO group's
-reward mean; a group-level drop on verl is not implemented (not verified).
+It adds no policy-gradient tokens.  The ``yeto_grpo`` estimator
+(:mod:`.advantage`) keeps it out of its GRPO group's mean and std (N10.3b);
+the loop refuses to start under another estimator.
 
 Configuration (worker environment; pass it to the Ray workers, e.g. through
 ``ray_kwargs.ray_init.runtime_env.env_vars``):
-  YETO_AGENTIC_RECORDER     ``module:callable`` returning a TokenRecorder (required).
-                            verl builds the agent loop once per sample, so the
-                            callable is called per sample; return a shared object.
+  YETO_AGENTIC_RECORDER     ``module:callable`` returning a TokenRecorder (required),
+                            e.g. ``yeto.rl.harness.gateway.recorder:recorder_from_env``.
+                            verl builds the agent loop once per sample; the loop
+                            calls the callable once per event loop and shares
+                            the recorder (``LoopLocal``).
   HARBOR_TASKS_DIR          Harbor task directories (required)
   HARBOR_TRIALS_DIR         trial output (default /tmp/harbor_trials)
   HARBOR_ENV_TYPE           sandbox provider of rows without ``agent_task.provider``
@@ -43,7 +47,7 @@ boat, a worker refuses a ``YETO_HARBOR_MAX_IN_FLIGHT`` above
 ``YETO_BOAT_MAX_ACTIVE``; keeping ``num_workers * YETO_BOAT_MAX_ACTIVE`` within
 the plan (box_20: 100 active, 12 starts per minute) is the launcher's job.
 
-The admission gate and the boat quota hold asyncio primitives and are kept
+The admission gate, the recorder and the boat quota hold asyncio state and are kept
 per event loop (:class:`~yeto.rl.agentic.loop_local.LoopLocal`).  verl runs
 ``AgentLoopWorker`` as a Ray async actor (one loop per process), so in a
 worker they are per process.
@@ -52,8 +56,10 @@ worker they are per process.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import uuid
+from collections.abc import Mapping, Sequence
 from functools import partial
 from typing import Any
 
@@ -74,8 +80,13 @@ from yeto.rl.agentic import (
     run_agent_task,
 )
 from yeto.rl.agentic.loop_local import LoopLocal
+from yeto.rl.agentic.types import TokenTurn
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
+
+from .run_config_rules import AGENTIC_ADV_ESTIMATOR as YETO_GRPO
+
+logger = logging.getLogger(__name__)
 
 AGENT_LOOP_NAME = "yeto_harbor"
 RECORDER_ENV = "YETO_AGENTIC_RECORDER"
@@ -102,6 +113,33 @@ def _recorder_from_env() -> TokenRecorder:
     if not module or not attr:
         raise HarnessConfigError(f"set {RECORDER_ENV}=module:callable (the N10.5 token recorder)")
     return getattr(importlib.import_module(module), attr)()
+
+
+_recorders: LoopLocal[TokenRecorder] = LoopLocal(_recorder_from_env)
+
+
+def _shared_recorder() -> TokenRecorder:
+    """The recorder of this worker's event loop, built once from ``YETO_AGENTIC_RECORDER``."""
+    return _recorders.get()
+
+
+def recorder_session_id(task: AgentTask) -> str:
+    """One recorder session per sample: verl repeats a row ``n`` times with the same task."""
+    suffix = uuid.uuid4().hex[:12]
+    return f"{task.trajectory_id}-{suffix}" if task.trajectory_id else uuid.uuid4().hex
+
+
+def check_estimator(config: Any) -> None:
+    """Refuse an advantage estimator that would count ABORTED placeholders (N10.3b).
+
+    A config without ``algorithm.adv_estimator`` (a test stub) is not checked.
+    """
+    algorithm = getattr(config, "algorithm", None)
+    estimator = getattr(algorithm, "adv_estimator", None)
+    if estimator is not None and str(getattr(estimator, "value", estimator)) != YETO_GRPO:
+        raise HarnessConfigError(
+            f"HarborAgentLoop needs algorithm.adv_estimator={YETO_GRPO} (got {estimator}): another "
+            "estimator counts ABORTED placeholder samples in their group's baseline")
 
 
 def _harness_from_env() -> AgentHarness:
@@ -139,24 +177,32 @@ class HarborAgentLoop(AgentLoopBase):
     """One Harbor trial per sample; tokens from the recorder, verdict from Harbor."""
 
     # Factories are class attributes so a test (or another wiring) can replace them.
-    recorder_factory = staticmethod(_recorder_from_env)
+    recorder_factory = staticmethod(_shared_recorder)
     harness_factory = staticmethod(_harness_from_env)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        check_estimator(self.config)
         self.prompt_length = int(self.rollout_config.prompt_length)
         self.response_length = int(self.rollout_config.response_length)
-        self._recorder = self.recorder_factory()
         self._harness = self.harness_factory()
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         task = task_from_row(kwargs)
-        trajectory_id = task.trajectory_id or uuid.uuid4().hex
-        endpoint = await self._recorder.open(trajectory_id, sampling_params)
+        recorder = self.recorder_factory()
+        session = recorder_session_id(task)
+        endpoint = await recorder.open(session, sampling_params)
         try:
             trajectory = await run_agent_task(task, self._harness, endpoint, _gate())
-        finally:
-            turns = await self._recorder.close(trajectory_id)
+        except BaseException:
+            await _close_after_error(recorder, session)
+            raise
+        turns: Sequence[TokenTurn] = ()
+        try:
+            turns = await recorder.close(session)
+        except TokenAlignmentError as exc:
+            if trajectory.outcome is not Outcome.ABORTED:
+                trajectory = _abort(trajectory, f"token_alignment: {exc}")
 
         segments: TokenSegments | None = None
         if trajectory.outcome is not Outcome.ABORTED:
@@ -166,9 +212,10 @@ class HarborAgentLoop(AgentLoopBase):
                 trajectory = _abort(trajectory, f"token_alignment: {exc}")
         if segments is not None and len(segments.prompt_ids) > self.prompt_length:
             trajectory, segments = _abort(trajectory, "prompt_exceeds_prompt_length"), None
-        return self._output(trajectory, segments, n_calls=len(turns))
+        return self._output(trajectory, segments, turns)
 
-    def _output(self, trajectory: AgentTrajectory, segments: TokenSegments | None, *, n_calls: int) -> AgentLoopOutput:
+    def _output(self, trajectory: AgentTrajectory, segments: TokenSegments | None,
+                turns: Sequence[TokenTurn]) -> AgentLoopOutput:
         if segments is None:
             segments = self._placeholder()
         metadata = trajectory.to_metadata()
@@ -178,7 +225,7 @@ class HarborAgentLoop(AgentLoopBase):
             response_mask=list(segments.response_mask),
             response_logprobs=list(segments.response_logprobs),
             reward_score=trajectory.reward,
-            num_turns=2 * n_calls,
+            num_turns=2 * len(turns),
             metrics=AgentLoopMetrics(),
             extra_fields={
                 OUTCOME_KEY: metadata[OUTCOME_KEY],
@@ -186,6 +233,7 @@ class HarborAgentLoop(AgentLoopBase):
                 "policy_version": trajectory.policy_version,
                 "truncated": segments.truncated,
                 "agent_metrics": metadata["agent_metrics"],
+                "provenance": turn_provenance(turns),
             },
         )
 
@@ -199,3 +247,23 @@ def _abort(trajectory: AgentTrajectory, reason: str) -> AgentTrajectory:
     _gate().metrics.reclassify(trajectory.outcome, Outcome.ABORTED)
     return AgentTrajectory(task=trajectory.task, outcome=Outcome.ABORTED, reward=0.0, reason=reason,
                            verdict=trajectory.verdict, policy_version=trajectory.policy_version)
+
+
+def turn_provenance(turns: Sequence[TokenTurn]) -> Mapping[str, str] | None:
+    """The sampler source of the sample: the one every call shares, else None.
+
+    Per-source metrics (``offpolicy_source``) group by it; a sample whose calls
+    came from different sources is counted under ``unknown``.
+    """
+    records = {tuple(sorted(t.provenance.items())) for t in turns if t.provenance}
+    if len(records) != 1 or any(not t.provenance for t in turns):
+        return None
+    return dict(next(iter(records)))
+
+
+async def _close_after_error(recorder: TokenRecorder, session: str) -> None:
+    """Close the recorder session after the trial raised; the trial's error is the one to report."""
+    try:
+        await recorder.close(session)
+    except Exception:  # the trial's error propagates
+        logger.warning("recorder close failed for %s after a trial error", session, exc_info=True)

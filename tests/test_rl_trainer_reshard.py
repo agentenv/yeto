@@ -354,3 +354,26 @@ def test_dp_shards_must_agree_on_the_miles_counters(tmp_path):
         _trainer(new).restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(2),
                                             plan=_plan(2, 1), certified=[SPEC_SHA])
     assert new[0].weight_updater.weight_version == 0  # refused before any write
+
+
+@pytest.mark.parametrize("src,dst", [(1, 2), (2, 1)])
+def test_reshard_checks_the_run_wide_resume_counters(tmp_path, src, dst):
+    """S25 N7.6: a DP change still checks global step, every rank's Adam step and the
+    scheduler against the cut, and the first step and data cursor after it."""
+    from yeto.rl.engine.resume_manifest import ResumeAssertionError
+
+    _trainer(_trained(src)).save_cut(epoch=1, context=_context(tmp_path, "c"))
+    new = make_world(dst, seed=99)
+    trainer = _trainer(new)
+    trainer.restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(src),
+                                  plan=_plan(src, dst), certified=[SPEC_SHA])
+    reference = trainer._resume_reference
+    assert len(reference.ranks) == dst and reference.global_step == 2
+    assert {s.max for st in reference.ranks.values() for s in st.adam_steps.values()} == {2}
+    with pytest.raises(ResumeAssertionError, match="never compared"):
+        trainer._check_first_step_after_resume(1)
+    trainer._resume_reference = reference
+    trainer.confirm_resumed_data_cursor({"sample_offset": reference.data_watermark})
+    train_step(new, _batches()[2])
+    trainer._check_first_step_after_resume(1)
+
