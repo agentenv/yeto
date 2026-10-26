@@ -153,6 +153,8 @@ def parse_args(argv):
     # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
     # launcher already forwards; megatron_engine.optimizer_memory_overrides maps it)
     p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
+    # S28 G-RCP: precision-aware optimizer on the card, bf16 Adam moments, FP32 master
+    p.add_argument("--rl-megatron-bf16-moments", action="store_true")
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -1151,6 +1153,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         grad_nan_check=not args.rl_no_grad_nan_check,
         rollout_pool=not buffer_trainer,
         optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0),
+        bf16_moments=bool(getattr(args, "rl_megatron_bf16_moments", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(

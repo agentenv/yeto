@@ -74,12 +74,31 @@ RECOMPUTE_MODULES = ("core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", 
 # Measured on 910B3 with the whole state in host memory: 8 cards at TP=1/PP=2/EP=4
 # peak at 41.97 GB per card (VERL-MEGATRON-PP.md section 7.9); the state it moves off
 # the card is about 29 GB per rank there.
-def optimizer_memory_overrides(fraction: float) -> dict[str, str]:
+def bf16_moment_overrides() -> dict[str, str]:
+    """S28 G-RCP: the precision-aware optimizer on the card with bf16 Adam moments and an
+    FP32 master (``store_param_remainders`` off, so the full-parameter boundary can read
+    the master: ``yeto.rl.megatron_masters``). Main grads stay FP32. Measured need: the
+    PP=2 Nano island on 64 GB 910B3 ran out of memory by 20 MiB in FusedAdam's first
+    moment allocation (VERL-MEGATRON-PP section 7.13.6); bf16 moments halve them."""
+    return {
+        "optim.use_precision_aware_optimizer": "True",
+        "optim.exp_avg_dtype": "bf16",
+        "optim.exp_avg_sq_dtype": "bf16",
+        "++optim.override_optimizer_config.store_param_remainders": "False",
+    }
+
+
+def optimizer_memory_overrides(fraction: float, bf16_moments: bool = False) -> dict[str, str]:
     """Megatron optimizer keys for an offload fraction in (0, 1]; {} at 0.
 
     The offload runs Megatron's precision-aware path, so the Adam moments and the
     gradient-accumulation buffer go to bf16 with it (the same pairing Miles documents
     for this flag, ``adapters.miles.config``, and the one the Ascend SFT recipe runs)."""
+    if bf16_moments and fraction:
+        raise MegatronShapeError("bf16 moments on the card and optimizer_offload_fraction are exclusive "
+                                 "(the full-parameter boundary cannot read offloaded masters)")
+    if bf16_moments:
+        return bf16_moment_overrides()
     if not fraction:
         return {}
     return {
@@ -179,6 +198,8 @@ class MegatronShape:
     # S27 G-FN: host share of the Megatron optimizer state
     # (--rl-optimizer-offload-fraction); 0 keeps all of it on the card
     optimizer_offload_fraction: float = 0.0
+    # S28 G-RCP: --rl-megatron-bf16-moments (bf16_moment_overrides)
+    bf16_moments: bool = False
     # S27 G-FN: write mtp_hybrid_override_pattern=null (MTP_OFF_PATTERN). True for a
     # hybrid model whose config.json declares no MTP layers at all.
     close_mtp_pattern: bool = False
@@ -257,6 +278,9 @@ def validate(shape: MegatronShape) -> None:
     if not 0.0 <= float(s.optimizer_offload_fraction) <= 1.0:
         raise MegatronShapeError("optimizer_offload_fraction 必须在 [0, 1]，"
                                  f"得到 {s.optimizer_offload_fraction}")
+    if s.bf16_moments and float(s.optimizer_offload_fraction) > 0:
+        raise MegatronShapeError("bf16_moments 与 optimizer_offload_fraction > 0 互斥"
+                                 "（全参数边界读不到卸载到主机的 master）")
 
 
 def validate_run(cfg: vconf.VerlRunConfig) -> None:
@@ -363,7 +387,8 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     # S27 G-FN: the optimizer-state memory keys, under the actor's optimizer config
     # ("optim.x" becomes actor_rollout_ref.actor.optim.x; a "++" prefix
     # stays in front of the whole key, as Hydra wants it)
-    for key, value in optimizer_memory_overrides(float(shape.optimizer_offload_fraction)).items():
+    for key, value in optimizer_memory_overrides(float(shape.optimizer_offload_fraction),
+                                                    bool(shape.bf16_moments)).items():
         path = key.removeprefix("++")
         out.append(f"{'++' if path != key else ''}{actor}.{path}={value}")
     if shape.router_replay == "R3":
