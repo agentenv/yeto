@@ -453,3 +453,85 @@ def test_neither_name_set_imports_the_whole_list(tmp_path, monkeypatch):
     monkeypatch.delenv(stack.SKIP_ENV, raising=False)
     report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
     assert report["installed"] == names
+
+
+@pytest.fixture
+def model_building_worker(monkeypatch):
+    """A stand-in for verl's model-building worker, with the seam this option waits for."""
+    import sys
+    import types
+
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    module = types.ModuleType("fake_verl_engine_workers")
+
+    class ActorRolloutRefWorker:
+        built: list[str] = []
+
+        def init_model(self):
+            type(self).built.append(os.environ.get("LOCAL_RANK", "<none>"))
+
+    module.ActorRolloutRefWorker = ActorRolloutRefWorker
+    monkeypatch.setitem(sys.modules, "fake_verl_engine_workers", module)
+    monkeypatch.setattr(stack, "VERL_MODEL_WORKERS",
+                        (("fake_verl_engine_workers", "ActorRolloutRefWorker", "init_model"),))
+    return ActorRolloutRefWorker
+
+
+def test_install_at_model_build_waits_for_the_model_call(tmp_path, monkeypatch, model_building_worker):
+    """With INSTALL_AT=init_model the hook must import nothing until the model is built,
+    and then import inside that call, not in the actor's constructor."""
+    bound = tmp_path / "bound_device.txt"
+    name = _device_touching_plugin(tmp_path, bound)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "init_model")
+    monkeypatch.setenv(stack.RANK_ENV, "4")  # the card is already bound; still must wait
+
+    stack.setup_worker()
+    assert not bound.exists(), "a plugin was imported before the model build"
+    worker = model_building_worker()
+    worker.init_model()
+    assert bound.read_text() == "4"
+    assert model_building_worker.built == ["4"]
+
+
+def test_install_at_model_build_still_runs_once_per_process(tmp_path, monkeypatch, model_building_worker):
+    counter = tmp_path / "imports.txt"
+    (tmp_path / "counting.py").write_text(
+        "import pathlib\n"
+        f"p = pathlib.Path({str(counter)!r})\n"
+        "p.write_text(str(int(p.read_text()) + 1) if p.exists() else '1')\n")
+    monkeypatch.setattr(stack, "PLUGINS", ("counting.py",))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "init_model")
+    monkeypatch.setenv(stack.RANK_ENV, "0")
+    stack.setup_worker()
+    worker = model_building_worker()
+    worker.init_model()
+    worker.init_model()
+    assert counter.read_text() == "1"
+
+
+def test_without_a_model_seam_install_at_model_build_installs_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    monkeypatch.setattr(stack, "VERL_MODEL_WORKERS", (("no_such_verl_module", "W", "init_model"),))
+    bound = tmp_path / "bound_device.txt"
+    monkeypatch.setattr(stack, "PLUGINS", (_device_touching_plugin(tmp_path, bound),))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "init_model")
+    monkeypatch.setenv(stack.RANK_ENV, "0")
+    lines: list[str] = []
+    assert stack._install_at_model_build(str(tmp_path), lines.append) == "unavailable"
+    assert not bound.exists()
+    assert "NOT installed" in "\n".join(lines)
+
+
+def test_the_default_is_still_the_worker_constructor(tmp_path, monkeypatch, armable):
+    """The new option must not change the behaviour of an island that does not set it."""
+    monkeypatch.delenv(stack.INSTALL_AT_ENV, raising=False)
+    bound = tmp_path / "bound_device.txt"
+    monkeypatch.setattr(stack, "PLUGINS", (_device_touching_plugin(tmp_path, bound),))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    stack.setup_worker()
+    armable(local_rank="2")
+    assert bound.read_text() == "2"

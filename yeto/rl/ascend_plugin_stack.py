@@ -96,6 +96,20 @@ SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 # cause is not the plugins' own set_device call). Both take a comma separated list of
 # file names. ONLY wins when both are set, and an unknown name is reported, not
 # silently ignored. Neither is set by the island: they are for a human bisect.
+# Where in the worker's life the install happens. "worker_init" (the default) is
+# :data:`VERL_WORKER`, the moment verl's base Worker has bound this process's card.
+# "init_model" waits one step longer: the start of the verl call that builds the model
+# (:data:`VERL_MODEL_WORKERS`), so the plugins' imports and Megatron's own device
+# initialisation happen inside the same Ray task rather than in the actor's
+# constructor. S28 G-PIN measured that a single plugin import in the constructor is
+# enough to make Megatron's first LazySetDevice fail with 507033, with the plugins'
+# own set_device call bypassed and the prewarm off, so where the import happens is
+# the next thing to vary.
+INSTALL_AT_ENV = "YETO_ASCEND_STACK_INSTALL_AT"
+VERL_MODEL_WORKERS = (
+    ("verl.workers.engine_workers", "ActorRolloutRefWorker", "init_model"),
+    ("verl.workers.engine_workers", "TrainingWorker", "init_model"),
+)
 ONLY_ENV = "YETO_ASCEND_STACK_ONLY"
 SKIP_ENV = "YETO_ASCEND_STACK_SKIP"
 
@@ -461,6 +475,44 @@ def install_when_rank_known(root: str, *, log=None) -> str:
     return "deferred"
 
 
+def _install_at_model_build(root: str, say) -> str:
+    """Wrap every verl worker method that builds the model, and install there.
+
+    Returns ``"deferred"`` when at least one seam of :data:`VERL_MODEL_WORKERS` was
+    wrapped, ``"unavailable"`` when none was: as everywhere else here, not installing
+    is the safe failure."""
+
+    wrapped: list[str] = []
+    for module_name, class_name, method_name in VERL_MODEL_WORKERS:
+        try:
+            worker_cls = getattr(importlib.import_module(module_name), class_name)
+            original = getattr(worker_cls, method_name)
+        except BaseException as error:  # noqa: BLE001 - a missing seam must not stop the island
+            say(f"[yeto-ascend-stack] {module_name}.{class_name}.{method_name} is not available "
+                f"to wait for ({type(error).__name__}: {error})")
+            continue
+        if getattr(original, "_yeto_ascend_stack", None) is not None:
+            wrapped.append(f"{class_name}.{method_name}")
+            continue
+
+        def make(original=original):
+            def method(self, *args, **kwargs):
+                _install_once(root)
+                return original(self, *args, **kwargs)
+            functools.update_wrapper(method, original)
+            method._yeto_ascend_stack = root
+            return method
+
+        setattr(worker_cls, method_name, make())
+        wrapped.append(f"{class_name}.{method_name}")
+    if not wrapped:
+        say(f"[yeto-ascend-stack] NOT installed: {INSTALL_AT_ENV}=init_model, but no model-building "
+            f"seam of this verl is available")
+        return "unavailable"
+    say(f"[yeto-ascend-stack] root={root} deferred to the model build: {sorted(wrapped)}")
+    return "deferred"
+
+
 def setup_worker() -> None:
     """Ray ``worker_process_setup_hook``: arm the install in this worker process when
     the island asked for the stack (:data:`ENV`).
@@ -471,5 +523,9 @@ def setup_worker() -> None:
     cannot be imported is recorded and the others still run (:func:`install`)."""
 
     root = os.environ.get(ENV, "")
-    if root:
-        install_when_rank_known(root)
+    if not root:
+        return
+    if os.environ.get(INSTALL_AT_ENV, "worker_init").strip() == "init_model":
+        _install_at_model_build(root, lambda line: print(line, flush=True))
+        return
+    install_when_rank_known(root)
