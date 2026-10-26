@@ -833,7 +833,13 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
              else pools_from_args(args, cards, what="verl Megatron 岛"))
     trainer_gpus = pools.trainer_gpus
     with open(Path(model_path) / "config.json") as handle:
-        num_experts = json.load(handle).get("n_routed_experts")
+        model_config = json.load(handle)
+    num_experts = model_config.get("n_routed_experts")
+    # S27 G-FN (B12): a hybrid model that declares no MTP layers must say so, or the
+    # bridge builds its MTP branch from a default pattern and dies
+    # (megatron_engine.MTP_OFF_PATTERN)
+    close_mtp = bool(model_config.get("hybrid_override_pattern")) and not any(
+        key in model_config for key in megatron_engine.MTP_CONFIG_KEYS)
     shape = MegatronShape(
         trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
         rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
@@ -845,7 +851,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         num_experts=int(num_experts) if num_experts else None,
         grad_nan_check=not args.rl_no_grad_nan_check,
         rollout_pool=not buffer_trainer,
-        optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0))
+        optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0),
+        close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,

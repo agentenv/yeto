@@ -46,6 +46,20 @@ ENGINE_MEGATRON = "megatron"
 ROLLOUT_ENGINES = ("vllm",)
 DISPATCHERS = ("alltoall",)
 ROUTER_REPLAY_MODES = ("disabled", "R3")
+# S27 G-FN: keys a model's own config.json uses to declare multi-token prediction.
+# A hybrid (Mamba) model that declares none of them wants the MTP branch closed, and
+# has to say so explicitly -- see MTP_OFF_PATTERN.
+MTP_CONFIG_KEYS = ("mtp_num_layers", "num_nextn_predict_layers", "mtp_hybrid_override_pattern")
+# Megatron-Bridge enters its MTP branch whenever mtp_hybrid_override_pattern is truthy
+# and then multiplies the pattern by mtp_num_layers, which verl spells as None for
+# "off" -- so the build dies with TypeError: can't multiply sequence by non-int of type
+# NoneType. transformers lights the fuse by defaulting NemotronHConfig.
+# mtp_hybrid_override_pattern to "*E" for a checkpoint whose config.json has no MTP key
+# at all. No single side is wrong; the three together are (G-FJ2 traced this,
+# SESSION27/VERL-ASCEND-MEGATRON.md conclusion C item 2, and it is not Ascend-specific:
+# the same versions on CUDA break the same way). Writing the pattern as null keeps the
+# branch closed, which is what the checkpoint asked for.
+MTP_OFF_PATTERN = "null"
 # Megatron-Core selective recompute modules (``TransformerConfig.recompute_modules``)
 RECOMPUTE_MODULES = ("core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts")
 
@@ -165,6 +179,9 @@ class MegatronShape:
     # S27 G-FN: host share of the Megatron optimizer state
     # (--rl-optimizer-offload-fraction); 0 keeps all of it on the card
     optimizer_offload_fraction: float = 0.0
+    # S27 G-FN: write mtp_hybrid_override_pattern=null (MTP_OFF_PATTERN). True for a
+    # hybrid model whose config.json declares no MTP layers at all.
+    close_mtp_pattern: bool = False
 
     @property
     def trainer_gpus(self) -> int:
@@ -320,6 +337,8 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         f"{tcfg}.moe_router_bias_update_rate=0.0",
         f"{tcfg}.moe_aux_loss_coeff=0.0",
     ]
+    if shape.close_mtp_pattern:  # S27 G-FN: MTP_OFF_PATTERN
+        out.append(f"{tcfg}.mtp_hybrid_override_pattern={MTP_OFF_PATTERN}")
     # S27 G-FL: verl's DDP config leaves check_for_nan_in_grad at Megatron's False, and
     # with it off a NaN gradient is scaled into every parameter instead of raising
     # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.

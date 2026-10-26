@@ -60,11 +60,11 @@ def _args(tmp_path, *, buffer_role: bool, **kw):
     return island_entry, args
 
 
-def _plan(tmp_path, *, buffer_role: bool = True, cards: int = 8, **kw):
+def _plan(tmp_path, *, buffer_role: bool = True, cards: int = 8, config=None, **kw):
     island_entry, args = _args(tmp_path, buffer_role=buffer_role, **kw)
     model = tmp_path / "model"
     model.mkdir(exist_ok=True)
-    (model / "config.json").write_text(json.dumps({"n_routed_experts": 128}))
+    (model / "config.json").write_text(json.dumps(config or {"n_routed_experts": 128}))
     return island_entry.megatron_island_plan(
         args, model_path=str(model), train_file="/d/train.parquet", val_file="/d/test.parquet", out_dir="/o",
         algo={"correction": "tis", "tis_upper": 2.0, "tis_lower": 0.0, "eps_clip": None, "eps_clip_high": None},
@@ -376,3 +376,32 @@ def test_the_optimizer_offload_fraction_writes_the_engine_keys_and_is_off_by_def
     with pytest.raises(me.MegatronShapeError, match="optimizer_offload_fraction"):
         me.validate(me.MegatronShape(tp=1, pp=2, ep=4, rollout_pool=False,
                                      optimizer_offload_fraction=1.5))
+
+
+def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path):
+    """S27 G-FN (B12): a three-way interaction, not an Ascend quirk (G-FJ2 traced it,
+    VERL-ASCEND-MEGATRON.md conclusion C item 2). The bridge enters its MTP branch
+    whenever mtp_hybrid_override_pattern is truthy and then multiplies the pattern by
+    mtp_num_layers, which verl spells None for off; transformers supplies the truthy
+    default for a checkpoint whose config.json has no MTP key. The island writes the
+    pattern as null so the branch stays closed -- which is what the checkpoint asked
+    for. A model that really has MTP layers keeps the bridge's own handling."""
+    key = "++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_hybrid_override_pattern"
+
+    # a model that is not hybrid at all: nothing is written
+    plain = _plan(tmp_path)
+    assert plain["shape"]["close_mtp_pattern"] is False
+    assert not [o for o in plain["overrides"] if "mtp_hybrid_override_pattern" in o]
+
+    # Nano's shape: a hybrid pattern and no MTP key anywhere
+    closed = _plan(tmp_path, config={"n_routed_experts": 128,
+                                     "hybrid_override_pattern": "MEMEM*EMEMEM"})
+    assert closed["shape"]["close_mtp_pattern"] is True
+    assert f"{key}={me.MTP_OFF_PATTERN}" in closed["overrides"]
+
+    # a hybrid model that does declare MTP layers is left alone
+    for declared in ("mtp_num_layers", "num_nextn_predict_layers", "mtp_hybrid_override_pattern"):
+        mtp = _plan(tmp_path, config={"n_routed_experts": 128,
+                                      "hybrid_override_pattern": "MEMEM*EMEMEM", declared: 1})
+        assert mtp["shape"]["close_mtp_pattern"] is False
+        assert not [o for o in mtp["overrides"] if "mtp_hybrid_override_pattern" in o]
