@@ -380,10 +380,13 @@ def agentic_run_fields(args: Any, *, out_dir: str) -> dict:
 
     path = Path(out_dir) / AGENT_LOOP_YAML
     path.parent.mkdir(parents=True, exist_ok=True)
-    # verl reads it with OmegaConf and keeps the mapping as the registry entry
-    # (agent_loop.py: _agent_loop_registry[name] = config). Written by hand: the
-    # file has two scalar fields and the island image has no yaml dumper guarantee.
-    path.write_text(f"name: {VERL_AGENT_LOOP}\n_target_: {AGENT_LOOP_TARGET}\n")
+    # verl reads the file with OmegaConf and *iterates* it, so the top level is a
+    # LIST of entries, each a mapping with ``name`` and ``_target_``
+    # (agent_loop.py:554-556: ``for c in configs: registry[c.name] = c``).  A
+    # top-level mapping iterates over its keys and fails with
+    # "'str' object has no attribute 'name'" -- S27 G-FS run s27-fs-2 died there.
+    # Written by hand: two scalar fields, and the island image guarantees no yaml dumper.
+    path.write_text(f"- name: {VERL_AGENT_LOOP}\n  _target_: {AGENT_LOOP_TARGET}\n")
     return {"agentic": True, "agent_loop_config": str(path),
             "agent_loop_workers": int(os.environ.get("YETO_VERL_AGENT_LOOP_WORKERS", "1"))}
 
@@ -750,6 +753,18 @@ def main(argv=None) -> int:
     env["YETO_VERL_READBACK_DIR"] = str(readback)
     if run.agentic:  # S27 G-FS: the recorder environment the agent-loop workers read
         env.update(agentic_records_env(run, model_path=model_path, card=_threshold_card(manifest)))
+        # Names only, never values: the tunnel's path secret and the boat token are
+        # in this environment. One line says whether the tunnel reached the island,
+        # which is the only way to tell a missing callback port from a dead sandbox.
+        from yeto.rl.harness.gateway import records_env as _renv
+
+        present = sorted(k for k in env if k.startswith(("YETO_RECORDS_", "HARBOR_", "YETO_BOAT_",
+                                                         "YETO_AGENTIC_", "YETO_HARBOR_")))
+        print(f"[yeto-verl] island {lid} agentic env {present}", flush=True)
+        for name in (_renv.PROXY_PORT_ENV, _renv.PROXY_PUBLIC_BASE_ENV, _renv.PROXY_SECRET_FILE_ENV, "BOAT_API_KEY"):
+            if not env.get(name):
+                print(f"[yeto-verl] island {lid} agentic WARNING {name} is not set "
+                      "(the sandboxes cannot reach the records proxy, or cannot start)", flush=True)
     env["VERL_FILE_LOGGER_PATH"] = str(OUTPUT / f"verl-file-logger-{lid}.jsonl")
     readback.mkdir(parents=True, exist_ok=True)
     entry = "main_buffer_trainer" if buffer_section else "main_fully_async" if limit else "main"

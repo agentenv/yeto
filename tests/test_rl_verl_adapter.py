@@ -620,15 +620,28 @@ def test_agentic_rows_pass_through_prepare_data(tmp_path):
     assert len(pd.read_parquet(val)) == 1
 
 
-def test_agent_loop_registry_file_names_the_row_loop(tmp_path):
+def test_agent_loop_registry_file_is_read_the_way_verl_reads_it(tmp_path):
+    """verl loads the file and *iterates* it, taking ``.name`` off each entry
+    (fork acad9875, ``agent_loop.py:554-556``).  A top-level mapping iterates over
+    its keys and dies with "'str' object has no attribute 'name'", which is how
+    S27 G-FS run s27-fs-2 failed; so parse it here as verl does, not as text.
+    """
+    # OmegaConf is not in the CPU test environment; PyYAML parses the same file
+    # into the same Python structure, and what this test pins is the structure.
+    import yaml
+
     from yeto.rl.adapters.verl import island_entry
     from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
 
     fields = island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=True), out_dir=str(tmp_path))
     assert fields["agentic"] is True and fields["agent_loop_workers"] == 1
-    text = Path(fields["agent_loop_config"]).read_text()
-    assert f"name: {VERL_AGENT_LOOP}" in text
-    assert f"_target_: {island_entry.AGENT_LOOP_TARGET}" in text
+    loaded = yaml.safe_load(Path(fields["agent_loop_config"]).read_text())
+    assert isinstance(loaded, list), f"verl iterates the file; a {type(loaded).__name__} iterates over its keys"
+    registry = {}
+    for entry in loaded:  # verl's own loop
+        registry[entry["name"]] = entry
+    assert set(registry) == {VERL_AGENT_LOOP}
+    assert registry[VERL_AGENT_LOOP]["_target_"] == island_entry.AGENT_LOOP_TARGET
     assert island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=False), out_dir=str(tmp_path)) == {}
 
 
