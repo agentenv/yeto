@@ -33,11 +33,23 @@ its rename table and the delta releases are untouched. The Mamba2 scan fix
 (:mod:`yeto.rl.nemotron_h_torch_fix`) stays in force; this only changes *when*
 the block's internals are materialised.
 
-Scope. :func:`apply` is a no-op unless this node's device family is ``ascend``
-(``yeto.hw.catalog.device_family``), because that is the card the 64 GiB ceiling
-belongs to; an NVIDIA island keeps storing activations, as before. The env var
-``YETO_NEMOTRONH_RECOMPUTE`` forces the decision either way (``1`` / ``0``), which
-is what an A/B of the memory saving uses.
+Scope. :func:`apply` is a no-op unless this worker belongs to an Ascend island,
+because that is the card the 64 GiB ceiling belongs to; an NVIDIA island keeps
+storing activations, as before. Three signals decide, in this order:
+
+1. ``YETO_NEMOTRONH_RECOMPUTE`` (``1`` / ``0``) forces it either way. The island
+   launcher sets it, and an A/B of the memory saving flips it.
+2. ``YETO_RL_COMPAT_GROUP`` starting with ``ascend`` -- the island's own
+   declaration of the card it runs on, present in the container environment.
+3. this node's device family (``yeto.hw.catalog.device_family``).
+
+Signal 3 alone is **not** enough, and S27 G-EQ4 found that out by running it: in
+the engine worker the model is built before the card is visible to that process,
+so ``available_type()`` answers ``"cpu"`` and ``device_family()`` falls back to
+its documented CPU default ``"nvidia"`` -- the hook reported
+``{'enabled': False, 'reason': 'not an Ascend node'}`` on an Ascend node and the
+island trained one step and ran out of memory exactly as before. The returned
+dict now names the signals it saw, so a wrong answer is readable in the log.
 
 Safety. A forward that fills a cache is never checkpointed (``use_cache`` true, or
 a cache object passed in): recomputing it would append to that cache twice. The
@@ -55,22 +67,32 @@ MODULE = "transformers.models.nemotron_h.modeling_nemotron_h"
 CLASS = "NemotronHBlock"
 MARK = "_yeto_nemotron_h_recompute"
 ENV = "YETO_NEMOTRONH_RECOMPUTE"
+COMPAT_ENV = "YETO_RL_COMPAT_GROUP"
 
 
-def wanted(*, family: str | None = None) -> bool:
-    """Whether this node recomputes NemotronH blocks: the env var when it is set
-    to 0/1, else true only on an Ascend node (module doc)."""
-    forced = os.environ.get(ENV)
-    if forced is not None and forced.strip() != "":
-        return forced.strip() not in ("0", "false", "False", "no")
+def decision(*, family: str | None = None) -> dict[str, Any]:
+    """Whether this worker recomputes NemotronH blocks, and on which signal
+    (module doc, "Scope"). Reported in the island log, so keep it readable."""
+    forced = (os.environ.get(ENV) or "").strip()
+    if forced:
+        return {"enabled": forced not in ("0", "false", "False", "no"), "signal": f"{ENV}={forced!r}"}
+    compat = (os.environ.get(COMPAT_ENV) or "").strip()
+    if compat.startswith("ascend"):
+        return {"enabled": True, "signal": f"{COMPAT_ENV}={compat!r}"}
     if family is None:
         try:
             from yeto.hw.catalog import device_family  # noqa: PLC0415
 
             family = device_family()
-        except Exception:  # noqa: BLE001 - a build without yeto.hw, or no torch
-            return False
-    return family == "ascend"
+        except Exception as error:  # noqa: BLE001 - a build without yeto.hw, or no torch
+            return {"enabled": False, "signal": f"device_family unavailable: {type(error).__name__}"}
+    return {"enabled": family == "ascend",
+            "signal": f"device_family={family!r}" + ("" if compat == "" else f", {COMPAT_ENV}={compat!r}")}
+
+
+def wanted(*, family: str | None = None) -> bool:
+    """:func:`decision` without the reason."""
+    return bool(decision(family=family)["enabled"])
 
 
 def _checkpointing_forward(original: Any) -> Any:
@@ -96,11 +118,12 @@ def apply(*, module: Any = None, enabled: bool | None = None) -> dict[str, Any]:
     it, ``{"already": True, ...}`` on a second call. Never raises for a build
     without the model family -- the caller prints the result and goes on.
     """
+    signal = "caller asked"
     if enabled is None:
-        enabled = wanted()
+        chosen = decision()
+        enabled, signal = chosen["enabled"], chosen["signal"]
     if not enabled:
-        return {"enabled": False, "reason": "not an Ascend node" if os.environ.get(ENV) is None
-                else f"{ENV}={os.environ.get(ENV)!r}"}
+        return {"enabled": False, "signal": signal}
     if module is None:
         import importlib  # noqa: PLC0415
 
@@ -110,7 +133,7 @@ def apply(*, module: Any = None, enabled: bool | None = None) -> dict[str, Any]:
     if getattr(current, MARK, None) is not None:
         return {"already": True, "enabled": True, **getattr(current, MARK)}
     forward = _checkpointing_forward(current)
-    info = {"module": module.__name__, "cls": CLASS, "use_reentrant": False}
+    info = {"module": module.__name__, "cls": CLASS, "use_reentrant": False, "signal": signal}
     setattr(forward, MARK, info)
     forward.__wrapped_original__ = current
     cls.forward = forward

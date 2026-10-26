@@ -83,7 +83,7 @@ def test_same_values_and_gradients_and_it_recomputes():
 
     info = rc.apply(module=module, enabled=True)
     assert info == {"already": False, "enabled": True, "module": "test.modeling_nemotron_h",
-                    "cls": "NemotronHBlock", "use_reentrant": False}
+                    "cls": "NemotronHBlock", "use_reentrant": False, "signal": "caller asked"}
     block_cls.calls = 0
     checkpointed, checkpointed_kept = _saved_elements(lambda: block(x))
     assert block_cls.calls == 1  # not yet recomputed
@@ -137,17 +137,31 @@ def test_a_forward_that_must_not_run_twice_is_not_checkpointed(case):
         assert len(cache) == 1  # appended once, not twice
 
 
-def test_the_gate_follows_the_device_family_and_the_env_override(monkeypatch):
+def test_the_gate_reads_three_signals_in_order(monkeypatch):
+    """The island worker builds the model before the card is visible to it, so the
+    device family alone answers "nvidia" on an Ascend node (module doc, "Scope")."""
     monkeypatch.delenv(rc.ENV, raising=False)
+    monkeypatch.delenv(rc.COMPAT_ENV, raising=False)
     assert rc.wanted(family="ascend") is True
     assert rc.wanted(family="nvidia") is False
+
+    # 2: the island's own compat group wins over a device family that reads "nvidia"
+    monkeypatch.setenv(rc.COMPAT_ENV, "ascend-910b3-64g")
+    assert rc.wanted(family="nvidia") is True
+    assert rc.decision(family="nvidia")["signal"] == "YETO_RL_COMPAT_GROUP='ascend-910b3-64g'"
+    monkeypatch.setenv(rc.COMPAT_ENV, "h200-141g")
+    assert rc.wanted(family="nvidia") is False
+
+    # 1: the explicit switch wins over both
     monkeypatch.setenv(rc.ENV, "1")
     assert rc.wanted(family="nvidia") is True
     monkeypatch.setenv(rc.ENV, "0")
+    monkeypatch.setenv(rc.COMPAT_ENV, "ascend-910b3-64g")
     assert rc.wanted(family="ascend") is False
-    # a disabled call changes nothing and says why
+
+    # a disabled call changes nothing and names the signal it read
     module, block_cls = _fresh()
     before = block_cls.forward
     out = rc.apply(module=module)
-    assert out["enabled"] is False and "YETO_NEMOTRONH_RECOMPUTE" in out["reason"]
+    assert out["enabled"] is False and out["signal"] == "YETO_NEMOTRONH_RECOMPUTE='0'"
     assert block_cls.forward is before
