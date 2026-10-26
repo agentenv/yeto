@@ -188,3 +188,34 @@ def test_ssd_decode_per_head_fast_path_equals_general_path():
         outs.append(o)
         states.append(st)
     assert torch.allclose(outs[0], outs[1]) and torch.allclose(states[0], states[1])
+
+
+def test_restore_moe_loaders_handles_both_layouts():
+    import types
+
+    E, I, Hd = 2, 3, 4
+
+    class Moe(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.local_num_experts, self.intermediate_size_per_partition, self.hidden_size = E, I, Hd
+            self.moe_config = types.SimpleNamespace(is_act_and_mul=False)
+            # vllm_ascend's kernel layout, loaders dropped
+            self.w13_weight = torch.nn.Parameter(torch.zeros(E, Hd, I), requires_grad=False)
+            self.w2_weight = torch.nn.Parameter(torch.zeros(E, I, Hd), requires_grad=False)
+
+        def weight_loader(self, param, loaded, expert_id):
+            param.data[expert_id].copy_(loaded)
+            return True
+
+    m = torch.nn.Module()
+    m.moe = Moe()
+    assert m2.restore_moe_loaders(m) == 2 and m2.restore_moe_loaders(m) == 0
+    w = torch.randn(I, Hd)
+    m.moe.w13_weight.weight_loader(m.moe.w13_weight, w, expert_id=1)
+    assert torch.equal(m.moe.w13_weight.data[1], w.t())
+    staged = torch.nn.Parameter(torch.zeros(E, I, Hd), requires_grad=False)  # verl's staging view
+    m.moe.w13_weight.weight_loader(staged, w, expert_id=0)
+    assert torch.equal(staged.data[0], w)
+    with pytest.raises(RuntimeError):
+        m.moe.w13_weight.weight_loader(torch.nn.Parameter(torch.zeros(5, 5, 5)), w, expert_id=0)

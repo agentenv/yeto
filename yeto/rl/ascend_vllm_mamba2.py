@@ -316,6 +316,70 @@ def make_shared_part1(orig):
     return _shared_experts_part1
 
 
+def moe_checkpoint_shapes(layer) -> dict[str, tuple[int, int, int]]:
+    """Checkpoint layout of a FusedMoE layer's ``w13_weight`` / ``w2_weight`` (this rank)."""
+    gated = bool(getattr(getattr(layer, "moe_config", None), "is_act_and_mul", True))
+    e = int(layer.local_num_experts)
+    i = int(layer.intermediate_size_per_partition)
+    h = int(layer.hidden_size)
+    return {"w13_weight": (e, i * (2 if gated else 1), h), "w2_weight": (e, h, i)}
+
+
+def layout_aware_loader(loader, ckpt_shape):
+    """A loader for an expert weight that is either in the checkpoint layout (vLLM's own
+    parameter, or verl's refit staging view) or transposed (vllm_ascend's kernel layout:
+    ``process_weights_after_loading`` stores ``transpose(1, 2)``)."""
+    import torch
+
+    def weight_loader(param, loaded_weight, *args, **kwargs):
+        shape = tuple(param.shape)
+        if shape == ckpt_shape:
+            return loader(param, loaded_weight, *args, **kwargs)
+        if shape == (ckpt_shape[0], ckpt_shape[2], ckpt_shape[1]):
+            view = torch.nn.Parameter(param.data.transpose(1, 2), requires_grad=False)
+            return loader(view, loaded_weight, *args, **kwargs)
+        raise RuntimeError(f"expert weight of shape {shape} is neither the checkpoint layout {ckpt_shape} "
+                           "nor its transpose")
+
+    weight_loader._yeto_layout_aware = True
+    return weight_loader
+
+
+def restore_moe_loaders(model) -> int:
+    """Give every FusedMoE expert weight without a ``weight_loader`` the layout-aware one.
+
+    vllm_ascend's unquantized MoE ``process_weights_after_loading`` replaces ``w13_weight`` /
+    ``w2_weight`` with new transposed Parameters that carry no ``weight_loader``; verl's weight
+    sync then fails in ``load_weights`` (n4 runs i6-i9: ``'Parameter' object has no attribute
+    'weight_loader'``, from the second bucket of a refit on). Returns how many were set.
+    """
+    count = 0
+    for module in model.modules():
+        if not (hasattr(module, "w13_weight") and hasattr(module, "w2_weight")
+                and callable(getattr(module, "weight_loader", None)) and hasattr(module, "local_num_experts")):
+            continue
+        shapes = moe_checkpoint_shapes(module)
+        for name, ckpt_shape in shapes.items():
+            param = getattr(module, name)
+            if getattr(param, "weight_loader", None) is not None:
+                continue
+            if ckpt_shape[1] == ckpt_shape[2]:
+                _say(f"moe reload: {name} {ckpt_shape} is square, layout ambiguous; not set")
+                continue
+            param.weight_loader = layout_aware_loader(module.weight_loader, ckpt_shape)
+            count += 1
+    return count
+
+
+def make_moe_loader_restoring(orig):
+    def load_weights(self, weights):
+        restore_moe_loaders(self)
+        return orig(self, weights)
+
+    load_weights._yeto_orig = orig
+    return load_weights
+
+
 # ----------------------------------------------------------------------------- apply
 def apply() -> list[str]:
     """Rebind the vLLM / vllm_ascend globals. Idempotent. Returns the list of applied patches."""
@@ -342,6 +406,11 @@ def apply() -> list[str]:
         if not hasattr(moe_mlp.unquant_apply_mlp, "_yeto_orig"):
             moe_mlp.unquant_apply_mlp = make_relu2_unquant_apply_mlp(moe_mlp.unquant_apply_mlp)
         _APPLIED.append("moe_mlp.relu2")
+    from vllm.model_executor.models import nemotron_h as _nh
+
+    if not hasattr(_nh.NemotronHModel.load_weights, "_yeto_orig"):
+        _nh.NemotronHModel.load_weights = make_moe_loader_restoring(_nh.NemotronHModel.load_weights)
+    _APPLIED.append("nemotron_h.moe_reload")
     try:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendSharedFusedMoE
     except Exception as e:  # noqa: BLE001
