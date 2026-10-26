@@ -137,18 +137,31 @@ def ssd_decode(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=
         rows = valid.nonzero().squeeze(1)
         src, dst = src[rows], dst[rows]
         x, dt, B, C = x[rows], dt[rows], B[rows], C[rows]
-    dtf = dt.to(f32)
-    if dt_bias is not None:
-        dtf = dtf + dt_bias.to(f32)
-    if dt_softplus:
-        dtf = torch.nn.functional.softplus(dtf)
-    s = state[src].to(f32)  # (b,H,P,N)
-    dA = torch.exp(dtf[..., None] * A.to(f32)[None])  # (b,H,P,N)
+    # mamba_mixer2 passes dt, dt_bias, A and D expanded (stride 0) from per-head values; then the
+    # decay is one scalar per (sequence, head) and we avoid (b,H,P,N)-sized dt/A temporaries.
+    per_head = (dt.stride(-1) == 0 and A.stride(-1) == 0 and A.stride(-2) == 0
+                and (dt_bias is None or dt_bias.stride(-1) == 0))
+    if per_head:
+        dtf = dt[..., 0].to(f32)
+        if dt_bias is not None:
+            dtf = dtf + dt_bias[..., 0].to(f32)
+        if dt_softplus:
+            dtf = torch.nn.functional.softplus(dtf)
+        dA = torch.exp(dtf * A[:, 0, 0].to(f32)[None])[..., None, None]  # (b,H,1,1)
+        dtf = dtf[..., None]  # (b,H,1)
+    else:
+        dtf = dt.to(f32)
+        if dt_bias is not None:
+            dtf = dtf + dt_bias.to(f32)
+        if dt_softplus:
+            dtf = torch.nn.functional.softplus(dtf)
+        dA = torch.exp(dtf[..., None] * A.to(f32)[None])  # (b,H,P,N)
+    s = state[src].to(f32)  # (b,H,P,N); advanced indexing returns a copy
     Bh = B.to(f32).repeat_interleave(rep, dim=1)  # (b,H,N)
     Ch = C.to(f32).repeat_interleave(rep, dim=1)
     xf = x.to(f32)
-    s = s * dA + (dtf * xf)[..., None] * Bh[:, :, None, :]
-    y = (s * Ch[:, :, None, :]).sum(-1)
+    s.mul_(dA).addcmul_((dtf * xf)[..., None], Bh[:, :, None, :])  # s is a fresh gathered copy
+    y = torch.matmul(s, Ch[..., None]).squeeze(-1)
     if D is not None:
         y = y + D.to(f32) * xf
     state[dst] = s.to(state.dtype)

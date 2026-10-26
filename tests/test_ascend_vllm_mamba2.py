@@ -161,3 +161,30 @@ def test_gateless_platform_proxy_only_flips_for_the_named_caller():
     assert guarded(proxy) is True
     assert other(proxy) is False
     assert proxy.name == "npu"
+
+
+def test_ssd_decode_per_head_fast_path_equals_general_path():
+    g = torch.Generator().manual_seed(5)
+    b = 3
+    state = torch.randn(4, H, P, N, generator=g, dtype=torch.float64)
+    x = torch.randn(b, H, P, generator=g, dtype=torch.float64)
+    dt_h = torch.randn(b, H, generator=g, dtype=torch.float64)
+    A_h = -torch.rand(H, generator=g, dtype=torch.float64)
+    B = torch.randn(b, G, N, generator=g, dtype=torch.float64)
+    C = torch.randn(b, G, N, generator=g, dtype=torch.float64)
+    D = torch.randn(H, generator=g, dtype=torch.float64)[:, None].expand(-1, P)
+    bias = torch.randn(H, generator=g, dtype=torch.float64)[:, None].expand(-1, P)
+    idx = torch.tensor([3, 0, 2])
+    outs, states = [], []
+    for expand in (True, False):
+        dt = dt_h[:, :, None].expand(-1, -1, P)
+        A = A_h[:, None, None].expand(-1, P, N)
+        bb = bias
+        if not expand:
+            dt, A, bb = dt.contiguous(), A.contiguous(), bias.contiguous()
+        st = state.clone()
+        o = torch.zeros(b, H, P, dtype=torch.float64)
+        m2.ssd_decode(st, x, dt, A, B, C, D, dt_bias=bb, dt_softplus=True, state_batch_indices=idx, out=o)
+        outs.append(o)
+        states.append(st)
+    assert torch.allclose(outs[0], outs[1]) and torch.allclose(states[0], states[1])

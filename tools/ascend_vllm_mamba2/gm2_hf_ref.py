@@ -11,6 +11,9 @@ def main():
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(os.environ["MODEL"], trust_remote_code=True, torch_dtype=dtype)
     model.eval()
+    import contextlib
+    torch.cuda.stream = lambda *a, **k: contextlib.nullcontext()  # remote code wraps a block in a CUDA stream
+    torch.cuda.default_stream = lambda *a, **k: None
     print("loaded", time.time() - t0, "fast_path", getattr(sys.modules[type(model).__module__], "is_fast_path_available", None), flush=True)
     data = json.load(open(src))
     res = []
