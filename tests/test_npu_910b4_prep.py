@@ -753,3 +753,46 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
         assert key in without, key
     # a model that can recompute activations bounds the head itself
     assert not [o for o in ascend_memory_overrides(True) if "entropy" in o]
+
+
+def test_ascend_plugin_stack_disables_dynamo_in_every_ray_worker(monkeypatch, tmp_path):
+    """S28 G-120: with the Ascend plugin stack on, every Ray worker must get
+    TORCHDYNAMO_DISABLE.
+
+    The stack pulls in paths that go through mcore's ``@jit_fuser``, which is
+    ``torch.compile``; inductor has no NPU backend, so a worker dies with
+    ``InductorError: AssertionError: Device npu not supported`` (run mfu-a1-160-mt28k,
+    in actor_compute_log_prob).  Exporting it on the driver is not enough: a worker
+    only receives ``FORWARD_ENV_PREFIXES``, which ``TORCHDYNAMO_`` does not match --
+    run mfu-a1c died the same way with it exported, which is why it travels explicitly.
+    """
+    import types
+
+    pkg = types.ModuleType("verl.trainer.constants_ppo")
+    pkg.get_ppo_ray_runtime_env = lambda _x: {"env_vars": {}}
+    for name in ("verl", "verl.trainer"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.trainer.constants_ppo", pkg)
+    ray_stub = types.ModuleType("ray")
+    ray_stub.remote = lambda *a, **k: (lambda cls: cls)
+    monkeypatch.setitem(sys.modules, "ray", sys.modules.get("ray") or ray_stub)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main", raising=False)
+    from yeto.rl.adapters.verl import verl_main
+
+    monkeypatch.delenv(verl_main.DYNAMO_DISABLE_ENV, raising=False)
+    # the driver's own export does NOT reach a worker: no prefix matches it
+    assert not verl_main.DYNAMO_DISABLE_ENV.startswith(verl_main.FORWARD_ENV_PREFIXES)
+
+    off = verl_main._runtime_env()["env_vars"]
+    assert verl_main.DYNAMO_DISABLE_ENV not in off  # stack off: nothing is forced
+
+    on = verl_main._runtime_env(ascend_stack=str(tmp_path))["env_vars"]
+    assert on[verl_main.DYNAMO_DISABLE_ENV] == "1"
+
+    # a deliberate opt-out is preserved
+    monkeypatch.setenv(verl_main.DYNAMO_DISABLE_ENV, "0")
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main", raising=False)
+    from yeto.rl.adapters.verl import verl_main as reloaded
+
+    assert reloaded._runtime_env(ascend_stack=str(tmp_path))["env_vars"][
+        reloaded.DYNAMO_DISABLE_ENV] == "0"
