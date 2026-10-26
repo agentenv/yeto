@@ -340,11 +340,29 @@ NEMOTRON_FIX_HOOK = (
 )
 NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")
 
+# S28 G-M2: the colocated (naive) full-parameter sync hands vLLM the actor's HF state
+# names; for a family whose transformers loader converts the checkpoint (nemotron_h:
+# backbone. -> model., stacked experts) vLLM's loader wants the checkpoint's own names
+# (n4 run i5: KeyError 'layers.1.mixer.experts.up_proj'). rollout_names rewrites the
+# stream; a LoRA sync (peft_config set) and an identity model pass through.
+CKPT_NAMES_TARGET = "verl/workers/engine_workers.py"
+CKPT_NAMES_ANCHOR = (
+    "        await self.rollout.update_weights(\n"
+    "            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps\n"
+    "        )\n"
+)
+CKPT_NAMES_HOOK = (
+    "        # yeto S28 G-M2: full-parameter sync in the checkpoint's own tensor names (rollout_names)\n"
+    "        from yeto.rl.adapters.verl.rollout_names import worker_stream as _yeto_worker_stream\n"
+    "        per_tensor_param = _yeto_worker_stream(self, per_tensor_param, peft_config)\n"
+)
+CKPT_NAMES = (CKPT_NAMES_TARGET, CKPT_NAMES_ANCHOR, CKPT_NAMES_HOOK, "before")
+
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE, CKPT_NAMES),
             "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 
