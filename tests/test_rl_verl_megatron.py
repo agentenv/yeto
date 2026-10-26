@@ -550,8 +550,18 @@ def test_megatron_image_layers_and_pins():
     expected = pins.expected_versions_for_engine("megatron")
     assert expected["mamba_ssm"] == pins.MAMBA_SSM_VERSION and expected["vllm"] == pins.EXPECTED_VERSIONS["vllm"]
     assert pins.expected_versions_for_engine("fsdp2") == pins.EXPECTED_VERSIONS
-    with pytest.raises(ValueError):
-        pins.expected_versions_for_engine("megatron", "ascend")
+    # S27 G-FN: an Ascend Megatron island asserts MindSpeed's stack, not the CUDA
+    # image's; nothing here builds that environment, so a mismatch is a recorded
+    # problem (YETO_VERL_ALLOW_UNPINNED waives it) rather than a refusal to start
+    npu = pins.expected_versions_for_engine("megatron", "ascend")
+    assert npu["megatron_bridge"] == "0.5.0" and npu["mindspeed"] == "0.18.0"
+    assert npu["megatron_core"] != expected["megatron_core"]
+    assert "vllm" not in npu or npu["vllm"] != expected.get("vllm")
+    # a family with no pins at all still fails on the family pins first
+    with pytest.raises(ValueError, match="no verl version pins"):
+        pins.expected_versions_for_engine("megatron", "amd")
+    # and a family with pins but no Megatron stack names that gap instead
+    assert set(pins.EXPECTED_VERSIONS_MEGATRON_BY_FAMILY) == set(pins.EXPECTED_VERSIONS_BY_FAMILY)
     with pytest.raises(ValueError):
         image.modal_image(object(), variant="sglang")
 
