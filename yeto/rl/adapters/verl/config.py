@@ -269,4 +269,7 @@ ASSERTED_KEYS = (
     "algorithm.rollout_correction.bypass_mode",
     "actor_rollout_ref.rollout.full_determinism",
     "actor_rollout_ref.actor.strategy",
+    # S27 G-EZ: a silently dropped offload_policy would only show up as an
+    # out-of-memory failure deep into the first step, so assert it resolved.
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
 )

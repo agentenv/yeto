@@ -187,24 +187,32 @@ class VerlHfWriter:
         copy_model_files(self.model_path, directory)
         (directory / COMPLETE_MARKER).write_text("")
 
-    def _release_memory(self) -> dict | None:
+    def _release_memory(self, host: bool = True) -> dict | None:
         """Give the workers' cached device blocks back after the export
         (``full_parameter.remote_release_memory``; the gathers leave large blocks
         cached and the next training step needs the room). Returns the largest
-        reserved bytes before and after, or None when the group cannot do it."""
+        reserved bytes before and after, or None when the group cannot do it.
+        ``host``: with ``YETO_HOST_MEMORY=trim`` also trim the workers' host heap
+        (S27 G-EZ3); the per-file calls skip it, the one after the export does it."""
         release = getattr(self.group, "release_memory", None)
         if release is None:
             return None
         try:
-            results = [dict(result) for result in (self.run(release()) or ())]
+            results = [dict(result) for result in (self.run(release(host=host)) or ())]
         except Exception as error:  # noqa: BLE001 -- the export matters, freeing is an optimisation
             print(f"[yeto hf export] could not free device memory: {error!r}", flush=True)
             return None
         if not results:
             return None
-        return {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
-                "reserved_after": max(int(r["after"]["reserved"]) for r in results),
-                "workers": len(results)}
+        freed = {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
+                 "reserved_after": max(int(r["after"]["reserved"]) for r in results),
+                 "workers": len(results)}
+        hosts = [r["host"] for r in results if r.get("host")]  # YETO_HOST_MEMORY=trim (S27 G-EZ3)
+        if hosts:
+            freed["host_rss_anon_mib_before"] = sum(int(h.get("rss_anon_mib_before") or 0) for h in hosts)
+            freed["host_rss_anon_mib_after"] = sum(int(h.get("rss_anon_mib_after") or 0) for h in hosts)
+            freed["host_trim_s_max"] = max(float(h.get("gc_s", 0)) + float(h.get("trim_s", 0)) for h in hosts)
+        return freed
 
     def _write_base_layout(self, plan: BaseExport, directory: Path) -> int:
         """The source checkpoint's own files (module doc, step 2). A stacked model
@@ -236,7 +244,7 @@ class VerlHfWriter:
             # Free the device blocks of this file's gathers before the next one: the
             # step after an export has to fit on the same card, and on a 64 GiB card
             # the margin is under one activation group (S27 G-EQ3, npu1).
-            self._release_memory()
+            self._release_memory(host=False)
         if plan.index:
             shutil.copyfile(plan.model_path / INDEX_FILE, directory / INDEX_FILE)
         return total

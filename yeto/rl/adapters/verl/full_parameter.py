@@ -398,7 +398,7 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
     return result
 
 
-def remote_release_memory(worker_dict) -> dict:
+def remote_release_memory(worker_dict, host: bool = True) -> dict:
     """Give the device allocator's cached blocks back (S27 G-EQ3).
 
     Why: a full export gathers every parameter whole on the device
@@ -413,12 +413,43 @@ def remote_release_memory(worker_dict) -> dict:
     del worker_dict  # the allocator is per process, not per parameter
     import torch
 
+    from yeto.rl.engine import host_memory
+
     device = torch.npu if hasattr(torch, "npu") and torch.npu.is_available() else torch.cuda
     before = {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}
     device.synchronize()  # blocks still referenced by pending work are not freed
     device.empty_cache()
-    return {"before": before,
-            "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}
+    result = {"before": before,
+              "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}
+    if host and host_memory.host_memory_mode() == "trim":  # S27 G-EZ3: the export's host copies too
+        result["host"] = host_memory.release_host_memory()
+    return result
+
+
+def remote_host_memory(worker_dict, release: bool) -> dict:
+    """This worker's host memory (S27 G-EZ3): its RSS by kind and its node's
+    ``/proc/meminfo`` (``yeto.rl.engine.host_memory``), after a full garbage
+    collection and ``malloc_trim(0)`` when ``release`` (the trim's own result
+    is in ``release``). Not collective: each worker reads its own process."""
+
+    del worker_dict  # per process
+    import os
+    import socket
+
+    from yeto.rl.engine import host_memory
+
+    try:
+        import torch.distributed as dist
+
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else None
+    except Exception:  # noqa: BLE001 - a report, not a check
+        rank = None
+    out = {"host": socket.gethostname(), "pid": os.getpid(), "rank": rank}
+    if release:
+        out["release"] = host_memory.release_host_memory()
+    out["process"] = host_memory.process_memory()
+    out["node"] = host_memory.node_memory()
+    return out
 
 
 def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_optimizer: bool) -> dict:
