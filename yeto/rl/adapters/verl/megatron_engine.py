@@ -52,6 +52,27 @@ class MegatronShapeError(ValueError):
     """The verl Megatron island cannot run this shape."""
 
 
+def sync_problems(args) -> list[str]:
+    """S27 G-FG: what a Megatron island with the full-parameter outer sync cannot
+    run ([] when it can). Read from launcher arguments and from island arguments
+    alike (the attribute names the two share or that only one of them has).
+
+    * pipeline parallelism: the HF boundary (``yeto.rl.megatron_hf_boundary``)
+      exports through Megatron-Bridge, which handles PP, but a tied embedding
+      over two stages and the PP broadcasts have no test; refused until they do;
+    * peer recovery: the verl stream's donor files are FSDP2 rank files
+      (``peer_recovery.VerlRankShards``); a Megatron island rejoins by catch-up
+      (the syncer's broadcast of the current fragments) instead."""
+    problems = []
+    if int(getattr(args, "pipeline_parallel", 1) or 1) != 1:
+        problems.append("--pipeline-parallel 1 (PP with the outer sync is not verified)")
+    if (getattr(args, "rl_peer_recovery", False) or getattr(args, "rl_peer_recovery_store", None)
+            or getattr(args, "rl_peer_recover", False)):
+        problems.append("no peer recovery (the Megatron island rejoins by catch-up: --rl-island-state-source "
+                        "catch-up)")
+    return problems
+
+
 def engine_for(*, tensor_parallel: int = 1, pipeline_parallel: int = 1, expert_parallel: int = 1) -> str:
     """The verl training engine of a run: Megatron when any model parallel size is
     above 1 (the FSDP2 island has none), FSDP2 otherwise."""

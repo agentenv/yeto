@@ -60,6 +60,9 @@ CORE_FILES = (
     "yeto/rl/critic_warmup.py", "yeto/rl/teacher_forcing.py", "yeto/rl/grad_audit.py",
     # harness test workload (audit R14)
     "yeto/rl/tool_wait_workload.py",
+    # S27 G-FG: Megatron masters and the HF-named boundary (they act on the objects
+    # the backend hands them; no framework import)
+    "yeto/rl/megatron_masters.py", "yeto/rl/megatron_hf_boundary.py",
 )
 # Backend adapters: name -> directory.  Each must not import the others.
 ADAPTER_DIRS = {"miles": ("yeto/rl/adapters/miles",),

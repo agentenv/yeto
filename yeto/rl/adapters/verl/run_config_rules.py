@@ -28,7 +28,8 @@ def check_trainer_parallel(actor_gpus: int, tensor_parallel: int, pipeline_paral
 # S26 E7 had refused EP > 1 (no verl Megatron engine in this adapter). S27 G-DC
 # wires the Megatron engine island (megatron_engine): EP > 1 trains there.
 EP_NEEDS_MEGATRON = ("verl 后端的专家并行（EP>1）只在 Megatron 引擎岛上（megatron_engine）："
-                     "要求全参数、--rl-single-island-no-sync、--rl-placement fixed-partition")
+                     "要求全参数、--rl-single-island-no-sync 或 --rl-sync-preset full-parameter、"
+                     "--rl-placement fixed-partition")
 
 
 def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
@@ -43,12 +44,24 @@ def check_global_batch(global_batch: int, data_parallel: int) -> None:
 
 def megatron_problems(args) -> list[str]:
     """Why a run with TP/PP/EP > 1 cannot run on the verl Megatron island ([] when it can);
-    the island refuses the same combinations at start (``island_entry.megatron_island_plan``)."""
+    the island refuses the same combinations at start (``island_entry.megatron_island_plan``).
+
+    S27 G-FG: one island without an outer sync (``--rl-single-island-no-sync``), or
+    islands in a full-parameter session (``--rl-sync-preset full-parameter``,
+    ``megatron_engine.sync_problems``)."""
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SYNC_PRESET_ALIASES
+
+    from .megatron_engine import sync_problems
+
     problems = []
-    if getattr(args, "tuning", "lora") != "full":
-        problems.append("--tuning full")
-    if not getattr(args, "rl_single_island_no_sync", False):
-        problems.append("--rl-single-island-no-sync")
+    if getattr(args, "rl_single_island_no_sync", False):
+        if getattr(args, "tuning", "lora") != "full":
+            problems.append("--tuning full")
+    else:  # the full-parameter preset trains every parameter whatever --tuning says
+        preset = getattr(args, "rl_sync_preset", None)
+        if SYNC_PRESET_ALIASES.get(preset, preset) != FULL_PARAMETER_SYNC_PRESET:
+            problems.append("--rl-single-island-no-sync with --tuning full, or --rl-sync-preset full-parameter")
+        problems += sync_problems(args)
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition")
     if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0 and not int(getattr(args, "rl_rollout_ahead", 0) or 0):

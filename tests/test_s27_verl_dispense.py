@@ -102,11 +102,12 @@ def test_the_verl_island_refuses_the_dispenser_where_it_does_not_belong():
     base = dict(rl_data_dispense=True, syncer="10.0.0.1:7000", rl_single_island_no_sync=False,
                 rl_data_slot=None, rl_data_position_store=None)
     assert vd.island_dispense(SimpleNamespace(**base)) is True
+    assert vd.island_dispense(SimpleNamespace(**base), engine="megatron") is True  # S27 G-FG: a synced Megatron island
     assert vd.island_dispense(SimpleNamespace(**{**base, "rl_data_dispense": False})) is False
     refused = {
         "--rl-data-slot": (dict(rl_data_slot="0/2"), {}),
         "no syncer": (dict(rl_single_island_no_sync=True, syncer=None), {}),
-        "megatron island": ({}, dict(engine="megatron")),
+        "unknown island": ({}, dict(engine="unknown")),
         "fully_async": (dict(rl_max_policy_age=1), {}),
         "buffer trainer": ({}, dict(buffer_trainer=True)),
         "--rl-data-position-store": (dict(rl_data_position_store="/store"), {}),

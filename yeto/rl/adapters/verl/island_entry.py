@@ -490,7 +490,8 @@ def main(argv=None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     full_plan: dict = {}
-    if full and megatron is None:  # S27 B10: model identity, and the outer full-parameter sync when synced
+    if full and (megatron is None or sync != "none"):  # S27 B10: model identity, and the outer
+        # full-parameter sync when synced (S27 G-FG: a synced Megatron island too)
         from yeto.rl.engine.algorithm import AlgorithmSpec
 
         from .full_parameter_stream import plan_section
@@ -724,7 +725,8 @@ def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
 def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
                          chat: dict, ray_info: dict, reward_path: str, reward_name: str) -> dict:
     """S27 G-DC: the Megatron island (``megatron_engine``): full parameters, trainer and
-    rollout pools apart, age 0, no outer sync. Returns run, overrides and the plan
+    rollout pools apart, age 0, no outer sync (S27 G-FG: or the full-parameter
+    outer sync, ``megatron_engine.sync_problems``). Returns run, overrides and the plan
     sections ``megatron`` (the shape) and ``hf_exports``; every flag the island cannot
     honour is refused here, before verl starts."""
     from .megatron_engine import MegatronShape, build_overrides
@@ -732,15 +734,16 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     problems = []
     if (args.parameter_mode or "lora") != "full":
         problems.append("--tuning full (parameter mode full)")
-    if not args.rl_single_island_no_sync:
-        problems.append("--rl-single-island-no-sync (outer sync is not wired)")
+    synced = not args.rl_single_island_no_sync  # S27 G-FG: the full-parameter outer sync
+    if synced:
+        problems += megatron_engine.sync_problems(args)
     if (args.rl_placement or "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
     if int(args.rl_max_policy_age or 0) != 0 and not int(args.rl_rollout_ahead or 0):
         problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the fully_async path is not wired)")
     if args.rl_sample_role or args.rl_rollout_quant_tier:
         problems.append("no --rl-sample-role / --rl-rollout-quant-tier")
-    if args.rl_data_slot:
+    if args.rl_data_slot and not synced:
         problems.append("no --rl-data-slot (one island)")
     if problems:
         raise SystemExit("verl Megatron 岛需要：" + "; ".join(problems))

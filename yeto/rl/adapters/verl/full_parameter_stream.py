@@ -471,8 +471,8 @@ class VerlFullParameterGroup:
         wall seconds (``call_s``) and the copy out of Ray's store (``own_s``)."""
 
         started = time.perf_counter()
-        results = await asyncio.to_thread(self.island.call_workers, fp.remote_export_flat,
-                                          [tuple(unit) for unit in units], int(numel), bool(payload), bool(sha256))
+        results = await asyncio.to_thread(self._export_on_workers, [tuple(unit) for unit in units], int(numel),
+                                          bool(payload), bool(sha256))
         call_s = time.perf_counter() - started
         readers = [result for result in results if "finite" in result]
         if len(readers) != 1:
@@ -494,7 +494,15 @@ class VerlFullParameterGroup:
         numpy arrays, which Ray stores without torch pickling)."""
 
         arrays = {name: tensor.contiguous().numpy() for name, tensor in tensors.items()}
-        return await asyncio.to_thread(self.island.call_workers_shared, fp.remote_apply_fragment, arrays, False)
+        return await asyncio.to_thread(self._apply_on_workers, arrays)
+
+    # The worker calls of a fragment read and an apply (S27 G-FG: the Megatron
+    # engine island's group, .megatron_full_parameter, replaces these two).
+    def _export_on_workers(self, units: list, numel: int, payload: bool, sha256: bool) -> list[dict]:
+        return self.island.call_workers(fp.remote_export_flat, units, numel, payload, sha256)
+
+    def _apply_on_workers(self, arrays: Mapping[str, Any]) -> list[dict]:
+        return self.island.call_workers_shared(fp.remote_apply_fragment, arrays, False)
 
     async def receipt(self, rollout_id: int) -> LocalStepReceipt:
         receipt = self.receipts.get(rollout_id)
@@ -1079,7 +1087,8 @@ def build_full_parameter_sync(island: Any, plan: Mapping[str, Any], *, backend_i
     return sync, FullParameterPolicyState(sync), stream
 
 
-def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str):
+def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str,
+                          group: VerlFullParameterGroup | None = None):
     """``(sync, policy state)`` of a full-parameter verl island (S27 B10), for every
     trainer that holds the FSDP2 actor workers behind ``island.call_workers``: the
     synchronous trainer (``trainer._full_parameter_ports``) and the fully_async and
@@ -1089,11 +1098,15 @@ def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_ident
     outer sync (``plan["full_parameter"]``): the engine-neutral ``FullParameterSync``
     over the verl role stream. Without one (``plan["sync"] == "none"``): the
     local-only sync over :class:`VerlFullParameterLocalState`, whose layout hash
-    becomes ``island.layout_hash``."""
+    becomes ``island.layout_hash``.
+
+    ``group`` (S27 G-FG): the trainer group to read and write through; the
+    Megatron engine island passes its own (``.megatron_full_parameter``), the
+    FSDP2 islands keep the default :class:`VerlFullParameterGroup`."""
     from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.local_learner import ComponentIdentity
 
-    island.full_group = VerlFullParameterGroup(island)
+    island.full_group = group if group is not None else VerlFullParameterGroup(island)
     if plan["sync"] == "none":
         component = ComponentIdentity(role="actor", model_revision=plan["model_revision"].lower(),
                                       config_hash=plan["model_config_sha256"])

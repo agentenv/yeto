@@ -67,6 +67,15 @@ FULL_PARAMETER_PLACEMENTS = ("colocated", "fixed-partition")
 # S27 G-ED: the verl stream recovers from a peer (adapters/verl/peer_recovery.py),
 # so the async mode turns it on by default as on Miles (rl_args._peer_recovery_applies).
 FULL_PARAMETER_PEER_RECOVERY = True
+
+
+def full_parameter_peer_recovery(args) -> bool:
+    """S27 G-FG: whether the async mode's default peer recovery applies to this run:
+    not on the Megatron engine island, whose donor has no FSDP2 rank files
+    (``megatron_engine.sync_problems``); it rejoins by catch-up."""
+    from .run_config_rules import megatron_run
+
+    return not megatron_run(args)
 FULL_PARAMETER_PLAN_COMMAND = (
     "python -m yeto.rl.adapters.verl.full_parameter_plan --model <M> --model-revision <R> "
     "--fragments <P> --matrix-merge <avg|rda>")

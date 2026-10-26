@@ -194,7 +194,9 @@ def test_island_plan_with_the_hf_export(tmp_path):
 
 @pytest.mark.parametrize("change,match", [
     (dict(parameter_mode="lora"), "--tuning full"),
-    (dict(rl_single_island_no_sync=False), "--rl-single-island-no-sync"),
+    # S27 G-FG: a synced Megatron island is allowed; what its outer sync cannot run is refused
+    (dict(rl_single_island_no_sync=False, pipeline_parallel=2), "--pipeline-parallel 1"),
+    (dict(rl_single_island_no_sync=False, rl_peer_recovery_store="modal-volume://v/p"), "no peer recovery"),
     (dict(rl_placement="colocated"), "fixed-partition"),
     (dict(rl_max_policy_age=1), "--rl-max-policy-age 0"),
     (dict(rl_sample_role="trainer"), "--rl-sample-role"),

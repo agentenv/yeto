@@ -569,6 +569,9 @@ def _peer_recovery_applies(args) -> bool:
     backend = _full_parameter_backend(args)
     if backend is not None and not getattr(backend, "FULL_PARAMETER_PEER_RECOVERY", True):
         return False  # S27 G-DN: the backend's stream has no peer recovery (verl)
+    applies = getattr(backend, "full_parameter_peer_recovery", None)
+    if callable(applies) and not applies(args):
+        return False  # S27 G-FG: not for this run's engine (verl Megatron islands rejoin by catch-up)
     from .peer_recovery import snapshot_store_path
 
     return snapshot_store_path(args) is not None
