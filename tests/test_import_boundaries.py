@@ -64,8 +64,9 @@ CORE_FILES = (
     # the backend hands them; no framework import)
     "yeto/rl/megatron_masters.py", "yeto/rl/megatron_hf_boundary.py",
     # S27 G-FL: the Ascend recipe's plugin table (imports the user's plugin files by
-    # path at install time; no framework import of its own)
-    "yeto/rl/ascend_plugin_stack.py",
+    # path at install time; no framework import of its own) and Megatron's gradient
+    # check (reads attributes off the DDP config the backend hands it)
+    "yeto/rl/ascend_plugin_stack.py", "yeto/rl/megatron_grad_checks.py",
 )
 # Backend adapters: name -> directory.  Each must not import the others.
 ADAPTER_DIRS = {"miles": ("yeto/rl/adapters/miles",),

@@ -107,6 +107,21 @@ def remote_megatron_layout(worker_dict) -> list[list]:
     return [[key, list(param.shape), str(param.dtype)] for key, param in owned_parameters(_chunks(worker), coords)]
 
 
+def remote_megatron_grad_checks(worker_dict) -> dict:
+    """S27 G-FL: the gradient checks this rank's DDP wrappers actually carry.
+
+    Read off ``DistributedDataParallelConfig`` after verl built the model, so an
+    override Hydra dropped cannot pass unnoticed
+    (:mod:`yeto.rl.megatron_grad_checks`)."""
+    import torch.distributed as dist
+
+    from yeto.rl import megatron_grad_checks
+
+    record = megatron_grad_checks.report(_chunks(_inner_worker(worker_dict)))
+    record["rank"] = int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0
+    return record
+
+
 def remote_ascend_plugin_report(worker_dict) -> dict:
     """S27 G-FL: what the Ascend plugin stack installed in this worker process.
 
@@ -415,6 +430,22 @@ def driver_options(plan: dict, spec, fingerprint: str) -> dict:
             "profile": _execution_profile(spec, plan), "layout": LAYOUT_FRAGMENTS}
 
 
+def _check_grad_checks(trainer, shape: dict, tape) -> None:
+    """S27 G-FL: every trainer rank must carry the gradient check the plan asked for.
+
+    The check turns a non-finite gradient into a RuntimeError instead of letting
+    ``clip_grads`` scale it into every parameter; a run that wants the old behaviour
+    says so with ``--rl-no-grad-nan-check``."""
+    from yeto.rl import megatron_grad_checks
+
+    wanted = bool(shape.get("grad_nan_check", True))
+    reports = call_workers(trainer, remote_megatron_grad_checks)
+    tape.append({"event": "rl_megatron_grad_checks", "wanted": wanted, "ranks": reports})
+    print(f"[yeto-verl] gradient NaN check wanted={wanted} ranks="
+          f"{[ (r.get('rank'), r.get('check_for_nan_in_grad')) for r in reports ]}", flush=True)
+    megatron_grad_checks.check_reports(reports, wanted=wanted)
+
+
 def _log_ascend_plugin_stack(trainer, section: dict, tape) -> None:
     """S27 G-FL: print what every trainer worker installed, and put it on the tape.
 
@@ -505,6 +536,7 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         thresholds_key=plan["thresholds_key"], emit=lambda event, **f: tape.append({"event": event, **f}))
     sync, policy_state = sync_ports(island, plan, identity_sha)
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    _check_grad_checks(trainer, shape, tape)  # S27 G-FL: refuses a trainer without the NaN check
     if plan.get("ascend_plugin_stack"):  # S27 G-FL: one line per switch and per plugin
         _log_ascend_plugin_stack(trainer, plan["ascend_plugin_stack"], tape)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "engine": "megatron",

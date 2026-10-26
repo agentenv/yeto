@@ -136,6 +136,8 @@ def parse_args(argv):
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
     # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
     p.add_argument("--rl-ascend-plugin-stack", default=None)
+    # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
+    p.add_argument("--rl-no-grad-nan-check", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)
@@ -767,7 +769,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
         gpu_memory_utilization=pools.gpu_memory_utilization,
-        num_experts=int(num_experts) if num_experts else None)
+        num_experts=int(num_experts) if num_experts else None,
+        grad_nan_check=not args.rl_no_grad_nan_check)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,

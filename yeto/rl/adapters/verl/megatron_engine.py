@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from yeto.rl import megatron_grad_checks as grad_checks
+
 from . import config as vconf
 from . import separate
 from .separate import TRAINER_MODE  # noqa: F401 - re-exported (S27 G-EK: separate mode moved to .separate)
@@ -103,6 +105,9 @@ class MegatronShape:
     rollout_engine: str = "vllm"
     gpu_memory_utilization: float = 0.8
     num_experts: int | None = None
+    # S27 G-FL: Megatron's per-bucket non-finite gradient check
+    # (yeto.rl.megatron_grad_checks); off only through --rl-no-grad-nan-check
+    grad_nan_check: bool = True
 
     @property
     def trainer_gpus(self) -> int:
@@ -234,6 +239,11 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         f"{tcfg}.moe_router_bias_update_rate=0.0",
         f"{tcfg}.moe_aux_loss_coeff=0.0",
     ]
+    # S27 G-FL: verl's DDP config leaves check_for_nan_in_grad at Megatron's False, and
+    # with it off a NaN gradient is scaled into every parameter instead of raising
+    # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.
+    for field, value in grad_checks.ddp_overrides(check_for_nan_in_grad=shape.grad_nan_check).items():
+        out.append(f"++{meg}.override_ddp_config.{field}={value}")
     if shape.router_replay == "R3":
         # R3 replays the experts vLLM routed (``enable_return_routed_experts``)
         out.append("actor_rollout_ref.rollout.enable_rollout_routing_replay=True")

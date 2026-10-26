@@ -522,6 +522,14 @@ _PLACEMENT = (
 )
 
 _RUNTIME = (
+    # S27 G-FL: islands with model parallelism check every gradient bucket for
+    # non-finite values by default (the trainer's own bucket check); this turns it off.
+    shared_flag("--rl-no-grad-nan-check", action="store_true", default=False,
+                help="island with model parallelism (TP/PP/EP > 1): do NOT check each gradient "
+                "bucket for non-finite values before the data-parallel collective. The check is "
+                "on by default because without it a NaN gradient is scaled into every parameter "
+                "and written into the weights with no error; turning it off buys back one L2 norm "
+                "per bucket per step and restores that silent-corruption path"),
     # S27 G-FL: the Ascend SFT recipe's plugin stack, opt-in and off by default
     # (yeto.rl.ascend_plugin_stack). Only an island with model parallelism honours it.
     shared_flag("--rl-ascend-plugin-stack", default=None, metavar="ISLAND_DIR",

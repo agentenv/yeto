@@ -185,6 +185,57 @@ def test_island_plan_of_the_d0_flags(tmp_path):
     assert _value(plan["overrides"], "data.apply_chat_template_kwargs.enable_thinking") == "False"
 
 
+def test_the_gradient_nan_check_is_on_by_default_and_can_be_turned_off(tmp_path):
+    """S27 G-FL: verl's DDP config leaves Megatron's check_for_nan_in_grad at False, and
+    with it off a NaN gradient is scaled into every parameter by clip_grads instead of
+    raising. The island asks for it through override_ddp_config unless told not to."""
+    from yeto.rl import megatron_grad_checks
+
+    assert megatron_grad_checks.CHECK_FOR_NAN_IN_GRAD is True
+    assert megatron_grad_checks.ddp_overrides() == {"check_for_nan_in_grad": True}
+    assert megatron_grad_checks.ddp_overrides(check_for_nan_in_grad=False) == {}
+
+    key = "++actor_rollout_ref.actor.megatron.override_ddp_config.check_for_nan_in_grad"
+    plan = _plan(tmp_path)
+    assert plan["shape"]["grad_nan_check"] is True
+    assert f"{key}=True" in plan["overrides"]
+    off = _plan(tmp_path, extra=["--rl-no-grad-nan-check"])
+    assert off["shape"]["grad_nan_check"] is False
+    assert not [o for o in off["overrides"] if o.startswith(key)]
+    # large-grad checking stays off: its rejection is a warning, not a guard
+    assert not [o for o in plan["overrides"] if "check_for_large_grads" in o]
+
+
+def test_the_island_refuses_a_trainer_without_the_gradient_nan_check():
+    """S27 G-FL: the flag is read back off the DDP wrappers, so an override Hydra
+    dropped fails at island start instead of running unguarded."""
+    from types import SimpleNamespace
+
+    from yeto.rl import megatron_grad_checks as gc
+
+    class _Chunk:  # a Megatron DDP wrapper over an inner module
+        def __init__(self, flag):
+            self.ddp_config = SimpleNamespace(check_for_nan_in_grad=flag, check_for_large_grads=False)
+
+    on = gc.report([_Chunk(True), _Chunk(True)])
+    assert on == {"chunks": 2, "wrapped": 2, "check_for_nan_in_grad": True, "check_for_large_grads": False}
+    off = gc.report([_Chunk(True), _Chunk(False)])
+    assert off["check_for_nan_in_grad"] is False
+    # a chunk that is not DDP-wrapped at all (forward_only engines)
+    bare = gc.report([SimpleNamespace(module=SimpleNamespace())])
+    assert bare == {"chunks": 1, "wrapped": 0, "check_for_nan_in_grad": False, "check_for_large_grads": False}
+    # nested one level down (DDP under another wrapper)
+    nested = gc.report([SimpleNamespace(module=_Chunk(True))])
+    assert nested["wrapped"] == 1 and nested["check_for_nan_in_grad"] is True
+
+    gc.check_reports([{**on, "rank": 0}], wanted=True)  # does not raise
+    gc.check_reports([{**off, "rank": 1}], wanted=False)  # the run asked for no check
+    with pytest.raises(gc.MegatronGradCheckError, match="without check_for_nan_in_grad on rank"):
+        gc.check_reports([{**on, "rank": 0}, {**off, "rank": 1}], wanted=True)
+    with pytest.raises(gc.MegatronGradCheckError, match="no Megatron DDP config"):
+        gc.check_reports([{**bare, "rank": 0}], wanted=True)
+
+
 def test_the_ascend_plugin_stack_is_off_unless_the_flag_asks_for_it(tmp_path):
     """S27 G-FL: no flag, no section; with the flag the plan carries the switches, the
     plugin order and the reasons, and never the clamp rewrite."""
