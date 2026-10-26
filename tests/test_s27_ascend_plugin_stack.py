@@ -407,3 +407,49 @@ def test_only_the_documented_values_turn_the_switch_off(monkeypatch):
     for value in ("1", "true", "", "yes", "nope"):
         assert stack.set_device_is_allowed({stack.SET_DEVICE_ENV: value}) is True
     assert stack.set_device_is_allowed({}) is True
+
+
+def _three_plugins(directory: Path) -> list[str]:
+    names = ["a_one.py", "b_two.py", "c_three.py"]
+    for name in names:
+        (directory / name).write_text("value = 1\n")
+    return names
+
+
+def test_only_imports_the_plugins_it_names(tmp_path, monkeypatch):
+    """The bisect knob: ONLY narrows the import list and keeps the recipe's order."""
+    names = _three_plugins(tmp_path)
+    monkeypatch.setattr(stack, "PLUGINS", tuple(names))
+    monkeypatch.setenv(stack.ONLY_ENV, "c_three.py, a_one.py")
+    report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
+    assert report["installed"] == ["a_one.py", "c_three.py"]
+    assert [row["plugin"] for row in report["plugins"]] == ["a_one.py", "c_three.py"]
+
+
+def test_skip_leaves_out_the_plugins_it_names(tmp_path, monkeypatch):
+    names = _three_plugins(tmp_path)
+    monkeypatch.setattr(stack, "PLUGINS", tuple(names))
+    monkeypatch.setenv(stack.SKIP_ENV, "b_two.py")
+    report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
+    assert report["installed"] == ["a_one.py", "c_three.py"]
+
+
+def test_only_wins_over_skip_and_an_unknown_name_is_reported(tmp_path, monkeypatch):
+    """A typo during a bisect must not read as 'that plugin is innocent'."""
+    names = _three_plugins(tmp_path)
+    monkeypatch.setattr(stack, "PLUGINS", tuple(names))
+    monkeypatch.setenv(stack.ONLY_ENV, "a_one.py,typo.py")
+    monkeypatch.setenv(stack.SKIP_ENV, "a_one.py")
+    lines: list[str] = []
+    report = stack.install(str(tmp_path), environ={}, log=lines.append)
+    assert report["installed"] == ["a_one.py"]
+    assert f"{stack.ONLY_ENV} names typo.py, which is not in this list" in "\n".join(lines)
+
+
+def test_neither_name_set_imports_the_whole_list(tmp_path, monkeypatch):
+    names = _three_plugins(tmp_path)
+    monkeypatch.setattr(stack, "PLUGINS", tuple(names))
+    monkeypatch.delenv(stack.ONLY_ENV, raising=False)
+    monkeypatch.delenv(stack.SKIP_ENV, raising=False)
+    report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
+    assert report["installed"] == names

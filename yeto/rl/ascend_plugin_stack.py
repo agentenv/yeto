@@ -90,6 +90,15 @@ VERL_WORKER = ("verl.single_controller.base.worker", "Worker")
 # Default ``1`` keeps the delivery's own behaviour.
 SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 
+# Two names that narrow the list of plugins this process imports, so a failing island
+# can be bisected without editing the delivery or this table (S28 G-PIN: the island
+# dies at 507033 with the stack on and builds its model with the stack off, and the
+# cause is not the plugins' own set_device call). Both take a comma separated list of
+# file names. ONLY wins when both are set, and an unknown name is reported, not
+# silently ignored. Neither is set by the island: they are for a human bisect.
+ONLY_ENV = "YETO_ASCEND_STACK_ONLY"
+SKIP_ENV = "YETO_ASCEND_STACK_SKIP"
+
 # The rewrite items the recipe enables in the Mamba2 SSD stack. ``clamp`` is not one
 # of them and must never be added, and this entry must stay in RECIPE_ENV: the
 # delivery's default (kern-stack/mamba2_stack.py:87) is "cumsum,squeeze,clamp", so
@@ -238,6 +247,32 @@ def _import_file(name: str, path: str) -> None:
 LAST_REPORT: dict[str, Any] | None = None
 
 
+def _narrow(wanted: list[str], say) -> list[str]:
+    """Apply :data:`ONLY_ENV` / :data:`SKIP_ENV` to the list of plugins to import.
+
+    A name in either list that is not in :data:`PLUGINS` is reported on its own line:
+    during a bisect a silently ignored typo would read as "this plugin is innocent"."""
+
+    def names(variable: str) -> list[str]:
+        return [part.strip() for part in os.environ.get(variable, "").split(",") if part.strip()]
+
+    only, skip = names(ONLY_ENV), names(SKIP_ENV)
+    for variable, chosen in ((ONLY_ENV, only), (SKIP_ENV, skip)):
+        for name in chosen:
+            if name not in wanted:
+                say(f"[yeto-ascend-stack] {variable} names {name}, which is not in this list")
+    if only:
+        narrowed = [name for name in wanted if name in only]
+        say(f"[yeto-ascend-stack] {ONLY_ENV}: importing {len(narrowed)} of {len(wanted)} plugin(s): "
+            f"{narrowed}")
+        return narrowed
+    if skip:
+        narrowed = [name for name in wanted if name not in skip]
+        say(f"[yeto-ascend-stack] {SKIP_ENV}: leaving out {sorted(set(wanted) - set(narrowed))}")
+        return narrowed
+    return wanted
+
+
 def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | None = None,
             plugins: Sequence[str] | None = None, log=None) -> dict[str, Any]:
     """Set the recipe's switches in ``environ`` and import the plugin files.
@@ -267,6 +302,7 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
     for name, reason in sorted(report["excluded"].items()):
         say(f"[yeto-ascend-stack]   excluded {name}: {reason}")
     wanted = list(PLUGINS if plugins is None else plugins)
+    wanted = _narrow(wanted, say)
     rows: list[dict[str, Any]] = []
     for name in wanted:
         path = os.path.join(report["root"], name)
