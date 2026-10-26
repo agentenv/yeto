@@ -233,7 +233,8 @@ class FakeBufferActor:
         return [{"applied": len(tensors)}]
 
 
-def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None):
+def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None, limit=1,
+             releases=None, resume_versions=False):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -242,7 +243,8 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None)
     from yeto.rl.engine.driver import EventTape, IslandDriver
 
     specs = (CanonicalTensorSpec(NAMES[0], (2, 4), "float32", 8), CanonicalTensorSpec(NAMES[1], (4, 2), "float32", 8))
-    island = FullyAsyncIsland(actor, learner_id=0, limit=1, required=required, out_dir=str(tmp_path / "out"),
+    island = FullyAsyncIsland(actor, learner_id=0, limit=limit, required=required,
+                              out_dir=str(tmp_path / "out"),
                               readback_dir=str(tmp_path / "rb"), base_model_revision="a" * 40,
                               lora_config_hash="b" * 64, layout_hash=canonical_layout_hash(specs),
                               expected_specs=specs)
@@ -253,14 +255,15 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None)
         buffer = FileSampleBuffer(store, batch_size=1, create_index=False)
     rollout, publisher, placement = install_buffer_ports(
         island, buffer=buffer,
-        releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
-        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30)
+        releases=releases or PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
+        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, resume_versions=resume_versions)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
     driver = IslandDriver(
         learner_id=0, rollout=rollout, trainer=FullyAsyncTrainerGroup(island), policy_state=VerlPolicyState(island),
         publisher=publisher, placement=placement,
         capabilities=verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1),
         algorithm=TOLERANT, sync=LocalOnlySync(rounds), events=tape, profile=profile)
+    publisher.bind(driver)  # as trainer.run_fully_async_island does for a buffer trainer
     return driver, island, publisher
 
 
@@ -319,6 +322,102 @@ def test_sampler_island_and_verl_buffer_trainer_run_three_rounds(tmp_path):
     rounds = [e for e in events if e["event"] == "rl_verl_fa_round"]
     assert sum(e["kept"] for e in rounds) == 6
     assert sum(e["pulled"] for e in rounds) == len(consumed)
+
+
+def _released(releases, version):
+    """One release of an earlier process of the island, with a hash-shaped policy hash."""
+    releases.release(version, f"{version:064d}", lambda d: (d / "w.bin").write_text(str(version)))
+
+
+def test_a_relaunched_buffer_trainer_trains_the_groups_of_the_releases_it_finds(tmp_path):
+    """S27 G-EQ5 (gap 22): the version account continues above the store's releases.
+
+    An earlier process released v1, v2 and v3; the samplers then wrote groups with
+    v1, v2 and v3. This process must start at v3, train the groups inside the
+    policy-age window (v3 and v2), discard v1 as over-age (not as unknown), and
+    release v4 -- never v3 again."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store, keep=4)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    for version in (1, 2, 3):
+        _released(releases, version)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i, version in enumerate((1, 2, 3)):  # oldest first: all three are judged this round
+        writer.write([_sample(version, index=0), _sample(version, index=1)], group_key=f"g{i}")
+    actor = FakeBufferActor()
+    driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=1, required=2, base=base,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                          releases=releases, resume_versions=True)
+    state = driver.run()
+
+    assert driver.rounds_completed == 1 and state.policy_version == 4  # one round from v3
+    events = {e["event"]: e for e in _lines(tmp_path / "tape.jsonl")}
+    assert {k: events["rl_buffer_resume_versions"][k] for k in
+            ("base_version", "start_version", "known_versions", "restored_versions")} == {
+        "base_version": 3, "start_version": 3, "known_versions": [1, 2, 3], "restored_versions": [2]}
+    # the driver restored the publication of v2 (v3 is published again by this process)
+    assert events["rl_published_policies_restored"]["versions"] == [2]
+    # the first publication is v3, which the store already holds: nothing is released
+    assert events["rl_policy_release_skipped"]["reason"] == "resumed_base_version"
+    consumed = _lines(tmp_path / "out" / CONSUMED_LOG.format(learner=0))
+    assert [(r["position"], r["behavior_versions"], r["param_versions"], r["kept"]) for r in consumed] == [
+        (0, [1, 1], [1, 1], False),   # age 2 > max_policy_age 1
+        (1, [2, 2], [2, 2], True),    # age 1
+        (2, [3, 3], [3, 3], True)]    # age 0
+    rounds = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_verl_fa_round"]
+    assert [(e["rollout_id"], e["kept"], e["discarded"]) for e in rounds] == [(3, 2, 1)]
+    carry = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_rollout_carry_over"]
+    assert carry[0]["over_age_discarded_groups"] == 1 and carry[0]["unknown_version_discarded_groups"] == 0
+    assert carry[0]["discard_reasons"] == ["policy age 2 exceeds max_policy_age=1"]
+    # the group of v2 kept the label of the release that generated it, and the driver took it
+    policies = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_group_policies"][0]
+    assert sorted(g[1] for g in policies["groups"]) == [f"yeto:2:{2:064d}",
+                                                        f"yeto:3:{island.hashes[3]}"]
+    # the round's release is v4: the version numbers of the store stay distinct
+    release_log = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    assert [(r["policy_version"], r["released"]) for r in release_log] == [(3, False), (4, True)]
+    assert releases.latest().version == 4
+    assert island.vmap.to_dict() == {"0": 3, "1": 4}  # verl's param versions still start at 0
+    assert island.consume_map.to_dict() == {"1": 1, "2": 2, "3": 3, "4": 4}
+
+
+def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):
+    """S27 G-EQ5: a run that starts here is unchanged (the account begins at v0)."""
+    from yeto.rl.engine.merged_release import resumed_releases
+
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    assert resumed_releases(releases, 1) is None
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="g0")
+    actor = FakeBufferActor()
+    driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=1, required=1, base=base,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                          releases=releases, resume_versions=True)
+    state = driver.run()
+    assert state.policy_version == 1 and driver.rounds_completed == 1
+    events = [e["event"] for e in _lines(tmp_path / "tape.jsonl")]
+    assert "rl_buffer_resume_versions" not in events and "rl_published_policies_restored" not in events
+    # v0 is the base (nothing released), v1 is released, as without a store history
+    assert [(r["policy_version"], r["released"]) for r in
+            _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))] == [(0, False), (1, True)]
+    assert island.consume_map.to_dict() == {"0": 0, "1": 1}
+
+
+def test_a_synced_buffer_trainer_refuses_a_resumed_version_account(tmp_path):
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
+    from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+
+    store = CheckpointStore(tmp_path / "store")
+    island = FullyAsyncIsland(FakeBufferActor(), learner_id=0, limit=1, required=1,
+                              out_dir=str(tmp_path / "out"), readback_dir=str(tmp_path / "rb"))
+    buffer = FileSampleBuffer(store, batch_size=1, lane=BufferLane(0, 2))
+    with pytest.raises(ValueError, match="come from the syncer"):
+        install_buffer_ports(island, buffer=buffer, releases=PolicyReleaseStore(store), shape=SHAPE,
+                             base_dir=tmp_path, cursor_log=lane_cursor_log(buffer), resume_versions=True)
 
 
 def test_publisher_releases_the_base_when_its_adapter_is_not_zero(tmp_path):

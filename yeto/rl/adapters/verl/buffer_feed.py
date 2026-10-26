@@ -16,9 +16,14 @@ data, without verl or Ray:
 
 * ``pull``: the next buffer entry (one GRPO group), waiting up to ``wait_s`` for
   the sampler; its :class:`~.fully_async_round.SampleMeta` with every response's
-  behavior version translated to verl's ``param_version`` through the island's
-  :class:`~.fully_async_translate.VersionMap` (a version the trainer never
-  published here maps to None: the collector discards the group as unknown);
+  behavior version put through the island's consumption map
+  (``FullyAsyncIsland.consume_map``, a :class:`~.fully_async_translate.VersionMap`
+  pairing the outer version with itself on this path: a buffered group's behavior
+  version is a store release version, which is an outer version, not a verl
+  ``param_version``). A version that map does not hold becomes None and the
+  collector discards the group as unknown; at a relaunch the map is seeded from
+  the store's release records, so the versions an earlier process published are
+  known (S27 G-EQ5, ``buffer_ports`` module doc, "relaunch");
 * ``keep``: the group's padded rows (:func:`group_rows`) go to the trainer actor
   (``add_group``), which wraps them as a verl ``RolloutSample``;
 * ``drop``: nothing reaches the actor; the group stays consumed.
@@ -223,8 +228,9 @@ class BufferFeed:
     """The rollout port's queue calls over the sample buffer (module doc).
 
     ``buffer``: the trainer's ``FileSampleBuffer``; ``vmap``: returns the
-    island's live version map; ``add_group(rows)``: hands kept rows to the
-    trainer actor; ``record(fields)``: one record per pulled group."""
+    island's live consumption map (module doc, ``pull``); ``add_group(rows)``:
+    hands kept rows to the trainer actor; ``record(fields)``: one record per
+    pulled group."""
 
     def __init__(self, buffer: Any, *, vmap: Callable[[], VersionMap], shape: RowShape,
                  add_group: Callable[[dict[str, Any]], Any], record: Callable[[dict[str, Any]], None],

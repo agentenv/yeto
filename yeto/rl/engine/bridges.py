@@ -173,10 +173,28 @@ class LocalOnlySync(RoundCutHooks):
         # rl-trainer-start-stop D3: trigger of the final cut (None = MANUAL); the
         # trainer lifecycle sets SCHEDULED for a stop the trainer scheduler ordered.
         self.final_trigger: str | None = None
+        # S27 G-EQ5 (gap 22): the version the island's account continues at
+        # (:meth:`resume_at`); 0 = this process starts the account at v0.
+        self.resumed_at = 0
+
+    def resume_at(self, version: int) -> None:
+        """S27 G-EQ5 (gap 22): continue the version account at ``version`` K instead
+        of at 0, for a buffer trainer that found releases up to vK in its store
+        (``merged_release.ResumedReleases``): its first publication is vK, its rounds
+        are K, K+1, ..., and ``num_rollout`` stays the rounds *this process* runs,
+        counted from K.
+
+        Refused with a round-cut resume, which brings its own start round."""
+        if int(version) < 0:
+            raise ValueError(f"the version account cannot start below 0, got {version!r}")
+        if self.round_cuts is not None:
+            raise ValueError("a resumed version account and a round-cut resume both set the "
+                             "start round; this island has round cuts configured")
+        self.resumed_at = int(version)
 
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
-        rollout_id = 0 if resumed is None else int(resumed["next_rollout_id"])
+        rollout_id = self.resumed_at if resumed is None else int(resumed["next_rollout_id"])
         return SyncStart(_local_state(driver, rollout_id), rollout_id,
                          finished=rollout_id >= self._end())
 
@@ -187,13 +205,14 @@ class LocalOnlySync(RoundCutHooks):
         return None if cursor is None else dict(cursor)
 
     def _end(self) -> int:
-        return self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
+        end = self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
+        return end + self.resumed_at  # the rounds of this process, counted from the start version
 
     def _cut_final(self, rollout_id: int) -> bool:
         return rollout_id >= self._end()
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
-        return rollout_id + 1 >= self.num_rollout
+        return rollout_id + 1 >= self.num_rollout + self.resumed_at
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
         check = getattr(self.round_cuts, "check_first_round", None)

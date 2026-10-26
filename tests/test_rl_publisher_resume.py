@@ -4,17 +4,26 @@
   the restart restores no data cursor;
 * it learns the versions an earlier publisher process released (the store's
   policy releases), so groups generated with them pass the policy-age check.
+
+S27 G-EQ5 (gap 22) adds the same for a buffer trainer that counts its versions
+itself (no syncer): :class:`~yeto.rl.engine.merged_release.ResumedReleases`
+continues the version account above the store's releases, and
+:meth:`~yeto.rl.engine.bridges.LocalOnlySync.resume_at` starts its rounds there.
+The verl island end to end is in test_rl_verl_buffer_trainer.py.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.miles import sampler_island as si
 from yeto.rl.engine import sample_roles
+from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import IslandDriver
-from yeto.rl.engine.merged_release import BufferLane
+from yeto.rl.engine.merged_release import BufferLane, ResumedReleases, resumed_releases
 from yeto.rl.engine.policy_age import check_batch_ages
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.policy_versions import PublishedPolicies
@@ -92,3 +101,58 @@ def test_wiring_a_synced_trainer_sets_the_lane_owner_and_the_release_history(tmp
         br._ACTIVE.pop(br.TRAINER, None)
         assert driver.data_position_owner == "buffer_lane"
         assert driver.published_policy_history() == [(1, "h1"), (2, "h2")]
+
+
+# -------------------------------------------- S27 G-EQ5 (gap 22): a trainer without a syncer
+def test_the_account_continues_above_every_release_the_store_holds(tmp_path):
+    store = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
+    assert resumed_releases(store, 2) is None  # a run that starts here
+    for version in (1, 2, 3):
+        _release(store, version, f"h{version}")
+    _release(store, 1, "h1b")  # the bug this fixes: a relaunch released v1 again
+    resumed = resumed_releases(store, 2)
+    # LATEST names v1, but the account must continue above v3: K = 3, not 1
+    assert store.latest().version == 1
+    assert (resumed.base_version, resumed.start_version) == (3, 3)
+    assert resumed.known_versions() == (1, 2, 3)
+    assert resumed.window() == {1: "h1b", 2: "h2"}  # [K - limit, K); the newest record of v1
+    assert resumed.history() == [(1, "h1b"), (2, "h2"), (3, "h3")]
+
+
+def test_derived_releases_are_not_policy_versions_of_this_trainer():
+    records = [SimpleNamespace(seq=1, version=1, policy_hash="h1", derived_from=None),
+               SimpleNamespace(seq=2, version=2, policy_hash="w2",
+                               derived_from={"scheme": "w4a8", "version": 2}),
+               SimpleNamespace(seq=3, version=2, policy_hash="h2", derived_from=None)]
+    resumed = resumed_releases(SimpleNamespace(records=lambda: records), 4)
+    assert resumed.base_version == 2 and resumed.window() == {1: "h1"}
+    assert resumed.history() == [(1, "h1"), (2, "h2")]
+
+
+def test_a_window_wider_than_the_account_stops_at_zero():
+    resumed = ResumedReleases(2, 5, ((0, "h0"), (1, "h1"), (2, "h2")))
+    assert resumed.window() == {0: "h0", 1: "h1"} and resumed.known_versions() == (0, 1, 2)
+
+
+def test_local_only_sync_runs_its_rounds_from_the_resumed_version():
+    driver = SimpleNamespace(
+        export_local_resident=lambda *, policy_version: SimpleNamespace(policy_version=policy_version))
+    sync = LocalOnlySync(2)
+    sync.resume_at(3)
+    start = sync.start(driver)
+    assert (start.rollout_id, start.state.policy_version, start.finished) == (3, 3, False)
+    # the round budget counts the rounds of this process: 3 and 4, the last one final
+    assert sync._end() == 5
+    assert not sync.is_final_round(driver, rollout_id=3)
+    assert sync.is_final_round(driver, rollout_id=4)
+    fresh = LocalOnlySync(2)
+    assert (fresh.start(driver).rollout_id, fresh._end()) == (0, 2)
+
+
+def test_a_resumed_account_and_a_round_cut_resume_are_refused_together():
+    sync = LocalOnlySync(2)
+    sync.round_cuts = SimpleNamespace(resume=lambda driver: None)
+    with pytest.raises(ValueError, match="round-cut resume"):
+        sync.resume_at(3)
+    with pytest.raises(ValueError, match="below 0"):
+        LocalOnlySync(2).resume_at(-1)

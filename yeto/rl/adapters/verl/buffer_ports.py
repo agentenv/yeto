@@ -47,6 +47,17 @@ update sends only the words one optimizer step moved instead of the whole
 checkpoint (Nemotron Nano: 63 GB). It needs the export to write the base's own
 file names and sizes, which :mod:`.hf_export` does.
 
+Relaunch (S27 G-EQ5, gap 22, ``resume_versions``): a buffer trainer without an
+outer sync counts its policy versions itself, so a new process of it continues
+the account above the releases its store already holds
+(:class:`~yeto.rl.engine.merged_release.ResumedReleases`): the driver's rounds
+start at the store's newest release version vK, the island's first publication
+is vK and releases nothing, the versions in the policy-age window below vK are
+restored with the hashes the store recorded, and the island judges behavior
+versions with an outer <-> outer map seeded from those releases. Before this a
+relaunched trainer discarded every group a sampler had written with a release
+above v0 and re-used version numbers the store already held.
+
 The publication is complete when the release record and ``LATEST.json`` are in
 the store. Whether a sampler has loaded it is the sampler's report
 (``rl_sampler_policy_loaded`` on its tape) and the behavior versions of the
@@ -64,13 +75,15 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest
-from yeto.rl.engine.merged_release import BufferLane, MergedReleaseGuard, is_publisher, merged_version
+from yeto.rl.engine.merged_release import (BufferLane, MergedReleaseGuard, ResumedReleases, is_publisher,
+                                           merged_version, resumed_releases)
 from yeto.rl.engine.policy_release import FULL, PolicyReleaseStore
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 
 from .buffer_feed import BufferCall, BufferFeed, MergedVersions, RowShape
 from .fully_async_ports import MEMBER, FullyAsyncIsland, FullyAsyncRolloutPool
 from .fully_async_round import FULLY_ASYNC_PLACEMENT
+from .fully_async_translate import VersionMap
 from .merged_release import LORA_B, write_full_checkpoint, write_merged_checkpoint
 
 BASE_POLICY_VERSION = 0
@@ -196,13 +209,16 @@ class BufferReleasePublisher:
                  merge: Callable[..., dict[str, Any]] = write_merged_checkpoint,
                  lane: BufferLane | None = None,
                  weights: Callable[[Any], ReleaseWeights] | None = None,
-                 staging: str | Path | None = None, delta: Any = None) -> None:
+                 staging: str | Path | None = None, delta: Any = None,
+                 resumed: ResumedReleases | None = None) -> None:
         """``staging``: publish each release from a directory under it instead of
         writing it into the store (module doc, delta releases); ``delta``: the
         :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
-        follow (:func:`delta_chain_for`), which needs ``staging``."""
+        follow (:func:`delta_chain_for`), which needs ``staging``; ``resumed``: the
+        version account this process continues (module doc, relaunch)."""
         if delta is not None and staging is None:
             raise ValueError("delta releases need a staging directory")
+        self.resumed = resumed
         self.staging = None if staging is None else Path(staging)
         self.delta = delta
         self.island = island
@@ -218,8 +234,20 @@ class BufferReleasePublisher:
         self.releasing = lane is None or is_publisher(lane.index, lane.count)
 
     def bind(self, driver: Any) -> None:
-        """The island's driver (synced trainers read its outer version)."""
+        """The island's driver (synced trainers read its outer version; a resumed
+        version account is wired into it here, module doc "relaunch")."""
         self.driver = driver
+        if self.resumed is not None:
+            # S27 G-EQ5 (gap 22): the island's rounds and publications continue at vK,
+            # and the versions published below it are restored with the hashes the
+            # store recorded, so a group inside the policy-age window is trained.
+            resume_at = getattr(driver.sync, "resume_at", None)
+            if not callable(resume_at):
+                raise RuntimeError(
+                    f"a buffer trainer resuming the store's version account needs a sync session "
+                    f"that takes a start version; {type(driver.sync).__name__} does not")
+            resume_at(self.resumed.start_version)
+            driver.published_policy_history = self.resumed.history
         if self.lane is not None:
             self.island.emit("rl_policy_release_role", learner_id=self.lane.index,
                              num_learners=self.lane.count, publisher=self.releasing)
@@ -233,6 +261,15 @@ class BufferReleasePublisher:
         the first time this island applies it (module doc)."""
         local = int(state.policy_version)
         if self.lane is None:
+            if self.resumed is not None and local <= self.resumed.base_version:
+                # S27 G-EQ5 (gap 22): the first publication of a relaunched trainer is
+                # the version its store already holds and nothing is trained yet, so
+                # releasing it would write a second release with that version number
+                # and other weights. The first trained round releases vK+1.
+                self.island.emit("rl_policy_release_skipped", policy_version=local,
+                                 latest_version=self.resumed.base_version,
+                                 reason="resumed_base_version")
+                return None
             return local
         if self.driver is None:
             raise RuntimeError("synced buffer trainer: publish before bind(driver)")
@@ -289,6 +326,10 @@ class BufferReleasePublisher:
         version = int(state.policy_version)
         param_version = int(isl.call("yeto_param_version"))
         isl.vmap.record(param_version, version)  # raises on contradiction / regression
+        if isl.consume_map is not isl.vmap:
+            # the version the samplers stamp on the groups of this release is the
+            # outer version itself (S27 G-EQ5); idempotent when it is already seeded
+            isl.consume_map.record(version, version)
         digest = state.policy_tensor_hash()
         weights = (self.weights or lora_release_weights(self.base_dir, self.merge))(state)
         started = self.clock()
@@ -351,6 +392,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
                          weights: Callable[[Any], ReleaseWeights] | None = None,
                          staging: str | Path | None = None, delta_full_every: int = 0,
+                         resume_versions: bool = False,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -360,17 +402,38 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     (``merged_release.lane_cursor_log``).
 
     ``delta_full_every`` > 0 (``--rl-release-delta-full-every``) publishes the
-    releases from ``staging`` as bf16 deltas (module doc, delta releases)."""
+    releases from ``staging`` as bf16 deltas (module doc, delta releases).
+
+    ``resume_versions`` (S27 G-EQ5, gap 22): this island counts its policy
+    versions itself (no outer sync), so it continues the account above the
+    releases its store already holds (``merged_release.ResumedReleases``) --
+    its round counter, its version map and its published policies all start at
+    the store's newest release version. A synced trainer takes its versions
+    from the syncer and refuses this."""
     lane = getattr(buffer, "lane", None)
     if lane is not None and cursor_log is None:
         raise ValueError("a synced buffer trainer needs both a lane reader and its cursor log")
+    if resume_versions and lane is not None:
+        raise ValueError("a synced buffer trainer's versions come from the syncer, not from the store")
     actor_call = island.call
     log = CONSUMED_LOG.format(learner=island.learner_id)
 
     def record(fields: dict[str, Any]) -> None:
         island.append_jsonl(log, fields)
 
-    feed = BufferFeed(buffer, vmap=lambda: island.vmap, shape=shape,
+    # A buffered group's behavior version is a store release version (an outer
+    # version), not a verl param version, so the round judges it with its own map.
+    island.consume_map = VersionMap()
+    resumed = resumed_releases(releases, island.limit) if resume_versions else None
+    if resumed is not None:
+        for version in resumed.known_versions():
+            island.consume_map.record(version, version)
+        island.hashes.update(resumed.window())
+        island.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
+                    start_version=resumed.start_version, max_policy_age=resumed.limit,
+                    known_versions=list(resumed.known_versions()),
+                    restored_versions=sorted(resumed.window()))
+    feed = BufferFeed(buffer, vmap=lambda: island.consume_map, shape=shape,
                       add_group=lambda rows: actor_call("yeto_add_group", rows), record=record,
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
@@ -383,5 +446,5 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane,
                                        weights=weights,
                                        staging=staging if int(delta_full_every) > 0 else None,
-                                       delta=delta)
+                                       delta=delta, resumed=resumed)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

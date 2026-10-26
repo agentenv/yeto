@@ -170,7 +170,11 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),
-                                        delta_full_every=int(section.get("release_delta_full_every") or 0))
+                                        delta_full_every=int(section.get("release_delta_full_every") or 0),
+                                        # S27 G-EQ5 (gap 22): this island counts its own
+                                        # versions, so a new process of it continues the
+                                        # account above the store's newest release
+                                        resume_versions=plan["sync"] == "none")
 
         return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
                                       buffer_ports=ports)
