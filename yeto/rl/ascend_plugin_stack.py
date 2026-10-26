@@ -36,6 +36,10 @@ recipe or from the plugin source, S27 G-FL):
   a name no ``verl_main.FORWARD_ENV_PREFIXES`` prefix forwards).
   **Do not drop ``STACK_REWRITES`` from :data:`RECIPE_ENV` on the grounds that it is
   "the default anyway": it is not.**
+* :func:`setup_worker` -- Ray's ``worker_process_setup_hook`` -- **never imports a
+  plugin itself**.  It only arms :func:`install_when_rank_known`, because one plugin
+  binds a card at import time and the hook runs before this process has one
+  (S27 G-FY; the reason and the measurement are under :func:`install_when_rank_known`).
 * three plugins are left out (:data:`EXCLUDED`): two import ms-swift at module
   level and cannot be imported without it, one does so under its own switch.  Each
   carries the file and line that says so.
@@ -50,6 +54,8 @@ imports them.  It never edits the delivery.
 
 from __future__ import annotations
 
+import functools
+import importlib
 import os
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -60,6 +66,17 @@ FLAG = "--rl-ascend-plugin-stack"
 # ``worker_process_setup_hook`` at :func:`setup_worker`.
 ENV = "YETO_ASCEND_PLUGIN_STACK"
 SETUP_HOOK = "yeto.rl.ascend_plugin_stack.setup_worker"
+
+# The variable that says which card of this node this process owns. A plugin of the
+# delivery reads it at import time to pick its device, so :func:`install` must not run
+# while it is unset (see :func:`install_when_rank_known`).
+RANK_ENV = "LOCAL_RANK"
+# The seam that turns "the process started" into "the process owns a card": verl's
+# base Worker writes RANK / LOCAL_RANK into the environment and binds the card in
+# ``Worker.__init__`` (``verl/single_controller/base/worker.py:180-215`` and
+# ``:275-280``), and every verl worker class chains to it. It runs before
+# ``init_model`` builds the model, which is the deadline the plugins have to meet.
+VERL_WORKER = ("verl.single_controller.base.worker", "Worker")
 
 # The rewrite items the recipe enables in the Mamba2 SSD stack. ``clamp`` is not one
 # of them and must never be added, and this entry must stay in RECIPE_ENV: the
@@ -261,13 +278,100 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
     return report
 
 
-def setup_worker() -> None:
-    """Ray ``worker_process_setup_hook``: install the stack in this worker process
-    before the framework builds the model, when the island asked for it (:data:`ENV`).
+def rank_is_known(environ: Mapping[str, str] | None = None) -> bool:
+    """True when this process has been told which card of the node it owns.
 
-    Each plugin reports its own line; one that cannot be imported is recorded and the
-    others still run (:func:`install`)."""
+    :data:`RANK_ENV` is how the delivery's plugins ask that question
+    (``plugins/ascend_mamba2_kernels.py:62``, ``_local_device``), so it is the question
+    :func:`install_when_rank_known` has to answer before it imports one."""
+
+    where = os.environ if environ is None else environ
+    return bool(str(where.get(RANK_ENV, "")).strip())
+
+
+def _install_once(root: str, *, log=None) -> dict[str, Any] | None:
+    """:func:`install` at most once per process, and never without a card.
+
+    :data:`LAST_REPORT` is the record of this process's install, so it is also the
+    "already done" flag: one Ray worker process builds several verl worker objects
+    (``WorkerDict.__init__`` constructs one per role,
+    ``verl/single_controller/ray/base.py:1028-1040``), and importing the plugins again
+    would re-apply every monkeypatch and re-run the Mamba2 prewarm."""
+
+    say = log if log is not None else (lambda line: print(line, flush=True))
+    if LAST_REPORT is not None:
+        return None
+    if not rank_is_known():
+        say(f"[yeto-ascend-stack] NOT installed: no {RANK_ENV} in this process, so a plugin that "
+            f"binds a card at import time would bind card 0 (S27 G-FW: eight ranks on card 0)")
+        return None
+    say(f"[yeto-ascend-stack] installing with {RANK_ENV}={os.environ.get(RANK_ENV)} "
+        f"ASCEND_RT_VISIBLE_DEVICES={os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '<unset>')}")
+    return install(root)
+
+
+def install_when_rank_known(root: str, *, log=None) -> str:
+    """Arrange for :func:`install` to run at the first moment this process owns a card.
+
+    **Why the install cannot happen in Ray's setup hook** (S27 G-FW, measured on npu1
+    n2 with 8 x 910B3): ``ascend_mamba2_kernels.apply`` calls
+    ``torch.npu.set_device(_local_device())`` on its kern-stack path
+    (``plugins/ascend_mamba2_kernels.py:352-356``), and ``_local_device`` returns **0**
+    when :data:`RANK_ENV` is unset (``:62``).  Ray runs
+    ``worker_process_setup_hook`` when the worker process starts, which is *before* Ray
+    leases that process to an actor, so no one has written :data:`RANK_ENV` yet.  All
+    eight trainer ranks therefore bound card 0 -- the island log showed
+    ``(Device:0, RankID:0)`` through ``(Device:0, RankID:7)``, cards 1-7 never took a
+    single allocation, and HCCL could not build the eight-rank domain, so the island
+    did not start.  The delivery is read-only, so the fix is on this side: wait.
+
+    The wait ends at :data:`VERL_WORKER`.  This wraps that class's ``__init__`` so the
+    install runs as soon as it returns: by then verl has written ``RANK`` and
+    :data:`RANK_ENV` and bound the card, and it has not built the model yet.
+
+    Returns ``"installed"`` (the rank was already known, nothing to wait for),
+    ``"deferred"`` (the wrapper is armed) or ``"unavailable"`` (the seam is not there,
+    so nothing is installed).  **Not installing is the safe failure and installing
+    blind is not**: without the stack the island runs without the recipe's kernels,
+    while installing without a card stops the island altogether (above)."""
+
+    say = log if log is not None else (lambda line: print(line, flush=True))
+    if rank_is_known():
+        _install_once(root, log=log)
+        return "installed"
+    module_name, class_name = VERL_WORKER
+    try:
+        worker_cls = getattr(importlib.import_module(module_name), class_name)
+    except BaseException as error:  # noqa: BLE001 - a missing seam must not stop the island
+        say(f"[yeto-ascend-stack] NOT installed: no {RANK_ENV} yet and {module_name}.{class_name} "
+            f"is not available to wait for ({type(error).__name__}: {error})")
+        return "unavailable"
+    original = worker_cls.__init__
+    if getattr(original, "_yeto_ascend_stack", None) is not None:
+        return "deferred"
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        _install_once(root)
+
+    functools.update_wrapper(__init__, original)  # copies __dict__, so tag afterwards
+    __init__._yeto_ascend_stack = root
+    worker_cls.__init__ = __init__
+    say(f"[yeto-ascend-stack] root={root} deferred: no {RANK_ENV} in this process yet, so the "
+        f"install waits for {module_name}.{class_name}.__init__ (it writes {RANK_ENV} and binds "
+        f"the card before the model is built)")
+    return "deferred"
+
+
+def setup_worker() -> None:
+    """Ray ``worker_process_setup_hook``: arm the install in this worker process when
+    the island asked for the stack (:data:`ENV`).
+
+    It does **not** import a plugin here.  Ray runs this hook before the process owns a
+    card, and one plugin binds a card at import time, so the import waits for
+    :func:`install_when_rank_known`.  Each plugin then reports its own line; one that
+    cannot be imported is recorded and the others still run (:func:`install`)."""
 
     root = os.environ.get(ENV, "")
     if root:
-        install(root)
+        install_when_rank_known(root)

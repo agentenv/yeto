@@ -119,6 +119,7 @@ def test_the_worker_hook_does_nothing_without_the_switch(monkeypatch, tmp_path):
     stack.setup_worker()
     assert stack.LAST_REPORT is None
     monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.RANK_ENV, "3")  # a process that already owns a card installs at once
     stack.setup_worker()  # the hook installs from the island's directory
     assert stack.LAST_REPORT is not None and stack.LAST_REPORT["root"] == str(tmp_path)
     assert sorted(stack.LAST_REPORT["failed"]) == sorted(stack.PLUGINS)  # the fake dir is empty
@@ -127,6 +128,189 @@ def test_the_worker_hook_does_nothing_without_the_switch(monkeypatch, tmp_path):
 
     module, _, name = stack.SETUP_HOOK.rpartition(".")
     assert getattr(importlib.import_module(module), name) is stack.setup_worker
+
+
+# --------------------------------------------------------------------------- S27 G-FY
+# The defect these tests hold down (S27 G-FW, measured on npu1 n2, 8 x 910B3):
+# ``ascend_mamba2_kernels.apply`` calls ``torch.npu.set_device(_local_device())``
+# (plugins/ascend_mamba2_kernels.py:352-356) and ``_local_device`` returns 0 when
+# LOCAL_RANK is unset (:62). Ray runs ``worker_process_setup_hook`` before it leases
+# the process to an actor, so LOCAL_RANK did not exist yet and all eight trainer ranks
+# bound card 0: the island log read ``(Device:0, RankID:0)`` .. ``(Device:0, RankID:7)``,
+# cards 1-7 took no allocation at all, and HCCL could not build the eight-rank domain.
+# So the thing to assert is NOT "the plugins were imported" -- they were, that was the
+# bug -- but "nothing was imported while this process did not own a card".
+
+
+class _FakeVerlWorker:
+    """Stands in for ``verl.single_controller.base.worker.Worker``: its ``__init__``
+    writes LOCAL_RANK and binds the card, as verl's does (worker.py:275-280)."""
+
+    seen: list[str] = []
+
+    def __init__(self, local_rank: str = "5"):
+        os.environ["LOCAL_RANK"] = local_rank
+        type(self).seen.append(local_rank)
+
+
+@pytest.fixture
+def armable(monkeypatch):
+    """A fresh process-local state plus a fake verl Worker to defer onto."""
+    import sys
+    import types
+
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    monkeypatch.delenv(stack.RANK_ENV, raising=False)
+    module = types.ModuleType("fake_verl_worker_module")
+    module.Worker = type("Worker", (_FakeVerlWorker,), {"seen": []})
+    monkeypatch.setitem(sys.modules, "fake_verl_worker_module", module)
+    monkeypatch.setattr(stack, "VERL_WORKER", ("fake_verl_worker_module", "Worker"))
+    return module.Worker
+
+
+def _device_touching_plugin(directory: Path, log: Path, name: str = "device_binder.py") -> str:
+    """A stand-in for the delivery's Mamba2 plugin: on import it picks a device from
+    LOCAL_RANK with the delivery's own fallback (0) and records which one it bound.
+
+    ``name`` differs per stand-in process on purpose: rewriting one file keeps its size
+    and (within the second) its mtime, so ``SourceFileLoader`` would serve the previous
+    body out of ``__pycache__`` and the test would read a stale device."""
+    (directory / name).write_text(
+        "import os, pathlib\n"
+        "device = int(os.environ.get('LOCAL_RANK', 0))  # ascend_mamba2_kernels.py:62\n"
+        f"pathlib.Path({str(log)!r}).write_text(str(device))  # torch.npu.set_device(...)\n")
+    return name
+
+
+def test_the_hook_imports_no_plugin_while_this_process_owns_no_card(tmp_path, monkeypatch, armable):
+    """The regression: with no LOCAL_RANK, the hook must not import a plugin at all.
+
+    Mutation check: make :func:`setup_worker` call ``install(root)`` directly again and
+    this fails on the first assert -- the plugin is imported and binds card 0."""
+    bound = tmp_path / "bound_device.txt"
+    name = _device_touching_plugin(tmp_path, bound)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+
+    stack.setup_worker()  # Ray's setup hook, in a process Ray has not leased to an actor
+    assert not bound.exists(), f"a plugin bound card {bound.read_text()} before this process had one"
+    assert stack.LAST_REPORT is None  # nothing installed yet, so the island log says so
+
+    armable(local_rank="5")  # verl leases the process: LOCAL_RANK appears, the card is bound
+    assert bound.read_text() == "5"  # and only now was the plugin imported
+    assert stack.LAST_REPORT is not None and stack.LAST_REPORT["installed"] == [name]
+
+
+def test_every_rank_binds_its_own_card_not_card_zero(tmp_path, monkeypatch, armable):
+    """Eight worker processes, each leased a different card: each must bind its own.
+
+    This is the shape of the failure itself. Under the old hook every one of these
+    recorded 0 (S27 G-FW's ``(Device:0, RankID:0..7)``)."""
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    bound: list[str] = []
+    for rank in range(8):
+        log = tmp_path / f"bound_{rank}.txt"
+        name = _device_touching_plugin(tmp_path, log, name=f"device_binder_{rank}.py")
+        monkeypatch.setattr(stack, "PLUGINS", (name,))
+        monkeypatch.setattr(stack, "LAST_REPORT", None)  # a separate worker process
+        monkeypatch.delenv(stack.RANK_ENV, raising=False)
+        stack.setup_worker()
+        assert not log.exists()
+        armable(local_rank=str(rank))
+        bound.append(log.read_text())
+    assert bound == [str(rank) for rank in range(8)]
+    assert len(set(bound)) == 8, f"the ranks did not spread over the cards: {bound}"
+
+
+def test_a_worker_that_names_no_card_installs_nothing_even_once_armed(tmp_path, monkeypatch, armable):
+    """The second line of defence, and the reason the check sits in the install and not
+    only in the hook: the deferral fires when the verl worker is built, but a worker
+    that still carries no LOCAL_RANK must make the install refuse, not import a plugin
+    that would then bind card 0."""
+    bound = tmp_path / "bound_device.txt"
+    name = _device_touching_plugin(tmp_path, bound)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    silent = armable
+    monkeypatch.setattr(silent, "__init__", lambda self: None, raising=False)  # writes no LOCAL_RANK
+    stack.setup_worker()
+    lines: list[str] = []
+    assert stack._install_once(str(tmp_path), log=lines.append) is None
+    assert not bound.exists() and stack.LAST_REPORT is None
+    assert f"NOT installed: no {stack.RANK_ENV}" in "\n".join(lines)
+
+
+def test_the_deferred_install_runs_once_per_process(tmp_path, monkeypatch, armable):
+    """``WorkerDict.__init__`` builds one verl worker per role in the same process
+    (verl/single_controller/ray/base.py:1028-1040), so the plugins must be imported
+    once: a second import re-applies every monkeypatch and re-runs the prewarm."""
+    counter = tmp_path / "imports.txt"
+    (tmp_path / "counting.py").write_text(
+        "import pathlib\n"
+        f"path = pathlib.Path({str(counter)!r})\n"
+        "path.write_text(str(int(path.read_text() or 0) + 1) if path.exists() else '1')\n")
+    monkeypatch.setattr(stack, "PLUGINS", ("counting.py",))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    stack.setup_worker()
+    worker = armable
+    worker("2"), worker("2"), worker("2")
+    assert worker.seen == ["2", "2", "2"] and counter.read_text() == "1"
+
+
+def test_without_the_verl_seam_nothing_is_installed_rather_than_pinned(tmp_path, monkeypatch):
+    """Not installing is the safe failure; installing without a card is not.
+
+    Without the stack the island runs without the recipe's kernels. With the stack
+    installed blind, every rank binds card 0 and the island cannot start at all."""
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    monkeypatch.delenv(stack.RANK_ENV, raising=False)
+    monkeypatch.setattr(stack, "VERL_WORKER", ("yeto_no_such_verl_module", "Worker"))
+    bound = tmp_path / "bound_device.txt"
+    name = _device_touching_plugin(tmp_path, bound)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    lines: list[str] = []
+    assert stack.install_when_rank_known(str(tmp_path), log=lines.append) == "unavailable"
+    assert not bound.exists() and stack.LAST_REPORT is None
+    assert "NOT installed" in "\n".join(lines) and stack.RANK_ENV in "\n".join(lines)
+
+
+def test_the_deferred_install_still_overwrites_an_inherited_clamp_rewrite(tmp_path, monkeypatch, armable):
+    """The clamp red line must survive the deferral: ``install`` writes STACK_REWRITES
+    before the first plugin import, and the deferral only moves *when* that pair runs."""
+    monkeypatch.setenv("STACK_REWRITES", "cumsum,squeeze,clamp")
+    read = tmp_path / "read_by_plugin.txt"
+    (tmp_path / "reader.py").write_text(
+        "import os, pathlib\n"
+        f"pathlib.Path({str(read)!r}).write_text(os.environ['STACK_REWRITES'])\n")
+    monkeypatch.setattr(stack, "PLUGINS", ("reader.py",))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    stack.setup_worker()
+    assert not read.exists() and os.environ["STACK_REWRITES"] == "cumsum,squeeze,clamp"
+    armable(local_rank="1")
+    assert read.read_text() == "cumsum,squeeze" and os.environ["STACK_REWRITES"] == "cumsum,squeeze"
+
+
+def test_the_seam_this_fix_waits_for_is_the_one_verl_has():
+    """The deferral is only as good as the name it waits for, so check the name against
+    verl itself when verl is importable, and against its source otherwise."""
+    import importlib
+
+    module_name, class_name = stack.VERL_WORKER
+    try:
+        worker_cls = getattr(importlib.import_module(module_name), class_name)
+    except Exception:  # noqa: BLE001 - verl is not installed in the unit-test image
+        root = os.environ.get("YETO_VERL_ROOT") or str(REPO.parent / "verl-fork-acad9875")
+        source = Path(root) / (module_name.replace(".", "/") + ".py")
+        if not source.is_file():
+            pytest.skip(f"needs verl importable or its source at {source}")
+        text = source.read_text()
+        assert f"class {class_name}" in text
+        # the two writes the deferral depends on, in Worker.__init__'s own body
+        assert 'os.environ["LOCAL_RANK"] = local_rank' in text
+        assert "def __init__(self, cuda_visible_devices=None)" in text
+        return
+    assert "LOCAL_RANK" in worker_cls.env_keys()
+    assert callable(worker_cls.__init__)
 
 
 _RECIPE_DIR = os.environ.get("YETO_ASCEND_RECIPE_DIR")
