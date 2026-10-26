@@ -136,12 +136,38 @@ EXPECTED_VERSIONS_MEGATRON = {
 }
 
 
+# --- Megatron engine stack on Ascend (S27 G-FN) -------------------------------
+#
+# The NPU Megatron path is MindSpeed's, not the CUDA image's: a different
+# Megatron-Core, a different Bridge, the NPU Transformer Engine, and MindSpeed
+# itself. These are the versions the npu1 stack actually carries and that the
+# Megatron engine was exercised on there -- the SFT training step at
+# TP=1/PP=2/EP=4 (VERL-MEGATRON-PP.md section 7.9) and the HF boundary round trip
+# over HCCL (section 7.7). They are what the island asserts, not a build it pins:
+# nothing here builds that environment, so a mismatch is a recorded problem (and
+# YETO_VERL_ALLOW_UNPINNED=1 waives it), as for every other pin on this family.
+EXPECTED_VERSIONS_MEGATRON_ASCEND = {
+    "megatron_core": "0.18.2+571370c",
+    "megatron_bridge": "0.5.0",
+    "mindspeed": "0.18.0",
+}
+
+EXPECTED_VERSIONS_MEGATRON_BY_FAMILY = {
+    "nvidia": EXPECTED_VERSIONS_MEGATRON,
+    "ascend": EXPECTED_VERSIONS_MEGATRON_ASCEND,
+}
+
+
 def expected_versions_for_engine(engine: str, device_family: str = "nvidia") -> dict:
-    """Versions an island asserts: the family pins, plus the Megatron stack for the
-    Megatron engine island (NVIDIA only; the NPU Megatron path is MindSpeed)."""
+    """Versions an island asserts: the family pins, plus the Megatron stack of this
+    family for the Megatron engine island (the CUDA image's, or MindSpeed's on
+    Ascend). A family with no Megatron stack is an error before launch."""
     expected = expected_versions(device_family)
     if engine == "megatron":
-        if device_family != "nvidia":
-            raise ValueError(f"no verl Megatron image pins for device family {device_family!r}")
-        expected.update(EXPECTED_VERSIONS_MEGATRON)
+        try:
+            expected.update(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY[device_family])
+        except KeyError:
+            raise ValueError(
+                f"no verl Megatron stack pins for device family {device_family!r}; known: "
+                f"{sorted(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY)}") from None
     return expected

@@ -185,6 +185,72 @@ def test_island_plan_of_the_d0_flags(tmp_path):
     assert _value(plan["overrides"], "data.apply_chat_template_kwargs.enable_thinking") == "False"
 
 
+def test_the_gradient_nan_check_is_on_by_default_and_can_be_turned_off(tmp_path):
+    """S27 G-FL: verl's DDP config leaves Megatron's check_for_nan_in_grad at False, and
+    with it off a NaN gradient is scaled into every parameter by clip_grads instead of
+    raising. The island asks for it through override_ddp_config unless told not to."""
+    from yeto.rl import megatron_grad_checks
+
+    assert megatron_grad_checks.CHECK_FOR_NAN_IN_GRAD is True
+    assert megatron_grad_checks.ddp_overrides() == {"check_for_nan_in_grad": True}
+    assert megatron_grad_checks.ddp_overrides(check_for_nan_in_grad=False) == {}
+
+    key = "++actor_rollout_ref.actor.megatron.override_ddp_config.check_for_nan_in_grad"
+    plan = _plan(tmp_path)
+    assert plan["shape"]["grad_nan_check"] is True
+    assert f"{key}=True" in plan["overrides"]
+    off = _plan(tmp_path, extra=["--rl-no-grad-nan-check"])
+    assert off["shape"]["grad_nan_check"] is False
+    assert not [o for o in off["overrides"] if o.startswith(key)]
+    # large-grad checking stays off: its rejection is a warning, not a guard
+    assert not [o for o in plan["overrides"] if "check_for_large_grads" in o]
+
+
+def test_the_island_refuses_a_trainer_without_the_gradient_nan_check():
+    """S27 G-FL: the flag is read back off the DDP wrappers, so an override Hydra
+    dropped fails at island start instead of running unguarded."""
+    from types import SimpleNamespace
+
+    from yeto.rl import megatron_grad_checks as gc
+
+    class _Chunk:  # a Megatron DDP wrapper over an inner module
+        def __init__(self, flag):
+            self.ddp_config = SimpleNamespace(check_for_nan_in_grad=flag, check_for_large_grads=False)
+
+    on = gc.report([_Chunk(True), _Chunk(True)])
+    assert on == {"chunks": 2, "wrapped": 2, "check_for_nan_in_grad": True, "check_for_large_grads": False}
+    off = gc.report([_Chunk(True), _Chunk(False)])
+    assert off["check_for_nan_in_grad"] is False
+    # a chunk that is not DDP-wrapped at all (forward_only engines)
+    bare = gc.report([SimpleNamespace(module=SimpleNamespace())])
+    assert bare == {"chunks": 1, "wrapped": 0, "check_for_nan_in_grad": False, "check_for_large_grads": False}
+    # nested one level down (DDP under another wrapper)
+    nested = gc.report([SimpleNamespace(module=_Chunk(True))])
+    assert nested["wrapped"] == 1 and nested["check_for_nan_in_grad"] is True
+
+    gc.check_reports([{**on, "rank": 0}], wanted=True)  # does not raise
+    gc.check_reports([{**off, "rank": 1}], wanted=False)  # the run asked for no check
+    with pytest.raises(gc.MegatronGradCheckError, match="without check_for_nan_in_grad on rank"):
+        gc.check_reports([{**on, "rank": 0}, {**off, "rank": 1}], wanted=True)
+    with pytest.raises(gc.MegatronGradCheckError, match="no Megatron DDP config"):
+        gc.check_reports([{**bare, "rank": 0}], wanted=True)
+
+
+def test_the_ascend_plugin_stack_is_off_unless_the_flag_asks_for_it(tmp_path):
+    """S27 G-FL: no flag, no section; with the flag the plan carries the switches, the
+    plugin order and the reasons, and never the clamp rewrite."""
+    from yeto.rl import ascend_plugin_stack
+
+    assert _plan(tmp_path)["ascend_plugin_stack"] is None
+    section = _plan(tmp_path, extra=["--rl-ascend-plugin-stack", "/data/work/sft-run/plugins"]
+                    )["ascend_plugin_stack"]
+    assert section["root"] == "/data/work/sft-run/plugins"
+    assert section["env"]["STACK_REWRITES"] == "cumsum,squeeze"
+    assert [row["plugin"] for row in section["plugins"]] == list(ascend_plugin_stack.PLUGINS)
+    assert section["excluded"] and section["unset"]
+    assert all(row["present"] is False for row in section["plugins"])  # not this machine's directory
+
+
 def test_island_plan_with_the_hf_export(tmp_path):
     plan = _plan(tmp_path, extra=["--rl-export-hf-rounds", "final",
                                   "--rl-export-hf-store", "modal-volume://v/run/hf"])
@@ -194,7 +260,8 @@ def test_island_plan_with_the_hf_export(tmp_path):
 
 @pytest.mark.parametrize("change,match", [
     (dict(parameter_mode="lora"), "--tuning full"),
-    (dict(rl_single_island_no_sync=False), "--rl-single-island-no-sync"),
+    # S27 G-FG: a synced Megatron island is allowed; what its outer sync cannot run is refused
+    (dict(rl_single_island_no_sync=False, rl_peer_recovery_store="modal-volume://v/p"), "no peer recovery"),
     (dict(rl_placement="colocated"), "fixed-partition"),
     (dict(rl_max_policy_age=1), "--rl-max-policy-age 0"),
     (dict(rl_sample_role="trainer"), "--rl-sample-role"),
@@ -483,8 +550,18 @@ def test_megatron_image_layers_and_pins():
     expected = pins.expected_versions_for_engine("megatron")
     assert expected["mamba_ssm"] == pins.MAMBA_SSM_VERSION and expected["vllm"] == pins.EXPECTED_VERSIONS["vllm"]
     assert pins.expected_versions_for_engine("fsdp2") == pins.EXPECTED_VERSIONS
-    with pytest.raises(ValueError):
-        pins.expected_versions_for_engine("megatron", "ascend")
+    # S27 G-FN: an Ascend Megatron island asserts MindSpeed's stack, not the CUDA
+    # image's; nothing here builds that environment, so a mismatch is a recorded
+    # problem (YETO_VERL_ALLOW_UNPINNED waives it) rather than a refusal to start
+    npu = pins.expected_versions_for_engine("megatron", "ascend")
+    assert npu["megatron_bridge"] == "0.5.0" and npu["mindspeed"] == "0.18.0"
+    assert npu["megatron_core"] != expected["megatron_core"]
+    assert "vllm" not in npu or npu["vllm"] != expected.get("vllm")
+    # a family with no pins at all still fails on the family pins first
+    with pytest.raises(ValueError, match="no verl version pins"):
+        pins.expected_versions_for_engine("megatron", "amd")
+    # and a family with pins but no Megatron stack names that gap instead
+    assert set(pins.EXPECTED_VERSIONS_MEGATRON_BY_FAMILY) == set(pins.EXPECTED_VERSIONS_BY_FAMILY)
     with pytest.raises(ValueError):
         image.modal_image(object(), variant="sglang")
 

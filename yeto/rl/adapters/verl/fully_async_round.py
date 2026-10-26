@@ -165,7 +165,7 @@ def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None
 
 def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, groups_per_round: int,
                               rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1,
-                              trainer_nodes: int = 1) -> list[str]:
+                              trainer_nodes: int = 1, rollouter: bool = True) -> list[str]:
     """Hydra overrides for ``fully_async_ppo_trainer.yaml`` (fork acad9875).
 
     One yeto round = one verl parameter version (prompt-level samples:
@@ -174,7 +174,16 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
     ``trainer_gpus`` is per node and ``trainer_nodes`` the node count: verl's
     trainer pool is ``[trainer.n_gpus_per_node] * trainer.nnodes``
     (``separation/utils.create_resource_pool_manager``). A buffer trainer
-    passes its island's shape (:func:`buffer_trainer_shape`)."""
+    passes its island's shape (:func:`buffer_trainer_shape`).
+
+    ``rollouter`` False (S27 G-FN): a buffer trainer island. It starts no rollouter and
+    no checkpoint engine (``buffer_trainer_runner``), so it asks for the always-present
+    ``naive`` weight transport instead of nccl. This is not cosmetic: every trainer
+    worker validates the configured backend while it builds its model, and the
+    fully_async yaml's own default is nccl, so leaving the key alone is not enough.
+    Runs fn-7 and fn-8 on npu1 died in every worker with ``Checkpoint engine nccl not
+    registered, registered backends: ['naive']`` -- on that build every real transport
+    failed to import (nccl and nixl want cupy, hccl and delta want zmq)."""
     if rollout_gpus < 1 or trainer_gpus < 1 or trainer_nodes < 1:
         raise VerlTranslationError("fully_async needs at least one rollout GPU and one trainer GPU")
     async_keys = fully_async_overrides(limit, samples_per_round=groups_per_round,
@@ -190,7 +199,7 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         f"rollout.total_rollout_steps={total_rollout_steps(limit, groups_per_round=groups_per_round, rounds=rounds)}",
         f"trainer.n_gpus_per_node={trainer_gpus}",
         f"trainer.nnodes={trainer_nodes}",
-        "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        "actor_rollout_ref.rollout.checkpoint_engine.backend=" + ("nccl" if rollouter else "naive"),
         # FullyAsyncTrainer/FullyAsyncRollouter assert not hybrid_engine
         # (fork acad9875, fully_async_trainer.py:76); the sync path never sets
         # this key, so without this override the config default True kills the

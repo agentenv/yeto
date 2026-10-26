@@ -94,8 +94,8 @@ def island_dispense(args: Any, *, engine: str = "fsdp2", buffer_trainer: bool = 
         problems.append("--rl-data-position-store (the dispenser keeps the data position)")
     if getattr(args, "rl_single_island_no_sync", False) or not getattr(args, "syncer", None):
         problems.append("no syncer (--rl-single-island-no-sync): the dispenser runs in the actor syncer")
-    if engine != "fsdp2":
-        problems.append(f"the {engine} island (one island without an outer sync)")
+    if engine not in ("fsdp2", "megatron"):  # S27 G-FG: a synced Megatron island draws through the same loader
+        problems.append(f"the {engine} island")
     if fully_async:
         problems.append("the fully_async path (--rl-max-policy-age > 0: verl's rollouter draws the rows)")
     if buffer_trainer:

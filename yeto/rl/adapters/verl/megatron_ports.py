@@ -9,12 +9,12 @@ Next to the FSDP2 ports of :mod:`.ports_impl`:
   prompts, the standalone servers generate, the replay buffer returns them);
 * trainer: ``ports_impl.VerlTrainerGroup`` plus a count of trained rounds
   (the weights version the resident policy handle is checked against);
-* policy state (:class:`MegatronPolicyState`): the weights stay in the
-  trainer. Each Megatron rank hashes the parameters it owns (dense ones on
-  data-parallel rank 0, expert ones on expert-data-parallel rank 0, keyed by
-  name and TP/PP/EP coordinates); the island combines the per-rank hashes
-  into the policy hash. No tensor leaves the trainer: there is no export or
-  apply (no outer sync on this island);
+* policy state without an outer sync (:class:`MegatronPolicyState`): the
+  weights stay in the trainer. Each Megatron rank hashes the parameters it
+  owns (dense ones on data-parallel rank 0, expert ones on
+  expert-data-parallel rank 0, keyed by name and TP/PP/EP coordinates); the
+  island combines the per-rank hashes into the policy hash. No tensor leaves
+  the trainer: there is no export or apply;
 * publisher (:class:`MegatronPublisher`): verl's standalone NCCL checkpoint
   engine. There is no read-back of what vLLM loaded (the LoRA read-back of
   ``vllm_readback`` does not cover full weights); the train/rollout log-prob
@@ -24,10 +24,16 @@ Next to the FSDP2 ports of :mod:`.ports_impl`:
 
 ``run_megatron_island`` wires them into the neutral ``IslandDriver``; the
 final model can be exported to the run's store (``--rl-export-hf-rounds``).
+
+S27 G-FG: with an outer sync (``plan["full_parameter"]``) the island runs the
+FSDP2 island's full-parameter sync instead of :class:`MegatronPolicyState`:
+the engine-neutral role stream over the Megatron trainer group of
+:mod:`.megatron_full_parameter` (FP32 masters in HF names, the FSDP2 layout).
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -100,6 +106,39 @@ def remote_megatron_layout(worker_dict) -> list[list]:
     worker = _inner_worker(worker_dict)
     coords = _parallel_coordinates()
     return [[key, list(param.shape), str(param.dtype)] for key, param in owned_parameters(_chunks(worker), coords)]
+
+
+def remote_megatron_grad_checks(worker_dict) -> dict:
+    """S27 G-FL: the gradient checks this rank's DDP wrappers actually carry.
+
+    Read off ``DistributedDataParallelConfig`` after verl built the model, so an
+    override Hydra dropped cannot pass unnoticed
+    (:mod:`yeto.rl.megatron_grad_checks`)."""
+    import torch.distributed as dist
+
+    from yeto.rl import megatron_grad_checks
+
+    record = megatron_grad_checks.report(_chunks(_inner_worker(worker_dict)))
+    record["rank"] = int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0
+    return record
+
+
+def remote_ascend_plugin_report(worker_dict) -> dict:
+    """S27 G-FL: what the Ascend plugin stack installed in this worker process.
+
+    ``verl_main.setup_worker`` installed it before verl built the model; this only
+    reads the record back for the island log. ``{"installed": False}`` when the worker
+    never ran the install (the switch is off, or the setup hook did not run)."""
+    import os
+
+    from yeto.rl import ascend_plugin_stack
+
+    report = ascend_plugin_stack.LAST_REPORT
+    rank = int(os.environ.get("RANK", 0))
+    if report is None:
+        return {"rank": rank, "ran": False, "root": os.environ.get("YETO_ASCEND_PLUGIN_STACK", "")}
+    return {"rank": rank, "ran": True, "root": report["root"], "installed": report["installed"],
+            "failed": report["failed"], "switches": sorted(report["env"])}
 
 
 def remote_megatron_digest(worker_dict) -> dict:
@@ -352,7 +391,8 @@ class MegatronHfExports:
 
 
 def _execution_profile(spec, plan: dict):
-    return execution_profile(spec, plan, name="verl-megatron-separate", engine="verl-megatron")
+    return execution_profile(spec, plan, name="verl-megatron-separate", engine="verl-megatron",
+                             outer_protocol="none" if plan.get("sync") == "none" else "strict-avg")
 
 
 def hf_exports_for(plan: dict, island: MegatronIsland) -> MegatronHfExports | None:
@@ -365,23 +405,117 @@ def hf_exports_for(plan: dict, island: MegatronIsland) -> MegatronHfExports | No
     return MegatronHfExports(island, config)
 
 
+def sync_ports(island: MegatronIsland, plan: dict, identity_sha256: str):
+    """``(sync, policy state)`` of the island: without an outer sync the local-only
+    sync over :class:`MegatronPolicyState`; with one (S27 G-FG) the FSDP2 island's
+    full-parameter sync over the Megatron trainer group
+    (:func:`.megatron_full_parameter.megatron_group`)."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    if plan.get("sync") == "none":
+        return LocalOnlySync(int(plan["global_rounds"])), MegatronPolicyState(island)
+    from .full_parameter_stream import full_parameter_policy
+    from .megatron_full_parameter import megatron_group
+
+    group = getattr(island, "full_group", None) or megatron_group(island, plan["model_path"])
+    return full_parameter_policy(island, plan, backend_identity_sha256=identity_sha256, group=group)
+
+
+def driver_options(plan: dict, spec, fingerprint: str) -> dict:
+    """``IslandDriver`` keywords of the Megatron island: its placement, capabilities,
+    partitioned-serial profile (outer protocol ``strict-avg`` when synced) and layout."""
+    from .entry import verl_capabilities
+
+    return {"placement": MegatronPlacement(dict(plan["megatron"])),
+            "capabilities": with_policy_age(verl_capabilities(fingerprint, megatron=True), plan),
+            "profile": _execution_profile(spec, plan), "layout": LAYOUT_FRAGMENTS}
+
+
+def _check_grad_checks(on_workers, shape: dict, tape) -> None:
+    """S27 G-FL: every trainer rank must carry the gradient check the plan asked for.
+
+    The check turns a non-finite gradient into a RuntimeError instead of letting
+    ``clip_grads`` scale it into every parameter; a run that wants the old behaviour
+    says so with ``--rl-no-grad-nan-check``.
+
+    ``on_workers(fn)`` runs ``fn`` on every trainer worker. The synchronous island
+    passes :func:`call_workers` over the in-process trainer; the buffer trainer passes
+    ``island.call_workers``, which goes through the trainer actor (S27 G-FN)."""
+    from yeto.rl import megatron_grad_checks
+
+    wanted = bool(shape.get("grad_nan_check", True))
+    reports = on_workers(remote_megatron_grad_checks)
+    tape.append({"event": "rl_megatron_grad_checks", "wanted": wanted, "ranks": reports})
+    print(f"[yeto-verl] gradient NaN check wanted={wanted} ranks="
+          f"{[ (r.get('rank'), r.get('check_for_nan_in_grad')) for r in reports ]}", flush=True)
+    megatron_grad_checks.check_reports(reports, wanted=wanted)
+
+
+def _log_ascend_plugin_stack(on_workers, section: dict, tape) -> None:
+    """S27 G-FL: print what every trainer worker installed, and put it on the tape.
+
+    Reading the report back cannot fail the island: a worker that never ran the
+    install reports ``ran: False`` and the line says so. ``on_workers`` is as in
+    :func:`_check_grad_checks`."""
+    try:
+        reports = on_workers(remote_ascend_plugin_report)
+    except Exception as error:  # noqa: BLE001 - a log must not stop the island
+        reports = [{"rank": -1, "ran": False, "error": repr(error)}]
+    print(f"[yeto-verl] ascend plugin stack root={section.get('root')} "
+          f"switches={len(section.get('env') or {})} planned={len(section.get('plugins') or [])}",
+          flush=True)
+    for name, reason in sorted((section.get("excluded") or {}).items()):
+        print(f"[yeto-verl]   excluded {name}: {reason}", flush=True)
+    for name, reason in sorted((section.get("unset") or {}).items()):
+        print(f"[yeto-verl]   unset {name}: {reason}", flush=True)
+    for report in sorted(reports, key=lambda row: int(row.get("rank", 0))):
+        if not report.get("ran"):
+            print(f"[yeto-verl]   rank {report.get('rank')}: the stack did not run "
+                  f"({report.get('error') or 'no report in the worker'})", flush=True)
+            continue
+        print(f"[yeto-verl]   rank {report['rank']}: installed {len(report['installed'])} "
+              f"plugin(s); not installed {sorted(report['failed']) or 'none'}", flush=True)
+        for plugin, reason in sorted(report["failed"].items()):
+            print(f"[yeto-verl]     NOT installed {plugin}: {reason}", flush=True)
+    tape.append({"event": "rl_ascend_plugin_stack", "root": section.get("root"),
+                 "env": section.get("env"), "unset": sorted(section.get("unset") or {}),
+                 "excluded": sorted(section.get("excluded") or {}), "ranks": reports})
+
+
+def island_megatron_checks(island, plan: dict, tape) -> None:
+    """S27 G-FN (blocker B4): the Megatron island's two start-up readbacks on a path
+    that does not run :func:`run_megatron_island`.
+
+    A buffer trainer runs the fully_async ports (``trainer.run_fully_async_island``),
+    so these two checks would otherwise be skipped although the island does run the
+    Megatron engine:
+
+    1. the per-rank gradient non-finite check the plan asked for (refuses the island
+       when a rank does not carry it);
+    2. one line per Ascend plugin-stack switch and plugin (a log, never a refusal).
+
+    The calls go to the trainer workers through ``island.call_workers``."""
+    _check_grad_checks(island.call_workers, dict(plan["megatron"]), tape)
+    if plan.get("ascend_plugin_stack"):
+        _log_ascend_plugin_stack(island.call_workers, plan["ascend_plugin_stack"], tape)
+
+
 def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     """The yeto driver over the Megatron ports (``verl_main.YetoTaskRunner``)."""
     from verl.utils.skip import SkipManager
     from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.hw.catalog import runtime_versions
 
-    from .entry import verl_capabilities
     from .identity import backend_identity
     from .trainer import _fingerprint, check_asserted
 
     t0 = time.time()
-    if plan.get("sync") != "none":
-        raise ValueError("verl Megatron island: outer sync is not wired (use --rl-single-island-no-sync)")
+    synced = plan.get("sync") != "none"  # S27 G-FG: the full-parameter outer sync (.megatron_full_parameter)
+    if synced and not plan.get("full_parameter"):
+        raise ValueError("a synced verl Megatron island needs the full-parameter sync plan")
     if plan.get("resume"):
         raise ValueError("verl Megatron island: round cuts are not wired")
     trainer.agent_loop_manager = agent_loop_manager
@@ -404,30 +538,60 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
     shape = dict(plan["megatron"])
     tape = EventTape(plan["event_tape"], learner_id)
-    specs = layout_of(call_workers(trainer, remote_megatron_layout))
-    layout_hash = layout_hash_of(specs)
-    identity_hash = config_hash(plan["model_path"], shape)
+    identity = backend_identity(train_backend="megatron", compat_group=plan.get("compat_group"))
+    if synced:  # S27 G-FG: the FSDP2 island's HF-named layout, identity and policy-age binding
+        from yeto.rl.engine.policy_age import bind_policy_age
+
+        from .full_parameter_stream import full_parameter_identity
+
+        specs: tuple = ()
+        layout_hash = plan["full_parameter"]["parameter_layout_sha256"]
+        _layout, identity_hash = full_parameter_identity(plan["model_config_sha256"])
+        identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
+    else:
+        specs = layout_of(call_workers(trainer, remote_megatron_layout))
+        layout_hash = layout_hash_of(specs)
+        identity_hash = config_hash(plan["model_path"], shape)
+        identity_sha = identity.sha256()
     island = MegatronIsland(
         trainer, model_path=plan["model_path"], learner_id=learner_id, out_dir=plan["out_dir"],
         base_model_revision=plan["model_revision"], lora_config_hash=identity_hash,
         layout_hash=layout_hash, expected_specs=(), tis_upper=float(plan.get("tis_upper", 2.0)),
         thresholds_key=plan["thresholds_key"], emit=lambda event, **f: tape.append({"event": event, **f}))
-    identity = backend_identity(train_backend="megatron", compat_group=plan.get("compat_group"))
+    sync, policy_state = sync_ports(island, plan, identity_sha)
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    on_workers = functools.partial(call_workers, trainer)
+    _check_grad_checks(on_workers, shape, tape)  # S27 G-FL: refuses a trainer without the NaN check
+    if plan.get("ascend_plugin_stack"):  # S27 G-FL: one line per switch and per plugin
+        _log_ascend_plugin_stack(on_workers, plan["ascend_plugin_stack"], tape)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "engine": "megatron",
-                 "backend_identity": identity.to_dict(), "backend_identity_sha256": identity.sha256(),
+                 "backend_identity": identity.to_dict(), "backend_identity_sha256": identity_sha,
                  "layout_hash": layout_hash, "config_hash": identity_hash, "n_specs": len(specs),
-                 "asserted": asserted, "init_seconds": time.time() - t0})
+                 "parameter_mode": "full", "asserted": asserted, "init_seconds": time.time() - t0})
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     fingerprint = _fingerprint(cfg)
+    from .driver_extras import TestExitPublisher
+
+    # TEST ONLY (leave/rejoin, as the FSDP2 island): end the first process after a given publication
+    publisher = TestExitPublisher(MegatronPublisher(island), plan.get("test_exit_after_version"), tape,
+                                  rejoined=lambda: bool(getattr(sync, "joined_running_pool", False)))
+    dispense = None
+    if plan.get("dispense"):  # S27 G-FG: a synced island claims its rows from the task dispenser (as FSDP2)
+        from .task_dispense import install as install_dispense
+
+        dispense = install_dispense(trainer, plan["dispense"],
+                                    emit=lambda event, **f: tape.append({"event": event, **f}))
     driver = IslandDriver(
-        learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=MegatronTrainerGroup(island),
-        policy_state=MegatronPolicyState(island), publisher=MegatronPublisher(island),
-        placement=MegatronPlacement(shape),
-        capabilities=with_policy_age(verl_capabilities(fingerprint, megatron=True), plan),
-        algorithm=spec, sync=LocalOnlySync(int(plan["global_rounds"])), events=tape,
-        profile=_execution_profile(spec, plan), layout=LAYOUT_FRAGMENTS)
+        learner_id=learner_id, rollout=VerlRolloutPool(island, dispense=dispense),
+        trainer=MegatronTrainerGroup(island), policy_state=policy_state, publisher=publisher,
+        algorithm=spec, sync=sync, events=tape, **driver_options(plan, spec, fingerprint))
     driver.data_slot = plan.get("data_slot")
+    if dispense is not None and plan["dispense"].get("data_streams"):
+        driver.data_streams = plan["dispense"]["data_streams"]  # S27 P3 streams (rl_driver_start)
+    if synced:  # S27 G-DS: data positions and observation, as on a synced FSDP2 island
+        from .driver_extras import wire_full_parameter_extras
+
+        wire_full_parameter_extras(driver, island, {k: v for k, v in plan.items() if k != "hf_exports"})
     wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
     driver.hf_exports = hf_exports_for(plan, island)
     from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #26, #35)

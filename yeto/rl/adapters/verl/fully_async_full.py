@@ -62,11 +62,31 @@ def refuse_unwired(plan: Mapping[str, Any]) -> None:
                          + ", ".join(asked))
 
 
+def trainer_group(island: Any, plan: Mapping[str, Any]):
+    """The trainer group these ports read and write, None for the default FSDP2 one.
+
+    S27 G-FN (blocker B5): a Megatron engine island (``plan["engine"] == "megatron"``)
+    reads and writes its weights through the Megatron HF boundary, not through FSDP2
+    rank files, so it needs its own group (:class:`~.megatron_full_parameter.MegatronFullParameterGroup`).
+    That group only uses ``island.call_workers`` / ``island.call_workers_shared``,
+    which ``FullyAsyncIsland`` has, so it fits this path unchanged. Until this was
+    wired, a Megatron buffer trainer installed the FSDP2 group and never called
+    ``megatron_hf_boundary.export_hf`` once."""
+    from . import megatron_engine
+
+    if plan.get("engine") != megatron_engine.ENGINE_MEGATRON:
+        return None
+    from .megatron_full_parameter import megatron_group
+
+    return megatron_group(island, plan["model_path"])
+
+
 def full_parameter_ports(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str):
     """``(sync, policy state)`` of a full-parameter fully_async or buffer trainer
     island; sets ``island.full_group`` and, without a syncer, ``island.layout_hash``
-    (module doc)."""
+    (module doc). The group is the engine's (:func:`trainer_group`)."""
     from .full_parameter_stream import full_parameter_policy
 
     refuse_unwired(plan)
-    return full_parameter_policy(island, plan, backend_identity_sha256=backend_identity_sha256)
+    return full_parameter_policy(island, plan, backend_identity_sha256=backend_identity_sha256,
+                                 group=trainer_group(island, plan))

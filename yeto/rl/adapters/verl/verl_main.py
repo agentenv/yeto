@@ -89,7 +89,7 @@ CUMEM_HOST_ENV = "NCCL_CUMEM_HOST_ENABLE"
 NEVER_FORWARD_ENV = ("ASCEND_RT_VISIBLE_DEVICES",)
 
 
-def _runtime_env(fully_async: bool = False) -> dict:
+def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     env = get_ppo_ray_runtime_env(None)
@@ -97,6 +97,11 @@ def _runtime_env(fully_async: bool = False) -> dict:
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
     if fully_async:
         env["env_vars"][CUMEM_HOST_ENV] = os.environ.get(CUMEM_HOST_ENV, "0")
+    if ascend_stack:  # S27 G-FL: install the Ascend plugin stack in every Ray worker
+        from yeto.rl import ascend_plugin_stack
+
+        os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
+        env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
     for key, value in os.environ.items():
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
@@ -138,10 +143,12 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
     # S27 G-DC: the Megatron island syncs weights over the same disaggregated NCCL
     # checkpoint engine as the fully_async path, so it gets the same NCCL host setting
     disaggregated = fully_async or plan.get("engine") == "megatron" or bool(plan.get("separate"))  # S27 G-EK
+    stack = (plan.get("ascend_plugin_stack") or {}).get("root")
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
-        ray.init(address=address, runtime_env=_runtime_env(disaggregated), namespace="yeto-verl")
+        ray.init(address=address, runtime_env=_runtime_env(disaggregated, ascend_stack=stack),
+                 namespace="yeto-verl")
     return plan
 
 
