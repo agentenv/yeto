@@ -152,6 +152,13 @@ class _YetoTrainerMixin:
         batch, self._yeto_batch = self._yeto_batch, None
         if batch is None:
             raise RuntimeError("yeto_train_step without an assembled batch")
+        # S27 G-FT (blocker B16): verl's own old-log-prob pass reads an MFU entry
+        # its Megatron engine never fills, so the first Megatron training step
+        # raises before any of our code runs.  One narrow run-time patch, logged
+        # once; see .verl_megatron_patches for the defect and when to drop this.
+        from .verl_megatron_patches import install as install_verl_patches
+
+        install_verl_patches()
         t0 = time.time()
         batch = self._fit_compute_reward(batch)
         batch = self._fit_compute_log_prob(batch)

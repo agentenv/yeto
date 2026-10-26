@@ -34,6 +34,18 @@ stage's tasks and receives the whole tensor over the PP group.  The one
 parameter outside that list is the tied embedding's second copy on the last
 stage (:func:`tied_output_copies`), which an apply writes explicitly.
 
+Two namespaces (S27 G-FT, blocker B15): Bridge names the tensors of the *base
+checkpoint*, the island's layout names the HF *model*'s own parameters, and for
+some families (NemotronH) the two differ -- ``backbone.`` against ``model.``,
+and 128 per-expert checkpoint tensors against one model tensor stacked along
+dim 0.  :class:`LayoutMap` carries the translation as plain data (``transformers``
+owns the rules; :mod:`yeto.rl.adapters.verl.hf_checkpoint_keys` reads them out),
+so one layout name is written by many conversion tasks and :class:`HfTaskIndex`
+keys the "written once" rule on a *row* of a layout tensor, not on its name.
+Nothing stacks a whole tensor in memory: :class:`LayoutSink` hands each
+per-expert tensor to the reader with its flat element offset inside the layout
+tensor, so the fragment buffer is where the stacking happens.
+
 Megatron, Megatron-Bridge and torch are imported lazily by the caller's
 objects; importing this module is cheap.
 """
@@ -307,47 +319,208 @@ def apply_hf(bridge: Any, modules: Sequence[Any], optimizer: Any, tensors: Mappi
             "tasks": len(write_indices), "tasks_read": len(read_indices), "tied_outputs": len(tied)}
 
 
+# ----------------------------------------------------------------------------- Bridge's names -> the layout
+@dataclass(frozen=True)
+class LayoutSlot:
+    """Where one Bridge HF tensor goes in the island's layout: ``name``, and
+    ``row`` along dim 0 when the layout tensor stacks several checkpoint tensors
+    (None: the whole layout tensor)."""
+
+    name: str
+    row: int | None = None
+
+    def label(self) -> str:
+        return self.name if self.row is None else f"{self.name}[{self.row}]"
+
+
+@dataclass(frozen=True)
+class LayoutMap:
+    """Bridge's HF names -> the island's layout names (S27 G-FT, module doc).
+
+    ``slots``: a Bridge name's slot, or None when the layout does not hold that
+    tensor at all.  A persistent buffer is the case that matters: the layout is
+    the model's ``named_parameters()`` with ``requires_grad``
+    (``full_parameter_plan.model_shapes``), and Bridge also exports the
+    ``state_dict``'s persistent buffers (NemotronH: 23 f32 router biases
+    ``mixer.gate.e_score_correction_bias``).  A Bridge name the map does not
+    mention is its own layout name, so a model whose checkpoint names are its
+    state names (Qwen3) needs no map at all (:data:`IDENTITY`).
+
+    ``row_numel``: elements per row of each stacked layout name.  A source
+    tensor of another size is refused instead of landing at a wrong offset."""
+
+    slots: Mapping[str, LayoutSlot | None]
+    row_numel: Mapping[str, int]
+
+    def slot(self, bridge_name: str) -> LayoutSlot | None:
+        """``bridge_name``'s slot; itself when the map does not mention it."""
+
+        if bridge_name in self.slots:
+            return self.slots[bridge_name]
+        return LayoutSlot(bridge_name)
+
+    def subset(self, bridge_names: Iterable[str]) -> LayoutMap:
+        """The map restricted to ``bridge_names`` (what one worker call needs);
+        ``row_numel`` is kept whole, it has one entry per stacked layout name."""
+
+        wanted = set(bridge_names)
+        return LayoutMap({name: slot for name, slot in self.slots.items() if name in wanted},
+                         dict(self.row_numel))
+
+
+IDENTITY = LayoutMap({}, {})
+
+
+class LayoutSink:
+    """Hand Bridge's exported tensors to a reader under their layout names.
+
+    ``add_part(layout_name, offset, tensor)`` receives each tensor with its flat
+    element offset inside the whole layout tensor: 0 for a whole tensor, and
+    ``row * row_numel`` for one row of a stacked one.  So the 128 per-expert
+    tensors of a NemotronH MoE layer reach the fragment buffer one by one and
+    nothing stacks a 2.6 GB FP32 tensor in a worker (module doc).  Names the
+    layout does not hold are dropped, names outside ``want`` are skipped."""
+
+    def __init__(self, layout: LayoutMap, add_part: Callable[[str, int, Any], None], *,
+                 want: Iterable[str] | None = None) -> None:
+        self.layout = layout
+        self.add_part = add_part
+        self.want = None if want is None else set(want)
+        self.kept = 0
+        self.dropped = 0
+        self.skipped = 0
+
+    def __call__(self, bridge_name: str, tensor: Any) -> None:
+        slot = self.layout.slot(str(bridge_name))
+        if slot is None:
+            self.dropped += 1
+            return
+        if self.want is not None and slot.name not in self.want:
+            self.skipped += 1
+            return
+        if slot.row is None:
+            self.add_part(slot.name, 0, tensor)
+        else:
+            numel = self.layout.row_numel.get(slot.name)
+            if numel is None:
+                raise MegatronHfBoundaryError(
+                    f"{bridge_name!r} is row {slot.row} of {slot.name!r}, whose row size is not known")
+            if int(tensor.numel()) != int(numel):
+                raise MegatronHfBoundaryError(
+                    f"{bridge_name!r} has {int(tensor.numel())} elements, row {slot.row} of "
+                    f"{slot.name!r} holds {int(numel)}")
+            self.add_part(slot.name, int(slot.row) * int(numel), tensor)
+        self.kept += 1
+
+
 # ----------------------------------------------------------------------------- the island's task index
 @dataclass(frozen=True)
 class HfTaskIndex:
-    """Which conversion tasks produce which HF names, over all ranks.
+    """Which conversion tasks produce which layout names, over all ranks.
 
-    ``names[i]`` is the union of task ``i``'s HF names on every rank (ranks of
-    different expert-parallel coordinates name different experts at one
-    index); ``by_name`` inverts it.  Built once from every rank's
-    :func:`manifest` and checked against the boundary's layout names."""
+    ``bridge[i]`` is the union of task ``i``'s Bridge HF names on every rank
+    (ranks of different expert-parallel coordinates name different experts at
+    one index); ``slots[i]`` is where those names go in the layout
+    (:class:`LayoutMap`), ``names[i]`` their layout names and ``by_name``
+    inverts it.  ``stacked`` gives each stacked layout name's row count.
 
+    A layout name may be written by many tasks (NemotronH: 128 per-expert
+    checkpoint tensors stack into one layout tensor, which with expert
+    parallelism arrive from 32 task indices x 4 expert-parallel ranks), so the
+    "written once" rule is checked per *row*, and every row of a stacked name
+    must be there exactly once.  Built once from every rank's :func:`manifest`
+    and checked against the boundary's layout names."""
+
+    bridge: Mapping[int, frozenset[str]]
+    slots: Mapping[int, frozenset[LayoutSlot]]
     names: Mapping[int, frozenset[str]]
     by_name: Mapping[str, tuple[int, ...]]
+    stacked: Mapping[str, int]
+    layout: LayoutMap
 
     @classmethod
-    def from_manifests(cls, records: Sequence[Mapping[str, Any]], layout_names: Iterable[str]
-                       ) -> HfTaskIndex:
+    def from_manifests(cls, records: Sequence[Mapping[str, Any]], layout_names: Iterable[str],
+                       *, layout: LayoutMap | None = None) -> HfTaskIndex:
         refused = sorted({name for record in records for name in record.get("refused", ())})
         if refused:
             raise MegatronHfBoundaryError(f"parameters without an FP32 optimizer master: {refused[:4]}")
-        names: dict[int, set[str]] = {}
+        layout_map = IDENTITY if layout is None else layout
+        bridge: dict[int, set[str]] = {}
         for record in records:
             for index, hf_names, _dtype in record["tasks"]:
-                names.setdefault(int(index), set()).update(str(name) for name in hf_names)
-        layout = set(layout_names)
-        produced = set().union(*names.values()) if names else set()
-        missing = sorted(layout - produced)
+                bridge.setdefault(int(index), set()).update(str(name) for name in hf_names)
+        slots: dict[int, set[LayoutSlot]] = {}
+        by_slot: dict[tuple[str, int | None], list[int]] = {}
+        produced: set[str] = set()
+        for index in sorted(bridge):
+            for name in sorted(bridge[index]):
+                slot = layout_map.slot(name)
+                if slot is None:  # not in the layout (a persistent buffer)
+                    continue
+                slots.setdefault(index, set()).add(slot)
+                produced.add(slot.name)
+                by_slot.setdefault((slot.name, slot.row), []).append(index)
+        wanted = set(layout_names)
+        missing = sorted(wanted - produced)
         if missing:
             raise MegatronHfBoundaryError(f"Megatron-Bridge exports no tensor for layout names {missing[:4]}"
                                           + (f" ... and {len(missing) - 4} more" if len(missing) > 4 else ""))
-        extra = sorted(produced - layout)
+        extra = sorted(produced - wanted)
         if extra:
-            raise MegatronHfBoundaryError(f"Megatron-Bridge exports names the layout does not have: {extra[:4]}")
-        by_name: dict[str, list[int]] = {}
-        for index in sorted(names):
-            for name in names[index]:
-                by_name.setdefault(name, []).append(index)
-        doubled = sorted(name for name, indices in by_name.items() if len(indices) > 1)
+            raise MegatronHfBoundaryError(f"Megatron-Bridge exports names the layout does not have: {extra[:4]}"
+                                          + (f" ... and {len(extra) - 4} more" if len(extra) > 4 else ""))
+        doubled = sorted(LayoutSlot(name, row).label()
+                         for (name, row), indices in by_slot.items() if len(indices) > 1)
         if doubled:
             raise MegatronHfBoundaryError(f"two conversion tasks write {doubled[:4]}")
-        return cls(names={index: frozenset(value) for index, value in names.items()},
-                   by_name={name: tuple(indices) for name, indices in by_name.items()})
+        rows: dict[str, set[int]] = {}
+        whole: set[str] = set()
+        for name, row in by_slot:
+            if row is None:
+                whole.add(name)
+            else:
+                rows.setdefault(name, set()).add(int(row))
+        both = sorted(whole & set(rows))
+        if both:
+            raise MegatronHfBoundaryError(f"Megatron-Bridge exports {both[:4]} both whole and in rows")
+        for name in sorted(rows):
+            present = rows[name]
+            gaps = sorted(set(range(max(present) + 1)) - present)
+            if gaps:
+                raise MegatronHfBoundaryError(
+                    f"{name}: Megatron-Bridge exports {len(present)} rows up to {max(present)}, "
+                    f"{len(gaps)} missing (e.g. {gaps[:4]})")
+        by_name: dict[str, set[int]] = {}
+        for index in sorted(slots):
+            for slot in slots[index]:
+                by_name.setdefault(slot.name, set()).add(index)
+        return cls(bridge={index: frozenset(value) for index, value in bridge.items()},
+                   slots={index: frozenset(value) for index, value in slots.items()},
+                   names={index: frozenset(slot.name for slot in value) for index, value in slots.items()},
+                   by_name={name: tuple(sorted(indices)) for name, indices in by_name.items()},
+                   stacked={name: len(present) for name, present in rows.items()},
+                   layout=layout_map)
+
+    def check_stack_heights(self, shapes: Mapping[str, Sequence[int]]) -> None:
+        """Every stacked layout name holds as many rows as its layout shape's dim 0.
+
+        The row count comes from Bridge (one row per checkpoint tensor it
+        exports), dim 0 from the model's own parameter, so a mismatch means the
+        two namespaces disagree on the expert count -- refuse at start."""
+
+        bad = [f"{name}: Bridge exports {height} rows, the layout has {int(shapes[name][0])}"
+               for name, height in sorted(self.stacked.items())
+               if name in shapes and int(shapes[name][0]) != height]
+        if bad:
+            raise MegatronHfBoundaryError(f"stacked layout tensors of the wrong height: {bad[:4]}")
+
+    def layout_for(self, indices: Iterable[int]) -> LayoutMap:
+        """The part of :attr:`layout` the worker call of ``indices`` needs."""
+
+        names: set[str] = set()
+        for index in indices:
+            names |= set(self.bridge.get(int(index), ()))
+        return self.layout.subset(names)
 
     def tasks_for(self, hf_names: Iterable[str]) -> list[int]:
         """The task indices that produce any of ``hf_names``, ascending."""
@@ -362,7 +535,14 @@ class HfTaskIndex:
 
     def apply_plan(self, given: Iterable[str]) -> tuple[list[int], list[int]]:
         """``(write, read)`` task indices of an apply of ``given``: every task
-        that writes one of them, and those of it that also need inputs not given."""
+        that writes one of them, and those of it that also need inputs not given.
+
+        ``given`` names *whole* layout tensors (``apply_parameters`` sends whole
+        tensors), so a task that writes only some rows of a stacked layout
+        tensor needs no read: the rows it needs are in that whole tensor.  A
+        partial apply of single rows is therefore not expressible here, and not
+        asked for -- the apply unit of the full-parameter stream is one layout
+        tensor, never a row of one."""
 
         given = set(given)
         write = self.tasks_for(given)
@@ -370,12 +550,19 @@ class HfTaskIndex:
         return write, read
 
     def master_dtypes(self, records: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-        """``{HF name: dtype of the master the sync reads}`` over all ranks."""
+        """``{layout name: dtype of the master the sync reads}`` over all ranks.
+
+        Keyed by layout name (:class:`LayoutMap`), so the hybrid-model dtype
+        rules see the names the layout has; a Bridge name the layout does not
+        hold (a persistent buffer) is left out."""
 
         out: dict[str, str] = {}
         for record in records:
             for _index, hf_names, dtype in record["tasks"]:
-                if dtype is not None:
-                    for name in hf_names:
-                        out.setdefault(str(name), str(dtype))
+                if dtype is None:
+                    continue
+                for name in hf_names:
+                    slot = self.layout.slot(str(name))
+                    if slot is not None:
+                        out.setdefault(slot.name, str(dtype))
         return out
