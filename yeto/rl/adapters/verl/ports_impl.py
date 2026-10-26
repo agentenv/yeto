@@ -30,15 +30,20 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from math import prod
 from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
-from yeto.rl.engine import mismatch_criteria
+from yeto.rl.engine import mismatch_criteria, offpolicy_source
+from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, is_resident
 from yeto.rl.engine.ports import GroupMetadata, PlacementDescription, PublicationResult, RolloutBatchHandle
-from yeto.rl.engine.trainable_state import TrainableState
+from yeto.rl.engine.trainable_state import LAYOUT_LORA, TrainableState
 
 from . import publish as pub
+from .cut import CutPorts
 from .param_names import train_to_canonical
 
 MEMBER = "vllm-0"
@@ -59,20 +64,86 @@ def _peft_module(worker):
     return getattr(module, "_fsdp_wrapped_module", module)
 
 
+def _lora_tensors(worker_dict) -> tuple[dict, set]:
+    """({canonical name: full LoRA tensor on its device}, parameter dtypes); collective
+    (``full_tensor``): every rank calls it."""
+    peft = _peft_module(_inner_worker(worker_dict))
+    out, dtypes = {}, set()
+    for name, param in peft.named_parameters():
+        if ".lora_" not in name:
+            continue
+        dtypes.add(str(param.dtype))
+        full = param.full_tensor() if hasattr(param, "full_tensor") else param
+        out[train_to_canonical(name)] = full.detach()
+    return out, dtypes
+
+
 def remote_export_lora(worker_dict):
     """(canonical f32 CPU tensors, info) from the actor's PEFT model."""
     import torch
 
-    peft = _peft_module(_inner_worker(worker_dict))
-    out, dtypes = {}, set()
     with torch.no_grad():
-        for name, param in peft.named_parameters():
-            if ".lora_" not in name:
-                continue
-            dtypes.add(str(param.dtype))
-            full = param.full_tensor() if hasattr(param, "full_tensor") else param
-            out[train_to_canonical(name)] = full.detach().to("cpu", torch.float32).clone()
+        tensors, dtypes = _lora_tensors(worker_dict)
+        out = {name: value.to("cpu", torch.float32).clone() for name, value in tensors.items()}
     return out, {"param_dtypes": sorted(dtypes), "count": len(out)}
+
+
+def digest_lora_tensors(tensors, *, base_model_revision: str, lora_config_hash: str,
+                        layout_hash: str, expected_specs) -> dict:
+    """rl-publish-fastpath, trainer side: validate ``tensors`` exactly as the driver's
+    ``canonical_state`` would and return only what the driver reads -- the policy
+    digests and the bf16 send checksum of :func:`publish.lora_checksum` (small dicts,
+    no tensors).  Same functions as the full-export path, so the values are equal
+    bit for bit."""
+
+    import time
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yeto.rl.core import canonical_state_from_owned_tensors
+    from yeto.rl.engine.policy_digest import digest_canonical_tensors
+
+    started = time.monotonic()
+    # E1: ``tensors`` are this call's own copies (the trainer's export), so the
+    # validation keeps them without a second clone; the values are the same
+    state = canonical_state_from_owned_tensors(
+        0, tensors, base_model_revision=base_model_revision, lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash, expected_specs=expected_specs)
+    # E1: the bf16 send checksum runs in its own thread beside the two digest streams
+    # (hashlib releases the GIL); each function is unchanged, so the values are too
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-lora-checksum") as pool:
+        checksum = pool.submit(pub.lora_checksum, dict(state.tensors))
+        digest = digest_canonical_tensors(state.tensors, base_model_revision=state.base_model_revision,
+                                          lora_config_hash=state.lora_config_hash,
+                                          layout_hash=state.layout_hash)
+        lora_checksum = checksum.result()
+    return {"digest": digest.to_wire(), "layout_hash": state.layout_hash,
+            "lora_checksum": lora_checksum,
+            "export_seconds": round(time.monotonic() - started, 3)}
+
+
+def remote_export_digest(worker_dict, kwargs: dict):
+    """All ranks gather the LoRA (``full_tensor`` is collective); rank 0 hashes it.
+
+    E1: rank 0 stages the tensors in one reusable pinned buffer (one GPU
+    synchronization, :func:`~yeto.rl.engine.policy_digest.stage_f32_on_host`); they
+    are hashed here and dropped, never returned."""
+    import torch
+    import torch.distributed as dist
+
+    from yeto.rl.engine.policy_digest import HostStaging, stage_f32_on_host
+
+    with torch.no_grad():
+        tensors, _dtypes = _lora_tensors(worker_dict)
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return None
+        worker = _inner_worker(worker_dict)
+        staging = getattr(worker, "_yeto_digest_staging", None)
+        if staging is None:
+            staging = HostStaging()
+            setattr(worker, "_yeto_digest_staging", staging)
+        tensors = stage_f32_on_host(tensors, staging)
+    return digest_lora_tensors(tensors, **kwargs)
 
 
 def remote_apply_lora(worker_dict, tensors, reset_optimizer: bool):
@@ -145,6 +216,9 @@ class VerlIsland:
         self.published: tuple[int, str] | None = None
         self.last_metrics: dict = {}
         self.last_criteria: dict = {}
+        # A full-parameter island's trainer group as its role stream sees it
+        # (``full_parameter_stream.VerlFullParameterGroup``); None on a LoRA island.
+        self.full_group = None
         self.readback_dir = Path(os.environ.get("YETO_VERL_READBACK_DIR", str(self.out / "readback")))
         self.readback_dir.mkdir(parents=True, exist_ok=True)
         (self.readback_dir / "expected_shapes.json").write_text(
@@ -157,9 +231,20 @@ class VerlIsland:
         workers = self.trainer.actor_rollout_wg.workers
         return ray.get([w.__ray_call__.remote(fn, *args) for w in workers])
 
+    def call_workers_shared(self, fn, *args):
+        """:meth:`call_workers` with every argument put in the object store once,
+        so a large argument (whole parameter tensors) is not serialized per worker."""
+        import ray
+
+        return self.call_workers(fn, *[ray.put(arg) for arg in args])
+
     def export_tensors(self) -> tuple[dict, dict]:
         results = self.call_workers(remote_export_lora)
         return results[0]
+
+    def export_digest(self, kwargs: dict) -> dict:
+        """rl-publish-fastpath: digests + send checksum computed on the workers."""
+        return next(r for r in self.call_workers(remote_export_digest, kwargs) if r is not None)
 
     def append_jsonl(self, name: str, record: dict) -> None:
         with (self.out / name).open("a") as handle:
@@ -167,16 +252,70 @@ class VerlIsland:
 
 
 # ----------------------------------------------------------------------------- ports
+@dataclass
+class VerlPendingGeneration:
+    """A batch whose prompts went to the rollout servers (:meth:`VerlRolloutPool.start_generate`):
+    the round, the publication ``(version, hash)`` the servers held at submission,
+    ``prepare_step``'s metrics and the submission time."""
+
+    rollout_id: int
+    published: tuple[int, str]
+    prep_metrics: dict
+    started: float
+    expected_policy_version: str | None = None
+    ahead: bool = False
+    cancelled: bool = False
+    # the submission's error, raised at the join (as a spawned generation's would be):
+    # e.g. the task dispenser's end of the data, met while drawing the prompts
+    failure: BaseException | None = None
+
+
+def _check_expected_token(rollout_id: int, published: tuple[int, str], expected: str | None) -> None:
+    """IR-3 (as Miles' ``_begin_generation``): the driver's token and the publication the
+    servers hold must be the same, before any prompt is submitted."""
+    if expected is None:
+        return
+    token = f"yeto:{published[0]}:{published[1]}"
+    if expected != token:
+        from yeto.rl.engine.driver import PolicyIdentityError  # the driver never imports the adapter
+
+        raise PolicyIdentityError(f"rollout {rollout_id}: driver expects {expected}, the servers hold {token}")
+
+
 class VerlRolloutPool:
-    def __init__(self, island: VerlIsland):
+    def __init__(self, island: VerlIsland, dispense=None):
         from .data_cursor import VerlDataCursor
 
         self.island = island
-        # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
-        self._cursor = VerlDataCursor(island.trainer)
+        # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        # (``task_dispense.VerlDispensedBatches``, installed on the trainer already)
+        self.dispense = dispense
+        if dispense is not None:
+            # the dispenser keeps the data position: nothing to seek (the driver's
+            # restart and rejoin paths skip a pool without a callable seek)
+            self.seek_data_cursor = None
+        else:
+            # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
+            self._cursor = VerlDataCursor(island.trainer)
 
     def data_cursor(self) -> dict[str, int]:
+        if self.dispense is not None:
+            return self.dispense.cursor()
         return self._cursor.cursor()
+
+    def commit_dispensed(self, rollout_id: int) -> dict | None:
+        """S27 G-EU (driver, after the round's sync boundary): report the round's
+        kept rows trained to the dispenser; None without one."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        return self.dispense.commit(int(rollout_id))
+
+    def close_dispensed(self) -> dict | None:
+        """S27 G-EU (driver, finished run): release every row not trained yet."""
+        if self.dispense is None or getattr(self, "_dispense_closed", False):
+            return None
+        self._dispense_closed = True
+        return self.dispense.close()
 
     def seek_data_cursor(self, cursor) -> dict[str, int]:
         landed = self._cursor.seek(cursor)
@@ -184,22 +323,87 @@ class VerlRolloutPool:
         return landed
 
     def generate(self, rollout_id: int, *, expected_policy_version: str | None = None) -> RolloutBatchHandle:
-        import numpy as np
-        import transfer_queue as tq
         from verl.utils.skip import SkipManager
 
         isl, t = self.island, self.island.trainer
         if isl.published is None or isl.published[0] != rollout_id:
             raise RuntimeError(f"rollout {rollout_id} requested without a verified publication")
-        version, digest = isl.published
         t.global_steps = rollout_id + 1
         SkipManager.set_step(t.global_steps)
         t.timing_raw = {}
-        metrics: dict = {}
         started = time.monotonic()
         prep = t.prepare_step()
-        if prep:
-            metrics.update(prep)
+        return self._collect(VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
+                                                   expected_policy_version))
+
+    # -- rollout ahead (driver ``rollout_ahead``, ``yeto.rl.engine.rollout_ahead``; S27 G-EV) --
+    def start_generate(self, rollout_id: int, *,
+                       expected_policy_version: str | None = None) -> VerlPendingGeneration:
+        """Submit the prompts of ``rollout_id`` to the rollout servers with the policy
+        published now (``rollout_id - 1``) and return while they generate.
+
+        Only the separate mode runs it (the vLLM servers have their own cards, so they
+        generate while the trainer trains ``rollout_id - 1``). verl's ``prepare_step``
+        hands the prompts to the agent loop without waiting (fork ``agent_loop_tq``);
+        the prompts carry ``global_steps = rollout_id + 1``, as in :meth:`generate`. The
+        trainer's own step counter goes back to the round it is about to train."""
+        from verl.utils.skip import SkipManager
+
+        isl, t = self.island, self.island.trainer
+        if isl.published is None or isl.published[0] != rollout_id - 1:
+            raise RuntimeError(f"rollout {rollout_id} started ahead without the publication of "
+                               f"v{rollout_id - 1} (published: {isl.published})")
+        _check_expected_token(rollout_id, isl.published, expected_policy_version)
+        training_step = t.global_steps
+        t.global_steps = rollout_id + 1
+        SkipManager.set_step(t.global_steps)
+        started = time.monotonic()
+        failure: BaseException | None = None
+        try:
+            prep = t.prepare_step()
+        except Exception as error:  # noqa: BLE001 - raised by finish_generate (the driver's join)
+            # S27 G-EV: the round being trained must still train and pass its boundary;
+            # the driver then ends on a data end or fails the join (rollout_ahead module)
+            prep, failure = {}, error
+        finally:
+            t.global_steps = training_step
+            SkipManager.set_step(training_step)
+        isl.emit("rl_verl_generate_started", rollout_id=rollout_id, policy_version=isl.published[0],
+                 **({"error": f"{type(failure).__name__}: {failure}"} if failure is not None else {}))
+        return VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
+                                     expected_policy_version, ahead=True, failure=failure)
+
+    def finish_generate(self, pending: VerlPendingGeneration) -> RolloutBatchHandle:
+        """Wait for a batch :meth:`start_generate` submitted (the driver calls it after the
+        previous round trained, before the next publication); the servers are idle after it."""
+        from verl.utils.skip import SkipManager
+
+        if pending.cancelled:
+            raise RuntimeError(f"rollout {pending.rollout_id}: the batch generated ahead was cancelled")
+        if pending.failure is not None:
+            raise pending.failure
+        t = self.island.trainer
+        t.global_steps = pending.rollout_id + 1
+        SkipManager.set_step(t.global_steps)
+        t.timing_raw = {}
+        return self._collect(pending)
+
+    def cancel_generate(self, pending: VerlPendingGeneration) -> None:
+        """A failed round leaves its batch generating: nothing will train it. verl has no
+        per-batch abort on this path; the island stops after the round's error."""
+        pending.cancelled = True
+
+    def _collect(self, pending: VerlPendingGeneration) -> RolloutBatchHandle:
+        """verl steps 1-3 of ``_step_once`` after the prompts were submitted: sample the
+        replay buffer (waits for the batch), rule reward, balance; the batch handle."""
+        import numpy as np
+        import transfer_queue as tq
+
+        isl, t = self.island, self.island.trainer
+        rollout_id = pending.rollout_id
+        version, digest = pending.published
+        metrics: dict = dict(pending.prep_metrics)
+        started = pending.started
         t.on_sample_begin()
         batch, off_policy = t.replay_buffer.sample(global_steps=t.global_steps, partition_id="train",
                                                    batch_size=t.config.data.train_batch_size)
@@ -216,6 +420,10 @@ class VerlRolloutPool:
         padded = data.to_padded_tensor()
         uids = [str(u) for u in padded.pop("uid").tolist()]
         prompt_sha = hashlib.sha256(padded["prompts"].cpu().numpy().tobytes()).hexdigest()
+        # the same digest independent of arrival order (rows sorted): compares the prompts two
+        # runs drew for one round (T-C4: a resumed island vs a continuous one)
+        prompt_set_sha = hashlib.sha256(b"".join(sorted(
+            row.tobytes() for row in padded["prompts"].cpu().numpy()))).hexdigest()
         gen_steps = sorted({int(tag.get("global_steps", -1)) for tag in batch.tags})
         rewards = padded["rm_scores"].float().sum(-1).tolist()
         lengths = padded["response_mask"].float().sum(-1).tolist()
@@ -238,6 +446,9 @@ class VerlRolloutPool:
                 token_count=int(sum(lengths[i] for i in idx)),
             ))
         isl.pending = {"batch": batch, "metrics": metrics, "gen_seconds": gen_seconds}
+        # S27 G-EU: the dispensed rows of the groups the trainer gets wait for the commit
+        data_rows = (None if self.dispense is None else
+                     self.dispense.kept_round(rollout_id, {uid: len(idx) for uid, idx in groups.items()}))
         lens = sorted(lengths)
         summary = {"resp_len_mean": float(np.mean(lengths)) if lengths else None,
                    "resp_len_p95": float(lens[int(0.95 * (len(lens) - 1))]) if lens else None,
@@ -245,14 +456,17 @@ class VerlRolloutPool:
         isl.append_jsonl(f"verl-rollout-{isl.learner_id}.jsonl", {
             "rollout_id": rollout_id, "policy_token": token, "groups": len(metas),
             "samples": len(uids), "reward_mean": float(np.mean(rewards)) if rewards else None,
-            "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version,
-            "prompts_sha256": prompt_sha, "sample_submit_global_steps": gen_steps,
+            "gen_seconds": gen_seconds, "expected_policy_version": pending.expected_policy_version,
+            **({"ahead": True} if pending.ahead else {}),
+            "prompts_sha256": prompt_sha, "prompt_set_sha256": prompt_set_sha,
+            "sample_submit_global_steps": gen_steps,
             "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids,
             "data_cursor": self.data_cursor()})
         return RolloutBatchHandle(
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
             batch_summary=summary, data_cursor=self.data_cursor(),
+            backend="verl", round_data_rows=data_rows,
         )
 
     def abort(self) -> None:
@@ -262,12 +476,34 @@ class VerlRolloutPool:
         return frozenset({MEMBER})
 
 
-class VerlTrainerGroup:
+def round_base_policy(island, batch: RolloutBatchHandle) -> tuple[int, str]:
+    """(version, hash) of the policy a round's optimizer step starts from: the island's
+    publication of that round. Serial rounds: the policy that generated the batch.
+    Rollout ahead (S27 G-EV): the batch was generated one version earlier, so the
+    receipt names the round's own publication (the full-parameter stream binds it to
+    the round's anchor) and the batch evidence keeps the generating policy."""
+    published = getattr(island, "published", None)
+    if published is not None and int(published[0]) == int(batch.rollout_id) > int(batch.policy_version):
+        return int(published[0]), str(published[1])
+    return int(batch.policy_version), str(batch.policy_hash)
+
+
+class VerlTrainerGroup(CutPorts):
     publish_offloaded = False
 
     def __init__(self, island: VerlIsland):
         self.island = island
         self._metrics = None
+        self._cut_trainer = None
+
+    # ---- cut verbs (S25 N7.6; .cut.CutPorts) ----
+    def _cut_calls(self):
+        return self.island.call_workers
+
+    def _optimizer_steps_per_round(self) -> int:
+        from .cut import optimizer_steps_per_round
+
+        return optimizer_steps_per_round(self.island.trainer.config)
 
     def onload(self) -> None:
         return None
@@ -290,6 +526,8 @@ class VerlTrainerGroup:
         if t.use_reference_policy:
             kv = t._compute_ref_log_prob(kv, metrics=metrics)
         kv = t._compute_advantage(kv, metrics=metrics)
+        if getattr(isl, "debug_dump", False):  # S27 G-EU (VERL-PARITY #35): --rl-debug-dump
+            debug_dump(isl, kv, batch.rollout_id)
         kv = t._update_actor(kv, metrics=metrics)
         try:
             t._compute_metrics(kv, metrics, timing, global_steps=t.global_steps, epoch=0)
@@ -318,14 +556,25 @@ class VerlTrainerGroup:
             train_step=batch.rollout_id,
             applied_lrs=None if lr is None else (lr,),
         )
+        if grad_norm is not None:
+            self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
-        return LocalStepReceipt(
+        base_version, base_hash = round_base_policy(isl, batch)
+        receipt = LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
-            base_policy_version=batch.policy_version, base_policy_hash=batch.policy_hash,
+            base_policy_version=base_version, base_policy_hash=base_hash,
             input_batch_hash=_sha("|".join(ids)), trajectory_ids=ids,
             trained_tokens=sum(g.token_count for g in batch.groups), optimizer_steps=1,
             optimizer_step_succeeded=grad_norm is not None, parameter_layout_hash=isl.layout_hash,
         )
+        if isl.full_group is not None:  # the full-parameter role stream binds the round to this
+            from .full_parameter_stream import VerlRoundEvidence
+
+            isl.full_group.record_round(receipt, VerlRoundEvidence(
+                rollout_id=batch.rollout_id, behavior_policy_hash=batch.policy_hash,
+                input_batch_hash=receipt.input_batch_hash, trained_tokens=receipt.trained_tokens,
+                trajectory_ids=ids))
+        return receipt
 
     def step_metrics(self):
         return self._metrics
@@ -344,6 +593,25 @@ class VerlTrainerGroup:
         return out
 
 
+@dataclass(frozen=True)
+class VerlResidentState(TrainerResidentState):
+    """A verl policy kept in the trainer; carries the bf16 send checksum the
+    publisher compares with the vLLM read-back (no tensors on the driver)."""
+
+    lora_checksum: Mapping[str, Any] | None = field(default=None, compare=False)
+
+
+def sent_checksum(state) -> tuple[dict, int]:
+    """(send checksum, bf16 payload bytes) of the policy being published.  A resident
+    state brings both from the trainer; any other state is hashed here as before."""
+
+    if is_resident(state) and getattr(state, "lora_checksum", None) is not None:
+        payload_bytes = sum(prod(shape) * 2 for _name, shape in state.digest.specs)
+        return dict(state.lora_checksum), int(payload_bytes)
+    tensors = dict(state.to_lora().tensors)
+    return pub.lora_checksum(tensors), sum(int(t.numel()) * 2 for t in tensors.values())
+
+
 class VerlPolicyState:
     def __init__(self, island: VerlIsland):
         self.island = island
@@ -358,6 +626,36 @@ class VerlPolicyState:
                                 layout_hash=self.island.layout_hash,
                                 expected_specs=self.island.expected_specs)
         return TrainableState.from_lora(state)
+
+    def export_digest(self, *, policy_version: int) -> VerlResidentState | None:
+        """rl-publish-fastpath: the workers export and hash; only digests cross Ray.
+        None when the island has no digest hook (the driver then calls :meth:`export`)."""
+
+        hook = getattr(self.island, "export_digest", None)
+        if not callable(hook):
+            return None
+        isl, started = self.island, time.monotonic()
+        raw = hook({"base_model_revision": isl.base_model_revision,
+                    "lora_config_hash": isl.lora_config_hash, "layout_hash": isl.layout_hash,
+                    "expected_specs": tuple(isl.expected_specs)})
+        digest = PolicyDigest.from_wire(raw["digest"])
+        print(f"[rl] verl publish-fastpath digest export v{policy_version}: "
+              f"total={time.monotonic() - started:.2f}s trainer={raw.get('export_seconds')}s "
+              f"hash={digest.hash_seconds:.2f}s bytes={digest.payload_bytes}", flush=True)
+        return VerlResidentState(
+            layout=LAYOUT_LORA, base_model_revision=isl.base_model_revision,
+            config_hash=isl.lora_config_hash, layout_hash=str(raw["layout_hash"]),
+            policy_version=int(policy_version), digest=digest, materialize_fn=self._materialize,
+            lora_checksum=raw["lora_checksum"])
+
+    def _materialize(self, policy_version: int) -> TrainableState:
+        from yeto.rl.core import canonical_state
+
+        lora = self.export().to_lora()
+        return TrainableState.from_lora(canonical_state(
+            int(policy_version), lora.tensors, base_model_revision=lora.base_model_revision,
+            lora_config_hash=lora.lora_config_hash, layout_hash=lora.layout_hash,
+            expected_specs=lora.specs))
 
     def apply(self, state: TrainableState, *, optimizer: str, local_step: int) -> None:
         if optimizer not in ("reset", "preserve"):
@@ -399,8 +697,7 @@ class VerlPublisher:
 
         isl, t = self.island, self.island.trainer
         version = int(state.policy_version)
-        lora = state.to_lora()
-        sent = pub.lora_checksum(dict(lora.tensors))
+        sent, payload_bytes = sent_checksum(state)
         (isl.readback_dir / "expected_version").write_text(str(version))
         stale = isl.readback_dir / f"readback-v{version}.json"
         if stale.exists():
@@ -426,7 +723,6 @@ class VerlPublisher:
                                    f"{list(check.mismatched[:3])}", cause=cause)
         digest = state.policy_tensor_hash()
         isl.published = (version, digest)
-        payload_bytes = sum(int(t_.numel()) * 2 for t_ in lora.tensors.values())
         manifest = InferencePublicationManifest(
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
@@ -435,10 +731,84 @@ class VerlPublisher:
         return PublicationResult(manifest, frozenset({MEMBER}))
 
 
+class VerlFullParameterPublisher:
+    """Publication of a full-parameter island: verl's colocated ``update_weights``
+    of the whole model into vLLM.
+
+    vLLM's copy is not read back: the LoRA read-back hook (``vllm_readback``)
+    reads a registered adapter, and no full-parameter hook exists yet.  Every
+    record says so (status ``UNVERIFIED``); nothing claims a verified engine copy."""
+
+    STATUS = "UNVERIFIED"
+    DETAIL = "full-parameter publication: vLLM's weights are not read back"
+
+    def __init__(self, island: VerlIsland):
+        self.island = island
+
+    def publish(self, state) -> PublicationResult:
+        isl, t = self.island, self.island.trainer
+        version = int(state.policy_version)
+        digest = state.policy_tensor_hash()
+        started = time.monotonic()
+        t.checkpoint_manager.update_weights(t.global_steps)
+        record = {"status": self.STATUS, "detail": self.DETAIL, "policy_version": version,
+                  "policy_tensor_hash": digest, "payload_hash": state.digest.payload_hash,
+                  "payload_bytes": int(state.digest.payload_bytes),
+                  "update_seconds": time.monotonic() - started}
+        isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", record)
+        isl.emit("rl_publication_check", **record)
+        isl.published = (version, digest)
+        manifest = InferencePublicationManifest(
+            publication_mode="full", base_policy_version=None, target_policy_version=version,
+            target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
+            payload_hash=state.digest.payload_hash, payload_bytes=int(state.digest.payload_bytes),
+            complete=True)
+        return PublicationResult(manifest, frozenset({MEMBER}))
+
+
 class VerlPlacement:
     def describe(self) -> PlacementDescription:
         return PlacementDescription("colocated", ("cuda:0",), ("cuda:0",),
                                     extra={"weight_transport": "verl-colocated-memory"})
+
+
+DEBUG_DUMP_FIELDS = ("uid", "prompts", "responses", "response_mask", "rm_scores", "advantages")
+
+
+def debug_dump(isl: VerlIsland, kv_batch, rollout_id: int, *, get=None, save=None) -> dict:
+    """S27 G-EU (``--rl-debug-dump``, ``train_options.debug_plan``): the round's
+    samples and train data after the advantage step, as
+    ``verl-debug-<id>-r<round>.pt`` at the top of the output dir (the tape mirror
+    picks it up). Archival: a field verl does not hold is skipped and named in the
+    file, an error is recorded on the tape; training never fails on it."""
+    out = isl.out / f"verl-debug-{isl.learner_id}-r{int(rollout_id):04d}.pt"
+    record: dict = {"rollout_id": int(rollout_id), "global_step": int(getattr(isl.trainer, "global_steps", -1))}
+    try:
+        if get is None:
+            import transfer_queue as tq
+
+            def get(fields):
+                return tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id,
+                                       select_fields=list(fields))
+        if save is None:
+            import torch
+
+            save = torch.save
+        tensors, missing = {}, []
+        for name in DEBUG_DUMP_FIELDS:
+            try:
+                data = get([name])
+                value = data.to_padded_tensor()[name] if hasattr(data, "to_padded_tensor") else data[name]
+            except Exception as exc:  # noqa: BLE001 - archival: one field at a time
+                missing.append(f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+            tensors[name] = value.cpu() if hasattr(value, "cpu") else list(value)
+        save({**record, **tensors, "missing": missing}, out)
+        record.update(path=out.name, fields=sorted(tensors), missing=missing)
+    except Exception as exc:  # noqa: BLE001 - archival, training continues
+        record["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+    isl.emit("rl_verl_debug_dump", **record)
+    return record
 
 
 def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:
@@ -476,3 +846,64 @@ def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:
     isl.last_criteria = crit
     isl.append_jsonl(f"verl-criteria-{isl.learner_id}.jsonl", crit)
     isl.emit("rl_mismatch_criteria", **{k: v for k, v in crit.items()})
+    if "error" not in crit:
+        try:
+            provenances, read = _row_field(kv_batch, "provenance")
+            event = source_event(train_lp, infer_lp, mask, provenances, read,
+                                 rollout_id=step, trainer_version=step, tis_upper=isl.tis_upper)
+        except Exception as exc:  # noqa: BLE001 - archival, training continues
+            event = source_error(exc, rollout_id=step, trainer_version=step)
+        _emit_offpolicy_source(isl, event)
+
+
+def _row_field(kv_batch, name: str) -> tuple[list | None, str]:
+    """Per-row values of one ``extra_fields`` entry (``HarborAgentLoop`` puts
+    ``provenance`` there); ``(None, reason)`` when the batch has none.
+
+    verl's TransferQueue agent loop (``agent_loop_tq._agent_loop_postprocess``)
+    stores ``AgentLoopOutput.as_dict()``, so the entry sits inside the
+    ``extra_fields`` record of each row, not under its own name (the classic
+    agent loop flattens it into ``non_tensor_batch``; the fully async runner
+    reads that).  The batch is read by the record name."""
+    import transfer_queue as tq
+
+    try:
+        data = tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id,
+                               select_fields=["extra_fields"])
+        rows = extra_field_values(list(data["extra_fields"]), name)
+    except Exception as exc:  # noqa: BLE001 - the rows then group under ``unknown``
+        return None, f"missing: {type(exc).__name__}: {str(exc)[:200]}"
+    if all(v is None for v in rows):
+        return None, f"missing: no {name!r} in extra_fields"
+    return rows, "ok"
+
+
+def extra_field_values(records: list, name: str) -> list:
+    """``record[name]`` of each row's ``extra_fields`` (``None`` where absent).  A
+    TransferQueue read can return each record wrapped in a ``NonTensorData``."""
+    values = []
+    for record in records:
+        record = getattr(record, "data", record)
+        values.append(record.get(name) if isinstance(record, dict) else None)
+    return values
+
+
+def source_event(train_lp, infer_lp, mask, provenances, provenance_read: str, *, rollout_id: int,
+                 trainer_version: int, tis_upper: float) -> dict:
+    """The ``offpolicy_source`` event of one verl step (padded tensors, same width)."""
+    event = offpolicy_source.offpolicy_source_event(
+        offpolicy_source.masked_source_samples(train_lp.float().tolist(), infer_lp.float().tolist(),
+                                               mask.tolist(), provenances=provenances),
+        rollout_id=rollout_id, trainer_version=trainer_version, backend="verl", tis_upper=tis_upper)
+    event["provenance_read"] = provenance_read
+    return event
+
+
+def source_error(exc: Exception, *, rollout_id: int, trainer_version: int) -> dict:
+    return {"schema": offpolicy_source.SCHEMA, "rollout_id": int(rollout_id), "trainer_version": int(trainer_version),
+            "backend": "verl", "error": f"{type(exc).__name__}: {str(exc)[:300]}", "sources": []}
+
+
+def _emit_offpolicy_source(isl: VerlIsland, event: dict) -> None:
+    isl.append_jsonl(f"verl-offpolicy-source-{isl.learner_id}.jsonl", event)
+    isl.emit(offpolicy_source.OFFPOLICY_SOURCE_EVENT, **event)

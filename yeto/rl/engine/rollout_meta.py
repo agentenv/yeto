@@ -63,6 +63,13 @@ def current_policy_token() -> str | None:
     return port().current_policy_token()
 
 
+def current_rollout_round() -> int | None:
+    """The round the driver set for this rollout (rollout ahead: one above the
+    token's version); None when the backend has no such value."""
+    reader = getattr(port(), "current_rollout_round", None)
+    return reader() if callable(reader) else None
+
+
 def expected_policy_version(sample: Any = None) -> str | None:
     return port().expected_policy_version(sample)
 

@@ -182,3 +182,67 @@ def test_iter_plugin_refs_walks_nested_dataclasses():
 
     assert list(iter_plugin_refs(Spec())) == [ref]
     assert AlgorithmIdentity.from_spec(Spec()).plugin_sha256 == (f"yeto.rl.algos.reducers.x@{'e' * 64}",)
+
+
+# -- rl-identity-tiering L9.8: semantic hash at cut resume -------------------------
+
+_PLUGIN = "yeto.rl.algos.seq_adv.maxrl_advantage"
+
+
+def _semantic_identity(spec):
+    return AlgorithmIdentity.from_spec(spec, ref_model=ALGO.ref_model)
+
+
+def _spec(source_sha256="1" * 64, upper=2.0):
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, PluginRef
+
+    return AlgorithmSpec(plugins=[PluginRef(_PLUGIN, source_sha256)],
+                         correction=CorrectionSpec(method="tis", lower=0.0, upper=upper))
+
+
+def test_new_cut_records_spec_and_semantic_hash(tmp_path):
+    spec = _spec()
+    ident = _semantic_identity(spec)
+    assert ident.semantic_sha256 == spec.semantic_sha256()
+    commit_manifest(tmp_path, _manifest(tmp_path, algorithm=ident))
+    raw = json.loads((cut_dir(tmp_path, "cut-1") / MANIFEST_NAME).read_text())["algorithm"]
+    assert raw["semantic_sha256"] == spec.semantic_sha256()
+    assert AlgorithmIdentity.from_dict(raw) == ident
+
+
+def test_new_cut_resumes_after_a_plugin_source_change(tmp_path):
+    commit_manifest(tmp_path, _manifest(tmp_path, algorithm=_semantic_identity(_spec("1" * 64))))
+    run = _semantic_identity(_spec("2" * 64))
+    assert run.algorithm_spec_sha256 != _semantic_identity(_spec("1" * 64)).algorithm_spec_sha256
+    verify_cut(tmp_path, "cut-1", _expect(algorithm=run))
+
+
+def test_new_cut_refuses_another_semantic_hash(tmp_path):
+    commit_manifest(tmp_path, _manifest(tmp_path, algorithm=_semantic_identity(_spec())))
+    with pytest.raises(CutError, match=r"algorithm identity differs .*semantic_sha256"):
+        verify_cut(tmp_path, "cut-1", _expect(algorithm=_semantic_identity(_spec(upper=5.0))))
+    other_ref = replace(_semantic_identity(_spec()), ref_model={"ref_load": "/m/x"})
+    with pytest.raises(CutError, match=r"ref_model"):
+        verify_cut(tmp_path, "cut-1", _expect(algorithm=other_ref))
+
+
+def test_new_cut_whose_spec_does_not_match_its_hash_is_refused(tmp_path):
+    ident = _semantic_identity(_spec())
+    forged = replace(ident, algorithm_spec=json.loads(_spec(upper=5.0).canonical_json()))
+    commit_manifest(tmp_path, _manifest(tmp_path, algorithm=forged))
+    with pytest.raises(CutError, match="its manifest says"):
+        verify_cut(tmp_path, "cut-1", _expect(algorithm=ident))
+
+
+def test_old_cut_keeps_the_whole_hash_rule(tmp_path):
+    """A cut from before L9.8 holds hashes only: its manifest bytes are unchanged,
+    and it resumes only when the whole identity is equal (GOAL §6 L9.8 rule)."""
+    spec = _spec()
+    new = _semantic_identity(spec)
+    old = replace(new, semantic_sha256=None, algorithm_spec=None)
+    assert set(old.to_dict()) == {"algorithm_spec_sha256", "plugin_sha256",
+                                  "runtime_attrs_sha256", "ref_model"}
+    commit_manifest(tmp_path, _manifest(tmp_path, algorithm=old))
+    verify_cut(tmp_path, "cut-1", _expect(algorithm=new))
+    with pytest.raises(CutError, match="spec/plugins/runtime attrs/ref model"):
+        verify_cut(tmp_path, "cut-1", _expect(algorithm=_semantic_identity(_spec("2" * 64))))

@@ -175,9 +175,9 @@ def test_two_pass_builds_eight_loadable_runtime_contracts(tmp_path):
             expected_sha256=record["streaming_context"]["sha256"],
             expected_sao_context_sha256=record["sao_context"]["sha256"],
         )
-        assert runtime.streams.actor.learner_id == island_id
-        assert runtime.streams.actor.total_fragment_steps == 2
-        assert runtime.streams.critic.optimizer_steps_per_round == 2
+        assert runtime.actor.learner_id == island_id
+        assert runtime.actor.total_fragment_steps == 2
+        assert runtime.critic.optimizer_steps_per_round == 2
         assert runtime.trajectory_evidence_kind == "terminal-bench-2.1"
 
 

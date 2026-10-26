@@ -521,9 +521,8 @@ def test_examples_build_and_translate(name):
     from yeto.rl.adapters.miles import config as mc
 
     spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
-    # plugin hashes are the current sources (a dispatcher/reducer edit must
-    # regenerate the examples: the hash is the plugin identity)
-    spec.verify_plugins()
+    # plugins are referenced by path only (L9.11): a plugin edit needs no regeneration
+    assert spec.verify_plugins() == ()
     assert spec.rejections() == []
     cfg = make_config()
     if spec.sampling.over_sampling_batch_size is not None:
@@ -559,27 +558,30 @@ def test_other_module_stages_enter_identity():
         spec = pipeline_spec(transform="test_foreign")
         assert spec.rejections() == []
         assert "yeto.rl.algos.reducers._foreign" in {p.path for p in spec.plugins}
-        cfg = gk.plugins_config(spec)["reward_pipeline"]
-        assert cfg["pipeline_sha256"] == rp.combined_sha256(rp.stage_plugin_refs())
+        # no source hash travels in the runtime attrs (L9.11): the code pack pins code
+        assert "pipeline_sha256" not in gk.plugins_config(spec)["reward_pipeline"]
     finally:
         rp.ADV_TRANSFORMS.pop("test_foreign")
 
 
-def test_post_process_rechecks_pipeline_identity():
+def test_post_process_ignores_legacy_pipeline_hash():
+    """L9.11: an old config that still carries ``pipeline_sha256`` is not rejected."""
+
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     payload = gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]
     cfg = json.loads(json.dumps(payload["config"]))
     cfg["reward_pipeline"]["pipeline_sha256"] = "0" * 64
     args = _args(AlgorithmSpec())
     setattr(args, rp.PIPELINE_ATTR, {"config": cfg, "sha256": rp.canonical_sha256(cfg)})
-    with pytest.raises(rp.RewardPipelineError, match="code identity"):
-        rp.post_process(args, [])
+    assert rp.post_process(args, []) == ([], [])
 
 
-def test_stale_plugin_hash_rejected():
+def test_stale_plugin_hash_warns_not_rejected():
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     stale = spec.replace(plugins=[{"path": p.path, "sha256": "1" * 64} for p in spec.plugins])
-    assert any("source hash differs" in p for p in stale.rejections())
+    assert stale.rejections() == []
+    assert all("source hash mismatch" in w for w in stale.verify_plugins())
+    assert len(stale.verify_plugins()) == len(spec.plugins)
 
 
 def test_unknown_transform_refused_at_launch():
@@ -605,7 +607,7 @@ def test_plugins_bound_to_expected_algorithm_hash():
         rp.read_plugins(bad)
 
 
-def test_sample_filters_fail_closed_and_hash_checked():
+def test_sample_filters_fail_closed():
     data = [_group(["truncated"])]
     lost = SimpleNamespace(yeto_rl_expected_algorithm_sha256="a" * 64)
     with pytest.raises(rp.RewardPipelineError, match="did not reach"):
@@ -618,10 +620,10 @@ def test_sample_filters_fail_closed_and_hash_checked():
     assert spec.rejections() == []
     assert rp.SAMPLE_FILTERS_PATH in {p.path for p in spec.plugins}
     cfg = json.loads(json.dumps(gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]["config"]))
-    cfg["sample_filters_sha256"] = "0" * 64
-    tampered = SimpleNamespace(**{rp.PIPELINE_ATTR: {"config": cfg, "sha256": rp.canonical_sha256(cfg)}})
-    with pytest.raises(rp.RewardPipelineError, match="sample filters source"):
-        sf.apply_sample_filters(tampered, data)
+    assert "sample_filters_sha256" not in cfg  # L9.11: the code pack pins the source
+    cfg["sample_filters_sha256"] = "0" * 64  # a legacy config still runs the filter
+    legacy = SimpleNamespace(**{rp.PIPELINE_ATTR: {"config": cfg, "sha256": rp.canonical_sha256(cfg)}})
+    assert sf.apply_sample_filters(legacy, data) is not None
     unpinned = AlgorithmSpec(sampling={"overlong_filter": True})
     assert any("plugins must list" in p for p in unpinned.rejections())
 

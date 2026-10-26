@@ -1,25 +1,111 @@
-"""``--rl-engine`` selection and the R0 ports support matrix (task 5.1).
+"""The ports engine's support matrix (task 5.1; rl-code-quality-cleanup 1.8).
 
 Import-light (no torch/ray/miles): the CLI, launcher, SSH harness, learner
 and benchmark all call :func:`require_ports_supported` before any remote or
-GPU work starts. The choice is always explicit; nothing here infers it.
+GPU work starts.
 
-R0 ports support (spec ``rl-engine-selection`` "不支持的组合明确拒绝"):
-causal LM + LoRA, GRPO, serial colocated, strict-avg / decoupled presets.
-Everything else is rejected with a pointer to ``--rl-engine legacy``.
+The ports engine (``IslandDriver``) is the only Miles engine path.  It runs
+causal LMs with LoRA or full parameters, GRPO and PPO critics, colocated or
+fixed-partition placement, the strict-avg / decoupled presets and the
+full-parameter presets (the strict whole-model sweep, which also carries
+DeepSeek V4 expert-full, and SAO streaming).  Every rejection that remains
+is a combination no engine runs; each one names its reason below.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-RL_ENGINES = ("legacy", "ports")
-DEFAULT_RL_ENGINE = "ports"
-PORTS_SYNC_PRESETS = frozenset({"strict-avg", "decoupled"})
+# ``--rl-engine`` keeps accepting its one value so existing commands parse.
+RL_ENGINES = ("ports",)
+# P0-D8: one full-parameter sync; the preset only picks its profile (the
+# strict whole-model sweep, or SAO's actor + critic streaming).
+# ``full-parameter`` names the transport (every parameter of the synced state
+# is swept), not which parameters train: DeepSeek V4 expert-full rides it too
+# (P0-1.7b.2-Q2).  ``dense-full`` is its old name, kept as an alias.
+FULL_PARAMETER_SYNC_PRESET = "full-parameter"
+SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
+FULL_PARAMETER_SYNC_PRESETS = frozenset({FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
+SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET)
+SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
+# S27 P1: the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
+RL_MATRIX_MERGES = ("avg", "rda")
+# S27 P2: how the full-parameter preset schedules its fragment rounds. "sweep"
+# is the strict policy sweep (every island per round, plain average, the
+# control); "async" runs asynchronous sharded fragment rounds.
+FULL_PARAMETER_ROUNDS = ("sweep", "async")
+# How a multi-island RL run fills the sync options the command leaves unset.
+# "async" (default): asynchronous sharded rounds, quorum 1 with the adaptive
+# grace window, tokens^2/steps island weights, RDA matrix merge, outer
+# Nesterov, int4 push. "strict": the strict-roster control (every island per
+# round, plain average, f32), i.e. the values each option had before the
+# modes existed. An option given on the command line always wins.
+RL_SYNC_MODES = ("async", "strict")
+# The adaptive grace window's cap in the async mode. The window itself is
+# computed from the islands' measured step time (--grace-gamma, --grace-tau);
+# the cap only bounds a slow round, it does not fix the wait.
+ASYNC_GRACE_CAP_MS = 300_000
+# The async full-parameter mode's terminal grace: the last round of each
+# fragment waits this long at most for every island, since no later round of
+# that fragment can carry a late delta into the final parameters (S27 G-CG).
+ASYNC_TERMINAL_GRACE_MS = 120_000
+# The async mode's outer step needs enough local progress per merge: with
+# fewer than this many local RL rounds per sync (H), the default outer step is
+# plain averaging (lr 1.0, momentum 0); from H on it is Nesterov (lr 0.7,
+# momentum 0.9). On GPU, 2 full-parameter islands with H = 1 diverged under
+# Nesterov 0.7/0.9 and trained normally with plain averaging.
+ASYNC_NESTEROV_MIN_H = 4
+
+
+class SyncModeDefault:
+    """Marks an argparse default that ``--rl-sync-mode`` may replace.
+
+    The marked value equals the strict-mode value, so code that reads the
+    option before the mode is resolved sees the strict default."""
+
+    __slots__ = ()
+
+
+class _SyncModeDefaultStr(SyncModeDefault, str):
+    __slots__ = ()
+
+
+class _SyncModeDefaultInt(SyncModeDefault, int):
+    __slots__ = ()
+
+
+def sync_mode_default(value: str | int) -> str | int:
+    """``value`` marked as a default the sync mode resolves."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError(f"no sync-mode default for {value!r}")
+    return (_SyncModeDefaultStr if isinstance(value, str) else _SyncModeDefaultInt)(value)
+
+
+def is_sync_mode_default(value: object) -> bool:
+    """True when ``value`` is still the unset (marked) default."""
+
+    return isinstance(value, SyncModeDefault)
+
+
+def plain(value: object) -> object:
+    """``value`` without its sync-mode mark."""
+
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(value)
+    return value
+
+
+def canonical_sync_preset(value: str) -> str:
+    """argparse type for the sync preset flags: resolve an alias to its preset."""
+
+    return SYNC_PRESET_ALIASES.get(value, value)
 
 
 class UnsupportedPortsCombination(ValueError):
-    """The requested run is only supported by the legacy engine path."""
+    """The requested run is outside what the ports engine runs."""
 
 
 def _extra_argv_facts(extra_argv: Sequence[str]):
@@ -36,44 +122,49 @@ def ports_rejections(
     parameter_mode: str = "lora",
     model_kind: str = "causal-lm",
     tuning: str = "lora",
-    model_recipe: str = "generic",
-    lora_targets: str | None = None,
     expert_full_count: int = 0,
     rollout_num_gpus: int | None = None,
     use_critic: bool = False,
     advantage_estimator: str = "grpo",
     extra_argv: Sequence[str] = (),
     placement: str = "colocated",
+    island_scheduling: str = "legacy",
 ) -> list[str]:
-    """Reasons the combination is outside the R0 ports matrix (empty = OK)."""
+    """Reasons the combination is outside the ports matrix (empty = OK)."""
 
     reasons: list[str] = []
+    sync_preset = canonical_sync_preset(sync_preset)
     facts = _extra_argv_facts(extra_argv)
+    # The island loop, the LoRA layouts and the rollout engine are causal-LM only.
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
-    if tuning != "lora" or parameter_mode != "lora" or sync_preset == "dense-full":
-        reasons.append("full-parameter / dense-full training")
-    if "sao" in str(sync_preset) or facts.streaming_compaction:
-        reasons.append("SAO (streaming compaction)")
-    elif sync_preset not in PORTS_SYNC_PRESETS and sync_preset != "dense-full":
+    if island_scheduling == "elastic" and sync_preset == SAO_STREAMING_SYNC_PRESET:
+        # The SAO island session has no pool membership (heartbeat, re-JOIN);
+        # the other presets' limits are checked by the launcher (rl_args).
+        reasons.append("the sao-streaming-full preset with membership options (island pool)")
+    if tuning not in ("lora", "full") or parameter_mode not in ("lora", "full"):
+        # Input check: no other parameter mode exists.
+        reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
+    if sync_preset not in SYNC_PRESETS:
+        # Input check: no other sync preset exists.
         reasons.append(f"sync preset {sync_preset!r}")
-    if (
-        model_recipe == "deepseek-v4-flash"
-        or lora_targets == "attention-routed-experts"
-        or int(expert_full_count or 0) > 0
-    ):
-        reasons.append("DeepSeek V4 recipe (clone/expert-full LoRA)")
+    # P0 1.7b.2: expert-full is a LoRA hybrid; only the full-parameter sync
+    # carries its clone-expert weights.
+    if int(expert_full_count or 0) > 0 and sync_preset != FULL_PARAMETER_SYNC_PRESET:
+        reasons.append(f"expert-full tuning without --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
     estimator = facts.advantage_estimator or advantage_estimator
-    # rl-algo-critic-family 3.1: PPO (shared actor/critic, Miles derives
-    # use_critic from the estimator) is not routed to legacy any more; the
-    # algorithm spec, the capability check and the critic rejections decide.
-    # ``--use-critic`` is not an upstream Miles flag (legacy fork only).
+    # ``--use-critic`` is not an upstream Miles flag (the critic comes from the
+    # algorithm spec), and Miles has no estimator besides GRPO and PPO that the
+    # algorithm spec maps; a critic without PPO has no value loss to train.
     if facts.critic_flag or estimator not in ("grpo", "ppo") or (
         use_critic and estimator != "ppo"
     ):
         reasons.append(f"critic / non-GRPO advantage estimator ({estimator})")
+    # Input check: no other placement exists.
     if placement not in ("colocated", "fixed-partition"):
         reasons.append(f"placement {placement!r}")
+    # The placement translation owns the rollout GPU count; a pass-through
+    # flag would bypass it.
     if facts.rollout_gpus_flag:
         reasons.append("fixed partition via --rollout-num-gpus in extra argv (use --rl-placement fixed-partition)")
     if placement == "fixed-partition":
@@ -90,16 +181,5 @@ def ports_rejections(
 def require_ports_supported(**kwargs) -> None:
     reasons = ports_rejections(**kwargs)
     if reasons:
-        raise UnsupportedPortsCombination(
-            "--rl-engine ports does not support: "
-            + "; ".join(reasons)
-            + ". This combination is only supported by the legacy path "
-            "(--rl-engine legacy). ports is the default engine, so pass "
-            "--rl-engine legacy explicitly for this run."
-        )
+        raise UnsupportedPortsCombination("unsupported RL run: " + "; ".join(reasons))
 
-
-def check_rl_engine(value: str) -> str:
-    if value not in RL_ENGINES:
-        raise ValueError(f"--rl-engine must be one of {RL_ENGINES}, got {value!r}")
-    return value

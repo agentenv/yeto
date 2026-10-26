@@ -10,6 +10,7 @@
 - 组装入口：`entry.py`（`--rl-engine ports` 的组装根：能力声明、执行档案、岛的组装与 Ray 连接）。
 - 弹性与切点：`elastic_*`、`cut_plugin.py`、`round_cut.py`、`trainer_rebuild.py`、`trainer_resize.py`、`rebuild_wiring.py`、`reshard.py`、`bundles.py`。
 - Miles rollout 进程内的元数据钩子：`rollout_meta_hook.py`。
+- 引擎启动前的远程代码预热：`remote_code_prewarm.py`（连上岛的 Ray 之后、Miles 起任何引擎之前，每台机器起一个子解释器，在文件锁里把模型目录的 `*.py` 填进 transformers 的模块缓存，并跑一次 AutoConfig/AutoTokenizer/AutoProcessor/AutoImageProcessor；失败只打 WARNING）。
 
 ## 声明什么
 
@@ -19,7 +20,7 @@
 
 ## 不支持什么
 
-- 没有翻译的配置项抛 `UnmappedConfigError`（如部分仅旧版引擎支持的配置：DeepSeek V4、全参数等）。
+- 没有翻译的配置项抛 `UnmappedConfigError`。
 - Miles 容错（FT）语义、一个训练组多个 cell、被 Miles 改写的放置：分别以 `FaultToleranceArgsError`、`SingleCellError`、放置改写检测拒绝。
 - 只支持 NVIDIA CUDA（确定性环境变量 `cut_plugin.DETERMINISM_ENV` 为 CUDA 专用）。
-- 本目录之外的旧版引擎（`yeto/rl/adapters/miles/legacy/engine.py`）与 Miles 补丁（`miles_overlay.py`、`overlays/`）不属于本适配层，阶段 4 再归位。
+- 旧版引擎已删除（rl-code-quality-cleanup 1.10）；Miles 补丁 `overlay.py` 经后端注册表的 `overlay` 角色供启动层使用。

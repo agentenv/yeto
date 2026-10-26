@@ -12,7 +12,7 @@ import pytest
 
 from yeto.protocol import encode_hello, layout_fingerprint
 from yeto.rl.adapters.miles import identity as miles_identity
-from yeto.rl.adapters.miles.pins import MILES_COMMIT, MILES_NEXT_COMMIT
+from yeto.rl.adapters.miles.pins import MILES_NEXT_COMMIT
 from yeto.rl.engine.backend_identity import (
     BackendIdentity,
     BackendIdentityMismatch,
@@ -26,10 +26,10 @@ FAKE_VERL = BackendIdentity("verl", "a" * 40, "nvidia", param_map_sha256({"kind"
 
 
 def test_miles_identity_is_fixed_and_hash_is_stable():
-    ports, legacy = miles_identity.backend_identity("ports"), miles_identity.backend_identity("legacy")
+    ports = miles_identity.backend_identity()
     assert ports.engine == "miles" and ports.device_family == "nvidia"
-    assert ports.engine_commit == MILES_NEXT_COMMIT and legacy.engine_commit == MILES_COMMIT
-    assert ports.sha256() == miles_identity.backend_identity("ports").sha256()
+    assert ports.engine_commit == MILES_NEXT_COMMIT
+    assert ports.sha256() == miles_identity.backend_identity().sha256()
     assert BackendIdentity.from_dict(ports.to_dict()) == ports
     assert ports.sha256() == hashlib.sha256(ports.canonical_json().encode()).hexdigest()
 
@@ -38,27 +38,29 @@ def test_miles_identity_is_fixed_and_hash_is_stable():
                                          ("device_family", "ascend"),
                                          ("param_map_sha256", "c" * 64)])
 def test_changing_any_field_changes_the_identity_hash(field, value):
-    base = miles_identity.backend_identity("ports")
+    base = miles_identity.backend_identity()
     assert dataclasses.replace(base, **{field: value}).sha256() != base.sha256()
 
 
 def test_golden_samples_keep_both_old_hashes_and_carry_the_identity():
-    expected = miles_identity.backend_identity("ports")
+    expected = miles_identity.backend_identity()
     for path in sorted(GOLDEN.glob("*.json")):
         if path.name == "fake_engine_tapes.json":
             continue
         sample = json.loads(path.read_text())
-        # the identity is a parallel hash: algorithm/contract hashes do not include it
-        assert sample["backend_identity"]["sha256"] == expected.sha256(), path.name
+        # the identity is a parallel hash; the golden keeps it without the engine
+        # commit (rl-identity-tiering L9.10, design D5)
+        recorded = {k: v for k, v in expected.to_dict().items() if k != "engine_commit"}
+        assert sample["backend_identity"] == {**recorded, "compat_group": "nvidia-h100"}, path.name
         assert sample["algorithm_sha256"] == sample["execution_profile"]["profile"]["algorithm_spec_sha256"]
 
 
 def test_miles_vs_verl_handshake_is_refused_and_names_both():
-    miles = miles_identity.backend_identity("ports")
+    miles = miles_identity.backend_identity()
     with pytest.raises(BackendIdentityMismatch) as err:
         check_identity_match(miles, FAKE_VERL)
     assert "'engine': 'miles'" in str(err.value) and "'engine': 'verl'" in str(err.value)
-    check_identity_match(miles, miles_identity.backend_identity("ports"))  # two Miles islands: fine
+    check_identity_match(miles, miles_identity.backend_identity())  # two Miles islands: fine
 
 
 def _layout():
@@ -74,7 +76,7 @@ def test_syncer_session_contract_binds_identity():
     equality in syncer/src/server.rs): different identities -> different contracts."""
     layout = _layout()
     fp = layout_fingerprint(layout)
-    miles = miles_identity.backend_identity("ports").sha256()
+    miles = miles_identity.backend_identity().sha256()
     a = session_contract_hash(fp, miles)
     assert a == session_contract_hash(fp, miles) and len(a) == 32
     assert a != session_contract_hash(fp, FAKE_VERL.sha256())
@@ -87,7 +89,7 @@ def test_bridges_send_the_identity_bound_contract():
     from yeto.rl import bridge, decoupled
 
     layout = _layout()
-    sha = miles_identity.backend_identity("ports").sha256()
+    sha = miles_identity.backend_identity().sha256()
     for module in (bridge, decoupled):
         assert module._session_contract(layout, None) is None  # legacy callers unchanged
         assert module._session_contract(layout, sha) == session_contract_hash(layout_fingerprint(layout), sha)
@@ -95,15 +97,11 @@ def test_bridges_send_the_identity_bound_contract():
         assert "backend_identity_sha256" in {f.name for f in dataclasses.fields(cls)}
 
 
-def test_dense_and_sao_training_contracts_reference_the_identity():
-    from yeto.rl import local_learner
+def test_full_parameter_session_contracts_reference_the_identity():
+    from yeto.rl.adapters.miles.full_parameter import role_stream
 
-    src = Path(local_learner.__file__).read_text()
-    assert "backend_identity_sha256" in src
-    from yeto.rl.adapters.miles.models import full_parameter_dense, sao_streaming
-
-    for module in (full_parameter_dense, sao_streaming):
-        assert module._legacy_identity_sha256() == miles_identity.backend_identity("legacy").sha256()
+    # P0-D5/D8: every full-parameter role stream (dense and SAO) binds the ports identity.
+    assert "backend_identity().sha256()" in Path(role_stream.__file__).read_text()
 
 
 def test_lr_schedule_is_bound_into_the_island_contract():
@@ -114,7 +112,7 @@ def test_lr_schedule_is_bound_into_the_island_contract():
     from yeto.rl.adapters.miles.lr_schedule import miles_lr_schedule_sha256
     from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
 
-    sha = miles_identity.backend_identity("ports").sha256()
+    sha = miles_identity.backend_identity().sha256()
     lin = lr_schedule_sha256("linear", 12, 1e-5)
     const = lr_schedule_sha256("constant", 12, 1e-5)
     assert lin != const != lr_schedule_sha256("constant", 12, 2e-5)
@@ -134,28 +132,55 @@ def test_lr_schedule_is_bound_into_the_island_contract():
     assert miles_lr_schedule_sha256(SimpleNamespace(lr=1e-5)) is None
 
 
-def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
+def test_island_contract_binds_algorithm_spec():
+    """rl-code-quality-cleanup 4.8 (contract v3: the semantic hash, L9.7): the
+    algorithm is part of the island contract; islands that run different
+    algorithms declare different contracts."""
+    from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
+
+    sha = miles_identity.backend_identity().sha256()
+    lr = lr_schedule_sha256("constant", 12, 1e-5)
+    alg_a, alg_b = "a" * 64, "b" * 64
+    assert island_contract_sha256(sha, None, None) == sha  # nothing declared: old identity
+    assert island_contract_sha256(None, lr, alg_a) is None
+    contracts = {island_contract_sha256(sha, lr, None), island_contract_sha256(sha, lr, alg_a),
+                 island_contract_sha256(sha, lr, alg_b), island_contract_sha256(sha, None, alg_a)}
+    assert len(contracts) == 4 and sha not in contracts
+    # an undeclared slot never collides with the other slot's value
+    assert island_contract_sha256(sha, alg_a, None) != island_contract_sha256(sha, None, alg_a)
+    with pytest.raises(ValueError):
+        island_contract_sha256(sha, lr, "not-a-hash")
+
+
+def test_bridge_configs_bind_lr_schedule_into_hello(monkeypatch):
     from types import SimpleNamespace
 
-    import yeto.rl.elastic_client as ec
+    import yeto.rl.pool_client as pc
     from yeto.rl import bridge, decoupled
+    from yeto.rl.core import CanonicalTensorSpec, build_avg_layout
     from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
-    from yeto.rl.engine.bridges import ElasticAvgSync
+    from yeto.rl.engine.bridges import PoolAvgSync
 
     for cls in (bridge.BridgeConfig, decoupled.DecoupledBridgeConfig):
-        assert "lr_schedule_sha256" in {f.name for f in dataclasses.fields(cls)}
-    sha = miles_identity.backend_identity("ports").sha256()
+        assert {"lr_schedule_sha256", "algorithm_semantic_sha256", "code_pack_digest"} <= {
+            f.name for f in dataclasses.fields(cls)}
+    sha = miles_identity.backend_identity().sha256()
     lr = lr_schedule_sha256("constant", 1, 1e-5)
     seen = []
 
     class Spy:
-        def __init__(self, config, key, **kw):
-            seen.append(config.backend_identity_sha256)
+        def __init__(self, config, layout, **kw):
+            seen.append((config.session_contract_hash, layout))
 
-    monkeypatch.setattr(ec, "ElasticIslandClient", Spy)
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
+    monkeypatch.setattr(pc, "PoolIslandClient", Spy)
+    spec = CanonicalTensorSpec("base_model.model.layer.lora_A.weight", (1, 2), "float32", 2)
     cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=sha,
-                          lr_schedule_sha256=lr, expected_specs=(), global_rounds=1,
-                          local_optimizer_steps=1)
-    ElasticAvgSync(cfg)._client()
-    assert seen == [island_contract_sha256(sha, lr)]
+                          lr_schedule_sha256=lr, algorithm_semantic_sha256="e" * 64,
+                          code_pack_digest="f" * 64, wan_streams=1,
+                          expected_specs=(spec,), global_rounds=1, local_optimizer_steps=1)
+    sync = PoolAvgSync(cfg)
+    sync.specs = (spec,)
+    sync._client()
+    layout = build_avg_layout((spec,))
+    contract = island_contract_sha256(sha, lr, "e" * 64, "f" * 64)
+    assert seen == [(bridge._session_contract(layout, contract), seen[0][1])]

@@ -29,6 +29,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_DROPPED_LENGTHS,
+    GATE_GRANULARITY,
+    GATE_GROUP_DROPPED,
+    GATE_UNKNOWN_VERSION_DROPPED,
+    GRANULARITY_TRAJECTORY,
+)
+from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
+
 from .fully_async_translate import (
     VerlTranslationError,
     VersionMap,
@@ -49,8 +58,9 @@ DISCARD_MECHANISM = "yeto policy-age discard (verl fully_async queue)"
 # ``data.train_batch_size`` is replaced: FullyAsyncRollouter asserts it is 0
 # (prompts are pulled one at a time, ``gen_batch_size=1``); the batch size of a
 # round is ``ppo_mini_batch_size * require_batches``.
+AGENT_LOOP_CONFIG_KEY = "actor_rollout_ref.rollout.agent.agent_loop_config_path="
 _SYNC_ONLY_PREFIXES = ("trainer.use_v1=", "trainer.v1.trainer_mode=", "trainer.n_gpus_per_node=",
-                       "data.train_batch_size=")
+                       "trainer.nnodes=", "data.train_batch_size=")
 
 # Overrides the island re-reads from the resolved config (initialisation assertions).
 FULLY_ASYNC_ASSERTED_KEYS = (
@@ -62,6 +72,7 @@ FULLY_ASYNC_ASSERTED_KEYS = (
     "async_training.use_dynamic_resource_scheduling",
     "rollout.n_gpus_per_node",
     "trainer.n_gpus_per_node",
+    "trainer.nnodes",
     "data.gen_batch_size",
     "data.train_batch_size",
     "actor_rollout_ref.hybrid_engine",
@@ -133,13 +144,47 @@ def total_rollout_steps(limit: int, *, groups_per_round: int, rounds: int) -> in
     return groups_per_round * (2 * rounds + limit + 1)
 
 
+def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None) -> tuple[int, int]:
+    """``(nodes, cards per node)`` of a buffer trainer island (S27 G-EZ2).
+
+    A buffer trainer has no rollout pool, so its trainer gets every card the
+    island's Ray reports (``cards``), over ``--actor-num-nodes`` nodes. Before
+    this, the fully_async overrides gave the trainer ``1 x 1`` card whatever the
+    island held (npu1: one WorkerDict on a 16-card, two-node island). Refused:
+    a card count the nodes do not divide, and a ``--actor-num-gpus-per-node``
+    that does not match it."""
+    nodes = int(nodes or 1)
+    if nodes < 1 or cards < nodes or cards % nodes:
+        raise VerlTranslationError(f"buffer trainer: {cards} cards do not split over {nodes} node(s)")
+    each = cards // nodes
+    if per_node is not None and int(per_node) != each:
+        raise VerlTranslationError(
+            f"buffer trainer: --actor-num-gpus-per-node {per_node} != {cards} cards / {nodes} node(s)")
+    return nodes, each
+
+
 def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, groups_per_round: int,
-                              rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1) -> list[str]:
+                              rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1,
+                              trainer_nodes: int = 1, rollouter: bool = True) -> list[str]:
     """Hydra overrides for ``fully_async_ppo_trainer.yaml`` (fork acad9875).
 
     One yeto round = one verl parameter version (prompt-level samples:
-    ``ppo_mini_batch_size = groups_per_round``, ``require_batches = 1``)."""
-    if rollout_gpus < 1 or trainer_gpus < 1:
+    ``ppo_mini_batch_size = groups_per_round``, ``require_batches = 1``).
+
+    ``trainer_gpus`` is per node and ``trainer_nodes`` the node count: verl's
+    trainer pool is ``[trainer.n_gpus_per_node] * trainer.nnodes``
+    (``separation/utils.create_resource_pool_manager``). A buffer trainer
+    passes its island's shape (:func:`buffer_trainer_shape`).
+
+    ``rollouter`` False (S27 G-FN): a buffer trainer island. It starts no rollouter and
+    no checkpoint engine (``buffer_trainer_runner``), so it asks for the always-present
+    ``naive`` weight transport instead of nccl. This is not cosmetic: every trainer
+    worker validates the configured backend while it builds its model, and the
+    fully_async yaml's own default is nccl, so leaving the key alone is not enough.
+    Runs fn-7 and fn-8 on npu1 died in every worker with ``Checkpoint engine nccl not
+    registered, registered backends: ['naive']`` -- on that build every real transport
+    failed to import (nccl and nixl want cupy, hccl and delta want zmq)."""
+    if rollout_gpus < 1 or trainer_gpus < 1 or trainer_nodes < 1:
         raise VerlTranslationError("fully_async needs at least one rollout GPU and one trainer GPU")
     async_keys = fully_async_overrides(limit, samples_per_round=groups_per_round,
                                        ppo_mini_batch_size=groups_per_round)
@@ -153,7 +198,8 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         f"rollout.n_gpus_per_node={rollout_gpus}",
         f"rollout.total_rollout_steps={total_rollout_steps(limit, groups_per_round=groups_per_round, rounds=rounds)}",
         f"trainer.n_gpus_per_node={trainer_gpus}",
-        "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        f"trainer.nnodes={trainer_nodes}",
+        "actor_rollout_ref.rollout.checkpoint_engine.backend=" + ("nccl" if rollouter else "naive"),
         # FullyAsyncTrainer/FullyAsyncRollouter assert not hybrid_engine
         # (fork acad9875, fully_async_trainer.py:76); the sync path never sets
         # this key, so without this override the config default True kills the
@@ -163,6 +209,11 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         # fully_async_rollouter.py:351; s19-verl64b-async3-20261009a died here).
         "data.train_batch_size=0",
     ]
+    if any(o.startswith(AGENT_LOOP_CONFIG_KEY) for o in out):
+        # The rollouter replaces every row's agent_name with single_turn_agent unless
+        # multi_turn is on (fork detach_utils.prepare_single_generation_data), so an
+        # agent-loop run (Harbor) would never reach its loop (S26 agv-async-eff-b).
+        out.append("actor_rollout_ref.rollout.multi_turn.enable=True")
     return out
 
 
@@ -283,10 +334,19 @@ class RoundCollector:
                 "unknown_groups": sum(1 for v in self.discarded if v.unknown)}
 
     def carry_over_fields(self) -> dict[str, Any]:
-        """The round's ``rl_rollout_carry_over`` fields (Miles names, carry_over.CARRY_FIELDS)."""
+        """The round's ``rl_rollout_carry_over`` fields (Miles names, carry_over.CARRY_FIELDS).
+
+        Also the ``offpolicy_gate`` inputs the driver turns into its own event
+        (rl-offpolicy-correction-passthrough D5/D6): verl has no drop by version
+        at consumption, so this collector is it (a group more than ``limit``
+        versions behind is dropped whole). verl gives versions per trajectory,
+        so the granularity is ``trajectory``; truncation by turn is not reported.
+        """
         carried = [v for v in self.kept if v.versions and min(v.versions) < self.current_outer]
         over_age = [v for v in self.discarded if not v.unknown]
+        unknown = [v for v in self.discarded if v.unknown]
         return {
+            "execution_mode": ROLLOUT_OVERLAP_MODE,
             "max_policy_age": self.limit,
             "carried_in_groups": len(carried),
             "carried_in_trajectories": sum(v.meta.n for v in carried),
@@ -294,14 +354,17 @@ class RoundCollector:
             "over_age_discarded_groups": len(over_age),
             "over_age_discarded_trajectories": sum(v.meta.n for v in over_age),
             "over_age_discarded_tokens": sum(sum(v.meta.lengths) for v in over_age),
-            "unknown_version_discarded_groups": sum(1 for v in self.discarded if v.unknown),
+            "unknown_version_discarded_groups": len(unknown),
             "cross_version_tokens": sum(v.older_tokens for v in self.kept),
             "trained_response_tokens": sum(sum(v.meta.lengths) for v in self.kept),
             "resumed_trajectories": sum(v.resumed for v in self.kept),
             "segment_token_mismatches": sum(v.segment_mismatches for v in self.kept),
             "discard_reasons": sorted({v.reason for v in self.discarded if v.reason})[:5],
+            GATE_DROPPED_LENGTHS: {
+                GATE_GROUP_DROPPED: [n for v in over_age for n in v.meta.lengths],
+                GATE_UNKNOWN_VERSION_DROPPED: [n for v in unknown for n in v.meta.lengths]},
+            GATE_GRANULARITY: GRANULARITY_TRAJECTORY,
         }
-
 
 def group_metadata(collector: RoundCollector, rollout_id: int, published: Mapping[int, str]):
     """Kept groups as :class:`GroupMetadata`; the policy token names the oldest version
@@ -332,7 +395,7 @@ def execution_profile_for(spec: Any, limit: int, *, groups_per_round: int, sampl
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.policy_age import BOUNDED_STALENESS_CONTRACT
 
-    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg"}[sync]
+    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg", "pool": "strict-avg"}[sync]
     return ExecutionProfile(
         name="verl-fully-async", execution_mode=FULLY_ASYNC_MODE, outer_protocol=protocol,
         algorithm_contract=BOUNDED_STALENESS_CONTRACT, max_policy_age=limit,

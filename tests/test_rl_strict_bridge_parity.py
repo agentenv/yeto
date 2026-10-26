@@ -22,6 +22,7 @@ from yeto.rl.core import LocalRoundStats
 from yeto.rl.engine.bridges import StrictAvgSync, _PortsStrictRuntime
 from yeto.rl.engine.island_ledger import merge_weight
 from yeto.rl.engine.trainable_state import TrainableState
+from strict_bridge_loop import run_round
 
 from test_rl_core import _bridge_config, state, tensors
 
@@ -43,7 +44,7 @@ def _local(base, island: int, seed: int):
 
 
 class _Runtime:
-    """IslandRuntime for the legacy StrictRlBridge.run path: one fixed local result."""
+    """Fake island for the test bridge loop (strict_bridge_loop): one fixed local result."""
 
     def __init__(self, base, local, stats):
         self.base, self.local, self.stats = base, local, stats
@@ -73,7 +74,7 @@ def _legacy_push(tmp_path, island, base, local, stats):
     pushed = []
     bridge.client = SimpleNamespace(push_fragment=lambda *v: pushed.append(v))
     bridge.current = bridge.initial
-    bridge._run_round(PullRequest(0, 1, 1))
+    run_round(bridge, PullRequest(0, 1, 1))
     return pushed
 
 

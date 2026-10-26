@@ -56,24 +56,74 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert f"rollout.total_rollout_steps={8 * (2 * 5 + 1 + 1)}" in out
     assert not any(o.startswith(("trainer.use_v1=", "trainer.v1.trainer_mode=")) for o in out)
     assert sum(o.startswith("trainer.n_gpus_per_node=") for o in out) == 1
+    assert sum(o.startswith("trainer.nnodes=") for o in out) == 1 and "trainer.nnodes=1" in out
     assert "actor_rollout_ref.actor.ppo_mini_batch_size=8" in out  # require_batches * 8 = one round
+    assert not any("multi_turn" in o for o in out)  # no agent loop configured
+    agentic = far.fully_async_run_overrides(
+        [*sync, "actor_rollout_ref.rollout.agent.agent_loop_config_path=/x/loops.yaml"], 1,
+        groups_per_round=8, rounds=5)
+    assert "actor_rollout_ref.rollout.multi_turn.enable=True" in agentic
     with pytest.raises(PolicyAgeError):
         far.fully_async_run_overrides(sync, 0, groups_per_round=8, rounds=5)
     # sync path at limit 0 unchanged (6.3)
     assert not any("staleness" in o for o in vconf.build_overrides(run))
 
 
-def test_verl_declares_stage_two_up_to_limit_one():
+def test_buffer_trainer_gets_every_island_card_over_its_nodes():
+    """S27 G-EZ2 (npu1): a buffer trainer's pool was [1] * 1 whatever the island
+    held; one WorkerDict came up on a 16-card, two-node island."""
+    import yeto.rl.adapters.verl.config as vconf
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=4, samples_per_group=4, n_gpus=16)
+    sync = vconf.build_overrides(run)
+    assert far.buffer_trainer_shape(16, 2) == (2, 8)
+    assert far.buffer_trainer_shape(16, 2, 8) == (2, 8)
+    assert far.buffer_trainer_shape(8) == (1, 8)
+    out = far.fully_async_run_overrides(sync, 4, groups_per_round=4, rounds=3, trainer_gpus=8, trainer_nodes=2)
+    assert [o for o in out if o.startswith(("trainer.n_gpus_per_node=", "trainer.nnodes="))] == [
+        "trainer.n_gpus_per_node=8", "trainer.nnodes=2"]
+    default = far.fully_async_run_overrides(sync, 4, groups_per_round=4, rounds=3)
+    assert "trainer.nnodes=1" in default and "trainer.n_gpus_per_node=1" in default
+    assert "trainer.nnodes" in far.FULLY_ASYNC_ASSERTED_KEYS
+    for bad in ((16, 3, None), (16, 2, 4), (1, 2, None)):
+        with pytest.raises(far.VerlTranslationError):
+            far.buffer_trainer_shape(*bad)
+
+
+def test_island_plan_gives_a_buffer_trainer_its_two_node_shape():
+    import argparse
+
+    import yeto.rl.adapters.verl.config as vconf
+    from yeto.rl.adapters.verl.island_entry import fully_async_plan
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=4, samples_per_group=4, n_gpus=16)
+    args = argparse.Namespace(groups_per_round=4, samples_per_group=4, global_rounds=3,
+                              actor_num_nodes=2, actor_num_gpus_per_node=8)
+    spec = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=4),
+                         correction=CorrectionSpec(method="tis", lower=0.0, upper=2.0)).to_dict()
+    out, asserted = fully_async_plan(4, vconf.build_overrides(run), spec, args, "none", trainer_cards=16)
+    assert "trainer.n_gpus_per_node=8" in out and "trainer.nnodes=2" in out
+    assert "trainer.nnodes" in asserted
+    args.actor_num_gpus_per_node = 4
+    with pytest.raises(SystemExit, match="actor-num-gpus-per-node 4"):
+        fully_async_plan(4, vconf.build_overrides(run), spec, args, "none", trainer_cards=16)
+
+
+def test_verl_declares_stage_two_up_to_limit_four():
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.policy_age import SUPPORT, policy_age_overrides
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 4)
     assert policy_age_overrides(0) == ()
     assert policy_age_overrides(1, groups_per_round=8) == (
         "async_training.staleness_threshold=1.0", "async_training.partial_rollout=True",
         "async_training.trigger_parameter_sync_step=1", "async_training.require_batches=1")
     with pytest.raises(PolicyAgeError, match="supports up to stage 2"):
-        policy_age_overrides(2, groups_per_round=8)
+        policy_age_overrides(5, groups_per_round=8)
+    # L6.9: A_hard = 2 maps to staleness_threshold 2 (decoupled PPO needs >= 2)
+    assert "async_training.staleness_threshold=2.0" in policy_age_overrides(2, groups_per_round=8)
     sync_caps = verl_capabilities("sha256:" + "0" * 64)
     assert sync_caps.execution.max_policy_staleness == 0 and sync_caps.placements == {"colocated"}
     fa = verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1)
@@ -254,6 +304,12 @@ class FakeTrainerActor:
     def yeto_export_lora(self):
         return {k: v.clone() for k, v in self.tensors.items()}, {"count": 2}
 
+    def yeto_export_digest(self, kwargs):
+        from yeto.rl.adapters.verl.ports_impl import digest_lora_tensors
+
+        self.digest_exports = getattr(self, "digest_exports", 0) + 1
+        return digest_lora_tensors(dict(self.tensors), **kwargs)
+
     def yeto_call_workers(self, fn, tensors, reset):
         for k in self.tensors:
             self.tensors[k] = tensors[k].clone().float()
@@ -318,16 +374,37 @@ def test_driver_runs_fully_async_rounds_with_carry_over_and_discard(tmp_path):
     events = _events(tmp_path / "tape.jsonl")
     carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
     assert [e["rollout_id"] for e in carry] == [0, 1, 2]
+    # the profile stays partitioned-serial; the overlapped rounds say so (P0-S-fix B)
+    assert {e["execution_mode"] for e in carry} == {"partitioned-overlap"}
     assert carry[1]["carried_in_groups"] == 1 and carry[1]["resumed_trajectories"] == 2
     assert carry[1]["cross_version_tokens"] == 4  # 2 tokens at v0 x 2 responses
     assert carry[2]["over_age_discarded_groups"] == 1 and carry[2]["over_age_discarded_tokens"] == 10
     cutoff = [e for e in events if e["event"] == "rl_rollout_cutoff"]
     assert [e["rollout_id"] for e in cutoff] == [2]
+    gates = [e for e in events if e["event"] == "offpolicy_gate"]
+    assert [e["rollout_id"] for e in gates] == [0, 1, 2]
+    assert {(e["backend"], e["granularity"]) for e in gates} == {("verl", "trajectory")}
     trained = [e for e in events if e["event"] == "rl_round_trained"]
     assert [e["aborted_in_flight_groups"] for e in trained] == [0, 0, 1]  # never null (async10)
     checks = [e for e in events if e["event"] == "rl_publication_check"]
     assert all(e["status"] == "VERIFIED" for e in checks) and len(checks) == 4
     assert [e["param_version"] for e in events if e["event"] == "rl_verl_version_map"] == [0, 1, 2, 3]
+    # rl-publish-fastpath: LocalOnlySync takes digests from the trainer, no tensor export
+    assert actor.digest_exports == 4
+
+
+def test_fastpath_off_publishes_the_same_hashes(tmp_path, monkeypatch):
+    def run(sub):
+        actor = FakeTrainerActor(tmp_path / sub / "rb", [_sample("a", 0, 0, [(0, 4)])] * 2)
+        _driver(tmp_path / sub, actor, rounds=2, required=1)[0].run()
+        return [(e["policy_tensor_hash"], e["sent_checksum"]) for e in _events(tmp_path / sub / "tape.jsonl")
+                if e["event"] == "rl_publication_check"], getattr(actor, "digest_exports", 0)
+
+    fast, fast_digests = run("fast")
+    monkeypatch.setenv("YETO_RL_PUBLISH_FASTPATH", "0")
+    slow, slow_digests = run("slow")
+    assert fast == slow and len(fast) == 3
+    assert fast_digests == 3 and slow_digests == 0
 
 
 def test_publication_mismatch_on_the_rollouter_replica_fails(tmp_path):
@@ -372,10 +449,13 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
     fork = Path("/home/michael/work/verl-fork-acad9875")
     if not (fork / patch_verl.CALLS_TARGET).is_file():
         pytest.skip("verl fork checkout not present")
-    for target, *_ in patch_verl.PATCHES:
+    for target, *_ in patch_verl.PROFILES["fsdp"]:
         (tmp_path / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(fork / target, tmp_path / target)
     patch_verl.apply(tmp_path)
+    zmq = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # S27 G-EK: zmq SUB fix in the fsdp profile
+    compile(zmq, "nccl_checkpoint_engine.py", "exec")
+    assert zmq.count("_yeto_sub_key") == 2 and zmq.count("time.sleep(1.0)  # yeto") == 1
     text = (tmp_path / patch_verl.CALLS_TARGET).read_text()
     compile(text, "llm_server.py", "exec")
     assert text.count("yeto_resume_calls") == 1

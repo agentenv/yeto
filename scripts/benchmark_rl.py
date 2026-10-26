@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark native Miles, one Yeto island, and federated Yeto RL.
+"""Benchmark one Yeto island against federated and decoupled Yeto RL.
 
 For a requested M and G, every arm owns M*G GPUs and processes the same
 round-major prompt groups.  The harness runs on one host and does not create
@@ -35,14 +35,12 @@ from yeto.provenance import file_sha256, source_tree_sha256
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 _MILES_PORT_STRIDE = 1000
-_ARM_KINDS = ("native", "single", "federated", "decoupled")
+_ARM_KINDS = ("single", "federated", "decoupled")
 _RESUME_EXCLUDES = {
     "_active_seed",
     "_pass_ks",
     "dry_run",
     "overwrite",
-    # Recorded separately and only for ports, so legacy resume identities
-    # are unchanged.
     "rl_engine",
     "report_dir",
     "resume",
@@ -85,7 +83,6 @@ class WorkerSpec:
     gpus: int
     groups_per_round: int
     prompt_path: Path
-    policy_sync: bool
 
 
 def _positive_csv(spec: str, flag: str) -> list[int]:
@@ -127,7 +124,7 @@ def select_arms(
     selected = set(kinds)
     if not selected or selected - set(_ARM_KINDS):
         raise ValueError(
-            "arm kinds must be selected from native,single,federated,decoupled"
+            "arm kinds must be selected from single,federated,decoupled"
         )
     if "decoupled" in selected:
         if fragments < 2:
@@ -143,14 +140,6 @@ def select_arms(
         arms.extend(
             arm
             for arm in (
-                Arm(
-                    f"native-miles-m{islands}",
-                    "native",
-                    islands,
-                    1,
-                    total_gpus,
-                    total_groups,
-                ),
                 Arm(
                     f"yeto-single-m{islands}",
                     "single",
@@ -376,7 +365,6 @@ def worker_specs(
                 arm.gpus_per_island,
                 arm.groups_per_round,
                 combined_prompt_path,
-                arm.kind != "native",
             )
         ]
     if len(island_prompt_paths) != arm.islands:
@@ -387,7 +375,6 @@ def worker_specs(
             arm.gpus_per_island,
             arm.groups_per_round,
             island_prompt_paths[learner_id],
-            True,
         )
         for learner_id in range(arm.islands)
     ]
@@ -459,102 +446,22 @@ def syncer_command(
     return command
 
 
-def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "ports") -> Path:
+def rollout_dump_dir(run_dir: Path, learner_id: int) -> Path:
     """Where an island's ``--save-debug-rollout-data`` dumps land.
 
-    Upstream Miles (the ports engine) also writes dashboard columns to
+    Upstream Miles also writes dashboard columns to
     ``<dump dir>/../dashboard_columns/rollout_<id>.parquet`` through a fixed
     ``.tmp`` name, so co-resident islands must not share the dump's
-    grandparent; ports nests one level deeper. Legacy keeps its layout.
+    grandparent; the dumps nest one level deeper.
     """
-    island = run_dir / "rollouts" / f"island-{learner_id}"
-    return island / "dumps" if rl_engine == "ports" else island
+    return run_dir / "rollouts" / f"island-{learner_id}" / "dumps"
 
 
-def miles_extra_argv(
-    worker: WorkerSpec, run_dir: Path, rounds: int, rl_engine: str = "ports"
-) -> list[str]:
-    values = [
+def miles_extra_argv(worker: WorkerSpec, run_dir: Path) -> list[str]:
+    return [
         "--save-debug-rollout-data",
-        str(rollout_dump_dir(run_dir, worker.learner_id, rl_engine) / "{rollout_id}.pt"),
+        str(rollout_dump_dir(run_dir, worker.learner_id) / "{rollout_id}.pt"),
     ]
-    if not worker.policy_sync:
-        values.extend(
-            (
-                "--save",
-                str(run_dir / "native-checkpoint"),
-                "--save-interval",
-                str(rounds),
-            )
-        )
-    return values
-
-
-def canonical_native_adapter_tensors(tensors, specs) -> dict[str, Any]:
-    expected = {spec.name: tuple(spec.shape) for spec in specs}
-    mapped = {}
-    for name, tensor in tensors.items():
-        canonical_name = name if name in expected else f"base_model.model.{name}"
-        if (
-            canonical_name not in expected
-            or canonical_name in mapped
-            or tuple(tensor.shape) != expected[canonical_name]
-        ):
-            raise RuntimeError("native Miles adapter does not match the PEFT contract")
-        mapped[canonical_name] = tensor
-    if set(mapped) != set(expected):
-        raise RuntimeError("native Miles adapter does not match the PEFT contract")
-    return {name: mapped[name] for name in expected}
-
-
-def standardize_native_adapter(args, source: Path, output: Path) -> Path:
-    import torch
-
-    from yeto.rl.core import (
-        canonical_layout_hash,
-        canonical_lora_config_hash,
-        canonical_state,
-    )
-    from yeto.rl.export import (
-        adapter_targets,
-        derive_peft_lora_specs,
-        write_peft_adapter,
-    )
-
-    specs = derive_peft_lora_specs(
-        args.model,
-        args.model_revision,
-        rank=args.lora_r,
-        targets=args.lora_targets,
-        trust_remote_code=args.trust_remote_code,
-    )
-    raw = torch.load(
-        source / "adapter_model.bin",
-        map_location="cpu",
-        weights_only=True,
-    )
-    if not isinstance(raw, dict):
-        raise TypeError("native Miles adapter does not contain a tensor mapping")
-    targets = adapter_targets(specs)
-    state = canonical_state(
-        args.global_rounds,
-        canonical_native_adapter_tensors(raw, specs),
-        base_model_revision=args.model_revision,
-        lora_config_hash=canonical_lora_config_hash(
-            rank=args.lora_r,
-            target_modules=targets,
-        ),
-        layout_hash=canonical_layout_hash(specs),
-        expected_specs=specs,
-    )
-    write_peft_adapter(
-        state,
-        output,
-        base_model=args.model,
-        model_revision=args.model_revision,
-        rank=args.lora_r,
-    )
-    return output
 
 
 def worker_payload(
@@ -620,19 +527,14 @@ def worker_payload(
         "miles_root": str(args.miles_root.expanduser().resolve()),
         "trust_remote_code": args.trust_remote_code,
     }
-    if getattr(args, "rl_engine", "ports") == "ports":
-        # Upstream Miles has no fork-only port isolation flags; the ports
-        # translation rejects them, so the island uses upstream defaults.
-        for name in (
-            "rollout_engine_base_port",
-            "sglang_router_prometheus_port",
-            "train_master_base_port",
-        ):
-            values.pop(name, None)
-        values["rl_engine"] = "ports"
-    else:
-        # The learner defaults to ports; legacy must be explicit in-process.
-        values["rl_engine"] = "legacy"
+    # Upstream Miles has no fork-only port isolation flags; the ports
+    # translation rejects them, so the island uses upstream defaults.
+    for name in (
+        "rollout_engine_base_port",
+        "sglang_router_prometheus_port",
+        "train_master_base_port",
+    ):
+        values.pop(name, None)
     if arm.kind == "decoupled":
         values.update(
             sync_preset="decoupled",
@@ -646,10 +548,7 @@ def worker_payload(
         "arguments": values,
         "model_path": str(model_path),
         "prompt_path": str(worker.prompt_path),
-        "policy_sync": worker.policy_sync,
-        "extra_argv": miles_extra_argv(
-            worker, run_dir, args.global_rounds, getattr(args, "rl_engine", "ports")
-        ),
+        "extra_argv": miles_extra_argv(worker, run_dir),
     }
 
 
@@ -677,7 +576,7 @@ def run_training_worker(config_path: Path) -> int:
         args,
         model_path=payload["model_path"],
         prompt_path=payload["prompt_path"],
-        yeto_policy_sync=bool(payload["policy_sync"]),
+        yeto_policy_sync=True,
         extra_argv=tuple(payload["extra_argv"]),
     )
     return 0
@@ -1322,8 +1221,8 @@ def _run_training_processes(
     model_path: Path,
     reward_sha256: str,
 ) -> tuple[float, dict[str, float]]:
-    port = _free_port() if arm.kind != "native" else None
-    syncer_address = f"127.0.0.1:{port}" if port is not None else None
+    port = _free_port()
+    syncer_address = f"127.0.0.1:{port}"
     payload_paths = []
     for worker in workers:
         path = run_dir / f"island-{worker.learner_id}" / "worker.json"
@@ -1732,57 +1631,40 @@ def run_arm(
         reward_sha256=reward_sha256,
     )
 
-    artifact_s = None
-    if arm.kind == "native":
-        native_adapter = (
-            run_dir
-            / "native-checkpoint"
-            / f"iter_{args.global_rounds - 1:07d}"
-            / "adapter"
-        )
-        export_started = time.monotonic()
-        adapter_path = standardize_native_adapter(
-            args,
-            native_adapter,
-            run_dir / "adapter",
-        )
-        artifact_s = time.monotonic() - export_started
-    else:
-        checkpoint = run_dir / "state.ckpt"
-        adapter_path = run_dir / "adapter"
-        export_started = time.monotonic()
-        from yeto.rl.export import export_rl_checkpoint
+    checkpoint = run_dir / "state.ckpt"
+    adapter_path = run_dir / "adapter"
+    export_started = time.monotonic()
+    from yeto.rl.export import export_rl_checkpoint
 
-        expected_version = args.global_rounds
-        if arm.kind == "decoupled":
-            from yeto.final_marker import validate_final_checkpoint
+    expected_version = args.global_rounds
+    if arm.kind == "decoupled":
+        from yeto.final_marker import validate_final_checkpoint
 
-            expected_version = validate_final_checkpoint(checkpoint)
-        state = export_rl_checkpoint(
-            checkpoint,
-            adapter_path,
-            model=args.model,
-            model_revision=args.model_revision,
-            rank=args.lora_r,
-            lora_targets=args.lora_targets,
-            trust_remote_code=args.trust_remote_code,
-            sync_preset=(
-                "decoupled" if arm.kind == "decoupled" else "strict-avg"
-            ),
-            fragments=arm.fragments,
-            pipeline=arm.pipeline,
-            local_horizon=arm.local_horizon,
-            benchmark_learner_budget_steps=(
-                local_rounds(args) if arm.kind == "decoupled" else None
-            ),
-            rl_engine=getattr(args, "rl_engine", "ports"),
+        expected_version = validate_final_checkpoint(checkpoint)
+    state = export_rl_checkpoint(
+        checkpoint,
+        adapter_path,
+        model=args.model,
+        model_revision=args.model_revision,
+        rank=args.lora_r,
+        lora_targets=args.lora_targets,
+        trust_remote_code=args.trust_remote_code,
+        sync_preset=(
+            "decoupled" if arm.kind == "decoupled" else "strict-avg"
+        ),
+        fragments=arm.fragments,
+        pipeline=arm.pipeline,
+        local_horizon=arm.local_horizon,
+        benchmark_learner_budget_steps=(
+            local_rounds(args) if arm.kind == "decoupled" else None
+        ),
+    )
+    artifact_s = time.monotonic() - export_started
+    if state.policy_version != expected_version:
+        raise RuntimeError(
+            f"authoritative RL checkpoint ended at v{state.policy_version}, "
+            f"expected v{expected_version}"
         )
-        artifact_s = time.monotonic() - export_started
-        if state.policy_version != expected_version:
-            raise RuntimeError(
-                f"authoritative RL checkpoint ended at v{state.policy_version}, "
-                f"expected v{expected_version}"
-            )
     if not (adapter_path / "adapter_config.json").is_file() or not any(
         (adapter_path / name).is_file()
         for name in ("adapter_model.safetensors", "adapter_model.bin")
@@ -1791,8 +1673,7 @@ def run_arm(
 
     rollout_paths = tuple(
         tuple(
-            rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "ports"))
-            / f"{round_id}.pt"
+            rollout_dump_dir(run_dir, worker.learner_id) / f"{round_id}.pt"
             for round_id in range(local_rounds(args))
         )
         for worker in workers
@@ -1817,8 +1698,8 @@ def run_arm(
         or training["trajectories"] != expected_work["trajectories"]
     ):
         raise RuntimeError("Miles completed work does not match the paired budget")
-    sync = None if arm.kind == "native" else summarize_yeto_events(run_dir, arm.islands)
-    if sync is not None and sync["local_rounds"] != arm.islands * local_rounds(args):
+    sync = summarize_yeto_events(run_dir, arm.islands)
+    if sync["local_rounds"] != arm.islands * local_rounds(args):
         raise RuntimeError("Yeto event tape is missing a local RL round")
 
     wait_for_free_gpus()
@@ -1846,7 +1727,7 @@ def run_arm(
         "total_gpus": total_gpus,
         "train_wall_s": train_wall_s,
         "artifact_s": artifact_s,
-        "artifact_ready_s": train_wall_s + (artifact_s or 0.0),
+        "artifact_ready_s": train_wall_s + artifact_s,
         "gpu_hours": gpu_hours,
         "gpu_activity": gpu_activity,
         "estimated_cost": (
@@ -1918,15 +1799,9 @@ def annotate_deltas(records: list[dict]) -> list[dict]:
     for record in records:
         m, seed = record["m"], record["seed"]
         reward = record["eval"]["reward_mean"]
-        native = rewards.get((m, seed, f"native-miles-m{m}"))
         single = rewards.get((m, seed, f"yeto-single-m{m}"))
         strict = rewards.get((m, seed, f"yeto-federated-m{m}"))
         row = dict(record)
-        row["delta_vs_native"] = (
-            None
-            if record["arm"].startswith("native-") or native is None
-            else reward - native
-        )
         row["delta_vs_single"] = (
             reward - single
             if record["arm"].startswith("yeto-federated-") and single is not None
@@ -2102,24 +1977,20 @@ def load_prompt_matrix(
 
 def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
     from yeto.benchmark_resume import implementation_fingerprint, jsonable_arguments
-    from yeto.rl import MILES_COMMIT
+    from yeto.rl import MILES_NEXT_COMMIT
 
-    identity = {
+    return {
         "format_version": 1,
         "benchmark": "miles-rl-lm",
         "arguments": jsonable_arguments(args, exclude=_RESUME_EXCLUDES),
         "arms": [asdict(arm) for arm in arms],
-        "miles_commit": MILES_COMMIT,
+        "miles_commit": MILES_NEXT_COMMIT,
         "implementation_sha256": implementation_fingerprint(
             REPO_ROOT,
             _IMPLEMENTATION_PATHS,
         ),
+        "rl_engine": "ports",
     }
-    if getattr(args, "rl_engine", "ports") == "ports":
-        from yeto.rl import MILES_NEXT_COMMIT
-
-        identity.update(rl_engine="ports", miles_commit=MILES_NEXT_COMMIT)
-    return identity
 
 
 def write_run_config(
@@ -2129,7 +2000,7 @@ def write_run_config(
     data_manifest: dict[str, Any],
 ) -> None:
     from yeto.benchmark_resume import jsonable_arguments
-    from yeto.rl import MILES_COMMIT
+    from yeto.rl import MILES_NEXT_COMMIT
 
     config = {
         "format_version": 1,
@@ -2138,7 +2009,7 @@ def write_run_config(
             exclude={"_active_seed", "_pass_ks"},
         ),
         "arms": [asdict(arm) for arm in arms],
-        "miles_commit": MILES_COMMIT,
+        "miles_commit": MILES_NEXT_COMMIT,
         "resume_identity": _resume_identity(args, arms),
         "data_manifest": data_manifest,
         "fairness_contract": {
@@ -2151,7 +2022,6 @@ def write_run_config(
             "paired_round_major_prompt_streams": True,
             "paired_held_out_generation_seeds": True,
             "yeto_artifact": "authoritative syncer checkpoint export",
-            "native_artifact": "Miles final LoRA save, PEFT-normalized by the harness",
         },
     }
     args.report_dir.mkdir(parents=True, exist_ok=True)
@@ -2206,13 +2076,6 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     )
                     for key in pass_keys
                 },
-                "delta_vs_native": _mean(
-                    [
-                        record["delta_vs_native"]
-                        for record in group
-                        if record["delta_vs_native"] is not None
-                    ]
-                ),
                 "delta_vs_single": _mean(
                     [
                         record["delta_vs_single"]
@@ -2384,10 +2247,9 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     order = {
-        "native-miles": 0,
-        "yeto-single": 1,
-        "yeto-federated": 2,
-        "yeto-decoupled": 3,
+        "yeto-single": 0,
+        "yeto-federated": 1,
+        "yeto-decoupled": 2,
     }
     return sorted(
         output,
@@ -2423,15 +2285,15 @@ def write_report(args, records: list[dict[str, Any]]) -> None:
         "",
         "| arm | M | runs | reward | "
         + " | ".join(f"pass@{key}" for key in pass_keys)
-        + " | delta vs native | delta vs single | delta vs strict |",
-        "|---|---:|---:|---:|" + "---:|" * len(pass_keys) + "---:|---:|---:|",
+        + " | delta vs single | delta vs strict |",
+        "|---|---:|---:|---:|" + "---:|" * len(pass_keys) + "---:|---:|",
     ]
     for row in aggregates:
         reward = f"{row['reward_mean']:.4f} +/- {row['reward_std']:.4f}"
         passes = " | ".join(fmt(row["pass_at_k"].get(key), 4) for key in pass_keys)
         lines.append(
             f"| {row['arm']} | {row['m']} | {row['runs']} | {reward} | {passes} | "
-            f"{fmt(row['delta_vs_native'], 4)} | {fmt(row['delta_vs_single'], 4)} | "
+            f"{fmt(row['delta_vs_single'], 4)} | "
             f"{fmt(row['delta_vs_strict'], 4)} |"
         )
     lines.extend(
@@ -2486,9 +2348,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--arms",
         default=None,
         help=(
-            "comma-separated benchmark arms: native,single,federated,decoupled "
-            "(default: all four with --rl-engine legacy; single,federated,"
-            "decoupled with --rl-engine ports, which has no native arm)"
+            "comma-separated benchmark arms: single,federated,decoupled "
+            "(default: all three)"
         ),
     )
     parser.add_argument("--islands", default="2")
@@ -2566,12 +2427,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--rl-engine",
-        choices=["legacy", "ports"],
-        default="ports",
-        help="RL engine path for every arm (default ports; legacy explicit) (ports: LoRA/GRPO/colocated only)",
-    )
     return parser
 
 
@@ -2629,13 +2484,7 @@ def main(argv=None) -> int:
     if args.eval_samples_per_prompt is None:
         args.eval_samples_per_prompt = args.samples_per_group
     if args.arms is None:
-        # Resolved before the resume identity is built, so an existing legacy
-        # run resumed with --rl-engine legacy keeps its recorded arm string.
-        args.arms = ",".join(
-            kind
-            for kind in _ARM_KINDS
-            if not (args.rl_engine == "ports" and kind == "native")
-        )
+        args.arms = ",".join(_ARM_KINDS)
     try:
         arms = select_arms(
             args.islands,
@@ -2647,28 +2496,19 @@ def main(argv=None) -> int:
             local_horizon=args.local_horizon,
         )
         validate_args(args, arms, check_runtime=not args.dry_run)
-        if args.rl_engine == "ports":
-            from yeto.rl.engine.selection import require_ports_supported
+        from yeto.rl.engine.selection import require_ports_supported
 
-            if any(arm.kind == "native" for arm in arms):
-                raise ValueError(
-                    "the native arm is stock Miles' own loop; select "
-                    "--arms single,federated,decoupled with --rl-engine ports"
-                )
-
-            require_ports_supported(
-                sync_preset=(
-                    "decoupled"
-                    if any(arm.kind == "decoupled" for arm in arms)
-                    else "strict-avg"
-                ),
-                lora_targets=args.lora_targets,
-            )
+        require_ports_supported(
+            sync_preset=(
+                "decoupled"
+                if any(arm.kind == "decoupled" for arm in arms)
+                else "strict-avg"
+            ),
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print_plan(args, arms)
-    if args.rl_engine == "ports":
-        print("RL_ENGINE ports")
+    print("RL_ENGINE ports")
     if args.dry_run:
         return 0
 
@@ -2678,7 +2518,7 @@ def main(argv=None) -> int:
         validate_data_manifest,
     )
     from yeto.provenance import python_spec_sha256
-    from yeto.rl.adapters.miles.legacy.engine import verify_miles_revision
+    from yeto.rl.adapters.miles.revision import verify_miles_revision
 
     miles_root = str(args.miles_root)
     if miles_root not in sys.path:
@@ -2686,14 +2526,8 @@ def main(argv=None) -> int:
     reward_sha256 = python_spec_sha256(args.reward_function, base_dir=REPO_ROOT)
     args.reward_sha256 = reward_sha256
     args.source_sha256 = source_tree_sha256()
-    if args.rl_engine == "ports":
-        from yeto.rl import MILES_NEXT_PINS
-
-        verify_miles_revision(args.miles_root, expected=MILES_NEXT_PINS)
-    else:
-        verify_miles_revision(args.miles_root)
-    if any(arm.kind != "native" for arm in arms):
-        ensure_syncer()
+    verify_miles_revision(args.miles_root)
+    ensure_syncer()
     model_path = resolve_model_path(args)
     distinct_m = tuple(sorted({arm.benchmark_islands for arm in arms}))
 

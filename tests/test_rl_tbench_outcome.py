@@ -6,8 +6,20 @@ import pytest
 
 from yeto.rl import tbench_outcome
 
+_REWARD_KEY_ENV = (
+    "TBENCH_REWARD_HMAC_KEY",
+    "TBENCH_REWARD_HMAC_KEY_FILE",
+    "SECRLENV_REWARD_HMAC_KEY",
+)
 
-def _signed(**overrides):
+
+@pytest.fixture(autouse=True)
+def _no_reward_keys(monkeypatch):
+    for name in _REWARD_KEY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _metadata(**overrides):
     values = {
         "task_id": "configure-git-webserver",
         "sample_id": "baseline:configure-git-webserver:r0",
@@ -18,18 +30,18 @@ def _signed(**overrides):
         "testsh_rc": 0,
     }
     values.update(overrides)
-    return tbench_outcome.build_signed_metadata(**values)
+    return tbench_outcome.build_outcome_metadata(**values)
 
 
-def test_signed_test_sh_and_native_outcomes_verify(monkeypatch):
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
-    metadata = _signed()
+def test_test_sh_and_native_outcomes_validate_without_any_key():
+    metadata = _metadata()
+    assert set(metadata) == {tbench_outcome.OUTCOME_KEY}
     outcome, reward = tbench_outcome.verified_outcome(metadata)
     assert reward == 1.0
     assert outcome["benchmark"] == "terminal-bench-2.1"
     assert outcome["sample_id"] == "baseline:configure-git-webserver:r0"
 
-    native = _signed(
+    native = _metadata(
         reward=0.0,
         verifier=tbench_outcome.NATIVE_VERIFIER,
         testsh_rc=None,
@@ -38,9 +50,8 @@ def test_signed_test_sh_and_native_outcomes_verify(monkeypatch):
     assert tbench_outcome.verify_outcome(native) == 0.0
 
 
-def test_timeout_is_signed_but_cannot_claim_a_verdict(monkeypatch):
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
-    timeout = _signed(
+def test_timeout_cannot_claim_a_verdict():
+    timeout = _metadata(
         status="timeout",
         reward=0.0,
         verifier=tbench_outcome.TIMEOUT_VERIFIER,
@@ -51,86 +62,47 @@ def test_timeout_is_signed_but_cannot_claim_a_verdict(monkeypatch):
     with pytest.raises(
         tbench_outcome.UntrustedTBenchOutcome, match="claims a verifier verdict"
     ):
-        _signed(status="timeout", reward=0.0, testsh_rc=0)
+        _metadata(status="timeout", reward=0.0, testsh_rc=0)
 
 
-def test_forgery_extra_fields_and_wrong_key_fail_closed(monkeypatch):
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
-    metadata = _signed()
-    forged = copy.deepcopy(metadata)
-    forged[tbench_outcome.OUTCOME_KEY]["reward"] = 0.0
+def test_inconsistent_and_open_outcomes_are_rejected():
+    metadata = _metadata()
+    changed = copy.deepcopy(metadata)
+    changed[tbench_outcome.OUTCOME_KEY]["reward"] = 0.0
     with pytest.raises(
         tbench_outcome.UntrustedTBenchOutcome, match="pass bit differs"
     ):
-        tbench_outcome.verified_outcome(forged)
+        tbench_outcome.verified_outcome(changed)
 
-    forged = copy.deepcopy(metadata)
-    forged[tbench_outcome.OUTCOME_KEY]["unexpected"] = "untrusted"
+    changed = copy.deepcopy(metadata)
+    changed[tbench_outcome.OUTCOME_KEY]["unexpected"] = "untrusted"
     with pytest.raises(
         tbench_outcome.UntrustedTBenchOutcome, match="fields are not closed"
     ):
-        tbench_outcome.verified_outcome(forged)
+        tbench_outcome.verified_outcome(changed)
 
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "x" * 48)
+    with pytest.raises(tbench_outcome.UntrustedTBenchOutcome, match="no Terminal-Bench"):
+        tbench_outcome.verified_outcome({})
+
+
+def test_out_of_range_reward_is_rejected():
+    metadata = _metadata()
+    metadata[tbench_outcome.OUTCOME_KEY]["reward"] = 0.5
     with pytest.raises(
-        tbench_outcome.UntrustedTBenchOutcome, match="signature mismatch"
+        tbench_outcome.UntrustedTBenchOutcome, match="finite and binary"
     ):
         tbench_outcome.verified_outcome(metadata)
 
 
-def test_dedicated_key_is_required(monkeypatch):
-    monkeypatch.delenv(tbench_outcome.HMAC_ENV, raising=False)
-    monkeypatch.delenv(tbench_outcome.HMAC_FILE_ENV, raising=False)
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
-    with pytest.raises(
-        tbench_outcome.UntrustedTBenchOutcome, match="missing or outside"
-    ):
-        _signed()
+def test_legacy_mac_field_is_ignored():
+    metadata = _metadata()
+    legacy = {**metadata, "tbench_trusted_outcome_hmac": "not-a-mac"}
+    assert tbench_outcome.verified_outcome(legacy) == tbench_outcome.verified_outcome(
+        metadata
+    )
 
 
-def test_private_key_file_is_supported_without_direct_env(tmp_path, monkeypatch):
-    monkeypatch.delenv(tbench_outcome.HMAC_ENV, raising=False)
-    key_file = tmp_path / "tbench.key"
-    key_file.write_text("f" * 48 + "\n")
-    key_file.chmod(0o400)
-    monkeypatch.setenv(tbench_outcome.HMAC_FILE_ENV, str(key_file))
-    assert tbench_outcome.verify_outcome(_signed()) == 1.0
-
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "d" * 48)
-    with pytest.raises(
-        tbench_outcome.UntrustedTBenchOutcome, match="mutually exclusive"
-    ):
-        _signed()
-
-
-def test_key_file_rejects_relative_symlink_public_and_oversized_paths(
-    tmp_path, monkeypatch
-):
-    monkeypatch.delenv(tbench_outcome.HMAC_ENV, raising=False)
-    real = tmp_path / "real.key"
-    real.write_bytes(b"f" * 48)
-    real.chmod(0o600)
-    link = tmp_path / "link.key"
-    link.symlink_to(real)
-
-    for value, message in (
-        ("relative.key", "absolute and non-symlink"),
-        (str(link), "absolute and non-symlink"),
-    ):
-        monkeypatch.setenv(tbench_outcome.HMAC_FILE_ENV, value)
-        with pytest.raises(tbench_outcome.UntrustedTBenchOutcome, match=message):
-            _signed()
-
-    real.chmod(0o644)
-    monkeypatch.setenv(tbench_outcome.HMAC_FILE_ENV, str(real))
-    with pytest.raises(
-        tbench_outcome.UntrustedTBenchOutcome, match="private and regular"
-    ):
-        _signed()
-
-    real.write_bytes(b"f" * 4097)
-    real.chmod(0o600)
-    with pytest.raises(
-        tbench_outcome.UntrustedTBenchOutcome, match="outside its size bound"
-    ):
-        _signed()
+def test_reward_key_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", "short")
+    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY_FILE", "relative.key")
+    assert tbench_outcome.verify_outcome(_metadata()) == 1.0

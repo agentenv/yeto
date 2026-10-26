@@ -31,7 +31,7 @@ Current layers (explore §1): L1 source tree hash (`yeto/provenance.py:120-132`)
 - Replacement, re-JOIN, and cut resume read the manifest and use the same pack. The local tree of the submitter is not used.
 
 ### D3. Handshake
-HELLO and JOIN carry the pack digest. The syncer rejects a different digest by default. In normal use a mismatch does not happen; a mismatch means a path went around the launcher. L1 checks change to a pack digest check.
+The pack digest is sent as part of the island contract hash. The HELLO and JOIN frames have no separate digest field. The syncer rejects a different contract by default and reports "backend identity mismatch". In normal use a mismatch does not happen; a mismatch means a path went around the launcher. L1 checks change to a pack digest check.
 
 ### D4. Explicit upgrade
 An operator can change the pack of a running run only by an explicit upgrade command. The launcher allows it only if the semantic hash of the new pack equals the old one. The manifest appends the record "pack A → pack B" with time and reason.
@@ -40,14 +40,14 @@ An operator can change the pack of a running run only by an explicit upgrade com
 Golden files drop `plugins[*].source_sha256`, `ports_runtime_fingerprint`, and `engine_commit` in `backend_identity`. They keep the Miles argv digest. `hash-migration.md` gets an entry only when a semantic hash changes.
 
 ### D6. Version boundary
-The island contract switches from L3 to the semantic hash, with domain `yeto-rl-island-contract-v3`. The pack digest goes into the handshake. These two changes ship at the same version boundary as L6b of `rl-offpolicy-correction-passthrough`. Old and new islands cannot run together after it, as with earlier pin updates.
+The island contract switches from L3 to the semantic hash, with domain `yeto-rl-island-contract-v3`. The pack digest goes into the contract hash. The backend identity in the contract still includes `engine_commit`. These two changes ship at the same version boundary as L6b of `rl-offpolicy-correction-passthrough`. Old and new islands cannot run together after it, as with earlier pin updates.
 
 ## Migration
 
 1. Dual write: islands write `code_pack_digest` and `semantic_sha256` into run metadata and `rl_driver_start`. Old fields stay. Now.
 2. `PluginRef` accepts no `sha256`. A present and different `sha256` gives a warning, not a reject. Now.
 3. Code pack, handshake digest, and semantic hash in the island contract v3. At the L6b version boundary.
-4. Cut resume compatibility: `verify_cut` compares `semantic_sha256`; for an old cut without it, recompute it from the spec in the old manifest. This is inferred from explore §6; `cut.py` is not read yet. Old elastic checkpoints stay readable and use the old comparison rule.
+4. Cut resume compatibility: `verify_cut` compares `semantic_sha256`; new cuts write the spec JSON so the semantic hash can be recomputed. An old cut (whole hash only) keeps the existing whole-hash comparison; there is no resume across the semantic boundary (GOAL §6, L9.8). An old elastic checkpoint records a v2 contract, and a v3 island that resumes from it is rejected. This version boundary is intended.
 5. Golden simplification: change the generator, re-record once, write one final `hash-migration.md` entry.
 6. Delete old paths (L2 hard reject, L7 golden fields) after two production runs pass under the new rules.
 
@@ -55,5 +55,6 @@ The island contract switches from L3 to the semantic hash, with domain `yeto-rl-
 
 - "Same config, different math" code changes are not caught by the semantic hash. The strict pack digest catches them inside one run. Between runs, the code review and the golden tape catch them.
 - Unverified: the actual code fetch paths in `yeto/cloud/replace.py` and `yeto/rl/elastic_client.py`.
-- Unverified: whether `cut.py` keeps enough of the old spec to recompute `semantic_sha256`.
+- Found (L9.3): an old cut stores only the whole hash, so it cannot be recomputed. The GOAL §6 rule above replaces the recompute step.
+- Not covered: the verl island contract is still the backend identity only (no semantic hash, no code pack). Full-parameter sync and SAO streaming sync are still bound to `sha256()`.
 - Pack size and upload time for a work tree with large untracked files are not measured. The pack honors `.gitignore`.

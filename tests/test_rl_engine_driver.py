@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.adapters.miles.legacy import engine as miles
+from yeto.rl.engine import progress
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.core import (
     LocalRoundStats,
@@ -128,6 +128,17 @@ def test_serial_colocated_three_rounds_event_order(tmp_path):
         "publish", "eval", "offload", "generate", "onload", "train", "sync", "publish",
     ]
     assert [e["event"] for e in events].count("rl_local_round") == 3
+
+
+def test_driver_start_records_island_tasks_only_when_set(tmp_path):
+    record = {"task_ids": ["web1", "web2"], "data_sha256": "a" * 64}
+    for island_tasks, expected in ((None, None), (record, record)):
+        driver = _driver(_engine(), LocalOnlySync(1), tmp_path / str(bool(island_tasks)))
+        driver.island_tasks = island_tasks
+        driver.run()
+        events = _events(tmp_path / str(bool(island_tasks)) / "events.jsonl")
+        start = next(e for e in events if e["event"] == "rl_driver_start")
+        assert start.get("island_tasks") == expected
 
 
 def test_fixed_partition_never_offloads(tmp_path):
@@ -345,7 +356,7 @@ def test_single_island_strict_progress_and_publication_tokens(tmp_path):
     assert [c for c in engine.calls if c[0] == "publish"] == [("publish", 0), ("publish", 1)]
     payload = torch.load(tmp_path / "island.pt", weights_only=True)
     assert payload["schema_version"] == 3
-    assert payload["config"] == miles._island_checkpoint_config(args)
+    assert payload["config"] == progress._island_checkpoint_config(args)
     assert payload["local_round_id"] == 1
     assert payload["local_round_stats"]["base_policy_version"] == 0
     assert "tensors" not in payload and "optimizer" not in payload
@@ -438,7 +449,7 @@ def _dengine(offset=0.0, **kwargs):
 
 
 def _save(args, snapshot, steps, tokens, groups=()):
-    miles._save_decoupled_checkpoint(
+    progress._save_decoupled_checkpoint(
         args, snapshot=snapshot, optimizer_steps=steps, action_tokens=tokens,
         rollout_metrics={}, local_round_stats=None, completed_groups=list(groups),
     )
@@ -511,7 +522,7 @@ def test_decoupled_boundary_preserves_optimizer_and_publishes_one_snapshot(tmp_p
     assert engine.published[0] == 1
     assert args.yeto_rl_policy_token == sync.snapshot.token
     assert torch.equal(engine.tensors["base_model.model.a.lora_A.weight"], torch.tensor([[3.0, 4.0]]))
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 1 and payload["fragment_versions"] == [1, 0]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_sync_hook") == 1
@@ -548,7 +559,7 @@ def test_decoupled_pending_finalization_records_work_and_stops(tmp_path):
     assert result.stop and sync.finished
     assert engine.policy_state.applied == [(1, "preserve", 1)]
     assert Bridge.acknowledged == FinalManifest(4, (3, 4))
-    assert miles._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
+    assert progress._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_local_round") == 1
     assert next(e for e in events if e["event"] == "rl_final_cut")[
@@ -608,7 +619,7 @@ def test_decoupled_budget_freezes_and_stops_after_final_cut(tmp_path):
     assert sync.boundary(driver, rollout_id=0, stats=_stats(0)).stop
     assert engine.policy_state.applied == [(1, "preserve", 1)]
     assert Bridge.acknowledged == FinalManifest(2, (1, 2))
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 1 and payload["fragment_versions"] == [1, 2]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_fragment_push") == 1
@@ -663,7 +674,7 @@ def test_decoupled_restart_applies_newer_uneven_cut_with_reset(tmp_path):
     assert engine.scheduler_step == 2
     assert start.rollout_id == 2 and not start.finished
     assert sync.snapshot.fragment_versions == (3, 2)
-    assert miles._load_decoupled_checkpoint(args)["completed_groups"] == []
+    assert progress._load_decoupled_checkpoint(args)["completed_groups"] == []
 
 
 def test_decoupled_restart_keeps_groups_for_exact_rebuilt_snapshot(tmp_path):
@@ -674,7 +685,7 @@ def test_decoupled_restart_keeps_groups_for_exact_rebuilt_snapshot(tmp_path):
     _save(args, snapshot, 2, 10, groups=[group])
     sync = DecoupledSync(args, bridge_factory=_recovery_bridge(recovered, (1, 0), []))
     sync.start(_driver(_dengine(), sync, tmp_path))
-    restored = miles._load_decoupled_checkpoint(args)
+    restored = progress._load_decoupled_checkpoint(args)
     assert restored["policy_token"] == snapshot.token
     assert len(restored["completed_groups"]) == 1
 
@@ -689,7 +700,7 @@ def test_decoupled_restart_at_terminal_cut_publishes_once_and_stops(tmp_path):
     _driver(engine, sync, tmp_path).run()
     assert bridge.acknowledged == manifest
     assert [c for c in engine.calls if c[0] in {"publish", "generate", "train"}] == [("publish", 2)]
-    assert miles._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
+    assert progress._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
 
 
 def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
@@ -718,7 +729,7 @@ def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
         assert torch.equal(engine.tensors[name], value)
     modes = [a[1] for a in engine.policy_state.applied]
     assert modes[0] == "reset" and set(modes[1:]) == {"preserve"}
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 5 and payload["fragment_versions"] == [3, 4]
     assert "tensors" not in payload
     phases = [
@@ -936,3 +947,69 @@ def test_miles_trainer_group_publish_offloaded_follows_offload_train():
     assert prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=True)))
     assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=False)))
     assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=False, offload_train=True)))
+
+
+def test_first_optimizer_step_records_the_last_start_phase_once(tmp_path):
+    from yeto.rl.engine.start_phases import START_PHASES, StartPhases
+
+    emitted = []
+    clock = iter(range(100, 200))
+    phases = StartPhases(lambda event, **f: emitted.append((event, f)), clock=lambda: float(next(clock)))
+    for name in START_PHASES[:-1]:
+        phases.mark(name)
+    driver = _driver(_engine(), LocalOnlySync(3), tmp_path)
+    driver.start_phases = phases
+    driver.run()
+    names = [f["phase"] for e, f in emitted if e == "trainer_start_phase"]
+    assert names == list(START_PHASES)
+    [summary] = [f for e, f in emitted if e == "trainer_start_summary"]
+    assert summary["total_s"] == 6.0 and summary["missing"] == []
+
+
+def test_colocated_publish_offloaded_prepares_a_due_cut_before_offloading(tmp_path):
+    """E1: with round cuts, the trainer part of a due cut is written while the trainer
+    is still resident (before the offload for the publication), not after it."""
+    engine = _engine()
+    engine.trainer.publish_offloaded = True
+    sync = LocalOnlySync(2)
+    order = []
+
+    class _Cuts:
+        def resume(self, driver):
+            return None
+
+        def due(self, rollout_id, *, final=False):
+            return True
+
+        def prepare(self, driver, *, rollout_id, state, final=False):
+            order.append(("prepare", rollout_id, state.policy_version, final, driver._trainer_offloaded))
+
+        def save(self, driver, *, rollout_id, final=False, **kw):
+            order.append(("save", rollout_id, final))
+            return None
+
+    sync.round_cuts = _Cuts()
+    driver = _driver(engine, sync, tmp_path)
+    driver.run()
+    if PROFILE == "ports-only":  # publish resident: nothing to prepare
+        assert not any(o[0] == "prepare" for o in order)
+        return
+    assert [o for o in order if o[1] >= 1][:2] == [("prepare", 1, 1, False, False), ("save", 1, False)]
+    assert ("prepare", 2, 2, True, False) in order
+    phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
+    assert phases[4:8] == ["train", "sync", "checkpoint", "offload"]
+
+
+def test_rollout_offload_after_generate_runs_in_its_own_phase(tmp_path):
+    """E1: Miles --offload-rollout frees the engine memory after generating; the
+    driver times it as its own phase so "generate" matches Miles' rollout_time."""
+    engine = _engine()
+    calls = []
+    engine.rollout.offloads_after_generate = True
+    engine.rollout.offload_after_generate = lambda: calls.append("offload_rollout")
+    driver = _driver(engine, LocalOnlySync(2), tmp_path)
+    driver.run()
+    assert calls == ["offload_rollout"] * 2 and engine.rollout.defer_offload is True
+    phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
+    i = phases.index("generate")
+    assert phases[i + 1] == "rollout_offload"

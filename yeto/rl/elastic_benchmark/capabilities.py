@@ -398,7 +398,11 @@ def config_rejection(
             f"{config.rollout_engine_gpus} GPUs per engine"
         )
     if profile["parameter_mode"] == "full" and config.data_parallel > 1:
-        return "dense full-parameter profile requires trainer DP=1"
+        from yeto.rl.engine import backends  # backend rules are loaded on demand
+
+        gap = backends.module("run_config_rules", backends.DEFAULT_BACKEND).full_parameter_dp_replica_gap()
+        if gap is not None:
+            return f"dense full-parameter profile requires trainer DP=1 (DP>1 needs {gap})"
     steps = profile.get("optimizer_steps_per_round", 1)
     if profile["global_batch"] % steps:
         return f"global_batch {profile['global_batch']} not divisible by {steps} optimizer steps"

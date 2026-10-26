@@ -14,7 +14,7 @@ from yeto.rl.engine.island_ledger import CrossIslandLedger, DeltaEntry
 
 
 def _args(**kw):
-    base = dict(training_mode="rl", rl_island_scheduling="elastic", spot=False, rl_q_min=None,
+    base = dict(training_mode="rl", rl_sync_island_lease_s=150.0, spot=False, rl_sync_q_min=None,
                 rl_checkpoint_store=None, rl_island_role=["1:droppable", "2:droppable"])
     base.update(kw)
     return SimpleNamespace(**base)
@@ -36,11 +36,17 @@ def test_no_roles_is_a_noop():
     assert dr.manifest_fields({}) == {}
 
 
-def test_legacy_refused_with_spec_reason():
-    with pytest.raises(ValueError, match="可丢弃岛只在 elastic 下支持"):
-        dr.admit(_args(rl_island_scheduling=None), ["nebius", "aws", "aws"])
-    with pytest.raises(ValueError, match="可丢弃岛只在 elastic 下支持"):
-        dr.admit(_args(rl_island_scheduling="legacy"), ["nebius", "aws", "aws"])
+def test_fixed_roster_refused_with_spec_reason():
+    with pytest.raises(ValueError, match="可丢弃岛只在岛池下支持"):
+        dr.admit(_args(rl_sync_island_lease_s=None), ["nebius", "aws", "aws"])
+
+
+def test_full_parameter_islands_are_droppable_only_with_async_rounds():
+    with pytest.raises(ValueError, match="joins a running pool only"):
+        dr.admit(_args(rl_sync_preset="full-parameter"), ["nebius", "aws", "aws"])
+    roles = dr.admit(_args(rl_sync_preset="full-parameter", rl_sync_full_parameter_rounds="async"),
+                     ["nebius", "aws", "aws"])
+    assert roles == {0: "anchor", 1: "droppable", 2: "droppable"}
 
 
 def test_needs_an_anchor():
@@ -59,9 +65,9 @@ def test_global_spot_refused():
 
 
 def test_q_min_must_fit_the_anchors():
-    with pytest.raises(ValueError, match="--rl-q-min 2 > 1 anchor"):
-        dr.admit(_args(rl_q_min=2), ["nebius", "aws", "aws"])
-    assert dr.admit(_args(rl_q_min=2, rl_island_role=["2:droppable"]), ["nebius", "nebius", "aws"])
+    with pytest.raises(ValueError, match="--rl-sync-q-min 2 > 1 anchor"):
+        dr.admit(_args(rl_sync_q_min=2), ["nebius", "aws", "aws"])
+    assert dr.admit(_args(rl_sync_q_min=2, rl_island_role=["2:droppable"]), ["nebius", "nebius", "aws"])
 
 
 def test_verda_anchor_cut_not_on_local_volume():
@@ -227,30 +233,6 @@ def test_droppable_rejoin_takes_the_current_base_with_zero_weight():
 
 
 # --- 5.2 CPU part: after a reclaim LEAVE the still-running island must not rejoin -----------
-
-
-def test_client_after_leave_never_rejoins_on_not_member_errors():
-    """The syncer answers a left island's delta/heartbeat with "not a member
-    (rejoin required)". The droppable island LEAVEs on reclaim and is killed by
-    the cloud later; until then it must not JOIN again by itself (the rejoin
-    comes from the relaunched island, catch_up from the syncer base)."""
-    from yeto.rl.elastic_client import JoinAck, ElasticClientConfig, ElasticIslandClient
-
-    sent = []
-    c = ElasticIslandClient(ElasticClientConfig(syncer_addr=("x", 1), island_id=2), b"k")
-    c.ack = JoinAck(1, 2, 3, 1, bytes(32), False)
-    c.sock = object()
-    c._send = sent.append
-    c.leave()
-    assert type(sent[-1]).__name__ == "Leave"
-    c._on_error("2 is not a member (rejoin required)")
-    assert not c._rejoin.is_set()
-    assert c.rejoin() is True and c.rejoins == 0
-    c.check()
-    assert [type(m).__name__ for m in sent] == ["Leave"]
-
-
-# --- 5.2: the Modal reclaim signal reaches the learner (grandchild) ---------------------
 
 
 def test_island_script_forwards_reclaim_signal_to_group_on_droppable_only():

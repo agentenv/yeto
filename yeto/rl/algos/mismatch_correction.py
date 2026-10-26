@@ -11,7 +11,7 @@ adds, on top of the P0 ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
   mechanism           spec                                             masks
   ==================  ===============================================  =========
   mismatch_observe    method=custom, function=:data:`OBSERVE_PATH`     no
-  tis (P0 built-in)   method=tis, tis_clip, tis_clip_low               no
+  tis (P0 built-in)   method=tis, upper, lower                        no
   icepop              method=custom, function=:data:`ICEPOP_PATH`      yes
   opsm_trainer        OPSM, opsm_old_logprob_source=trainer            yes
   opsm_rollout        OPSM, opsm_old_logprob_source=rollout            yes
@@ -59,6 +59,9 @@ from yeto.rl.engine.algorithm import (
 OBSERVE_PATH = "yeto.rl.algos.mismatch_observe.observe_mismatch"
 ICEPOP_PATH = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
 MIS_PATH = "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp"
+# S26 E2: adaptive TIS (AIS), yeto.rl.algos.adaptive_tis; CPU-tested, not declared on any
+# engine until a GPU run shows it takes effect (declaration policy, entry.MILES_DECLARED).
+ADAPTIVE_TIS_PATH = "yeto.rl.algos.adaptive_tis.ais_tis_function"
 # SHA256 of miles/backends/training_utils/loss_hub/corrections.py at
 # MILES_NEXT_COMMIT (checked against the source by
 # tests/test_rl_mismatch_observe.py in miles-next-venv). The Miles module is
@@ -78,6 +81,7 @@ CORRECTION_MECHANISMS = (
     "opsm_rollout",
     "mis",
     "mis_mask",
+    "adaptive_tis",
 )
 # Mechanisms whose masking may legitimately zero a whole round (design D7).
 MASKING_MECHANISMS = frozenset({"icepop", "opsm_trainer", "opsm_rollout", "mis_mask"})
@@ -105,14 +109,18 @@ def selected_corrections(spec: AlgorithmSpec) -> tuple[str, ...]:
     out = []
     c = spec.correction
     fn = _function(spec)
-    if c.method == "tis":
+    if c.method == "tis" and c.ratio_mask == "none":
         out.append("tis")
     if fn == OBSERVE_PATH:
         out.append("mismatch_observe")
-    if fn == ICEPOP_PATH:
+    if fn == ICEPOP_PATH or c.ratio_mask == "icepop":
         out.append("icepop")
     if fn == MIS_PATH:
         out.append("mis_mask" if c.mis_mode == "mask" else "mis")
+    if fn == ADAPTIVE_TIS_PATH:
+        out.append("adaptive_tis")
+    if c.ratio_mask == "mis":  # neutral MIS ratio mask (rl-offpolicy-correction D3)
+        out.append("mis_mask")
     if _uses_opsm(spec):
         out.append(f"opsm_{c.opsm_old_logprob_source}")
     return tuple(out)
@@ -184,7 +192,8 @@ if hasattr(_algorithm, "register_named_correction_function"):
     # function is named too, claimed by ("corrections", "icepop").
     for _path, _owners in ((OBSERVE_PATH, ("mismatch_observe",)),
                            (MIS_PATH, ("mis", "mis_mask")),
-                           (ICEPOP_PATH, ("icepop",))):
+                           (ICEPOP_PATH, ("icepop",)),
+                           (ADAPTIVE_TIS_PATH, ("adaptive_tis",))):
         _algorithm.register_named_correction_function(_path, mechanisms=_owners)
 
 for _name in CORRECTION_MECHANISMS:
@@ -205,18 +214,18 @@ for _name in CORRECTION_MECHANISMS:
 def _reject_bounds(spec: AlgorithmSpec) -> str | None:
     c = spec.correction
     fn = _function(spec)
-    if fn == ICEPOP_PATH and (c.tis_clip is None or c.tis_clip_low is None):
-        missing = [n for n in ("tis_clip", "tis_clip_low") if getattr(c, n) is None]
+    if fn == ICEPOP_PATH and (c.upper is None or c.lower is None):
+        missing = [n for n in ("upper", "lower") if getattr(c, n) is None]
         return (
             f"IcePop needs explicit interval bounds: missing "
             f"{', '.join('correction.' + m for m in missing)} (no engine default is inherited)"
         )
-    if (c.method == "tis" or fn == ICEPOP_PATH) and c.tis_clip is not None \
-            and c.tis_clip_low is not None and not c.tis_clip_low < c.tis_clip:
+    if (c.method == "tis" or fn == ICEPOP_PATH) and c.upper is not None \
+            and c.lower is not None and not c.lower < c.upper:
         what = "IcePop interval" if fn == ICEPOP_PATH else "TIS clip"
         return (
-            f"{what}: correction.tis_clip_low={c.tis_clip_low} must be smaller than "
-            f"correction.tis_clip={c.tis_clip}"
+            f"{what}: correction.lower={c.lower} must be smaller than "
+            f"correction.upper={c.upper}"
         )
     return None
 
@@ -226,8 +235,8 @@ def _reject_observe(spec: AlgorithmSpec) -> str | None:
     if _function(spec) != OBSERVE_PATH:
         return None
     problems = []
-    if c.tis_clip is not None or c.tis_clip_low is not None:
-        problems.append("correction.tis_clip/tis_clip_low (observe-only weights are 1)")
+    if c.upper is not None or c.lower is not None:
+        problems.append("correction.upper/lower (observe-only weights are 1)")
     if _uses_opsm(spec):
         problems.append("OPSM (observe-only cannot be combined with any correction)")
     if not c.mismatch_metrics:
@@ -295,8 +304,8 @@ def _reject_mis(spec: AlgorithmSpec) -> str | None:
         )
     if c.mis_batch_normalize and c.mis_level == "geometric":
         problems.append("correction.mis_batch_normalize supports mis_level token|sequence only")
-    if c.tis_clip is not None or c.tis_clip_low is not None:
-        problems.append("MIS uses mis_lower_bound/mis_upper_bound, not correction.tis_clip*")
+    if c.upper is not None or c.lower is not None:
+        problems.append("MIS uses mis_lower_bound/mis_upper_bound, not correction.lower/upper")
     if problems:
         return "MIS: " + "; ".join(problems)
     return None
@@ -322,9 +331,11 @@ def mis_config(spec: AlgorithmSpec) -> dict[str, Any]:
     Empty unless the MIS function is selected.
     """
 
+    c = spec.correction
+    if c.ratio_mask == "mis":
+        return neutral_mis_config(c)
     if _function(spec) != MIS_PATH:
         return {}
-    c = spec.correction
     return {
         "rs_level": c.mis_level,
         "rs_lower_bound": None,
@@ -336,6 +347,29 @@ def mis_config(spec: AlgorithmSpec) -> dict[str, Any]:
         "tis_mode": c.mis_mode,
         "tis_upper_bound": c.mis_upper_bound,
         "use_rs": False,
+    }
+
+
+def neutral_mis_config(c: Any) -> dict[str, Any]:
+    """MIS attributes for the neutral ``ratio_mask='mis'`` (rl-offpolicy-correction D3).
+
+    Mask mode over ``[lower, upper]`` at ``level``. ``veto`` needs Miles'
+    rejection-sampling branch (``use_rs``); its RS range is the same interval,
+    so RS adds only the veto (vendor/miles_mis.py, read 2026-10-14, not run on GPU).
+    """
+
+    veto = c.veto is not None
+    return {
+        "rs_level": c.level,
+        "rs_lower_bound": c.lower if veto else None,
+        "rs_upper_bound": c.upper if veto else None,
+        "rs_veto_threshold": c.veto,
+        "tis_batch_normalize": bool(c.batch_normalize),
+        "tis_level": c.level,
+        "tis_lower_bound": c.lower,
+        "tis_mode": "mask",
+        "tis_upper_bound": c.upper,
+        "use_rs": veto,
     }
 
 

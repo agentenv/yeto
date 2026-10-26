@@ -3,6 +3,7 @@ the cloud-local model store (``--model-store nebius-fs://...``)."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import types
@@ -73,9 +74,11 @@ def test_model_store_uri_validation(capsys):
 
 
 def _run(snippet):
+    # hermetic: the caller's HF_HUB_CACHE (a test runner may set it) must not leak in
+    env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_CACHE", "YETO_MODEL_STORE_HIT")}
     return subprocess.run(
         ["bash", "-c", snippet + '\necho "HUB=${HF_HUB_CACHE:-} HIT=${YETO_MODEL_STORE_HIT:-}"'],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=env,
     )
 
 
@@ -122,7 +125,8 @@ def test_island_task_model_store(monkeypatch):
     task = _island_task(args, monkeypatch)
     env = model_store_env("org/model", "a" * 40)
     assert env in task.setup
-    assert '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup huggingface-cli download' in task.setup
+    assert '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup sh -c ' in task.setup
+    assert 'snapshot_download' in task.setup and 'huggingface-cli' not in task.setup
     # both ranks export it before the learner / worker snapshot fetch
     assert task.run.index(env) < task.run.index("set -e") < task.run.index("snapshot_download")
     plain = _cli(["--gpu", "nebius:2x1xl40s@eu-north1"])

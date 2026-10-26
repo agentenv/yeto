@@ -28,7 +28,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -92,20 +92,33 @@ class CutFile:
 
 @dataclass(frozen=True)
 class AlgorithmIdentity:
-    """alignment A3: what must be identical between the cut and the restoring run."""
+    """alignment A3: what must be identical between the cut and the restoring run.
+
+    rl-identity-tiering L9.8: a cut written since the version boundary also
+    holds the canonical spec and its ``semantic_sha256``. Such a cut is compared
+    by the semantic hash: a plugin source change (code identity, pinned by the
+    run code pack) does not refuse the resume. An older cut holds hashes only
+    and keeps the whole-hash comparison (SESSION24 GOAL §6, L9.8 rule).
+    """
 
     algorithm_spec_sha256: str
     plugin_sha256: tuple[str, ...] = ()  # sorted "<dotted path>@<source sha256>" of every PluginRef
     runtime_attrs_sha256: str | None = None  # hash of the yeto_algo_plugins runtime attrs
     ref_model: Mapping[str, Any] | None = None  # {"ref_load", "base_model_revision"} when a ref model is used
+    semantic_sha256: str | None = None  # AlgorithmSpec.semantic_sha256(); None in a cut from before L9.8
+    algorithm_spec: Mapping[str, Any] | None = None  # the canonical spec the semantic hash is taken of
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "algorithm_spec_sha256": self.algorithm_spec_sha256,
             "plugin_sha256": sorted(self.plugin_sha256),
             "runtime_attrs_sha256": self.runtime_attrs_sha256,
             "ref_model": None if self.ref_model is None else dict(sorted(self.ref_model.items())),
         }
+        if self.semantic_sha256 is not None:  # absent keys: an old cut keeps its bytes
+            out["semantic_sha256"] = self.semantic_sha256
+            out["algorithm_spec"] = self.algorithm_spec
+        return out
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "AlgorithmIdentity":
@@ -114,6 +127,8 @@ class AlgorithmIdentity:
             tuple(sorted(raw.get("plugin_sha256") or ())),
             raw.get("runtime_attrs_sha256"),
             raw.get("ref_model"),
+            raw.get("semantic_sha256"),
+            raw.get("algorithm_spec"),
         )
 
     @classmethod
@@ -124,12 +139,40 @@ class AlgorithmIdentity:
         runtime_attrs: Mapping[str, Any] | None = None,
         ref_model: Mapping[str, Any] | None = None,
     ) -> "AlgorithmIdentity":
-        """Identity of an ``AlgorithmSpec`` (duck-typed: ``sha256()``, PluginRef ``sha256``)."""
+        """Identity of an ``AlgorithmSpec`` (duck-typed: ``sha256()``, PluginRef ``sha256``;
+        ``semantic_sha256()`` and ``canonical_json()`` when the spec has them)."""
         plugins = sorted({f"{p.path}@{p.sha256}" for p in iter_plugin_refs(spec)})
         attrs = None
         if runtime_attrs:
             attrs = hashlib.sha256(canonical_json(_jsonable(runtime_attrs)).encode()).hexdigest()
-        return cls(spec.sha256(), tuple(plugins), attrs, ref_model)
+        semantic = getattr(spec, "semantic_sha256", None)
+        if not callable(semantic):
+            return cls(spec.sha256(), tuple(plugins), attrs, ref_model)
+        return cls(spec.sha256(), tuple(plugins), attrs, ref_model,
+                   semantic(), json.loads(spec.canonical_json()))
+
+    def mismatch(self, run: "AlgorithmIdentity") -> str | None:
+        """Why a cut with this identity cannot resume in ``run``; None when it can."""
+        if self.semantic_sha256 is None:  # old cut: whole-hash comparison
+            if self == replace(run, semantic_sha256=None, algorithm_spec=None):
+                return None
+            return ("algorithm identity differs from the current run (spec/plugins/runtime "
+                    f"attrs/ref model): cut {self.to_dict()} vs run {run.to_dict()}")
+        from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError
+
+        try:
+            recorded = AlgorithmSpec.from_dict(self.algorithm_spec or {}).semantic_sha256()
+        except AlgorithmSpecError as error:
+            return f"cut algorithm spec cannot be read: {error}"
+        if recorded != self.semantic_sha256:
+            return (f"cut algorithm spec has semantic hash {recorded}, "
+                    f"its manifest says {self.semantic_sha256}")
+        differs = [name for name in ("semantic_sha256", "runtime_attrs_sha256", "ref_model")
+                   if getattr(self, name) != getattr(run, name)]
+        if not differs:
+            return None
+        return (f"algorithm identity differs from the current run ({', '.join(differs)}): "
+                f"cut {self.semantic_sha256} vs run {run.semantic_sha256}")
 
 
 def _jsonable(value: Any) -> Any:
@@ -217,6 +260,13 @@ class CutManifest:
     # cut (InFlightTrajectory.to_dict()); written only under a policy-age limit
     # > 0 and serialized only when non-empty (default manifests unchanged).
     in_flight: tuple[Mapping[str, Any], ...] = ()
+    # S25 N7.6: ResumeManifest.to_dict() (yeto.rl.engine.resume_manifest);
+    # serialized only when non-empty. Restoring a cut without it is refused
+    # by the backends that write it.
+    resume: Mapping[str, Any] = field(default_factory=dict)
+    # S27 R-5: wall clock (epoch seconds) when the writer built the manifest;
+    # serialized only when set (manifests without it keep their bytes).
+    created_unix: float | None = None
 
     def body(self) -> dict[str, Any]:
         return {
@@ -233,6 +283,8 @@ class CutManifest:
             "rank_summaries": [_jsonable(s) for s in self.rank_summaries],
             **({"backend_state": _jsonable(self.backend_state)} if self.backend_state else {}),
             **({"in_flight": [_jsonable(t) for t in self.in_flight]} if self.in_flight else {}),
+            **({"resume": _jsonable(self.resume)} if self.resume else {}),
+            **({"created_unix": float(self.created_unix)} if self.created_unix is not None else {}),
         }
 
     def digest(self) -> str:
@@ -266,6 +318,8 @@ class CutManifest:
                 rank_summaries=tuple(raw.get("rank_summaries") or ()),
                 backend_state=raw.get("backend_state") or {},
                 in_flight=tuple(raw.get("in_flight") or ()),
+                resume=raw.get("resume") or {},
+                created_unix=None if raw.get("created_unix") is None else float(raw["created_unix"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CutError(f"malformed cut manifest: {exc}") from exc
@@ -324,7 +378,11 @@ def context_problems(
         out.append(f"invalid cut_id {cut_id!r}")
     if not algorithm.algorithm_spec_sha256:
         out.append("algorithm: algorithm_spec_sha256 missing")
-    for key in DATA_CURSOR_FIELDS:
+    # A backend whose data source has fewer position fields (verl: sample_offset
+    # only) names them in ``cursor_fields``; sample_offset (the data watermark) is
+    # always required.
+    fields = tuple(data.get("cursor_fields") or DATA_CURSOR_FIELDS)
+    for key in dict.fromkeys(("sample_offset", *fields)):
         if not isinstance(data.get(key), int):
             out.append(f"data: cursor field {key!r} missing")
     buffered = data.get("buffer_length")
@@ -459,11 +517,9 @@ def verify_cut(
     problems = manifest.completeness_problems()
     if check_files:
         problems += file_problems(cut_dir(root, cut_id), manifest.files)
-    if manifest.algorithm != expect.algorithm:
-        problems.append(
-            "algorithm identity differs from the current run (spec/plugins/runtime attrs/ref model): "
-            f"cut {manifest.algorithm.to_dict()} vs run {expect.algorithm.to_dict()}"
-        )
+    algorithm_problem = manifest.algorithm.mismatch(expect.algorithm)
+    if algorithm_problem is not None:
+        problems.append(algorithm_problem)
     if dict(manifest.runtime.get("layout") or {}) != dict(expect.layout):
         problems.append(f"parallel layout {manifest.runtime.get('layout')} != current {dict(expect.layout)}")
     if manifest.runtime.get("backend_fingerprint") != expect.backend_fingerprint:

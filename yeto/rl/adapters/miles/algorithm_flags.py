@@ -140,17 +140,9 @@ def _kl_rows() -> list[FlagMapping]:
 
 def _correction_rows() -> list[FlagMapping]:
     def use_tis(spec):
-        c = spec.correction
-        if c.method not in ("tis", "custom"):
-            return []
-        argv = ["--use-tis"]
-        if c.tis_clip is not None:
-            argv += ["--tis-clip", _num(c.tis_clip)]
-        if c.tis_clip_low is not None:
-            argv += ["--tis-clip-low", _num(c.tis_clip_low)]
-        if c.function is not None:
-            argv += ["--custom-tis-function-path", c.function.path]
-        return argv
+        from .offpolicy_correction import tis_argv  # neutral fields -> Miles (D3)
+
+        return tis_argv(spec)
 
     def use_opsm(spec):
         c = spec.correction
@@ -161,10 +153,10 @@ def _correction_rows() -> list[FlagMapping]:
     return [
         FlagMapping("--use-tis", "correction.method", True, lambda raw: True,
                     lambda _: [("correction.method", "tis")], use_tis),
-        FlagMapping("--tis-clip", "correction.tis_clip", False, _float,
-                    lambda v: [("correction.tis_clip", v)], lambda spec: []),
-        FlagMapping("--tis-clip-low", "correction.tis_clip_low", False, _float,
-                    lambda v: [("correction.tis_clip_low", v)], lambda spec: []),
+        FlagMapping("--tis-clip", "correction.upper", False, _float,
+                    lambda v: [("correction.upper", v)], lambda spec: []),
+        FlagMapping("--tis-clip-low", "correction.lower", False, _float,
+                    lambda v: [("correction.lower", v)], lambda spec: []),
         FlagMapping("--custom-tis-function-path", "correction.function", False, _plugin,
                     lambda v: [("correction.method", "custom"), ("correction.function", v)],
                     lambda spec: []),
@@ -276,6 +268,11 @@ _UNMAPPED = [
     "--value-target-type",
     "--hl-gauss-sigma-ratio",
     "--value-reward-range",  # two values; translation constant, never absorbed
+    # The streaming-SAO switches of the TB2.1 fork (agentenv/miles 16a9bea4)
+    # are not in the ports pin: ports carries the SAO recipe as the algorithm
+    # spec (yeto.rl.algos.sao.sao_algorithm_spec), so they are refused.
+    "--sao-online-recipe",
+    "--sao-compaction",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
@@ -327,20 +324,6 @@ def register_flag(row: FlagMapping) -> None:
 # --------------------------------------------------------------------------
 # translation
 # --------------------------------------------------------------------------
-
-
-def legacy_algorithm_argv(spec: AlgorithmSpec) -> list[str]:
-    """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec
-    (moved from ``AlgorithmSpec.to_legacy_argv``, decoupling 4.3/E14)."""
-
-    argv = ["--advantage-estimator", spec.advantage_estimator]
-    if spec.kl_coef is not None:
-        argv += ["--kl-coef", str(spec.kl_coef)]
-    if spec.dynamic_sampling_filter is not None:
-        from .binding import filter_argv
-
-        argv += filter_argv(spec.dynamic_sampling_filter)
-    return argv
 
 
 def algorithm_argv(spec: AlgorithmSpec) -> list[str]:
@@ -512,7 +495,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = parser.parse_args(argv)
     result: dict[str, Any] = {}
     try:
-        base = resolve_ports_algorithm(args, rl_engine="ports")
+        base = resolve_ports_algorithm(args)
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
         # models a single-island G1 smoke without outer sync (D11)
         allow = check_unverified_allowance(

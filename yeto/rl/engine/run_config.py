@@ -4,9 +4,7 @@
 model provider into an immutable :class:`RLRunConfig`.  All validation and
 derivation that does not depend on a particular RL engine lives here; each
 engine then owns a pure translation of the config into its own launch
-arguments (legacy: ``yeto.rl.adapters.miles.island_entry.build_miles_argv``; ports:
-``miles_adapter/config.py``).  Both paths start from the same resolved config,
-so equivalence runs are guaranteed identical inputs.
+arguments (Miles: ``yeto.rl.adapters.miles.config.translate_run_config``).
 
 This module is import-light: it never imports torch, ray or miles.
 
@@ -29,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import sample_roles
+from .sample_roles import SampleBufferConfig
+
 PARAMETER_MODES = frozenset({"lora", "full"})
 RECIPE_GENERIC = "generic"
 RECIPE_QWEN3_5 = "qwen3_5"
@@ -36,6 +37,16 @@ RECIPE_DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 # Qwen3.8-Flash-Next (qwen4_exp): GDN + QSA + 512-expert MoE through the native
 # Miles plugin (miles_plugins/models/qwen3_8_next), never the Qwen3.5 spec.
 RECIPE_QWEN3_8_NEXT = "qwen3_8_next"
+# GLM5.3-Flash (glm5_next): KDA + DSA MLA + 288-expert MoE through the Miles
+# plugin spec (adapters/miles/models/glm5_next.py), full-parameter.
+RECIPE_GLM5_NEXT = "glm5_next"
+# NVIDIA Nemotron-H family (Nemotron-3 Nano / Super, Nemotron-3.5 Super VL text
+# model): Mamba-2 + MoE + attention hybrid built by the Megatron-Bridge
+# HybridModelProvider from the HF checkpoint (Miles --megatron-to-hf-mode
+# bridge). The recipe is driven by the provider's layer pattern and router
+# fields, not by one checkpoint (adapters/miles/models/nemotron_h.py).
+RECIPE_NEMOTRON_H = "nemotron_h"
+TRANSFORMER_IMPLS = ("transformer_engine", "local")
 GATED_DELTA_NET = "gated_delta_net"
 
 
@@ -131,10 +142,16 @@ class GdnRecipe:
 
 @dataclass(frozen=True)
 class ModelRecipe:
-    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT
+    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT | RECIPE_GLM5_NEXT
     provider_class: str
     training_attention_backend: str
     gdn: GdnRecipe
+    # Megatron --transformer-impl of a recipe that chooses it (glm5_next: the
+    # N7.5 TE-free fallback is "local"); the other recipes keep their own.
+    transformer_impl: str = "transformer_engine"
+    # Recipe-owned Miles model flags read from the provider (nemotron_h router,
+    # latent MoE); empty for the other recipes.
+    model_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -168,6 +185,9 @@ class ParallelLayout:
     # --rl-allow-cross-node-engine-tp); default False = TP stays inside a node.
     allow_cross_node_tp: bool = False
     allow_cross_node_engine_tp: bool = False
+    # S27 G-AC: Megatron context parallelism of the trainer (Miles splits each
+    # packed micro batch of max_tokens_per_gpu * CP tokens across the CP ranks).
+    context_parallel: int = 1
 
     @property
     def colocated(self) -> bool:
@@ -234,6 +254,40 @@ class BatchConfig:
     rollout_max_response_len: int
 
 
+DP_OPTIMIZERS = ("auto", "distributed", "replicated")
+
+
+@dataclass(frozen=True)
+class TrainMemoryConfig:
+    """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
+    --rl-optimizer-offload-fraction). Defaults keep the historical argv: no
+    recompute, fixed micro batches, optimizer state on the device."""
+
+    # Recompute every layer's activations in backward (keep only layer inputs).
+    activation_recompute: bool = False
+    # Token budget of one packed micro batch per GPU (dynamic batching);
+    # None = fixed micro batches of --micro-batch-size samples.
+    max_tokens_per_gpu: int | None = None
+    # Share of the optimizer state kept and updated on the host (0 = none).
+    optimizer_offload_fraction: float = 0.0
+    # Megatron gradient-accumulation fusion (fused wgrad into main_grad; needs
+    # APEX/TE fused kernels). Off keeps the historical argv.
+    gradient_accumulation_fusion: bool = False
+    # Optimizer of a full-parameter trainer at DP>1 (--rl-dp-optimizer):
+    # "distributed" (sharded FP32 masters), "replicated" (whole masters on
+    # every DP rank) or "auto" (distributed when the Miles pin supports it).
+    dp_optimizer: str = "auto"
+    # Gradient buffers and the data-parallel gradient reduce in bf16
+    # (--rl-grad-reduce-bf16, Megatron --grad-reduce-in-bf16) instead of fp32;
+    # FP32 masters and Adam moments stay (the full-parameter sync reads them).
+    grad_reduce_bf16: bool = False
+    # Megatron precision-aware optimizer with bf16 Adam moments
+    # (--rl-precision-aware-optimizer): FP32 masters live as 16-bit remainders
+    # inside TE FusedAdam, which the full-parameter sync cannot read, so only a
+    # no-sync island may use it.
+    precision_aware_optimizer: bool = False
+
+
 @dataclass(frozen=True)
 class AlgorithmConfig:
     advantage_estimator: str
@@ -249,6 +303,10 @@ class AlgorithmConfig:
     # state given). The algorithm itself (gamma, value_clip, init ...) is the
     # AlgorithmSpec; this carries only what one run resolves.
     critic: "CriticRunConfig | None" = None
+    # Log the training-side entropy (metrics only while entropy_coef is 0).
+    observe_training_entropy: bool = False
+    # Mamba training inter-chunk SSM state dtype ("fp32"/"bf16"; None = Megatron default).
+    mamba_training_ssm_states_dtype: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,20 +385,23 @@ def resolve_lr_schedule(
     global_batch: int,
     island_scheduling: str = "legacy",
     requested: str = "auto",
+    full_parameter_async: bool = False,
 ) -> LrSchedule | None:
     """The island's LR schedule (design D1-D3), ``--rl-lr-schedule`` (S17 N16).
 
-    ``auto`` (default) keeps the mode rule: decoupled and elastic islands run
-    until the syncer stops them (an elastic island that re-JOINs needs local
-    rounds past ``global_rounds``; S17 N5 a73ab1b2), so any finite linear
-    horizon can reach zero mid-run -> constant; strict-avg / dense-full /
-    single island -> linear over ``global_rounds * optimizer_steps``.
+    ``auto`` (default) keeps the mode rule: decoupled, island-pool and
+    asynchronous full-parameter islands run until the syncer stops them (an
+    island that re-JOINs needs local rounds past ``global_rounds``; S17 N5
+    a73ab1b2; an asynchronous full-parameter island trains H local rounds per
+    fragment round and, with a partial quorum, as many rounds as it is fast),
+    so any finite linear horizon can reach zero mid-run -> constant;
+    strict-avg / full-parameter sweep / single island -> linear over
+    ``global_rounds * optimizer_steps``.
     ``constant`` holds the LR in every mode (e.g. a single island compared
     with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
     linear horizon). ``linear`` is refused where the horizon is unknown.
 
-    Both engine translations (legacy ``_legacy_miles_argv`` and ports
-    ``translate_run_config``) emit exactly this schedule.
+    The Miles translation (``translate_run_config``) emits exactly this schedule.
     """
 
     if requested not in LR_SCHEDULE_CHOICES:
@@ -348,16 +409,18 @@ def resolve_lr_schedule(
     if eval_only:
         return None
     horizon = global_rounds * optimizer_steps
-    run_until_stop = sync_preset == "decoupled" or island_scheduling == "elastic"
+    run_until_stop = (sync_preset == "decoupled" or island_scheduling == "elastic"
+                      or full_parameter_async)
     if requested == "linear" and run_until_stop:
         raise ValueError(
-            "--rl-lr-schedule linear needs a known local step count; decoupled and "
-            "elastic islands run until the syncer stops them (use auto or constant)")
+            "--rl-lr-schedule linear needs a known local step count; decoupled, "
+            "island-pool and asynchronous full-parameter islands run until the syncer "
+            "stops them (use auto or constant)")
     if requested == "constant" or (requested == "auto" and run_until_stop):
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
         return LrSchedule("constant", horizon)
-    # strict-avg / dense-full: one local round (optimizer_steps steps) per
+    # strict-avg / full-parameter: one local round (optimizer_steps steps) per
     # global round.  The explicit linear horizon equals Miles' implicit
     # ``num_rollout * rollout_batch_size * n_samples / global_batch`` only
     # when every round is exactly ``optimizer_steps`` optimizer steps.
@@ -395,6 +458,13 @@ class ServingConfig:
     page_size: Any = None
     max_running_requests: Any = None
     chunked_prefill_size: Any = None
+    # rl-trainer-cold-start-cost L8.2: opt-in SGLang snapshot flags on the
+    # sampler (rollout) engines; refused without a recorded compatibility pass.
+    sampler_snapshot: bool = False
+    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
+    rollout_quant_tier: int = 0
+    # tier 1: who quantizes ("engine" online FP8, or "trainer": Miles block FP8 updates)
+    rollout_quant_fp8_source: str = "engine"
 
 
 @dataclass(frozen=True)
@@ -459,6 +529,10 @@ class RLRunConfig:
     # and the load-window length for ``timeline.load_windows`` (None = no hook).
     edge_costs_path: str | None = None
     elastic_window_s: float | None = None
+    # rl-trainer-start-stop L4.6 (--rl-sample-role sampler|trainer): the island
+    # writes or reads the durable sample buffer. None = role both (unchanged).
+    sample_buffer: SampleBufferConfig | None = None
+    train_memory: TrainMemoryConfig = TrainMemoryConfig()
 
 
 # --------------------------------------------------------------------------
@@ -497,6 +571,18 @@ def qwen3_8_next_variant(args, provider) -> str | None:
     return None
 
 
+def _is_nemotron_h(provider) -> bool:
+    """A Megatron-Bridge hybrid (Mamba) provider built from a Nemotron-H checkpoint."""
+    return bool(getattr(provider, "is_hybrid_model", False)) and bool(
+        getattr(provider, "hybrid_layer_pattern", None))
+
+
+def _recipe_model_flags(recipe_name: str, provider) -> tuple[str, ...]:
+    if recipe_name != RECIPE_NEMOTRON_H:
+        return ()
+    return _nemotron_h_recipe().model_flags(provider)
+
+
 def select_gdn_recipe(provider) -> GdnRecipe:
     return GdnRecipe(
         gated_delta_net=(
@@ -506,16 +592,119 @@ def select_gdn_recipe(provider) -> GdnRecipe:
     )
 
 
-def _rules():
-    """Backend-specific checks of the run (decoupling 4.2): Miles -> adapters/miles/run_config_rules."""
+def _nemotron_h_recipe():
+    """The backend's Nemotron-H recipe (Miles -> adapters/miles/models/nemotron_h)."""
     from . import backends
 
-    return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
+    return backends.module("nemotron_h_recipe", backends.DEFAULT_BACKEND)
+
+
+def _rules(backend: str | None = None):
+    """Backend-specific checks of the run (decoupling 4.2) of the selected backend.
+
+    ``backend`` is the run's ``--rl-backend`` (``args.rl_backend``); unset means
+    the default backend (Miles -> adapters/miles/run_config_rules).  The
+    environment (``$YETO_RL_BACKEND``) is not read: the rules follow the run's
+    arguments only, so a Miles island never picks up another backend's rules.
+    """
+    from . import backends
+
+    return backends.module("run_config_rules", backend or backends.DEFAULT_BACKEND)
+
+
+def _backend_of(args) -> str | None:
+    """The run's ``--rl-backend`` (None when the arguments do not name one)."""
+    return getattr(args, "rl_backend", None)
+
+
+def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
+                                  rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH,
+                                  island_gpus: int | None = None,
+                                  island_gpus_per_node: int | None = None,
+                                  colocated: bool = False,
+                                  single_island_no_sync: bool = False) -> str | None:
+    """Why the Miles full-parameter mode refuses this layout; None when it accepts it.
+
+    Four layouts are accepted:
+
+    * a sampler island (``--rl-sample-role sampler``): its own engine partition.
+      It builds no trainer, so every island GPU (``island_gpus``) serves an
+      engine and it loads each full-weight release from the store. No
+      ``--rollout-num-gpus`` (the island size is the partition); the island GPUs
+      split evenly into engines of ``--rollout-num-gpus-per-engine``;
+    * samples from the store (``--rl-sample-role trainer``): a trainer-only
+      island. Any node count and any DP; the island starts no inference engine
+      (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
+    * engines on the island (Milestone 1): dedicated, evenly partitioned
+      engines on one node, or on a multi-node island (``island_gpus_per_node``,
+      ``--rl-island-gpus-per-node``: the trainer rectangle and the engines are
+      laid out over the island's nodes, as for a LoRA fixed partition); the
+      trainer does not share its cards with these engines. DP>1 needs a Miles
+      pin with data-parallel replicas
+      (``run_config_rules.full_parameter_dp_replica_gap``);
+    * engines colocated with the trainer (``colocated``: ``--rl-placement
+      colocated`` and no ``--rollout-num-gpus``), only on one island without
+      outer sync (``--rl-single-island-no-sync``) and on one node. The trainer
+      and the engines take turns on the same GPUs through Miles' own
+      ``--colocate`` / ``--offload-train`` (the adapter adds both): the trainer
+      sleeps while the engines generate and publishes from its host backups.
+      A synced island stays refused: its outer-sync boundary needs the trainer
+      state resident while the engines hold the GPUs (G-EB, AGENTIC-ROLLOUT-SCALING
+      section 4.1). The island GPUs split evenly into engines of
+      ``--rollout-num-gpus-per-engine``.
+    """
+    if sample_role == sample_roles.SAMPLER:
+        if rollout_gpus not in (None, 0):
+            return ("a full-parameter sampler island is its own engine partition: every island "
+                    "GPU serves an engine; drop --rollout-num-gpus and size the island with --gpu")
+        per_engine = 1 if rollout_gpus_per_engine is None else rollout_gpus_per_engine
+        if (type(per_engine) is not int or per_engine < 1
+                or (island_gpus is not None and int(island_gpus) % per_engine)):
+            return (f"a full-parameter sampler island splits its {island_gpus} GPU(s) evenly into "
+                    f"engines: --rollout-num-gpus-per-engine {rollout_gpus_per_engine} must divide it")
+        return None
+    if sample_role == sample_roles.TRAINER:
+        if rollout_gpus not in (None, 0):
+            return ("a full-parameter trainer that reads samples from the store starts no "
+                    "inference engine: --rollout-num-gpus must be 0 or absent")
+        return None
+    if data_parallel != 1 and (gap := _rules().full_parameter_dp_replica_gap()) is not None:
+        return ("dense full-parameter GRPO with engines on the island requires DP=1 "
+                f"with this Miles pin (DP>1 needs {gap})")
+    if colocated and rollout_gpus in (None, 0):
+        if not single_island_no_sync:
+            return ("full-parameter mode colocates the engines with the trainer only on one "
+                    "island without outer sync (--rl-single-island-no-sync): an outer-sync "
+                    "boundary needs the trainer state on the GPUs; use dedicated engines "
+                    "(--rl-placement fixed-partition --rl-rollout-gpus N)")
+        per_engine = 1 if rollout_gpus_per_engine is None else rollout_gpus_per_engine
+        if actor_num_nodes != 1 or island_gpus_per_node is not None:
+            return ("full-parameter mode with colocated engines runs on one node "
+                    "(no --rl-island-gpus-per-node)")
+        if (type(per_engine) is not int or per_engine < 1
+                or (island_gpus is not None and int(island_gpus) % per_engine)):
+            return (f"full-parameter colocated engines split the {island_gpus} trainer GPU(s) "
+                    f"evenly: --rollout-num-gpus-per-engine {rollout_gpus_per_engine} must divide it")
+        return None
+    if (
+        (actor_num_nodes != 1 and island_gpus_per_node is None)
+        or type(rollout_gpus) is not int
+        or rollout_gpus < 1
+        or type(rollout_gpus_per_engine) is not int
+        or rollout_gpus_per_engine < 1
+        or rollout_gpus % rollout_gpus_per_engine
+    ):
+        return ("full-parameter mode with engines on the island requires one node (or a "
+                "multi-node island, --rl-island-gpus-per-node) and dedicated, evenly "
+                "partitioned inference engines (colocated engines only on one island without "
+                "outer sync, --rl-placement colocated --rl-single-island-no-sync); or read "
+                "samples from the store (--rl-sample-role trainer)")
+    return None
 
 
 def _resolve_ref_load(args, model_path) -> str:
     """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
-    return _rules().resolve_ref_load(args, model_path)
+    return _rules(_backend_of(args)).resolve_ref_load(args, model_path)
 
 
 def _validate_callable_spec(spec: str) -> None:
@@ -595,9 +784,12 @@ def resolve_rl_run_config(
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
     tensor_parallel = getattr(args, "tensor_parallel", 1)
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
-    model_parallel = tensor_parallel * pipeline_parallel
-    rules = _rules()
+    context_parallel = int(getattr(args, "context_parallel", 1) or 1)
+    model_parallel = tensor_parallel * pipeline_parallel * context_parallel
+    rules = _rules(_backend_of(args))
     rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
+    if context_parallel < 1 or actor_gpus % model_parallel:
+        raise ValueError("trainer world must be divisible by TP*PP*CP")
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
@@ -629,31 +821,43 @@ def resolve_rl_run_config(
             "expert-full tuning requires the DeepSeek V4 recipe and attention LoRA"
         )
     data_parallel = actor_gpus // model_parallel
-    if parameter_mode == "full" and data_parallel != 1:
-        raise ValueError("dense full-parameter GRPO requires DP=1")
     dedicated_rollout_gpus: int | None = None
     if parameter_mode == "full":
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
-        if (
-            args.actor_num_nodes != 1
-            or type(rollout_gpus) is not int
-            or rollout_gpus < 1
-            or type(rollout_gpus_per_engine) is not int
-            or rollout_gpus_per_engine < 1
-            or rollout_gpus % rollout_gpus_per_engine
-        ):
-            raise ValueError(
-                "Milestone-1 dense full-parameter mode requires one node and "
-                "dedicated, evenly partitioned inference engines"
-            )
+        role = sample_roles.sample_role(args)
+        island_gpus_per_node = getattr(args, "rl_island_gpus_per_node", None)
+        # G-EF: engines on the trainer GPUs (one island without outer sync only)
+        colocated = (role == sample_roles.BOTH and rollout_gpus in (None, 0)
+                     and getattr(args, "rl_placement", "colocated") == "colocated")
+        if problem := full_parameter_layout_problem(
+                data_parallel=data_parallel, actor_num_nodes=args.actor_num_nodes,
+                rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine,
+                sample_role=role, island_gpus=actor_gpus, island_gpus_per_node=island_gpus_per_node,
+                colocated=colocated,
+                single_island_no_sync=bool(getattr(args, "rl_single_island_no_sync", False))):
+            raise ValueError(problem)
+        if role == sample_roles.TRAINER:
+            rollout_gpus = 0  # trainer-only island (Miles --debug-train-only): no engine
         if qwen35_recipe and (
             rollout_gpus_per_engine != 1
             or getattr(args, "sglang_tp_size", None) not in {None, 1}
         ):
             raise ValueError("pinned Qwen3.5 requires TP1 SGLang inference engines")
-        dedicated_rollout_gpus = rollout_gpus
-        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+        if role == sample_roles.SAMPLER:
+            # Engines only (Miles --debug-rollout-only): the island GPUs are the
+            # engine partition, as on a LoRA sampler island; no trainer GPU.
+            visible_gpus_per_node = args.actor_num_gpus_per_node
+        elif colocated:
+            # Trainer and engines share the trainer GPUs (Miles --colocate); no
+            # dedicated engine GPU (dedicated_rollout_gpus stays None).
+            visible_gpus_per_node = args.actor_num_gpus_per_node
+        else:
+            dedicated_rollout_gpus = rollout_gpus
+            # A multi-node island exposes every GPU of each node; the trainer
+            # rectangle and the engines are laid out over the island.
+            visible_gpus_per_node = (args.actor_num_gpus_per_node + rollout_gpus
+                                     if island_gpus_per_node is None else int(island_gpus_per_node))
     elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
         # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
         # legacy CLI never sets rl_placement, so its layout is unchanged).
@@ -716,6 +920,18 @@ def resolve_rl_run_config(
                 "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
             )
         recipe_name, attention_backend = RECIPE_DEEPSEEK_V4_FLASH, "flash"
+    elif recipe == RECIPE_GLM5_NEXT:
+        if parameter_mode != "full":
+            raise ValueError("the glm5_next recipe is full-parameter only")
+        if getattr(args, "megatron_ref_load", None) is None:
+            # Miles loads an HF checkpoint only through Megatron-Bridge, which has no
+            # glm5_next bridge (Modal run-7): train from the converted torch_dist checkpoint
+            raise ValueError(
+                "the glm5_next recipe needs --megatron-ref-load <dir> (Miles "
+                "tools/convert_hf_to_torch_dist.py output; Megatron-Bridge cannot load glm5_next)"
+            )
+        # Megatron picks the backend (Miles run_glm5_3_flash.py passes none)
+        recipe_name, attention_backend = RECIPE_GLM5_NEXT, "auto"
     elif fn_variant is not None:
         if parameter_mode != "lora":
             raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
@@ -736,6 +952,10 @@ def resolve_rl_run_config(
                 "the Qwen3.8-Flash-Next recipe needs --no-sglang-deterministic-inference "
                 "(FlashInfer GDN prefill is not supported with deterministic inference)"
             )
+    elif _is_nemotron_h(provider):
+        _nemotron_h_recipe().check_provider(provider, parameter_mode=parameter_mode)
+        # Miles run_nemotron_3_nano.py: --attention-backend auto
+        recipe_name, attention_backend = RECIPE_NEMOTRON_H, "auto"
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:
@@ -754,11 +974,17 @@ def resolve_rl_run_config(
             )
         attention_backend = backend_override
 
+    transformer_impl = str(getattr(args, "rl_transformer_impl", None) or TRANSFORMER_IMPLS[0])
+    if transformer_impl not in TRANSFORMER_IMPLS:
+        raise ValueError(f"--rl-transformer-impl {transformer_impl!r} is not one of {TRANSFORMER_IMPLS}")
+    if transformer_impl != TRANSFORMER_IMPLS[0] and recipe_name != RECIPE_GLM5_NEXT:
+        raise ValueError(f"--rl-transformer-impl {transformer_impl} is supported by the "
+                         f"{RECIPE_GLM5_NEXT} recipe only")
+
     _validate_callable_spec(args.reward_function)
 
     eval_config = _resolve_eval(
         args,
-        parameter_mode=parameter_mode,
         prompt_path=prompt_path,
         eval_prompt_path=eval_prompt_path,
         yeto_policy_sync=yeto_policy_sync,
@@ -866,6 +1092,8 @@ def resolve_rl_run_config(
             provider_class=type(provider).__name__,
             training_attention_backend=attention_backend,
             gdn=gdn,
+            transformer_impl=transformer_impl,
+            model_flags=_recipe_model_flags(recipe_name, provider),
         ),
         geometry=geometry,
         parallel=ParallelLayout(
@@ -888,6 +1116,7 @@ def resolve_rl_run_config(
             bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
             allow_cross_node_tp=bool(getattr(args, "rl_allow_cross_node_tp", False)),
             allow_cross_node_engine_tp=bool(getattr(args, "rl_allow_cross_node_engine_tp", False)),
+            context_parallel=context_parallel,
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -933,9 +1162,12 @@ def resolve_rl_run_config(
                 rollout_batch_size=args.groups_per_round,
                 n_samples_per_prompt=args.samples_per_group,
                 global_batch=global_batch,
-                island_scheduling=getattr(args, "rl_island_scheduling", None) or "legacy",
+                island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
                 requested=getattr(args, "rl_lr_schedule", None) or "auto",
+                full_parameter_async=getattr(args, "full_parameter_rounds", "sweep") == "async",
             ),
+            observe_training_entropy=bool(getattr(args, "observe_training_entropy", False)),
+            mamba_training_ssm_states_dtype=getattr(args, "mamba_training_ssm_states_dtype", None) or None,
             seed=args.seed,
             critic=resolve_critic_run_config(args),
             rollout_seed=getattr(args, "rollout_seed", args.seed + args.learner_id),
@@ -954,6 +1186,9 @@ def resolve_rl_run_config(
             page_size=getattr(args, "sglang_page_size", None),
             max_running_requests=getattr(args, "sglang_max_running_requests", None),
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
+            sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
+            rollout_quant_tier=int(getattr(args, "rl_rollout_quant_tier", 0) or 0),
+            rollout_quant_fp8_source=_fp8_source(args),
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
@@ -996,6 +1231,48 @@ def resolve_rl_run_config(
         edge_costs_path=getattr(args, "rl_edge_costs_path", None) or None,
         elastic_window_s=(float(args.rl_elastic_window_s)
                           if getattr(args, "rl_elastic_window_s", None) else None),
+        sample_buffer=sample_roles.resolve(args, groups_per_round=args.groups_per_round),
+        train_memory=_train_memory(args),
+    )
+
+
+def _fp8_source(args) -> str:
+    from ..quant.tiers import fp8_source
+
+    return fp8_source(args)
+
+
+def _train_memory(args) -> TrainMemoryConfig:
+    max_tokens = getattr(args, "rl_max_tokens_per_gpu", None)
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    if max_tokens is not None and int(max_tokens) * cp < int(args.seq_len):
+        # a sample longer than the budget would not fit in any micro batch
+        # (Miles packs max_tokens_per_gpu * CP tokens per micro batch: dp_schedule.py)
+        raise ValueError(
+            f"--rl-max-tokens-per-gpu {max_tokens} x CP {cp} is below --seq-len {args.seq_len}"
+        )
+    offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
+    if not 0.0 <= offload <= 1.0:
+        raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
+    dp_optimizer = getattr(args, "rl_dp_optimizer", None) or "auto"
+    if dp_optimizer not in DP_OPTIMIZERS:
+        raise ValueError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
+    precision_aware = bool(getattr(args, "rl_precision_aware_optimizer", False))
+    if precision_aware and not getattr(args, "rl_single_island_no_sync", False):
+        # Miles full_parameter_state reads FP32 masters; TE FusedAdam keeps only remainders
+        raise ValueError("--rl-precision-aware-optimizer needs --rl-single-island-no-sync "
+                         "(the full-parameter sync reads FP32 optimizer masters)")
+    if precision_aware and offload > 0:
+        raise ValueError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
+                         "are exclusive (the offload already runs the precision-aware path)")
+    return TrainMemoryConfig(
+        activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
+        max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
+        optimizer_offload_fraction=offload,
+        gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
+        dp_optimizer=dp_optimizer,
+        grad_reduce_bf16=bool(getattr(args, "rl_grad_reduce_bf16", False)),
+        precision_aware_optimizer=precision_aware,
     )
 
 
@@ -1063,29 +1340,27 @@ def _lora_dropout(args, parameter_mode: str) -> float:
     value = float(value)
     if not 0.0 <= value < 1.0:
         raise ValueError("--rl-lora-dropout must be in [0, 1)")
-    if getattr(args, "rl_engine", "ports") != "ports" or parameter_mode != "lora":
-        raise ValueError("--rl-lora-dropout only applies to the ports LoRA engine")
+    if parameter_mode != "lora":
+        raise ValueError("--rl-lora-dropout only applies to LoRA training")
     return value
 
 
-def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
-    """Training-time heldout eval on a ports LoRA island (not eval-only, not dense).
+def ports_training_eval(args) -> bool:
+    """Training-time heldout eval on a ports island (not eval-only).
+
+    Dense full-parameter islands use the same driver evaluation (rollout 0,
+    every ``interval`` rollouts and the final one; P0 1.7b.1b).
 
     Shared by the learner's dataset-identity check and :func:`_resolve_eval`
     so both accept exactly the same runs.
     """
 
-    return (
-        not getattr(args, "eval_only", False)
-        and getattr(args, "rl_engine", "ports") == "ports"
-        and parameter_mode != "full"
-    )
+    return not getattr(args, "eval_only", False)
 
 
 def _resolve_eval(
     args,
     *,
-    parameter_mode: str,
     prompt_path,
     eval_prompt_path,
     yeto_policy_sync: bool,
@@ -1093,30 +1368,19 @@ def _resolve_eval(
     eval_interval = getattr(args, "eval_interval", None)
     if eval_interval is None:
         return None
-    if not yeto_policy_sync:
+    if not yeto_policy_sync and not getattr(args, "rl_single_island_no_sync", False):
+        # A single island without outer sync owns its policy versions (it publishes
+        # every round to its own engines), so the driver's training-time eval needs no
+        # syncer (S27 G-DA: held-out agentic eval at round 0 and at the last round).
         raise ValueError("Yeto evaluation requires the external policy boundary")
     if eval_interval <= 0:
         raise ValueError("evaluation interval must be positive")
     eval_only = getattr(args, "eval_only", False)
-    dense_train_eval = (
-        not eval_only
-        and parameter_mode == "full"
-        and getattr(args, "sync_preset", None) == "dense-full"
-    )
-    ports_train_eval = ports_training_eval(args, parameter_mode=parameter_mode)
+    ports_train_eval = ports_training_eval(args)
     if eval_only:
         if eval_interval != 1:
             raise ValueError("SSH evaluation must be one separate eval-only run")
         selected = prompt_path
-    elif dense_train_eval:
-        if eval_interval != args.global_rounds + 1:
-            raise ValueError(
-                "dense full evaluation interval must remain outside the "
-                "training-round budget"
-            )
-        if eval_prompt_path is None:
-            raise ValueError("dense full evaluation requires heldout prompt data")
-        selected = eval_prompt_path
     elif ports_train_eval:
         # Ports LoRA island (rl-infra-spec 2.3 / launcher wiring): Miles runs
         # the heldout eval every ``interval`` rollouts through the driver's
@@ -1125,21 +1389,27 @@ def _resolve_eval(
             raise ValueError("ports training-time evaluation requires heldout prompt data")
         selected = eval_prompt_path
     else:
-        raise ValueError(
-            "training-time evaluation is restricted to dense full mode or the ports LoRA engine"
-        )
+        raise ValueError("training-time evaluation is restricted to the ports engine")
+    # Eval-only reuses its sole normalized prompt file; training binds a
+    # separately normalized, immutable heldout split.
+    return eval_config_from_args(args, prompt_path=selected)
+
+
+def eval_config_from_args(args, *, prompt_path) -> EvalConfig:
+    """The heldout eval an island's ``--eval-*`` flags name (the launcher sends
+    them from ``--rl-eval-*``, ``launch/rl_ports._ports_infra_flags``).
+
+    One reading of those flags for every backend: the Miles island
+    (:func:`_resolve_eval`) and the verl island (``adapters/verl/eval_port``)."""
+
     eval_name = getattr(args, "eval_dataset_name", None)
     eval_samples = getattr(args, "eval_samples_per_prompt", None)
     if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
         raise ValueError("evaluation requires a dataset name and positive sample count")
-    # Eval-only reuses its sole normalized prompt file.  Dense training binds a
-    # separately normalized, immutable heldout split; its interval sits beyond
-    # the rollout budget because the dense policy hook evaluates only the exact
-    # initial and terminal published policies.
     return EvalConfig(
-        interval=eval_interval,
+        interval=getattr(args, "eval_interval", None),
         dataset_name=str(eval_name),
-        prompt_path=str(selected),
+        prompt_path=str(prompt_path),
         samples_per_prompt=eval_samples,
         temperature=getattr(args, "eval_temperature", None),
         top_p=getattr(args, "eval_top_p", None),
@@ -1147,3 +1417,34 @@ def _resolve_eval(
         max_response_len=getattr(args, "eval_max_response_len", None),
         max_context_len=getattr(args, "eval_max_context_len", None),
     )
+
+
+def verify_eval_dataset_file(args, *, eval_only: bool = False) -> Path:
+    """The eval dataset file of an island (``--data`` of an eval-only run, else
+    the heldout ``--eval-data``), checked against the SHA256 the launcher
+    computed (``--eval-data-sha256``); a training-time heldout file must not be
+    the training data.  Shared by the Miles and verl islands."""
+
+    import re
+
+    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("evaluation dataset requires an immutable SHA256")
+    source_value = args.data if eval_only else getattr(args, "eval_data", None)
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("training-time evaluation requires --eval-data")
+    source = Path(source_value).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("evaluation requires one regular local dataset file")
+    if not eval_only and (
+        source.resolve() == Path(args.data).expanduser().resolve()
+    ):
+        raise ValueError("training-time evaluation must use a distinct heldout dataset")
+    from yeto.provenance import file_sha256
+
+    actual = file_sha256(source)
+    if actual != expected:
+        raise ValueError(
+            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
+        )
+    return source

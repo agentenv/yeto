@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 
 import torch
 
-from .engine.backend_identity import island_contract_sha256
+from .engine.backend_identity import config_island_contract_sha256
 from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
+from .pool_client import DEFAULT_MAX_REJOIN_FAILURES, LeaseHeartbeat
 from ..tensor_io import (
     apply_fragment,
     fragment_flat,
@@ -44,9 +45,22 @@ class DecoupledBridgeConfig:
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
+    # rl-identity-tiering L9.7 (island contract v3): AlgorithmSpec.semantic_sha256()
+    # of the island and the run code pack digest, the third and fourth parts of
+    # that identity.  None = not declared.
+    algorithm_semantic_sha256: str | None = None
+    code_pack_digest: str | None = None
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
+    # S27 P1: --rl-sync-matrix-merge (yeto.rl.core.build_rl_fragment_layout).
+    matrix_merge: str = "avg"
+    # Island pool (--rl-sync-island-lease-s): the syncer's lease on this
+    # island; the bridge heartbeats every lease/3 and redials (re-JOIN) when
+    # the lease expired or the link was lost. None = fixed roster.
+    island_lease_s: float | None = None
+    # Island pool: the syncer incarnation this island was launched for.
+    syncer_epoch: int | None = None
 
     def __post_init__(self) -> None:
         if self.num_fragments < 2:
@@ -62,6 +76,12 @@ class DecoupledBridgeConfig:
             raise ValueError("decoupled RL local horizon must be at least 2")
         if self.learner_budget_steps is not None and self.learner_budget_steps < 1:
             raise ValueError("decoupled RL learner budget must be positive")
+        if self.island_lease_s is not None and not self.island_lease_s > 0:
+            raise ValueError("decoupled RL island lease must be positive")
+
+    @property
+    def island_pool(self) -> bool:
+        return self.island_lease_s is not None
 
 
 @dataclass(frozen=True)
@@ -134,6 +154,7 @@ class DecoupledRlBridge:
         self.layout = build_rl_fragment_layout(
             self.initial.specs,
             config.num_fragments,
+            matrix_merge=config.matrix_merge,
         )
         self.client = SyncerClient(
             config.syncer_addr,
@@ -141,12 +162,21 @@ class DecoupledRlBridge:
             self.layout,
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
-            session_contract_hash=_session_contract(self.layout, island_contract_sha256(
-                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None),
-                test_salt=_identity_test_salt())),
+            session_contract_hash=_session_contract(
+                self.layout, config_island_contract_sha256(config)),
             compat_group=getattr(config, "compat_group", None),
-            max_reconnects=(None if config.learner_budget_steps is not None else 0),
+            max_reconnects=self._max_reconnects(config),
+            syncer_epoch=config.syncer_epoch,
         )
+        # Island pool: keep the lease while the island trains between pushes.
+        self._optimizer_steps = 0
+        self._heartbeat = (
+            LeaseHeartbeat(self.client, config.island_lease_s,
+                           progress=lambda: self._optimizer_steps,
+                           name="decoupled-heartbeat")
+            if config.island_pool else None
+        )
+        self._connection_generation: int | None = None
         count = self.layout.num_fragments
         self._anchors: list[torch.Tensor | None] = [None] * count
         self._fragment_versions: list[int | None] = [None] * count
@@ -156,6 +186,15 @@ class DecoupledRlBridge:
         self._answered: set[tuple[int, int]] = set()
         self.startup_final_manifest: FinalManifest | None = None
         self.final_payload_bytes_received = 0
+
+    @staticmethod
+    def _max_reconnects(config: DecoupledBridgeConfig) -> int | None:
+        """A fixed roster fails on a lost link (no redial) unless it runs a
+        learner budget; an island pool redials a bounded number of times
+        (its rounds merge without it meanwhile)."""
+        if config.learner_budget_steps is not None:
+            return None
+        return DEFAULT_MAX_REJOIN_FAILURES if config.island_pool else 0
 
     @property
     def fragment_versions(self) -> tuple[int, ...]:
@@ -188,6 +227,8 @@ class DecoupledRlBridge:
 
     def start(self) -> None:
         self.client.start()
+        if self._heartbeat is not None:
+            self._heartbeat.start()
         if self.config.learner_id == 0:
             params = dict(self.initial.tensors)
             for fragment_id, fragment in enumerate(self.layout.fragments):
@@ -264,6 +305,7 @@ class DecoupledRlBridge:
     ) -> BroadcastBatch:
         if optimizer_steps < 0 or action_tokens < 0:
             raise ValueError("decoupled RL progress must be non-negative")
+        self._optimizer_steps = optimizer_steps
         return self._drain_broadcast_updates(local, self._fragment_versions)
 
     def _drain_broadcast_updates(
@@ -322,6 +364,10 @@ class DecoupledRlBridge:
             self._fragment_versions[update.fragment_id] = update.version
             self._steps_at_anchor[update.fragment_id] = optimizer_steps
             self._tokens_at_anchor[update.fragment_id] = action_tokens
+            permit = self._pending.get(update.fragment_id)
+            if self.config.island_pool and permit is not None and permit.global_step <= update.version:
+                # The round closed without this island; its PULL can never commit.
+                self._pending.pop(update.fragment_id)
 
     def submit_ready(
         self,
@@ -331,6 +377,7 @@ class DecoupledRlBridge:
         action_tokens: int,
     ) -> tuple[FragmentSubmission, ...]:
         self.client.check_health()
+        self._optimizer_steps = optimizer_steps
         if self.finalizing:
             return ()
         state = self._canonical(local)
@@ -553,15 +600,33 @@ class DecoupledRlBridge:
         self.client.acknowledge_finalization(manifest)
 
     def close(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
         self.client.close()
 
     def _queue_pulls(self) -> None:
+        if self.config.island_pool:
+            # A new connection generation (re-JOIN after a lease expiry or a
+            # lost link): the syncer replays the PULLs this island still owes.
+            generation = int(getattr(self.client, "connection_generation", 0))
+            if self._connection_generation != generation:
+                self._pending.clear()
+                self._answered.clear()
+                self._connection_generation = generation
         for permit in self.client.drain_pulls():
             self._validate_permit(permit)
             key = (permit.global_step, permit.round_attempt)
             if key in self._answered:
                 continue
             previous = self._pending.get(permit.fragment_id)
+            if (self.config.island_pool and previous is not None
+                    and previous.global_step != permit.global_step):
+                # Island pool: a round may close without this island; the
+                # syncer permits a fragment's next round only after the
+                # previous one committed, so the newer permit supersedes.
+                if permit.global_step > previous.global_step:
+                    self._pending[permit.fragment_id] = permit
+                continue
             if previous is not None and previous != permit:
                 raise RuntimeError("decoupled RL received conflicting fragment permits")
             if previous is None:
@@ -625,10 +690,3 @@ def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     return session_contract_hash(layout_fingerprint(layout), identity_sha256)
-
-
-def _identity_test_salt():
-    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
-    from yeto.island_overrides import identity_test_salt
-
-    return identity_test_salt()

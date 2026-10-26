@@ -5,65 +5,33 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import shlex
 import shutil
-import statistics
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 import torch
 
 from . import (
-    CODEX_APP_SERVER_PROTOCOL_REVISION,
-    CODEX_APP_SERVER_SCHEMA_SHA256,
-    CODEX_BASE_INSTRUCTIONS_SHA256,
-    CODEX_CLI_VERSION,
-    CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH,
-    CODEX_CONTAINER_BINARY_PATH,
-    CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-    CODEX_HARNESS_AGENT,
-    CODEX_HARNESS_AGENT_SHA256,
-    CODEX_LINUX_BINARY_SHA256,
-    CODEX_LINUX_BINARY_SIZE_BYTES,
-    CODEX_LINUX_TARGET,
-    CODEX_NPM_PACKAGE,
-    CODEX_NPM_TARBALL_SHA256,
-    CODEX_OPENENV_AGENT,
-    CODEX_OPENENV_IDENTITY_ENV,
-    CODEX_PACKAGE_MANIFEST_SHA256,
-    CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-    CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
-    MILES_BASE_COMMIT,
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
-    MILES_COMMIT,
     MILES_NEXT_COMMIT,
     MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
-    MILES_REPOSITORY,
-    SECRLENV_AGENTS,
-    SECRLENV_GENERATE,
-    SECRLENV_GROUP_FILTER,
-    SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
-    SECRLENV_REWARD,
-    SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
-    SGLANG_COMMIT,
     SGLANG_NEXT_COMMIT,
     SGLANG_NEXT_REPOSITORY,
-    SGLANG_REPOSITORY,
-    SIGNED_CODEX_AGENTS,
     TMS_PRELOAD_BASE_BINARY_SHA256,
     TMS_PRELOAD_PATCH_BASE_COMMIT,
     TMS_PRELOAD_PATCH_COMMIT,
     TMS_PRELOAD_PATCH_REPOSITORY,
 )
+from ..gpu_spec import UnknownCard, canonical_card, device_family_of
+from ..hw import card_tools
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
 PLAN_SCHEMA = 2
@@ -103,12 +71,18 @@ _HOST = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9.-]*\Z")
 _NETWORK_INTERFACE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}\Z")
 _DOCKER_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# The Miles/SGLang forks every island checks out (the ports engine pins).
+_PINNED_MILES = MappingProxyType({
+    "repository": MILES_NEXT_REPOSITORY,
+    "commit": MILES_NEXT_COMMIT,
+    "peft_version": MILES_PEFT_VERSION,
+})
+_PINNED_SGLANG = MappingProxyType({
+    "repository": SGLANG_NEXT_REPOSITORY,
+    "commit": SGLANG_NEXT_COMMIT,
+})
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]+\Z")
-_EVAL_DATASET_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\Z")
-CODEX_REMOTE_BUNDLE_PATH = "codex/codex-x86_64-unknown-linux-musl"
-CODEX_REMOTE_MANIFEST_PATH = "codex/codex-package.json"
-CODEX_REMOTE_SCHEMA_PATH = "codex/codex_app_server_protocol.v2.schemas.json"
 _CONTAINER_STATE_FORMAT = (
     '{"Status":{{json .State.Status}},'
     '"ExitCode":{{.State.ExitCode}},'
@@ -133,15 +107,6 @@ allowed = {
         "rl_policy_snapshot": ("event", "rl/fragment_versions", "rl/policy_hash"),
         "rl_policy_apply": ("event", "sync/global_policy_hash"),
         "rl_final_cut": ("event",),
-    },
-    "eval-learner": {
-        "rl_policy_apply": (
-            "event", "island_id", "policy_version", "sync/global_policy_hash"
-        ),
-        "rl_eval_result": (
-            "event", "island_id", "rollout_id", "policy_version", "dataset_name",
-            "sample_count", "rl/eval/result", "rl/eval/pass_at_1"
-        ),
     },
     "syncer": {
         "syncer_commit": (
@@ -249,26 +214,6 @@ try:
 except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     raise SystemExit("invalid event evidence source")
 """
-_SYNCER_LIFECYCLE_EVIDENCE = r"""
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
-    raise SystemExit("invalid syncer lifecycle source")
-resume = 0
-final_ack = 0
-try:
-    with path.open(encoding="utf-8", errors="strict") as source:
-        for line in source:
-            resume += line.count("resumed from checkpoint")
-            final_ack += line.count("learner finalized authoritative parameters")
-except (OSError, UnicodeError):
-    raise SystemExit("invalid syncer lifecycle source")
-print(json.dumps({"schema": 1, "resume_count": resume, "final_ack_count": final_ack},
-                 sort_keys=True, separators=(",", ":")))
-"""
 _EVENT_EVIDENCE_FIELDS = {
     "strict-learner": {
         "rl_local_round": {
@@ -294,24 +239,6 @@ _EVENT_EVIDENCE_FIELDS = {
         },
         "rl_final_cut": {"event"},
     },
-    "eval-learner": {
-        "rl_policy_apply": {
-            "event",
-            "island_id",
-            "policy_version",
-            "sync/global_policy_hash",
-        },
-        "rl_eval_result": {
-            "event",
-            "island_id",
-            "rollout_id",
-            "policy_version",
-            "dataset_name",
-            "sample_count",
-            "rl/eval/result",
-            "rl/eval/pass_at_1",
-        },
-    },
     "syncer": {
         "syncer_commit": {
             "step",
@@ -328,6 +255,28 @@ _EVENT_EVIDENCE_FIELDS = {
 
 class HarnessError(RuntimeError):
     pass
+
+
+# The accelerator an older plan (and the acceptance runs so far) implies. The
+# harness is no longer pinned to it: rl-ssh-node-pool lets an island record any
+# card the yeto catalog knows, and the card tool of its device family runs in
+# the host preflight.
+DEFAULT_ACCELERATOR = "H200"
+
+
+def _plan_accelerator(plan: dict[str, Any]) -> str:
+    """The card every island of the plan records."""
+    islands = plan.get("islands") or []
+    cards = {island.get("accelerator", DEFAULT_ACCELERATOR) for island in islands
+             if isinstance(island, dict)}
+    if len(cards) > 1:
+        raise HarnessError("all acceptance islands must record the same accelerator, "
+                           f"got {sorted(cards)}")
+    return canonical_card(cards.pop()) if cards else DEFAULT_ACCELERATOR
+
+
+def _plan_device_family(plan: dict[str, Any]) -> str:
+    return device_family_of(_plan_accelerator(plan))
 
 
 def _learner_count(plan: dict[str, Any]) -> int:
@@ -472,276 +421,6 @@ def _syncer_source_sha256() -> str:
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
     return digest.hexdigest()
-
-
-def _pinned_codex_adapter_identity() -> dict[str, str]:
-    return {
-        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-    }
-
-
-def _codex_adapter_source_path() -> Path:
-    """Resolve the optional legacy adapter from its installed package."""
-
-    try:
-        from yeto.rl.harness.codex import codex_harness_agent
-    except ImportError as exc:
-        raise HarnessError("cannot attest the Yeto Codex harness adapter") from exc
-    value = getattr(codex_harness_agent, "__file__", None)
-    if not isinstance(value, str):
-        raise HarnessError("Yeto Codex harness adapter has no source identity")
-    source = Path(value)
-    if source.is_symlink() or not source.is_file():
-        raise HarnessError("Yeto Codex harness adapter source is unavailable")
-    return source.resolve()
-
-
-def _codex_adapter_identity() -> dict[str, str]:
-    """Read hashes derived by the live optional Codex adapter."""
-
-    try:
-        from yeto.rl.harness.codex import codex_harness_agent
-
-        identity = codex_harness_agent.codex_harness_identity()
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        raise HarnessError("cannot attest the Yeto Codex harness adapter") from exc
-    required = {
-        "base_instructions_sha256",
-        "terminal_exec_tool_schema_sha256",
-        "submit_tool_schema_sha256",
-        "dynamic_tools_schema_sha256",
-    }
-    if not isinstance(identity, dict) or set(identity) != required:
-        raise HarnessError("Yeto Codex adapter returned an invalid identity contract")
-    normalized = {name: str(value).lower() for name, value in identity.items()}
-    if any(not _SHA256.fullmatch(value) for value in normalized.values()):
-        raise HarnessError("Yeto Codex adapter identity contains an invalid SHA256")
-    expected = _pinned_codex_adapter_identity()
-    if normalized != expected:
-        raise HarnessError("Yeto Codex adapter identity does not match its Yeto pins")
-    return normalized
-
-
-def _codex_harness_contract(namespace, args) -> dict[str, Any]:
-    """Attest the official Linux Codex artifact and the Yeto adapter surface."""
-
-    from ..provenance import canonical_json_sha256, file_sha256
-
-    binary_value = getattr(namespace, "codex_harness_binary", None)
-    manifest_value = getattr(namespace, "codex_package_manifest", None)
-    schema_value = getattr(namespace, "codex_app_server_schema", None)
-    if not binary_value or not manifest_value or not schema_value:
-        raise HarnessError(
-            "the stock Codex agent requires --codex-harness-binary and "
-            "--codex-package-manifest and --codex-app-server-schema"
-        )
-    binary = Path(binary_value).expanduser()
-    manifest = Path(manifest_value).expanduser()
-    schema = Path(schema_value).expanduser()
-    for path, flag in (
-        (binary, "--codex-harness-binary"),
-        (manifest, "--codex-package-manifest"),
-        (schema, "--codex-app-server-schema"),
-    ):
-        if path.is_symlink() or not path.is_file():
-            raise HarnessError(f"{flag} must be a regular, non-symlink file")
-    binary = binary.resolve()
-    manifest = manifest.resolve()
-    schema = schema.resolve()
-    if not binary.stat().st_mode & 0o111:
-        raise HarnessError("--codex-harness-binary must be executable")
-    if binary.stat().st_size != CODEX_LINUX_BINARY_SIZE_BYTES:
-        raise HarnessError("Codex Linux binary size does not match its Yeto pin")
-    if file_sha256(binary) != CODEX_LINUX_BINARY_SHA256:
-        raise HarnessError("Codex Linux binary SHA256 does not match its Yeto pin")
-    if file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256:
-        raise HarnessError("Codex package manifest SHA256 does not match its Yeto pin")
-    try:
-        schema_sha = canonical_json_sha256(schema)
-    except ValueError:
-        schema_sha = None
-    if schema_sha != CODEX_APP_SERVER_SCHEMA_SHA256:
-        raise HarnessError("Codex app-server schema SHA256 does not match its Yeto pin")
-    openenv = (
-        getattr(args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT
-    )
-    if openenv:
-        # The OpenEnv wrapper is shipped by the pinned Miles bundle and is
-        # attested inside the learner before model allocation.
-        identity = _pinned_codex_adapter_identity()
-    else:
-        identity = _codex_adapter_identity()
-        adapter_path = _codex_adapter_source_path()
-        if file_sha256(adapter_path) != CODEX_HARNESS_AGENT_SHA256:
-            raise HarnessError(
-                "Yeto Codex harness adapter source does not match its pin"
-            )
-    from .codex_backend import stock_codex_backend_contract_with_reasoning_policy
-
-    profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
-    backend = stock_codex_backend_contract_with_reasoning_policy(
-        profile_name,
-        args.rollout_max_response_len,
-        not getattr(args, "codex_exclude_reasoning_from_loss", False),
-    )
-    contract = {
-        "agent_function_path": CODEX_HARNESS_AGENT,
-        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
-        "controller_binary_path": str(binary),
-        "controller_package_manifest_path": str(manifest),
-        "controller_app_server_schema_path": str(schema),
-        "bundle_binary_path": CODEX_REMOTE_BUNDLE_PATH,
-        "bundle_package_manifest_path": CODEX_REMOTE_MANIFEST_PATH,
-        "bundle_app_server_schema_path": CODEX_REMOTE_SCHEMA_PATH,
-        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
-        "container_app_server_schema_path": (
-            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
-        ),
-        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
-        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
-        "cli_version": CODEX_CLI_VERSION,
-        "npm_package": CODEX_NPM_PACKAGE,
-        "target": CODEX_LINUX_TARGET,
-        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
-        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
-        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
-        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        **identity,
-        "reasoning_effort": args.codex_reasoning_effort,
-        "backend": backend,
-    }
-    if openenv:
-        contract["openenv_identity_env"] = dict(CODEX_OPENENV_IDENTITY_ENV)
-    return contract
-
-
-def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
-    required = {
-        "agent_function_path",
-        "agent_source_sha256",
-        "controller_binary_path",
-        "controller_package_manifest_path",
-        "controller_app_server_schema_path",
-        "bundle_binary_path",
-        "bundle_package_manifest_path",
-        "bundle_app_server_schema_path",
-        "container_binary_path",
-        "container_app_server_schema_path",
-        "binary_sha256",
-        "binary_size_bytes",
-        "cli_version",
-        "npm_package",
-        "target",
-        "npm_tarball_sha256",
-        "package_manifest_sha256",
-        "app_server_protocol_revision",
-        "app_server_schema_sha256",
-        "base_instructions_sha256",
-        "terminal_exec_tool_schema_sha256",
-        "submit_tool_schema_sha256",
-        "dynamic_tools_schema_sha256",
-        "reasoning_effort",
-        "backend",
-    }
-    custom_agent = learner.get("custom_agent_function_path")
-    if custom_agent == CODEX_OPENENV_AGENT:
-        required.add("openenv_identity_env")
-    if not isinstance(value, dict) or set(value) != required:
-        raise HarnessError("plan has an invalid stock Codex harness contract")
-    pinned = {
-        "agent_function_path": CODEX_HARNESS_AGENT,
-        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
-        "bundle_binary_path": CODEX_REMOTE_BUNDLE_PATH,
-        "bundle_package_manifest_path": CODEX_REMOTE_MANIFEST_PATH,
-        "bundle_app_server_schema_path": CODEX_REMOTE_SCHEMA_PATH,
-        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
-        "container_app_server_schema_path": (
-            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
-        ),
-        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
-        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
-        "cli_version": CODEX_CLI_VERSION,
-        "npm_package": CODEX_NPM_PACKAGE,
-        "target": CODEX_LINUX_TARGET,
-        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
-        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
-        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
-        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-        "reasoning_effort": "xhigh",
-    }
-    if any(value.get(name) != expected for name, expected in pinned.items()):
-        raise HarnessError("plan does not use the pinned stock Codex runtime")
-    if (
-        custom_agent == CODEX_OPENENV_AGENT
-        and value.get("openenv_identity_env") != CODEX_OPENENV_IDENTITY_ENV
-    ):
-        raise HarnessError("plan does not use the pinned Codex OpenEnv surface")
-    for name in (
-        "controller_binary_path",
-        "controller_package_manifest_path",
-        "controller_app_server_schema_path",
-    ):
-        path = Path(str(value.get(name, "")))
-        if not path.is_absolute() or ".." in path.parts:
-            raise HarnessError(f"stock Codex contract has an invalid {name}")
-    from .codex_backend import (
-        stock_codex_backend_contract_with_reasoning_policy,
-        validate_stock_codex_fields,
-    )
-
-    backend = value.get("backend")
-    profile_name = str(
-        learner.get("codex_backend_profile") or learner.get("tito_model", "")
-    )
-    expected_backend = stock_codex_backend_contract_with_reasoning_policy(
-        profile_name,
-        learner.get("rollout_max_response_len"),
-        not learner.get("codex_exclude_reasoning_from_loss", False),
-    )
-    if backend != expected_backend:
-        raise HarnessError("stock Codex backend/TITO contract drifted")
-    if custom_agent not in SIGNED_CODEX_AGENTS:
-        raise HarnessError("stock Codex contract requires a signed agent path")
-    if (
-        custom_agent == CODEX_OPENENV_AGENT
-        and profile_name != "qwen35_08b"
-    ):
-        raise HarnessError(
-            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
-        )
-    try:
-        validate_stock_codex_fields(
-            tito_model=str(learner.get("tito_model", "")),
-            codex_backend_profile=profile_name,
-            rl_model_recipe=str(learner.get("rl_model_recipe", "generic")),
-            model=str(learner.get("model", "")),
-            model_revision=str(learner.get("model_revision", "")),
-            rollout_model=learner.get("rollout_model"),
-            rollout_model_revision=learner.get("rollout_model_revision"),
-            apply_chat_template_kwargs=learner.get(
-                "apply_chat_template_kwargs"
-            ),
-            tito_allowed_append_roles=learner.get(
-                "tito_allowed_append_roles"
-            ),
-            codex_reasoning_effort=learner.get("codex_reasoning_effort"),
-            lora_targets=str(learner.get("lora_targets", "")),
-            expert_full_count=int(learner.get("expert_full_count", 0)),
-            lora_expert_rank=int(learner.get("rl_lora_expert_rank") or 0),
-        )
-    except (TypeError, ValueError) as exc:
-        raise HarnessError("stock Codex model profile drifted") from exc
 
 
 def _tms_preload_patch(path: str | Path) -> dict[str, str]:
@@ -908,7 +587,7 @@ def _validate_jit_cache_root(value: str) -> str:
 def _jit_cache_compatibility_sha256(plan: dict[str, Any]) -> str:
     identity = {
         "schema": JIT_CACHE_SCHEMA,
-        "accelerator": "H200",
+        "accelerator": _plan_accelerator(plan),
         "docker_image": plan.get("docker_image"),
         "miles_commit": plan.get("miles", {}).get("commit"),
         "sglang_commit": plan.get("sglang", {}).get("commit"),
@@ -925,6 +604,17 @@ def _jit_cache_contract(
         "host_root": _validate_jit_cache_root(host_root),
         "compatibility_sha256": _jit_cache_compatibility_sha256(plan),
     }
+
+
+def _require_cuda_jit_cache(plan: dict[str, Any]) -> None:
+    """The JIT cache keys the compiled kernels by the ``nvidia-smi`` runtime
+    identity, so it stays an NVIDIA-only feature until a card tool of the
+    other families supplies the same identity."""
+    family = _plan_device_family(plan)
+    if family != "cuda":
+        raise HarnessError(f"--jit-cache-root is implemented for cuda islands only, "
+                           f"this plan records a {family} card "
+                           f"({_plan_accelerator(plan)})")
 
 
 def _validate_jit_cache(value: Any, plan: dict[str, Any]) -> None:
@@ -969,49 +659,6 @@ def _local_data_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _local_jsonl_record_count(path: str | Path) -> int:
-    source = Path(path)
-    if source.is_symlink() or not source.is_file():
-        raise HarnessError("evaluation dataset must be one regular JSONL file")
-    try:
-        with source.open("rb") as handle:
-            count = sum(1 for line in handle if line.strip())
-    except OSError as error:
-        raise HarnessError("cannot read evaluation dataset") from error
-    if count <= 0:
-        raise HarnessError("evaluation dataset is empty")
-    return count
-
-
-def _eval_checkpoint_contract(
-    source_host: str,
-    source_path: str,
-    sha256: str,
-    size_bytes: int,
-    global_step: int,
-) -> dict[str, Any]:
-    """Pin a remote terminal checkpoint without staging it on the controller."""
-
-    source_host = _validate_target(source_host)
-    source_path = _validate_remote_path(source_path, "--eval-checkpoint-path")
-    sha256 = str(sha256).lower()
-    if not _SHA256.fullmatch(sha256):
-        raise HarnessError("--eval-checkpoint-sha256 must be a lowercase SHA256")
-    for flag, value in (
-        ("--eval-checkpoint-size-bytes", size_bytes),
-        ("--eval-checkpoint-global-step", global_step),
-    ):
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise HarnessError(f"{flag} must be a positive integer")
-    return {
-        "source_host": source_host,
-        "source_path": source_path,
-        "sha256": sha256,
-        "size_bytes": size_bytes,
-        "global_step": global_step,
-    }
-
-
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -1022,8 +669,6 @@ def _require_ports_plan(learner: dict[str, Any]) -> None:
     try:
         require_ports_supported(
             sync_preset=learner.get("sync_preset", "strict-avg"),
-            model_recipe=learner.get("rl_model_recipe", "generic"),
-            lora_targets=learner.get("lora_targets"),
             expert_full_count=learner.get("expert_full_count", 0) or 0,
             rollout_num_gpus=learner.get("rollout_num_gpus"),
         )
@@ -1071,17 +716,19 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise HarnessError("each island needs hosts and a positive GPU count")
         node_counts.add(len(hosts))
         gpu_counts.add(gpus)
-        accelerator = island.get("accelerator", "H200")
-        if accelerator != "H200":
-            raise HarnessError("the direct SSH RL harness is pinned to H200")
-        accelerators.add(accelerator)
+        accelerator = island.get("accelerator", DEFAULT_ACCELERATOR)
+        try:
+            accelerators.add(canonical_card(accelerator))
+        except UnknownCard as exc:
+            raise HarnessError(str(exc)) from None
         all_hosts.extend(_validate_target(host) for host in hosts)
     if len(node_counts) != 1:
         raise HarnessError("all acceptance islands must use the same node count")
     if len(gpu_counts) != 1:
         raise HarnessError("all acceptance islands must use the same GPU count")
-    if accelerators != {"H200"}:
-        raise HarnessError("all acceptance islands must record H200")
+    if len(accelerators) != 1:
+        raise HarnessError("all acceptance islands must record the same accelerator, "
+                           f"got {sorted(accelerators)}")
     if len(set(all_hosts)) != len(all_hosts):
         raise HarnessError("each SSH target may belong to only one island")
     _syncer_host(plan)
@@ -1098,19 +745,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if not _NETWORK_INTERFACE.fullmatch(str(plan.get("network_interface", "eno3"))):
         raise HarnessError("plan has an invalid network interface")
     _docker_ref(str(plan.get("docker_image", "")))
-    if plan.get("miles") != {
-        "repository": MILES_REPOSITORY,
-        "base_commit": MILES_BASE_COMMIT,
-        "commit": MILES_COMMIT,
-        "bundle_path": MILES_BUNDLE_PATH,
-        "bundle_sha256": MILES_BUNDLE_SHA256,
-        "peft_version": MILES_PEFT_VERSION,
-    }:
+    if plan.get("miles") != _PINNED_MILES:
         raise HarnessError("plan does not use the current pinned Miles revision")
-    if plan.get("sglang") != {
-        "repository": SGLANG_REPOSITORY,
-        "commit": SGLANG_COMMIT,
-    }:
+    if plan.get("sglang") != _PINNED_SGLANG:
         raise HarnessError("plan does not use the current pinned SGLang revision")
     jit_cache = plan.get("jit_cache")
     if jit_cache is not None:
@@ -1121,65 +758,11 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     learner = plan.get("learner")
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
-    # Legacy plans never carry the key (their digest is unchanged); only an
-    # explicit ports selection is recorded.
-    if "rl_engine" in plan:
-        if plan["rl_engine"] != "ports":
-            raise HarnessError("plan rl_engine must be absent (legacy) or 'ports'")
-        _require_ports_plan(learner)
-    daemon = plan.get("secrlenv_daemon")
-    if learner.get("custom_agent_function_path") in SECRLENV_AGENTS:
-        if not isinstance(daemon, dict):
-            raise HarnessError("secrlenv agent requires a pinned daemon contract")
-        for name in ("source_root", "task_pack", "state_root"):
-            _validate_data_path(str(daemon.get(name, "")), f"secrlenv {name}")
-        for name in ("source_sha256", "task_pack_sha256"):
-            if not _SHA256.fullmatch(str(daemon.get(name, ""))):
-                raise HarnessError(f"secrlenv daemon has an invalid {name}")
-        enable_dind_debug = daemon.get("enable_dind_debug")
-        if type(enable_dind_debug) is not bool:
-            raise HarnessError(
-                "secrlenv daemon enable_dind_debug must be an explicit boolean"
-            )
-        dind_image = daemon.get("dind_image")
-        dind_image_id = daemon.get("dind_image_id")
-        dind_debug_script_sha256 = daemon.get("dind_debug_script_sha256")
-        if enable_dind_debug:
-            if not _SAFE_IMAGE.fullmatch(str(dind_image or "")) or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", str(dind_image_id or "")
-            ):
-                raise HarnessError(
-                    "enabled secrlenv DinD debug requires a pinned image and image ID"
-                )
-            if not _SHA256.fullmatch(str(dind_debug_script_sha256 or "")):
-                raise HarnessError(
-                    "enabled secrlenv DinD debug requires a pinned debug script"
-                )
-        elif any(
-            value is not None
-            for value in (dind_image, dind_image_id, dind_debug_script_sha256)
-        ):
-            raise HarnessError(
-                "disabled secrlenv DinD debug must not carry unused debug identities"
-            )
-        if (
-            daemon.get("bind") != "127.0.0.1"
-            or daemon.get("placement", "all-hosts")
-            not in {"all-hosts", "island-heads"}
-            or not isinstance(daemon.get("port"), int)
-            or not 1024 <= daemon["port"] <= 65535
-            or not isinstance(daemon.get("max_active_episodes"), int)
-            or daemon["max_active_episodes"] <= 0
-            or not _SAFE_IMAGE.fullmatch(str(daemon.get("operator_image", "")))
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", str(daemon.get("operator_image_id", ""))
-            )
-        ):
-            raise HarnessError("secrlenv daemon contract is invalid")
-        if not plan.get("remote_env_file"):
-            raise HarnessError("secrlenv daemon requires --remote-env-file")
-    elif daemon is not None:
-        raise HarnessError("secrlenv daemon requires the secrlenv custom agent")
+    if plan.get("rl_engine") != "ports":
+        raise HarnessError("plan rl_engine must be 'ports'")
+    _require_ports_plan(learner)
+    if plan.get("secrlenv_daemon") is not None:
+        raise HarnessError("secrlenv daemon plans are no longer supported (S26 E0.5)")
     tms_patch = plan.get("tms_preload_patch")
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if learner.get("rl_offload_train"):
@@ -1248,126 +831,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     sync_preset = learner.get("sync_preset", "strict-avg")
     if sync_preset not in {"strict-avg", "decoupled"}:
         raise HarnessError("plan has an invalid learner sync_preset")
-    evaluation = learner.get("evaluation")
-    if evaluation is not None:
-        if not isinstance(evaluation, dict):
-            raise HarnessError("plan has an invalid learner evaluation")
-        if evaluation.get("eval_only") is not True:
-            raise HarnessError("SSH evaluation must use a separate eval-only run")
-        if learner.get("custom_agent_function_path") not in SECRLENV_AGENTS:
-            raise HarnessError("SSH evaluation is restricted to the secrlenv agent")
-        if learner.get("reward_function") != SECRLENV_REWARD:
-            raise HarnessError(
-                "SSH evaluation requires the signed secrlenv reward contract"
-            )
-        if sync_preset != "strict-avg":
-            raise HarnessError(
-                "final SSH evaluation requires strict-avg synchronization"
-            )
-        if data_local_path is None or not PurePosixPath(
-            str(learner.get("data", ""))
-        ).suffix:
-            raise HarnessError(
-                "SSH evaluation requires one local training dataset file"
-            )
-        if (
-            evaluation.get("data") != learner.get("data")
-            or evaluation.get("data_sha256") != data_sha256
-        ):
-            raise HarnessError(
-                "evaluation must reuse the exact training dataset path and SHA256"
-            )
-        if not _EVAL_DATASET_NAME.fullmatch(
-            str(evaluation.get("dataset_name", ""))
-        ):
-            raise HarnessError("plan has an invalid evaluation dataset_name")
-        interval = evaluation.get("interval")
-        samples = evaluation.get("samples_per_prompt")
-        prompt_count = evaluation.get("prompt_count")
-        if (
-            not isinstance(interval, int)
-            or isinstance(interval, bool)
-            or interval != 1
-        ):
-            raise HarnessError("eval-only Miles evaluation interval must be 1")
-        if (
-            not isinstance(samples, int)
-            or isinstance(samples, bool)
-            or samples <= 0
-        ):
-            raise HarnessError("plan has an invalid evaluation samples_per_prompt")
-        if (
-            not isinstance(prompt_count, int)
-            or isinstance(prompt_count, bool)
-            or prompt_count <= 0
-        ):
-            raise HarnessError("plan has an invalid evaluation prompt_count")
-        if evaluation.get("skip_before_train") is not True:
-            raise HarnessError(
-                "post-training evaluation must skip pre-train evaluation"
-            )
-        if final_ack_timeout_s is None or final_ack_timeout_s <= 3600:
-            raise HarnessError(
-                "evaluation requires an explicitly extended final_ack_timeout_s"
-            )
-        temperature = evaluation.get("temperature")
-        if temperature is not None and (
-            not isinstance(temperature, (int, float))
-            or isinstance(temperature, bool)
-            or not math.isfinite(temperature)
-            or temperature < 0
-        ):
-            raise HarnessError("plan has an invalid evaluation temperature")
-        top_p = evaluation.get("top_p")
-        if top_p is not None and (
-            not isinstance(top_p, (int, float))
-            or isinstance(top_p, bool)
-            or not math.isfinite(top_p)
-            or not 0 < top_p <= 1
-        ):
-            raise HarnessError("plan has an invalid evaluation top_p")
-        for name in ("max_prompt_len", "max_response_len", "max_context_len"):
-            value = evaluation.get(name)
-            if value is not None and (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-                or value > learner["seq_len"]
-            ):
-                raise HarnessError(f"plan has an invalid evaluation {name}")
-        checkpoint = plan.get("eval_checkpoint")
-        if not isinstance(checkpoint, dict) or set(checkpoint) != {
-            "source_host",
-            "source_path",
-            "sha256",
-            "size_bytes",
-            "global_step",
-        }:
-            raise HarnessError("eval-only plan requires an attested syncer checkpoint")
-        try:
-            _validate_target(str(checkpoint.get("source_host", "")))
-            _validate_remote_path(
-                str(checkpoint.get("source_path", "")),
-                "eval checkpoint source_path",
-            )
-        except HarnessError as error:
-            raise HarnessError("plan has an invalid eval checkpoint identity") from error
-        if (
-            not _SHA256.fullmatch(str(checkpoint.get("sha256", "")))
-            or not isinstance(checkpoint.get("size_bytes"), int)
-            or isinstance(checkpoint.get("size_bytes"), bool)
-            or checkpoint["size_bytes"] <= 12
-            or checkpoint.get("global_step") != learner["global_rounds"]
-        ):
-            raise HarnessError("plan has an invalid eval checkpoint identity")
-        if (
-            checkpoint["source_host"] == _syncer_host(plan)
-            and checkpoint["source_path"]
-            == f"{plan['remote_run']}/state/state.ckpt"
-        ):
-            raise HarnessError("eval checkpoint source and fresh destination coincide")
-    elif plan.get("eval_checkpoint") is not None:
-        raise HarnessError("eval checkpoint requires an eval-only learner")
+    if learner.get("evaluation") is not None or plan.get("eval_checkpoint") is not None:
+        # SSH evaluation ran only the SecRLEnv agent, removed in S26 E0.5.
+        raise HarnessError("SSH evaluation is restricted to the removed secrlenv agent")
     fragments = learner.get("fragments", 1)
     pipeline = learner.get("pipeline", 1)
     local_horizon = learner.get("local_horizon", 1)
@@ -1409,38 +875,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         type(max_replacements) is not int or max_replacements < 0
     ):
         raise HarnessError("plan has an invalid dynamic_sampling_max_replacements")
-    infrastructure_replacements = learner.get(
-        "secrlenv_max_infrastructure_replacements"
-    )
-    agent_function = learner.get("custom_agent_function_path")
-    if agent_function in SECRLENV_AGENTS:
-        if learner.get("custom_generate_function_path") != SECRLENV_GENERATE:
-            raise HarnessError(
-                "secrlenv agent requires the signed generate wrapper"
-            )
-        if learner.get("reward_function") != SECRLENV_REWARD:
-            raise HarnessError("secrlenv agent requires the signed reward function")
-        if dynamic_filter != SECRLENV_GROUP_FILTER:
-            raise HarnessError("secrlenv agent requires the signed group filter")
-        if max_replacements != SECRLENV_ZERO_VARIANCE_REPLACEMENTS or isinstance(
-            max_replacements, bool
-        ):
-            raise HarnessError(
-                "secrlenv agent requires zero variance replacements"
-            )
-        if (
-            infrastructure_replacements
-            != SECRLENV_INFRASTRUCTURE_REPLACEMENTS
-            or isinstance(infrastructure_replacements, bool)
-        ):
-            raise HarnessError(
-                "secrlenv agent requires exactly one infrastructure replacement"
-            )
-        if learner["over_sampling_batch_size"] != learner["groups_per_round"] + 1:
-            raise HarnessError(
-                "secrlenv agent requires one reserved same-task retry slot"
-            )
-    elif infrastructure_replacements is not None:
+    if learner.get("secrlenv_max_infrastructure_replacements") is not None:
         raise HarnessError(
             "secrlenv infrastructure replacements require a secrlenv agent"
         )
@@ -1478,44 +913,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError(
             "dsv4/compressed attention is incompatible with deterministic inference"
         )
-    expert_full_count = learner.get("expert_full_count", 0)
-    if (
-        not isinstance(expert_full_count, int)
-        or isinstance(expert_full_count, bool)
-        or not 0 <= expert_full_count <= 32
-    ):
-        raise HarnessError("plan has an invalid expert_full_count")
-    if expert_full_count:
-        expert_full_lr = learner.get("expert_full_lr")
-        if (
-            not isinstance(expert_full_lr, (int, float))
-            or isinstance(expert_full_lr, bool)
-            or not 0 < expert_full_lr < float("inf")
-        ):
-            raise HarnessError("plan has an invalid expert_full_lr")
-        for name in (
-            "expert_selection_sha256",
-            "expert_selection_contract_sha256",
-        ):
-            if not _SHA256.fullmatch(str(learner.get(name, ""))):
-                raise HarnessError(f"plan has an invalid {name}")
-        if (
-            learner.get("rl_model_recipe") != "deepseek-v4-flash"
-            or learner.get("lora_targets") != "attention"
-        ):
-            raise HarnessError(
-                "expert-full plan requires DeepSeek V4 and attention LoRA"
-            )
-    elif learner.get("expert_selection_sha256") is not None or learner.get(
-        "expert_selection_contract_sha256"
-    ) is not None:
-        raise HarnessError("expert selection hashes require expert_full_count")
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
-        expected_lora_targets = (
-            "attention" if expert_full_count else "attention-routed-experts"
-        )
         if (
-            learner.get("lora_targets") != expected_lora_targets
+            learner.get("lora_targets") != "attention-routed-experts"
             or tensor_parallel != 8
             or learner.get("expert_parallel") != 8
             or rollout_gpus != 8
@@ -1535,10 +935,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or not learner.get("tito_model")
     ):
         raise HarnessError("plan has an incomplete agentic session contract")
-    codex_harness = plan.get("codex_harness")
-    if custom_agent in SIGNED_CODEX_AGENTS:
-        _validate_codex_harness(codex_harness, learner)
-    elif codex_harness is not None:
+    if plan.get("codex_harness") is not None:
         raise HarnessError("stock Codex contract requires the signed Codex agent")
     roles = learner.get("tito_allowed_append_roles")
     if roles is not None and (
@@ -1580,7 +977,15 @@ def _strip_separator(values: Sequence[str]) -> list[str]:
     return values[1:] if values[:1] == ["--"] else values
 
 
-def _parse_islands(values: Sequence[str], gpus_per_node: int) -> list[dict[str, Any]]:
+def _parse_islands(
+    values: Sequence[str],
+    gpus_per_node: int,
+    accelerator: str = DEFAULT_ACCELERATOR,
+) -> list[dict[str, Any]]:
+    try:
+        accelerator = canonical_card(accelerator)
+    except UnknownCard as exc:
+        raise HarnessError(str(exc)) from None
     if not values or gpus_per_node <= 0:
         raise HarnessError(
             "prepare requires one or more --host groups and positive GPUs per node"
@@ -1593,7 +998,7 @@ def _parse_islands(values: Sequence[str], gpus_per_node: int) -> list[dict[str, 
         if not hosts:
             raise HarnessError("each --host must contain at least one SSH target")
         islands.append(
-            {"hosts": hosts, "gpus_per_node": gpus_per_node, "accelerator": "H200"}
+            {"hosts": hosts, "gpus_per_node": gpus_per_node, "accelerator": accelerator}
         )
     if len({len(island["hosts"]) for island in islands}) != 1:
         raise HarnessError("all --host groups must contain the same number of nodes")
@@ -1619,7 +1024,8 @@ def _resolved_launch_args(namespace, islands):
         if _has_option(launch_args, reserved):
             raise HarnessError(f"{reserved} is set by the SSH harness")
     gpu = ",".join(
-        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}xh200@island-{index}"
+        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}x"
+        f"{island.get('accelerator', DEFAULT_ACCELERATOR).lower()}@island-{index}"
         for index, island in enumerate(islands)
     )
     argv = [
@@ -1647,7 +1053,11 @@ def _resolved_launch_args(namespace, islands):
 
 def prepare(namespace) -> Path:
     run_id = _validate_run_id(namespace.run_id)
-    islands = _parse_islands(namespace.host, namespace.gpus_per_node)
+    islands = _parse_islands(
+        namespace.host,
+        namespace.gpus_per_node,
+        getattr(namespace, "accelerator", DEFAULT_ACCELERATOR),
+    )
     remote_root = _validate_remote_path(namespace.remote_root, "--remote-root")
     if namespace.remote_env_file is not None:
         _validate_remote_path(namespace.remote_env_file, "--remote-env-file")
@@ -1673,7 +1083,6 @@ def prepare(namespace) -> Path:
     data = args.data
     data_local_path = None
     data_sha256 = None
-    data_prompt_count = None
     if dataset["source"] == "local":
         source = Path(args.data).expanduser().absolute()
         data_sha256 = _local_data_sha256(source)
@@ -1682,8 +1091,6 @@ def prepare(namespace) -> Path:
         data = "/workspace/data/dataset"
         if source.is_file():
             data += source.suffix
-            if getattr(namespace, "eval_checkpoint_host", None) is not None:
-                data_prompt_count = _local_jsonl_record_count(source)
 
     tms_patch_path = getattr(namespace, "tms_preload_patch", None)
     tms_preload_patch = (
@@ -1733,22 +1140,19 @@ def prepare(namespace) -> Path:
         "syncer_port": syncer_port,
         "network_interface": network_interface,
         "docker_image": _docker_ref(args.rl_image),
-        "miles": {
-            "repository": MILES_REPOSITORY,
-            "base_commit": MILES_BASE_COMMIT,
-            "commit": MILES_COMMIT,
-            "bundle_path": MILES_BUNDLE_PATH,
-            "bundle_sha256": MILES_BUNDLE_SHA256,
-            "peft_version": MILES_PEFT_VERSION,
-        },
-        "sglang": {
-            "repository": SGLANG_REPOSITORY,
-            "commit": SGLANG_COMMIT,
-        },
+        "rl_engine": "ports",
+        "miles": dict(_PINNED_MILES),
+        "sglang": dict(_PINNED_SGLANG),
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
         "tms_preload_patch": tms_preload_patch,
+        # Optional: the HBM GiB per card the operator declares. Set, the
+        # device-family preflight also compares the HBM capacity; absent, it
+        # compares the card name and the card count only. Older plans have no
+        # such key, so their digest is unchanged.
+        **({"hbm_gib_per_card": float(namespace.hbm_gib)}
+           if getattr(namespace, "hbm_gib", None) is not None else {}),
         "tms_train_disk_backup": tms_train_disk_backup,
         "learner": {
             "model": args.model,
@@ -1792,9 +1196,6 @@ def prepare(namespace) -> Path:
             "dynamic_sampling_max_replacements": getattr(
                 args, "dynamic_sampling_max_replacements", None
             ),
-            "secrlenv_max_infrastructure_replacements": getattr(
-                args, "secrlenv_max_infrastructure_replacements", None
-            ),
             "rl_offload_train": bool(getattr(args, "rl_offload_train", False)),
             "rl_distributed_timeout_minutes": getattr(
                 args, "rl_distributed_timeout_minutes", 10
@@ -1808,17 +1209,11 @@ def prepare(namespace) -> Path:
             "custom_agent_function_path": getattr(
                 args, "custom_agent_function_path", None
             ),
-            "codex_reasoning_effort": getattr(
-                args, "codex_reasoning_effort", None
-            ),
             "agent_max_seq_len": getattr(args, "agent_max_seq_len", None),
             "use_session_server": args.use_session_server,
             "session_server_ip": args.session_server_ip,
             "session_server_port": args.session_server_port,
             "tito_model": args.tito_model,
-            "codex_backend_profile": getattr(
-                args, "codex_backend_profile", None
-            ),
             "tito_allowed_append_roles": getattr(
                 args, "tito_allowed_append_roles", None
             ),
@@ -1852,154 +1247,17 @@ def prepare(namespace) -> Path:
             "cybergym_reward_view": os.environ.get("CYBERGYM_REWARD_VIEW", "train"),
         },
     }
-    if getattr(args, "codex_exclude_reasoning_from_loss", False):
-        # S17 WP6: only present when opted out, so default plans are unchanged.
-        plan["learner"]["codex_exclude_reasoning_from_loss"] = True
     final_ack_timeout_s = getattr(namespace, "final_ack_timeout_s", None)
     if final_ack_timeout_s is not None:
         plan["final_ack_timeout_s"] = final_ack_timeout_s
-    eval_checkpoint_host = getattr(namespace, "eval_checkpoint_host", None)
-    eval_checkpoint_path = getattr(namespace, "eval_checkpoint_path", None)
-    eval_checkpoint_sha256 = getattr(namespace, "eval_checkpoint_sha256", None)
-    eval_checkpoint_size_bytes = getattr(
-        namespace, "eval_checkpoint_size_bytes", None
-    )
-    eval_checkpoint_global_step = getattr(
-        namespace, "eval_checkpoint_global_step", None
-    )
-    checkpoint_values = (
-        eval_checkpoint_host,
-        eval_checkpoint_path,
-        eval_checkpoint_sha256,
-        eval_checkpoint_size_bytes,
-        eval_checkpoint_global_step,
-    )
-    if any(value is not None for value in checkpoint_values) and any(
-        value is None for value in checkpoint_values
-    ):
-        raise HarnessError(
-            "all remote eval checkpoint identity options are required together"
-        )
-    eval_interval = getattr(namespace, "eval_interval", None)
-    eval_dataset_name = getattr(namespace, "eval_dataset_name", None)
-    eval_options = {
-        "temperature": getattr(namespace, "eval_temperature", None),
-        "top_p": getattr(namespace, "eval_top_p", None),
-        "max_prompt_len": getattr(namespace, "eval_max_prompt_len", None),
-        "max_response_len": getattr(namespace, "eval_max_response_len", None),
-        "max_context_len": getattr(namespace, "eval_max_context_len", None),
-    }
-    if eval_checkpoint_host is None:
-        if (
-            eval_interval is not None
-            or eval_dataset_name is not None
-            or getattr(namespace, "eval_samples_per_prompt", None) is not None
-            or any(value is not None for value in eval_options.values())
-        ):
-            raise HarnessError("evaluation options require --eval-checkpoint-host")
-    else:
-        plan["eval_checkpoint"] = _eval_checkpoint_contract(
-            eval_checkpoint_host,
-            eval_checkpoint_path,
-            eval_checkpoint_sha256,
-            eval_checkpoint_size_bytes,
-            eval_checkpoint_global_step,
-        )
-        eval_samples_per_prompt = getattr(
-            namespace, "eval_samples_per_prompt", None
-        )
-        plan["learner"]["evaluation"] = {
-            "eval_only": True,
-            "dataset_name": eval_dataset_name,
-            "data": data,
-            "data_sha256": data_sha256,
-            "interval": 1 if eval_interval is None else eval_interval,
-            "samples_per_prompt": (
-                1 if eval_samples_per_prompt is None else eval_samples_per_prompt
-            ),
-            "prompt_count": data_prompt_count,
-            "skip_before_train": True,
-            **eval_options,
-        }
     jit_cache_root = getattr(namespace, "jit_cache_root", None)
     if jit_cache_root is not None:
+        _require_cuda_jit_cache(plan)
         plan["jit_cache"] = _jit_cache_contract(jit_cache_root, plan)
-    daemon_source_root = getattr(namespace, "secrlenv_source_root", None)
-    if args.custom_agent_function_path in SECRLENV_AGENTS:
-        required = {
-            "--secrlenv-source-root": daemon_source_root,
-            "--secrlenv-source-sha256": getattr(
-                namespace, "secrlenv_source_sha256", None
-            ),
-            "--secrlenv-task-pack": getattr(namespace, "secrlenv_task_pack", None),
-            "--secrlenv-task-pack-sha256": getattr(
-                namespace, "secrlenv_task_pack_sha256", None
-            ),
-            "--secrlenv-operator-image": getattr(
-                namespace, "secrlenv_operator_image", None
-            ),
-            "--secrlenv-operator-image-id": getattr(
-                namespace, "secrlenv_operator_image_id", None
-            ),
-        }
-        missing = [flag for flag, value in required.items() if not value]
-        if missing:
-            raise HarnessError(
-                "secrlenv custom agent requires " + ", ".join(missing)
-            )
-        plan["secrlenv_daemon"] = {
-            "source_root": daemon_source_root,
-            "source_sha256": namespace.secrlenv_source_sha256,
-            "task_pack": namespace.secrlenv_task_pack,
-            "task_pack_sha256": namespace.secrlenv_task_pack_sha256,
-            "state_root": f"/data/yeto-rl/secrlenv-runs/{run_id}",
-            "bind": "127.0.0.1",
-            "placement": "island-heads",
-            "port": namespace.secrlenv_port,
-            "operator_image": namespace.secrlenv_operator_image,
-            "operator_image_id": namespace.secrlenv_operator_image_id,
-            "max_active_episodes": namespace.secrlenv_max_active_episodes,
-            "enable_dind_debug": bool(namespace.secrlenv_enable_dind_debug),
-            "dind_image": (
-                namespace.secrlenv_dind_image
-                if namespace.secrlenv_enable_dind_debug
-                else None
-            ),
-            "dind_image_id": (
-                namespace.secrlenv_dind_image_id
-                if namespace.secrlenv_enable_dind_debug
-                else None
-            ),
-            "dind_debug_script_sha256": (
-                namespace.secrlenv_dind_debug_script_sha256
-                if namespace.secrlenv_enable_dind_debug
-                else None
-            ),
-        }
-    elif daemon_source_root is not None:
-        raise HarnessError(
-            "--secrlenv-source-root requires the secrlenv custom agent"
-        )
-    codex_binary = getattr(namespace, "codex_harness_binary", None)
-    codex_manifest = getattr(namespace, "codex_package_manifest", None)
-    codex_schema = getattr(namespace, "codex_app_server_schema", None)
-    if args.custom_agent_function_path in SIGNED_CODEX_AGENTS:
-        plan["codex_harness"] = _codex_harness_contract(namespace, args)
-    elif any(value is not None for value in (codex_binary, codex_manifest, codex_schema)):
-        raise HarnessError(
-            "Codex artifact options require the signed stock Codex agent"
-        )
     if getattr(args, "expert_full_count", 0):
-        plan["learner"].update(
-            expert_full_count=args.expert_full_count,
-            expert_full_lr=args.expert_full_lr,
-            expert_selection_sha256=args.expert_selection_sha256,
-            expert_selection_contract_sha256=(
-                args.expert_selection_contract_sha256
-            ),
-        )
-    if getattr(args, "rl_engine", "ports") == "ports":
-        plan["rl_engine"] = "ports"
+        # Recorded only so plan validation rejects it: expert-full needs the
+        # full-parameter sync preset, which this harness does not run.
+        plan["learner"]["expert_full_count"] = args.expert_full_count
     _validate_plan(plan)
     _write_plan(plan_path, plan)
     print(f"prepared {plan_path}")
@@ -2049,226 +1307,8 @@ def _remote_vars(plan: dict[str, Any]) -> str:
     return f'RUN="$HOME/{plan["remote_run"]}"'
 
 
-def _secrlenv_daemon_script(plan: dict[str, Any]) -> str:
-    daemon = plan["secrlenv_daemon"]
-    dind_image_check = ""
-    dind_server_args = ""
-    dind_existing_identity = """
-  case "$ARGS" in
-    *--enable-dind-debug*)
-      echo 'existing secrlenv daemon unexpectedly enables DinD debug' >&2
-      exit 1
-      ;;
-  esac
-"""
-    if daemon["enable_dind_debug"]:
-        dind_image_check = f"""
-DIND_IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['dind_image'])})"
-test "$DIND_IMAGE_ID" = {shlex.quote(daemon['dind_image_id'])}
-DIND_DEBUG_SCRIPT="$SOURCE/pipeline/debug_instance.sh"
-test -f "$DIND_DEBUG_SCRIPT" && test ! -L "$DIND_DEBUG_SCRIPT"
-printf '%s  %s\n' {shlex.quote(daemon['dind_debug_script_sha256'])} "$DIND_DEBUG_SCRIPT" | sha256sum --check -
-"""
-        dind_server_args = (
-            f"      --dind-image {shlex.quote(daemon['dind_image_id'])} \\\n"
-            "      --enable-dind-debug \\\n"
-        )
-        dind_existing_identity = f"""
-  case "$ARGS" in
-    *--dind-image*{shlex.quote(daemon['dind_image_id'])}*--enable-dind-debug*) ;;
-    *) echo 'existing secrlenv daemon has the wrong DinD debug identity' >&2; exit 1 ;;
-  esac
-"""
-    return f"""set -euo pipefail
-{_remote_vars(plan)}
-SOURCE={shlex.quote(daemon['source_root'])}
-TASK_PACK={shlex.quote(daemon['task_pack'])}
-STATE_ROOT={shlex.quote(daemon['state_root'])}
-ENV_FILE="$HOME/{plan['remote_env_file']}"
-test -d "$SOURCE/secrlenv_rl"
-test -d "$TASK_PACK"
-test -f "$ENV_FILE" && test ! -L "$ENV_FILE"
-test "$(stat -c '%a' "$ENV_FILE")" = 600
-SOURCE_SHA="$(cd "$SOURCE" && find secrlenv_rl -type f -name '*.py' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
-test "$SOURCE_SHA" = {shlex.quote(daemon['source_sha256'])}
-PYTHONPATH="$RUN/source:$SOURCE${{PYTHONPATH:+:$PYTHONPATH}}" \
-  python3 -m yeto.rl.secrlenv_task_images \
-    --task-pack "$TASK_PACK" \
-    --expected-task-pack-sha256 {shlex.quote(daemon['task_pack_sha256'])} \
-    --data-root /data
-IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['operator_image'])})"
-test "$IMAGE_ID" = {shlex.quote(daemon['operator_image_id'])}
-{dind_image_check}if [ -s "$STATE_ROOT/daemon.pid" ]; then
-  PID="$(cat "$STATE_ROOT/daemon.pid")"
-  ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
-  case "$ARGS" in
-    *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
-    *) echo 'existing secrlenv daemon PID has the wrong identity' >&2; exit 1 ;;
-  esac
-{dind_existing_identity}else
-  if python3 - <<'PY'
-import socket
-s = socket.socket()
-try:
-    s.bind(({daemon['bind']!r}, {daemon['port']}))
-finally:
-    s.close()
-PY
-  then :; else
-    echo 'secrlenv daemon port is occupied by an unattested process' >&2
-    exit 1
-  fi
-  mkdir -p "$STATE_ROOT/state"
-  TOKEN_FILE="$STATE_ROOT/daemon.token"
-  if [ ! -e "$TOKEN_FILE" ]; then
-    umask 077
-    python3 - <<'PY' >"$TOKEN_FILE"
-import secrets
-
-print(secrets.token_hex(32))
-PY
-  fi
-  test -f "$TOKEN_FILE" && test ! -L "$TOKEN_FILE"
-  test "$(stat -c '%a' "$TOKEN_FILE")" = 600
-  cd "$SOURCE"
-  nohup setsid env PYTHONPATH="$SOURCE${{PYTHONPATH:+:$PYTHONPATH}}" \
-    python3 -m secrlenv_rl.server \
-      --task-pack "$TASK_PACK" \
-      --state-dir "$STATE_ROOT/state" \
-      --repository-root "$SOURCE" \
-      --token-file "$TOKEN_FILE" \
-      --bind {shlex.quote(daemon['bind'])} \
-      --port {daemon['port']} \
-      --operator-image {shlex.quote(daemon['operator_image'])} \
-{dind_server_args}      --max-active-episodes {daemon['max_active_episodes']} \
-      >"$STATE_ROOT/daemon.log" 2>&1 < /dev/null &
-  echo "$!" > "$STATE_ROOT/daemon.pid"
-fi
-python3 - <<'PY'
-import json
-import time
-from urllib.request import urlopen
-
-deadline = time.monotonic() + 60
-last_error = None
-while time.monotonic() < deadline:
-    try:
-        with urlopen("http://{daemon['bind']}:{daemon['port']}/healthz", timeout=2) as response:
-            value = json.load(response)
-        if (
-            response.status == 200
-            and value.get("ok") is True
-            and value.get("task_pack_sha256") == {daemon['task_pack_sha256']!r}
-            and value.get("max_active_episodes") == {daemon['max_active_episodes']}
-        ):
-            print("secrlenv_daemon=ready task_pack=" + value["task_pack_sha256"])
-            raise SystemExit(0)
-        last_error = "health identity mismatch"
-    except Exception as exc:
-        last_error = str(exc)
-    time.sleep(1)
-raise SystemExit("secrlenv daemon did not become ready: " + str(last_error))
-PY
-"""
-
-
-def _start_secrlenv_daemons(plan: dict[str, Any]) -> None:
-    if plan.get("secrlenv_daemon") is None:
-        return
-    for target in _secrlenv_daemon_hosts(plan):
-        _ssh(plan, target, _secrlenv_daemon_script(plan))
-
-
-def _stop_secrlenv_daemons(plan: dict[str, Any]) -> None:
-    daemon = plan.get("secrlenv_daemon")
-    if daemon is None:
-        return
-    for target in _secrlenv_daemon_hosts(plan):
-        _ssh(
-            plan,
-            target,
-            f"""set -euo pipefail
-STATE_ROOT={shlex.quote(daemon['state_root'])}
-if [ ! -s "$STATE_ROOT/daemon.pid" ]; then exit 0; fi
-PID="$(cat "$STATE_ROOT/daemon.pid")"
-ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
-case "$ARGS" in
-  *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
-  '') exit 0 ;;
-  *) echo 'refusing to stop a process with the wrong identity' >&2; exit 1 ;;
-esac
-kill -TERM -- -"$PID"
-for _ in {{1..600}}; do
-  kill -0 "$PID" 2>/dev/null || exit 0
-  sleep 0.1
-done
-echo 'secrlenv daemon did not exit after SIGTERM' >&2
-exit 1
-""",
-        )
-
-
-def _secrlenv_daemon_status_script(plan: dict[str, Any]) -> str:
-    daemon = plan.get("secrlenv_daemon")
-    if daemon is None:
-        return ""
-    return f"""STATE_ROOT={shlex.quote(daemon['state_root'])}
-if [ ! -s "$STATE_ROOT/daemon.pid" ]; then
-  echo 'secrlenv_daemon=stopped'
-else
-  PID="$(cat "$STATE_ROOT/daemon.pid")"
-  case "$PID" in
-    ''|*[!0-9]*) echo 'secrlenv_daemon=identity-drifted' >&2; exit 1 ;;
-  esac
-  ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
-  case "$ARGS" in
-    *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
-    '') echo 'secrlenv_daemon=stopped' ;;
-    *) echo 'secrlenv_daemon=identity-drifted' >&2; exit 1 ;;
-  esac
-  if [ -n "$ARGS" ]; then
-    python3 - "$PID" <<'PY' || exit 1
-import json
-import sys
-from urllib.request import urlopen
-
-try:
-    with urlopen("http://{daemon['bind']}:{daemon['port']}/healthz", timeout=2) as response:
-        value = json.load(response)
-except Exception:
-    print("secrlenv_daemon=unhealthy")
-    raise SystemExit(1)
-if not (
-    response.status == 200
-    and value.get("ok") is True
-    and value.get("task_pack_sha256") == {daemon['task_pack_sha256']!r}
-    and value.get("max_active_episodes") == {daemon['max_active_episodes']}
-):
-    print("secrlenv_daemon=identity-drifted")
-    raise SystemExit(1)
-print("secrlenv_daemon=running pid=" + sys.argv[1])
-PY
-  fi
-fi
-"""
-
-
 def _all_hosts(plan: dict[str, Any]) -> list[str]:
     return [host for island in plan["islands"] for host in island["hosts"]]
-
-
-def _secrlenv_daemon_hosts(plan: dict[str, Any]) -> list[str]:
-    """Return the pinned daemon roster, retaining old-plan cleanup semantics."""
-
-    daemon = plan.get("secrlenv_daemon")
-    if daemon is None:
-        return []
-    placement = daemon.get("placement", "all-hosts")
-    if placement == "all-hosts":
-        return _all_hosts(plan)
-    if placement == "island-heads":
-        return [island["hosts"][0] for island in plan["islands"]]
-    raise HarnessError("secrlenv daemon has an invalid placement")
 
 
 def _deployment_hosts(plan: dict[str, Any]) -> list[str]:
@@ -2281,26 +1321,6 @@ def _attest_local(plan: dict[str, Any]) -> None:
     from ..provenance import file_sha256, python_spec_sha256, verify_source_tree_sha256
 
     verify_source_tree_sha256(plan["source_sha256"])
-    miles = plan["miles"]
-    bundle_path = REPO_ROOT / miles["bundle_path"]
-    if (
-        bundle_path.is_symlink()
-        or not bundle_path.is_file()
-        or file_sha256(bundle_path) != miles["bundle_sha256"]
-    ):
-        raise HarnessError("Miles source bundle changed after plan preparation")
-    try:
-        listed = subprocess.run(
-            ["git", "bundle", "list-heads", str(bundle_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        ).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise HarnessError("cannot attest the Miles source bundle") from exc
-    if listed != [f"{miles['commit']} refs/heads/codex/qwen38-tito"]:
-        raise HarnessError("Miles source bundle head identity drifted")
     if _syncer_source_sha256() != plan["syncer_source_sha256"]:
         raise HarnessError("syncer source changed after the plan was prepared")
     tms_patch = plan.get("tms_preload_patch")
@@ -2317,65 +1337,12 @@ def _attest_local(plan: dict[str, Any]) -> None:
         != plan["reward_sha256"]
     ):
         raise HarnessError("reward source changed after the plan was prepared")
-    learner = plan["learner"]
-    codex_harness = plan.get("codex_harness")
-    if codex_harness is not None:
-        _validate_codex_harness(codex_harness, learner)
-        binary = Path(codex_harness["controller_binary_path"])
-        manifest = Path(codex_harness["controller_package_manifest_path"])
-        schema = Path(codex_harness["controller_app_server_schema_path"])
-        for path, expected_size, expected_sha256, executable in (
-            (
-                binary,
-                codex_harness["binary_size_bytes"],
-                codex_harness["binary_sha256"],
-                True,
-            ),
-            (manifest, None, codex_harness["package_manifest_sha256"], False),
-            (schema, None, codex_harness["app_server_schema_sha256"], False),
-        ):
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or (executable and not path.stat().st_mode & 0o111)
-                or (expected_size is not None and path.stat().st_size != expected_size)
-                or file_sha256(path) != expected_sha256
-            ):
-                raise HarnessError("Codex controller artifact changed after prepare")
-        if learner.get("custom_agent_function_path") != CODEX_OPENENV_AGENT:
-            try:
-                adapter_path = _codex_adapter_source_path()
-                adapter_identity = _codex_adapter_identity()
-            except HarnessError:
-                raise HarnessError(
-                    "Yeto Codex adapter changed after prepare"
-                ) from None
-            if (
-                file_sha256(adapter_path)
-                != codex_harness["agent_source_sha256"]
-                or adapter_identity
-                != {
-                    name: codex_harness[name]
-                    for name in (
-                        "base_instructions_sha256",
-                        "terminal_exec_tool_schema_sha256",
-                        "submit_tool_schema_sha256",
-                        "dynamic_tools_schema_sha256",
-                    )
-                }
-            ):
-                raise HarnessError("Yeto Codex adapter changed after prepare")
     data_local_path = plan["learner"].get("data_local_path")
     if (
         data_local_path is not None
         and _local_data_sha256(data_local_path) != plan["learner"]["data_sha256"]
     ):
         raise HarnessError("local dataset changed after the plan was prepared")
-    evaluation = plan["learner"].get("evaluation")
-    if evaluation is not None and _local_jsonl_record_count(
-        data_local_path
-    ) != evaluation.get("prompt_count"):
-        raise HarnessError("evaluation dataset record count changed after prepare")
 
 
 def deploy(plan_path: str | Path) -> None:
@@ -2385,31 +1352,6 @@ def deploy(plan_path: str | Path) -> None:
     _attest_local(plan)
     digest = _plan_digest(plan)
     local_data = plan["learner"].get("data_local_path")
-    eval_checkpoint = plan.get("eval_checkpoint")
-    if eval_checkpoint is not None:
-        _require_program("scp")
-        source_path = eval_checkpoint["source_path"]
-        _ssh(
-            plan,
-            eval_checkpoint["source_host"],
-            f"""set -euo pipefail
-SOURCE="$HOME/{source_path}"
-test -f "$SOURCE" && test ! -L "$SOURCE"
-test "$(stat -c %s "$SOURCE")" = {eval_checkpoint['size_bytes']}
-printf '%s  %s\n' {shlex.quote(eval_checkpoint['sha256'])} "$SOURCE" | sha256sum --check -
-python3 - "$SOURCE" {eval_checkpoint['global_step']} <<'PY'
-import sys
-from pathlib import Path
-
-header = Path(sys.argv[1]).open("rb").read(12)
-expected_step = int(sys.argv[2])
-if len(header) != 12 or int.from_bytes(header[:4], "little") != {SYNCER_CHECKPOINT_MAGIC}:
-    raise SystemExit("invalid syncer checkpoint header")
-if int.from_bytes(header[4:12], "little") != expected_step:
-    raise SystemExit("syncer checkpoint global step mismatch")
-PY
-""",
-        )
     excludes = (
         ".git/",
         ".venv/",
@@ -2429,11 +1371,7 @@ PY
     learner_hosts = set(_all_hosts(plan))
     for target in _deployment_hosts(plan):
         deploy_data = local_data is not None and target in learner_hosts
-        deploy_checkpoint = eval_checkpoint is not None and target == _syncer_host(plan)
-        deploy_codex = plan.get("codex_harness") is not None and target in learner_hosts
         data_directory = '\nmkdir -p "$RUN/data"' if deploy_data else ""
-        state_directory = '\nmkdir -p "$RUN/state"' if deploy_checkpoint else ""
-        codex_directory = '\nmkdir -p "$RUN/codex"' if deploy_codex else ""
         initialize = f"""set -euo pipefail
 {_remote_vars(plan)}
 if [ -f "$RUN/control/plan.sha256" ]; then
@@ -2447,7 +1385,7 @@ else
     printf '%s\n' {shlex.quote(digest)} > "$RUN/control/deploying.sha256"
   fi
 fi
-{data_directory}{state_directory}{codex_directory}
+{data_directory}
 """
         _ssh(plan, target, initialize)
         _run(
@@ -2487,69 +1425,6 @@ fi
                     + ("/" if is_directory else ""),
                 ]
             )
-        if deploy_codex:
-            codex = plan["codex_harness"]
-            for source_path, bundle_path in (
-                (codex["controller_binary_path"], codex["bundle_binary_path"]),
-                (
-                    codex["controller_package_manifest_path"],
-                    codex["bundle_package_manifest_path"],
-                ),
-                (
-                    codex["controller_app_server_schema_path"],
-                    codex["bundle_app_server_schema_path"],
-                ),
-            ):
-                _run(
-                    [
-                        "rsync",
-                        "-az",
-                        "-e",
-                        _rsync_shell(plan),
-                        source_path,
-                        f"{target}:{plan['remote_run']}/{bundle_path}",
-                    ]
-                )
-            _ssh(
-                plan,
-                target,
-                f"""set -euo pipefail
-{_remote_vars(plan)}
-CODEX="$RUN/{codex['bundle_binary_path']}"
-MANIFEST="$RUN/{codex['bundle_package_manifest_path']}"
-SCHEMA="$RUN/{codex['bundle_app_server_schema_path']}"
-test -f "$CODEX" && test ! -L "$CODEX" && test -x "$CODEX"
-test "$(stat -c %s "$CODEX")" = {codex['binary_size_bytes']}
-printf '%s  %s\n' {shlex.quote(codex['binary_sha256'])} "$CODEX" | sha256sum --check -
-test -f "$MANIFEST" && test ! -L "$MANIFEST"
-printf '%s  %s\n' {shlex.quote(codex['package_manifest_sha256'])} "$MANIFEST" | sha256sum --check -
-test -f "$SCHEMA" && test ! -L "$SCHEMA"
-printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$SCHEMA" | sha256sum --check -
-""",
-            )
-        if deploy_checkpoint:
-            if eval_checkpoint["source_host"] == target:
-                _ssh(
-                    plan,
-                    target,
-                    f"""set -euo pipefail
-{_remote_vars(plan)}
-cp --reflink=auto -- "$HOME/{eval_checkpoint['source_path']}" "$RUN/state/state.ckpt"
-""",
-                )
-            else:
-                _run(
-                    [
-                        "scp",
-                        "-3",
-                        *plan.get("ssh_options", []),
-                        (
-                            f"{eval_checkpoint['source_host']}:"
-                            f"{eval_checkpoint['source_path']}"
-                        ),
-                        f"{target}:{plan['remote_run']}/state/state.ckpt",
-                    ]
-                )
         _ssh(
             plan,
             target,
@@ -2562,9 +1437,55 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
     print(f"deployed {plan['run_id']} to {len(_deployment_hosts(plan))} host(s)")
 
 
+def _card_tool_check_script(plan: dict[str, Any], gpus_per_node: int) -> str:
+    """Remote lines that refuse a node whose card tool is missing or sees too
+    few cards. The full card, count and HBM comparison runs on the controller
+    (:func:`_check_island_cards`), which can parse the output."""
+    family = _plan_device_family(plan)
+    if family == "cuda":
+        return ('command -v nvidia-smi >/dev/null\n'
+                'test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" '
+                f'-ge {gpus_per_node}\n')
+    tool = card_tools.preflight_commands(family)[0][0]
+    if family == "npu":
+        count = ('test "$(npu-smi info -l | grep -c \'^[[:space:]]*NPU ID\')" '
+                 f'-ge {gpus_per_node}\n')
+    else:
+        count = ('test "$(ppu-smi --query-gpu=index --format=csv,noheader | wc -l)" '
+                 f'-ge {gpus_per_node}\n')
+    return f"command -v {tool} >/dev/null\n{count}"
+
+
+def _card_tool_script(plan: dict[str, Any]) -> str:
+    """Remote line printing the card tool output the controller parses."""
+    family = _plan_device_family(plan)
+    return "\n".join(shlex.join(command)
+                      for command in card_tools.preflight_commands(family))
+
+
+def _check_island_cards(plan: dict[str, Any]) -> None:
+    """Device-family preflight (rl-ssh-node-pool): refuse the launch before any
+    accelerator process starts when a node's cards differ from the plan."""
+    family = _plan_device_family(plan)
+    card = _plan_accelerator(plan)
+    hbm_gib = plan.get("hbm_gib_per_card")
+    script = _card_tool_script(plan)
+    for island in plan["islands"]:
+        for target in island["hosts"]:
+            result = _ssh(plan, target, script, capture=True, check=False)
+            if result.returncode != 0:
+                raise HarnessError(
+                    f"the {family} card tool failed on {target}: "
+                    f"{(result.stderr or '').strip()[:200]!r}")
+            try:
+                card_tools.check_cards(family, result.stdout, card=card,
+                                       count=island["gpus_per_node"], hbm_gib=hbm_gib,
+                                       node=target)
+            except (card_tools.CardMismatch, card_tools.CardToolError) as exc:
+                raise HarnessError(str(exc)) from None
+
+
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
-    sglang = plan["sglang"]
-    miles = plan["miles"]
     learner = plan["learner"]
     if learner.get("model_manifest_sha256"):
         model_manifest_check = (
@@ -2587,6 +1508,7 @@ test "$TMS_BASE_ACTUAL" = {shlex.quote(tms_patch['base_binary_sha256'])}
         tms_patch_check = ""
     jit_cache = plan.get("jit_cache")
     if jit_cache is not None:
+        _require_cuda_jit_cache(plan)
         cache_names = " ".join(shlex.quote(name) for name, _ in JIT_CACHE_MOUNTS)
         jit_cache_setup = f"""JIT_CACHE_ROOT={shlex.quote(jit_cache['host_root'])}
 JIT_CACHE_COMPAT={shlex.quote(jit_cache['compatibility_sha256'])}
@@ -2612,14 +1534,13 @@ chmod 0600 "$RUN/control/jit-cache-host-path"
 """
     else:
         jit_cache_setup = ""
+    card_tool_check = _card_tool_check_script(plan, gpus_per_node)
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
 command -v docker >/dev/null
 command -v git >/dev/null
-command -v nvidia-smi >/dev/null
-test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" -ge {gpus_per_node}
-docker info >/dev/null
+{card_tool_check}docker info >/dev/null
 {model_manifest_check}mkdir -p "$HOME/.cache/huggingface" "$RUN/miles" "$RUN/sglang"
 if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; then
   docker pull {shlex.quote(plan['docker_image'])}
@@ -2629,46 +1550,11 @@ docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
 
 
 def _source_checkout_script(plan: dict[str, Any]) -> str:
-    """Miles/SGLang checkout steps; ``plan['rl_engine']`` selects the path."""
+    """Checkout steps of the pinned Miles and SGLang forks the plan names."""
 
-    rl_engine = plan.get("rl_engine", "legacy")
-    if rl_engine == "ports":
-        return _ports_source_checkout_script()
-    if rl_engine != "legacy":
-        raise HarnessError(f"unknown rl_engine {rl_engine!r}")
-    sglang = plan["sglang"]
-    miles = plan["miles"]
-    return f"""if [ ! -d "$RUN/miles/.git" ]; then
-  rmdir "$RUN/miles"
-  git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
-fi
-MILES_BUNDLE="$RUN/source/{miles['bundle_path']}"
-test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"
-printf '%s  %s\n' {shlex.quote(miles['bundle_sha256'])} "$MILES_BUNDLE" | sha256sum --check -
-git -C "$RUN/miles" remote set-url origin {shlex.quote(MILES_REPOSITORY)}
-git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['base_commit'])}
-git -C "$RUN/miles" checkout --detach {shlex.quote(miles['base_commit'])}
-git -C "$RUN/miles" bundle verify "$MILES_BUNDLE" >/dev/null
-git -C "$RUN/miles" fetch "$MILES_BUNDLE" {shlex.quote(miles['commit'])}
-git -C "$RUN/miles" checkout --detach {shlex.quote(miles['commit'])}
-test "$(git -C "$RUN/miles" rev-parse HEAD)" = {shlex.quote(miles['commit'])}
-test -z "$(git -C "$RUN/miles" status --porcelain --untracked-files=all)"
-if [ ! -d "$RUN/sglang/.git" ]; then
-  rmdir "$RUN/sglang"
-  git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"
-fi
-git -C "$RUN/sglang" remote set-url origin {shlex.quote(SGLANG_REPOSITORY)}
-git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['commit'])}
-git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
-"""
-
-
-def _ports_source_checkout_script() -> str:
     lines = []
-    for name, repository, commit in (
-        ("miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT),
-        ("sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT),
-    ):
+    for name in ("miles", "sglang"):
+        repository, commit = plan[name]["repository"], plan[name]["commit"]
         path = f'"$RUN/{name}"'
         lines += [
             f'if [ ! -d "$RUN/{name}/.git" ]; then',
@@ -2969,16 +1855,9 @@ syncer_listener_owned_by_unit() {
 
 def _syncer_start_script(plan: dict[str, Any]) -> str:
     unit = shlex.quote(_syncer_unit_name(plan))
-    eval_checkpoint = plan.get("eval_checkpoint")
-    checkpoint_check = ""
-    if eval_checkpoint is not None:
-        checkpoint_check = f"""test -f "$RUN/state/state.ckpt"
-test "$(stat -c %s "$RUN/state/state.ckpt")" = {eval_checkpoint['size_bytes']}
-printf '%s  %s\n' {shlex.quote(eval_checkpoint['sha256'])} "$RUN/state/state.ckpt" | sha256sum --check -
-"""
     return f"""set -euo pipefail
 {_remote_vars(plan)}
-{checkpoint_check}command -v systemctl >/dev/null
+command -v systemctl >/dev/null
 command -v systemd-run >/dev/null
 test -d /run/systemd/system
 UNIT={unit}
@@ -3238,49 +2117,12 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         values.extend(("--wandb-mode", str(learner.get("wandb_mode", "online"))))
         if learner.get("wandb_entity"):
             values.extend(("--wandb-entity", str(learner["wandb_entity"])))
-    evaluation = learner.get("evaluation")
-    if evaluation is not None:
-        values.append("--eval-only")
-        values.extend(
-            (
-                "--eval-dataset-name",
-                evaluation["dataset_name"],
-                "--eval-data-sha256",
-                evaluation["data_sha256"],
-                "--eval-interval",
-                str(evaluation["interval"]),
-                "--eval-samples-per-prompt",
-                str(evaluation["samples_per_prompt"]),
-            )
-        )
-        for flag, name in (
-            ("--eval-temperature", "temperature"),
-            ("--eval-top-p", "top_p"),
-            ("--eval-max-prompt-len", "max_prompt_len"),
-            ("--eval-max-response-len", "max_response_len"),
-            ("--eval-max-context-len", "max_context_len"),
-        ):
-            if evaluation.get(name) is not None:
-                values.extend((flag, str(evaluation[name])))
     if learner.get("rollout_model") is not None:
         values.extend(("--rollout-model", learner["rollout_model"]))
         values.extend(
             (
                 "--rollout-model-revision",
                 learner["rollout_model_revision"],
-            )
-        )
-    if learner.get("expert_full_count", 0):
-        values.extend(
-            (
-                "--expert-full-count",
-                str(learner["expert_full_count"]),
-                "--expert-full-lr",
-                str(learner["expert_full_lr"]),
-                "--expert-selection-sha256",
-                learner["expert_selection_sha256"],
-                "--expert-selection-contract-sha256",
-                learner["expert_selection_contract_sha256"],
             )
         )
     if learner.get("apply_chat_template_kwargs"):
@@ -3301,13 +2143,6 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 str(learner["dynamic_sampling_max_replacements"]),
             )
         )
-    if learner.get("secrlenv_max_infrastructure_replacements") is not None:
-        values.extend(
-            (
-                "--secrlenv-max-infrastructure-replacements",
-                str(learner["secrlenv_max_infrastructure_replacements"]),
-            )
-        )
     if learner.get("dynamic_sampling_filter_path"):
         values.extend(
             (
@@ -3317,9 +2152,6 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         )
     if learner.get("rl_offload_train"):
         values.append("--rl-offload-train")
-    # Absent key = legacy plan (digest-compatible); the learner defaults to
-    # ports, so the engine is always passed explicitly.
-    values.extend(("--rl-engine", plan.get("rl_engine", "legacy")))
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:
@@ -3356,13 +2188,6 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 learner["custom_agent_function_path"],
             )
         )
-    if plan.get("codex_harness") is not None:
-        values.extend(
-            (
-                "--codex-harness-contract",
-                _canonical_json(plan["codex_harness"]),
-            )
-        )
     if learner.get("agent_max_seq_len") is not None:
         values.extend(("--agent-max-seq-len", str(learner["agent_max_seq_len"])))
     if learner.get("use_session_server"):
@@ -3374,15 +2199,9 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
             values.extend(str(port) for port in learner["session_server_port"])
         if learner.get("tito_model"):
             values.extend(("--tito-model", learner["tito_model"]))
-        if learner.get("codex_backend_profile"):
-            values.extend(
-                ("--codex-backend-profile", learner["codex_backend_profile"])
-            )
         if learner.get("tito_allowed_append_roles"):
             values.append("--tito-allowed-append-roles")
             values.extend(learner["tito_allowed_append_roles"])
-    if learner.get("codex_exclude_reasoning_from_loss"):
-        values.append("--codex-exclude-reasoning-from-loss")
     if learner["trust_remote_code"]:
         values.append("--trust-remote-code")
     return values
@@ -3396,7 +2215,6 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
     island = plan["islands"][learner_id]
     if node_id not in range(len(island["hosts"])):
         raise HarnessError("node ID is outside the island topology")
-    daemon_on_node = island["hosts"][node_id] in _secrlenv_daemon_hosts(plan)
     name = _container_name(plan, learner_id, node_id)
     head = _target_host(island["hosts"][0])
     gpus = island["gpus_per_node"]
@@ -3419,22 +2237,6 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
         if learner.get("wandb")
         else ""
     )
-    daemon_env = (
-        "  --env SECRLENV_DAEMON_URL="
-        f"http://127.0.0.1:{plan['secrlenv_daemon']['port']} "
-        "--env SECRLENV_TASK_PACK_SHA256="
-        f"{plan['secrlenv_daemon']['task_pack_sha256']} "
-        "--env SECRLENV_BEARER_TOKEN_FILE=/run/secrlenv/daemon.token \\\n"
-        if daemon_on_node
-        else ""
-    )
-    daemon_volume = (
-        "  --volume "
-        f"{shlex.quote(plan['secrlenv_daemon']['state_root'])}/daemon.token:"
-        "/run/secrlenv/daemon.token:ro \\\n"
-        if daemon_on_node
-        else ""
-    )
     reward_scheme = shlex.quote(learner.get("cybergym_reward_scheme", "binary"))
     reward_view = shlex.quote(learner.get("cybergym_reward_view", "train"))
     data_volume = (
@@ -3446,69 +2248,6 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
         f"  --volume {shlex.quote(f'{mount}:{mount}:ro')} \\\n"
         for mount in learner.get("model_mounts", [])
     )
-    codex = plan.get("codex_harness")
-    if codex is not None:
-        codex_contract_sha256 = _plan_digest(codex)
-        codex_setup = f"""CODEX_HOST="$RUN/{codex['bundle_binary_path']}"
-CODEX_MANIFEST_HOST="$RUN/{codex['bundle_package_manifest_path']}"
-CODEX_SCHEMA_HOST="$RUN/{codex['bundle_app_server_schema_path']}"
-test -f "$CODEX_HOST" && test ! -L "$CODEX_HOST" && test -x "$CODEX_HOST"
-test "$(stat -c %s "$CODEX_HOST")" = {codex['binary_size_bytes']}
-printf '%s  %s\n' {shlex.quote(codex['binary_sha256'])} "$CODEX_HOST" | sha256sum --check -
-test -f "$CODEX_MANIFEST_HOST" && test ! -L "$CODEX_MANIFEST_HOST"
-printf '%s  %s\n' {shlex.quote(codex['package_manifest_sha256'])} "$CODEX_MANIFEST_HOST" | sha256sum --check -
-test -f "$CODEX_SCHEMA_HOST" && test ! -L "$CODEX_SCHEMA_HOST"
-printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$CODEX_SCHEMA_HOST" | sha256sum --check -
-"""
-        openenv_env = "".join(
-            f"--env {name}={shlex.quote(value)} "
-            for name, value in codex.get("openenv_identity_env", {}).items()
-        )
-        codex_env = (
-            "  --env YETO_CODEX_BINARY_PATH="
-            f"{shlex.quote(codex['container_binary_path'])} "
-            "--env YETO_CODEX_BINARY_SHA256="
-            f"{codex['binary_sha256']} "
-            f"--env YETO_CODEX_BINARY_SIZE_BYTES={codex['binary_size_bytes']} "
-            f"--env YETO_CODEX_VERSION={shlex.quote(codex['cli_version'])} "
-            "--env YETO_CODEX_APP_SERVER_PROTOCOL_REVISION="
-            f"{codex['app_server_protocol_revision']} "
-            "--env YETO_CODEX_APP_SERVER_SCHEMA_SHA256="
-            f"{codex['app_server_schema_sha256']} "
-            "--env YETO_CODEX_BASE_INSTRUCTIONS_SHA256="
-            f"{codex['base_instructions_sha256']} "
-            "--env YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256="
-            f"{codex['terminal_exec_tool_schema_sha256']} "
-            "--env YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256="
-            f"{codex['submit_tool_schema_sha256']} "
-            "--env YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256="
-            f"{codex['dynamic_tools_schema_sha256']} "
-            f"--env YETO_CODEX_REASONING_EFFORT={codex['reasoning_effort']} "
-            "--env YETO_CODEX_BACKEND_MAX_TOKENS="
-            f"{codex['backend']['max_tokens']} "
-            "--env YETO_CODEX_BACKEND_REASONING_EFFORT="
-            f"{codex['backend']['reasoning_effort']} "
-            "--env YETO_CODEX_BACKEND_THINKING="
-            f"{codex['backend']['thinking']['type']} "
-            f"--env YETO_CODEX_CHAT_TEMPLATE={codex['backend']['chat_template']} "
-            "--env YETO_CODEX_CHAT_TEMPLATE_KWARGS="
-            f"{shlex.quote(_canonical_json(codex['backend']['chat_template_kwargs']))} "
-            "--env YETO_CODEX_TITO_ALLOWED_APPEND_ROLES=tool,user "
-            f"{openenv_env}"
-            f"--env YETO_CODEX_HARNESS_CONTRACT_SHA256={codex_contract_sha256} \\\n"
-        )
-        codex_volumes = (
-            "  --volume \"$CODEX_HOST:"
-            f"{codex['container_binary_path']}:ro\" \\\n"
-            "  --volume \"$CODEX_MANIFEST_HOST:/opt/yeto/codex/"
-            "codex-package.json:ro\" \\\n"
-            "  --volume \"$CODEX_SCHEMA_HOST:"
-            f"{codex['container_app_server_schema_path']}:ro\" \\\n"
-        )
-    else:
-        codex_setup = ""
-        codex_env = ""
-        codex_volumes = ""
     tms_patch = plan.get("tms_preload_patch")
     tms_patch_volume = (
         "  --volume "
@@ -3569,20 +2308,11 @@ done
     else:
         jit_cache_setup = ""
         jit_cache_volumes = ""
-    expert_full = bool(learner.get("expert_full_count", 0))
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
         attention_env = ""
-        expert_env = (
-            "--env YETO_DSV4_EXPERT_FULL=1 "
-            f"--env YETO_DSV4_EXPERT_FULL_COUNT={learner['expert_full_count']} "
-            f"--env YETO_DSV4_EXPERT_FULL_LR={learner['expert_full_lr']} "
-            "--env NVTE_GROUPED_LINEAR_SINGLE_PARAM=0 "
-            if expert_full
-            else "--env YETO_DSV4_CLONE_ONLY_LORA=1 "
-        )
         recipe_env = (
             "  --env YETO_DSV4_EXPERT_CLONE=1 "
-            f"{expert_env}"
+            "--env YETO_DSV4_CLONE_ONLY_LORA_PORTS=1 "
             "--env SGLANG_SKIP_CHECKPOINT_LOAD_CHECK=1 "
             "--env SGLANG_DSV4_FP4_EXPERTS=0 "
             "--env SGLANG_HEALTH_CHECK_TIMEOUT=120 "
@@ -3656,7 +2386,7 @@ if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
   echo 'refusing to reuse a same-name learner container; use status or explicit restart-learner' >&2
   exit 1
 fi
-{codex_setup}{tms_disk_setup}{jit_cache_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
+{tms_disk_setup}{jit_cache_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
 docker run --detach \
   --name {shlex.quote(name)} \
   --gpus {shlex.quote(gpu_request)} \
@@ -3669,12 +2399,12 @@ docker run --detach \
   --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME={network_interface} \
   --env GLOO_SOCKET_IFNAME={network_interface} --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
-{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}{wandb_env}{daemon_env}{codex_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
+{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}{wandb_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
-{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}{daemon_volume}{codex_volumes}  --volume "$RUN/source:/workspace/yeto:ro" \
+{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
@@ -3699,7 +2429,7 @@ def _start_island(plan: dict[str, Any], learner_id: int) -> None:
 def start(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     deploy(plan_path)
-    _start_secrlenv_daemons(plan)
+    _check_island_cards(plan)
     for island in plan["islands"]:
         for target in island["hosts"]:
             _ssh(plan, target, _host_setup_script(plan, island["gpus_per_node"]))
@@ -3767,7 +2497,6 @@ fi
 
 def status(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
-    daemon_hosts = set(_secrlenv_daemon_hosts(plan))
     if _syncer_host(plan) not in _all_hosts(plan):
         result = _ssh(
             plan,
@@ -3789,18 +2518,13 @@ echo host={shlex.quote(_syncer_host(plan))} role=syncer
             syncer = ""
             if _syncer_host(plan) == target:
                 syncer = _syncer_status_script(plan)
-            daemon = (
-                _secrlenv_daemon_status_script(plan)
-                if target in daemon_hosts
-                else ""
-            )
             result = _ssh(
                 plan,
                 target,
                 f"""set -u
 {_remote_vars(plan)}
 echo host={shlex.quote(target)} island={learner_id} node={node_id}
-{syncer}{daemon}if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
+{syncer}if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
   printf 'container='
   docker inspect --format {shlex.quote(_CONTAINER_STATE_FORMAT)} {shlex.quote(name)}
 else echo container=missing; fi
@@ -3994,7 +2718,6 @@ def stop(plan_path: str | Path) -> None:
         _syncer_host(plan),
         _syncer_stop_script(plan),
     )
-    _stop_secrlenv_daemons(plan)
 
 
 def _collect_event_evidence(
@@ -4044,37 +2767,9 @@ def _collect_event_evidence(
     _atomic_bytes(destination, payload)
 
 
-def _parse_syncer_lifecycle_evidence(raw: str) -> dict[str, int]:
-    if len(raw.encode()) > 4096:
-        raise HarnessError("syncer lifecycle evidence is unexpectedly large")
-    try:
-        evidence = json.loads(raw)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise HarnessError("syncer lifecycle evidence is malformed") from error
-    if not isinstance(evidence, dict) or set(evidence) != {
-        "schema",
-        "resume_count",
-        "final_ack_count",
-    }:
-        raise HarnessError("syncer lifecycle evidence has unapproved fields")
-    if (
-        evidence.get("schema") != 1
-        or any(
-            isinstance(evidence.get(name), bool)
-            or not isinstance(evidence.get(name), int)
-            or not 0 <= evidence[name] <= 1_000_000
-            for name in ("resume_count", "final_ack_count")
-        )
-    ):
-        raise HarnessError("syncer lifecycle evidence has invalid counters")
-    return evidence
-
-
 def _collect_capacity_preflight(plan: dict[str, Any], artifacts: Path) -> None:
     """Refuse a large training transfer before it can fill the controller disk."""
 
-    if plan["learner"].get("evaluation") is not None:
-        return
     total_bytes = (len(plan["islands"]) + 1) * 64 * 1024 * 1024
     if plan["learner"].get("sync_preset", "strict-avg") != "decoupled":
         for learner_id, island in enumerate(plan["islands"]):
@@ -4121,16 +2816,9 @@ def collect(plan_path: str | Path) -> Path:
     artifacts = plan_file.parent / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     _collect_capacity_preflight(plan, artifacts)
-    eval_only = plan["learner"].get("evaluation") is not None
     sync_preset = plan["learner"].get("sync_preset", "strict-avg")
     learner_event_mode = (
-        "eval-learner"
-        if eval_only
-        else (
-            "decoupled-learner"
-            if sync_preset == "decoupled"
-            else "strict-learner"
-        )
+        "decoupled-learner" if sync_preset == "decoupled" else "strict-learner"
     )
     for learner_id, island in enumerate(plan["islands"]):
         destination = artifacts / f"island-{learner_id}"
@@ -4160,7 +2848,7 @@ def collect(plan_path: str | Path) -> Path:
             learner_event_mode,
             output / "events.jsonl",
         )
-        if not eval_only and sync_preset != "decoupled":
+        if sync_preset != "decoupled":
             audit = destination / "audit"
             audit.mkdir(parents=True, exist_ok=True)
             audit_includes = [
@@ -4182,34 +2870,17 @@ def collect(plan_path: str | Path) -> Path:
             )
     syncer = artifacts / "syncer"
     syncer.mkdir(parents=True, exist_ok=True)
-    if eval_only:
-        lifecycle = _ssh(
-            plan,
-            _syncer_host(plan),
-            f"{_remote_vars(plan)}\n"
-            "python3 -c "
-            f"{shlex.quote(_SYNCER_LIFECYCLE_EVIDENCE)} "
-            '"$RUN/state/syncer.log"',
-            capture=True,
-        )
-        evidence = _parse_syncer_lifecycle_evidence(lifecycle.stdout)
-        _atomic_bytes(
-            syncer / "lifecycle-evidence.json",
-            (_canonical_json(evidence) + "\n").encode(),
-        )
-        syncer_includes = ("--include=/syncer.exit",)
-    else:
-        _collect_event_evidence(
-            plan,
-            _syncer_host(plan),
-            "state/events.jsonl",
-            "syncer",
-            syncer / "events.jsonl",
-        )
-        syncer_includes = (
-            "--include=/state.ckpt",
-            "--include=/syncer.exit",
-        )
+    _collect_event_evidence(
+        plan,
+        _syncer_host(plan),
+        "state/events.jsonl",
+        "syncer",
+        syncer / "events.jsonl",
+    )
+    syncer_includes = (
+        "--include=/state.ckpt",
+        "--include=/syncer.exit",
+    )
     _run(
         [
             "rsync",
@@ -4280,11 +2951,9 @@ def _run_algorithm_provenance(
     Taken from what the islands actually ran: every island's
     ``rl_engine_selected`` events must carry one and the same canonical
     AlgorithmSpec (whose hash matches the recorded one) and the same
-    unverified-mechanism allowances.  Legacy runs record none.
+    unverified-mechanism allowances.
     """
 
-    if plan.get("rl_engine", "legacy") != "ports":
-        return None, ()
     from .engine.algorithm import AlgorithmSpec
 
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
@@ -4673,118 +3342,6 @@ def _container_succeeded(inspection: Any) -> bool:
     )
 
 
-def _read_successful_syncer_exit(path: Path) -> None:
-    try:
-        if path.stat().st_size > 4096:
-            raise HarnessError("eval syncer exit record is unexpectedly large")
-        lines = path.read_text(encoding="utf-8").splitlines()
-        pairs = [line.split("=", 1) for line in lines]
-    except OSError as error:
-        raise HarnessError("missing eval syncer exit record") from error
-    if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(
-        pairs
-    ):
-        raise HarnessError("eval syncer exit record is malformed")
-    fields = dict(pairs)
-    if (
-        fields.get("result") != "success"
-        or fields.get("exit_code") != "exited"
-        or fields.get("exit_status") != "0"
-    ):
-        raise HarnessError("eval syncer did not exit successfully after FINAL_ACK")
-
-
-def _eval_metric(event: dict[str, Any], name: str) -> float:
-    value = event.get(name)
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or not 0.0 <= value <= 1.0
-    ):
-        raise HarnessError(f"eval event has an invalid {name}")
-    return float(value)
-
-
-def _verify_eval(
-    plan: dict[str, Any], artifacts: Path
-) -> tuple[str, int, int, float, float]:
-    learner = plan["learner"]
-    evaluation = learner["evaluation"]
-    expected_version = learner["global_rounds"]
-    expected_samples = (
-        evaluation["prompt_count"] * evaluation["samples_per_prompt"]
-    )
-    if (artifacts / "syncer" / "state.ckpt").exists():
-        raise HarnessError("eval artifact collection must not contain state.ckpt")
-    _read_successful_syncer_exit(artifacts / "syncer" / "syncer.exit")
-    try:
-        lifecycle = _parse_syncer_lifecycle_evidence(
-            (artifacts / "syncer" / "lifecycle-evidence.json").read_text(
-                encoding="utf-8"
-            )
-        )
-    except OSError as error:
-        raise HarnessError("missing eval syncer lifecycle evidence") from error
-    if lifecycle["resume_count"] != 1:
-        raise HarnessError("eval syncer lacks one checkpoint resume event")
-    if lifecycle["final_ack_count"] != _learner_count(plan):
-        raise HarnessError("eval syncer lacks one FINAL_ACK per learner")
-
-    hashes = set()
-    results = []
-    pass_at_1 = []
-    for learner_id in range(_learner_count(plan)):
-        events = _json_lines(_event_path(artifacts, learner_id))
-        apply_indices = [
-            index
-            for index, event in enumerate(events)
-            if event.get("event") == "rl_policy_apply"
-            and event.get("policy_version") == expected_version
-        ]
-        eval_indices = [
-            index
-            for index, event in enumerate(events)
-            if event.get("event") == "rl_eval_result"
-            and event.get("dataset_name") == evaluation["dataset_name"]
-        ]
-        if len(apply_indices) != 1 or len(eval_indices) != 1:
-            raise HarnessError(
-                f"eval learner {learner_id} lacks one final apply/result event"
-            )
-        if apply_indices[0] >= eval_indices[0]:
-            raise HarnessError(
-                f"eval learner {learner_id} evaluated before final policy apply"
-            )
-        apply_event = events[apply_indices[0]]
-        eval_event = events[eval_indices[0]]
-        policy_hash = apply_event.get("sync/global_policy_hash")
-        if not isinstance(policy_hash, str) or not _SHA256.fullmatch(policy_hash):
-            raise HarnessError(f"eval learner {learner_id} has no final policy hash")
-        if (
-            apply_event.get("island_id") != learner_id
-            or eval_event.get("island_id") != learner_id
-            or eval_event.get("rollout_id") != 0
-            or eval_event.get("policy_version") != expected_version
-            or eval_event.get("sample_count") != expected_samples
-        ):
-            raise HarnessError(
-                f"eval learner {learner_id} result has the wrong policy/sample identity"
-            )
-        hashes.add(policy_hash)
-        results.append(_eval_metric(eval_event, "rl/eval/result"))
-        pass_at_1.append(_eval_metric(eval_event, "rl/eval/pass_at_1"))
-    if len(hashes) != 1:
-        raise HarnessError("eval learners applied different terminal policies")
-    return (
-        evaluation["dataset_name"],
-        evaluation["prompt_count"],
-        evaluation["samples_per_prompt"],
-        statistics.fmean(results),
-        statistics.fmean(pass_at_1),
-    )
-
-
 def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
     plan_file, plan = load_plan(plan_path)
     artifacts = plan_file.parent / "artifacts"
@@ -4806,15 +3363,6 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
                 raise HarnessError(
                     f"island {learner_id} node {node_id} did not exit successfully"
                 )
-    if plan["learner"].get("evaluation") is not None:
-        if export_dir:
-            raise HarnessError("eval-only verification cannot export a checkpoint")
-        dataset, prompts, samples, result, pass_at_1 = _verify_eval(plan, artifacts)
-        print(
-            f"verified terminal eval {dataset}: {prompts} prompts x {samples} "
-            f"sample(s), result={result:.6f}, pass@1={pass_at_1:.6f}"
-        )
-        return
     from ..export import parse_checkpoint
 
     checkpoint_path = artifacts / "syncer" / "state.ckpt"
@@ -4849,7 +3397,6 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             fragments=learner.get("fragments", 1),
             pipeline=learner.get("pipeline", 1),
             local_horizon=learner.get("local_horizon", 1),
-            rl_engine=plan.get("rl_engine", "legacy"),
             algorithm_spec=algorithm_spec,
             unverified_mechanisms=unverified,
         )
@@ -4867,6 +3414,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated SSH nodes for one island; repeat for each island",
     )
     prepare_parser.add_argument("--gpus-per-node", type=int, default=1)
+    prepare_parser.add_argument("--accelerator", default=DEFAULT_ACCELERATOR)
+    prepare_parser.add_argument("--hbm-gib", type=float, default=None)
     prepare_parser.add_argument(
         "--syncer-host",
         default=None,
@@ -4879,55 +3428,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT)
     prepare_parser.add_argument("--remote-env-file", default=None)
     prepare_parser.add_argument("--final-ack-timeout-s", type=int, default=None)
-    prepare_parser.add_argument("--eval-checkpoint-host", default=None)
-    prepare_parser.add_argument("--eval-checkpoint-path", default=None)
-    prepare_parser.add_argument("--eval-checkpoint-sha256", default=None)
-    prepare_parser.add_argument("--eval-checkpoint-size-bytes", type=int, default=None)
-    prepare_parser.add_argument("--eval-checkpoint-global-step", type=int, default=None)
-    prepare_parser.add_argument("--eval-dataset-name", default=None)
-    prepare_parser.add_argument("--eval-interval", type=int, default=None)
-    prepare_parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
-    prepare_parser.add_argument("--eval-temperature", type=float, default=None)
-    prepare_parser.add_argument("--eval-top-p", type=float, default=None)
-    prepare_parser.add_argument("--eval-max-prompt-len", type=int, default=None)
-    prepare_parser.add_argument("--eval-max-response-len", type=int, default=None)
-    prepare_parser.add_argument("--eval-max-context-len", type=int, default=None)
     prepare_parser.add_argument("--model-manifest-sha256", default=None)
-    prepare_parser.add_argument("--secrlenv-source-root", default=None)
-    prepare_parser.add_argument("--secrlenv-source-sha256", default=None)
-    prepare_parser.add_argument("--secrlenv-task-pack", default=None)
-    prepare_parser.add_argument("--secrlenv-task-pack-sha256", default=None)
-    prepare_parser.add_argument("--secrlenv-operator-image", default=None)
-    prepare_parser.add_argument("--secrlenv-operator-image-id", default=None)
-    prepare_parser.add_argument("--secrlenv-port", type=int, default=28765)
-    prepare_parser.add_argument(
-        "--secrlenv-max-active-episodes", type=int, default=16
-    )
-    prepare_parser.add_argument(
-        "--secrlenv-enable-dind-debug",
-        action="store_true",
-        help="give each solver a private flagless DinD challenge copy",
-    )
-    prepare_parser.add_argument("--secrlenv-dind-image", default=None)
-    prepare_parser.add_argument("--secrlenv-dind-image-id", default=None)
-    prepare_parser.add_argument(
-        "--secrlenv-dind-debug-script-sha256", default=None
-    )
-    prepare_parser.add_argument(
-        "--codex-harness-binary",
-        default=None,
-        help="controller path to the pinned official Codex Linux binary",
-    )
-    prepare_parser.add_argument(
-        "--codex-package-manifest",
-        default=None,
-        help="controller path to the pinned codex-package.json identity",
-    )
-    prepare_parser.add_argument(
-        "--codex-app-server-schema",
-        default=None,
-        help="controller path to the pinned experimental v2 app-server schema",
-    )
     prepare_parser.add_argument("--tms-preload-patch", default=None)
     prepare_parser.add_argument(
         "--tms-train-disk-backup-root",

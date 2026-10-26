@@ -82,9 +82,13 @@ def test_unknown_runtime_fingerprint_blocks_every_target_arm():
     assert any(i.status == caps.STATUS_SUPPORTED and i.kind == "target-fixed-sweep" for i in plan.items)
 
 
-def test_dense_full_dp_above_one_is_rejected():
+def test_dense_full_dp_above_one_needs_the_replica_pin(monkeypatch):
+    from yeto.rl.adapters.miles import pins
+
     m = _formal()
     m["profile"]["parameter_mode"] = "full"
+    assert _reject(m, "P62") is None  # the pinned Miles has data-parallel replicas (S27 closing)
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
     assert "DP=1" in _reject(m, "P62")
 
 

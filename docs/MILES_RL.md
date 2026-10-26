@@ -17,8 +17,8 @@ Two explicit synchronization presets are available:
 Selecting `decoupled` is intentional. The launcher never infers it from the
 model, island count, or generic DiLoCo flags.
 
-> **Status (audited against integ-decl `d3a202c4`, 2026-10-07).** The default
-> engine is `ports` (see "Engine selection"); `legacy` is deprecated.
+> **Status (audited against integ-decl `d3a202c4`, 2026-10-07).** The only
+> engine is `ports` (see "Engine selection"); the legacy engine was removed.
 > `strict-avg` has real-model GPU and recovery evidence on both engines. The
 > `decoupled` preset has source and automated protocol/oracle coverage and a
 > fixed LR schedule (`fix-decoupled-lr-schedule`); its GPU re-run (task 3.2 of
@@ -39,7 +39,7 @@ The supported model and runtime contract is deliberately narrow:
 | rollout | colocated SGLang (ports also offers `--rl-placement fixed-partition` for LoRA, used by the multi-node and elastic paths) |
 | optimization | GRPO plus the declared GRPO-family mechanisms (see "Algorithm status matrix"); critic algorithms (PPO, VAPO, SAO, CompactionRL) are single-island G1 only |
 | island size | one or more nodes and one or more GPUs per node |
-| parallelism | legacy path: TP = PP = CP = 1; on `ports` the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1; multi-island outer sync with TP > 1 LoRA is not verified here); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
+| parallelism | the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1; multi-island outer sync with TP > 1 LoRA is not verified here); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
 | membership | fixed logical island IDs `0..M-1`, `M >= 1` |
 | wire format | f32 |
 | global weighting | complete roster, equal learner weight |
@@ -53,7 +53,7 @@ fallback.
 
 The following remain outside this boundary:
 
-- full-parameter (legacy path only), critic LoRA (`critic.param_mode=lora` is refused) or diffusion RL;
+- critic LoRA (`critic.param_mode=lora` is refused) or diffusion RL;
 - TP>1 or PP>1 LoRA gather/scatter;
 - expert-sharded LoRA tensors;
 - trajectory migration across policy snapshots;
@@ -279,7 +279,7 @@ on Miles' implicit default, whose horizon is
 
 | Preset | `--lr-decay-style` | `--lr-decay-iters` | `--lr-warmup-iters` | `--min-lr` |
 |--------|--------------------|--------------------|---------------------|------------|
-| `strict-avg`, `dense-full` | `linear` | `global_rounds x optimizer_steps` | `0` | `0` |
+| `strict-avg`, `full-parameter` (alias `dense-full`) | `linear` | `global_rounds x optimizer_steps` | `0` | `0` |
 | `decoupled` | `constant` | `global_rounds x optimizer_steps` (unused; satisfies Megatron's `lr_decay_steps > 0`) | `0` | `0` |
 | eval-only | not passed | | | |
 
@@ -306,10 +306,7 @@ on Miles' implicit default, whose horizon is
 actually applied, read from `optimizer.param_groups[*]["lr"]` before Miles
 advances the scheduler. (`train/lr` is Miles' post-step value, i.e. the next
 step's learning rate.) Ports records it in the state plugin's
-`train_one_step` recorder; legacy through Miles'
-`--custom-megatron-before-train-step-hook-path`, using the combined hook
-`yeto.rl.applied_lr.before_train_step`, which also runs the gradient audit
-hook when `YETO_RL_AUDIT_GRADS=1`. If a round applied learning rate 0 and the
+`train_one_step` recorder. If a round applied learning rate 0 and the
 island will keep training, the round fails with
 `rl_strict_failure metric=zero_lr_before_final_round` (naming the local round
 and the learning rate) and is not submitted to the syncer. The final round is
@@ -367,6 +364,123 @@ Add the following for decoupled synchronization:
 
 The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
 claimed to be optimal for every model.
+
+### Which island reads which rows of `--data`
+
+Row `i` is the 0-based number of a row of `--data`, in the order the rows are
+read. The launcher decides which rows each island reads, prints the rule
+(`[launcher] data split (...)`) and records it in the run manifest and the
+dry-run plan (`data_split`); each island records its slot in `rl_driver_start`
+(`data_slot`). The rules are in `yeto/rl/engine/data_split.py`.
+
+- Islands that generate and train (the default sample role), two or more of
+  them: by default (`--rl-data-split auto`) they claim their rows from the
+  task dispenser (below) when the launch can use it. Otherwise (verl, the
+  SAO streaming preset, no syncer, `--rl-elastic`, `--syncer-shards > 1`, Miles fully_async, island
+  round cuts, `--eval-only`; the launch log names the reason), and with
+  `--rl-data-split stride`, the island with learner id `k` of `N` reads the
+  rows with `i % N == k`, in data order. The
+  launcher sends each island `--rl-data-slot k/N`; the island keeps only those
+  rows when it writes its prompt file, for a local JSONL file and a Hub
+  dataset, on Miles and on verl. Each kept row carries its row number as
+  `metadata.yeto_data_row` (verl: `extra_info.yeto_data_row`). In round `r`
+  the `N` islands together read the rows that `N` rounds of one island would
+  read.
+- After its last row an island starts the next pass over its own rows. Pass 0
+  is data order; every later pass is reshuffled with a seed made from `--seed`
+  and the pass number (Miles). verl keeps its own sampler, which shuffles every
+  pass with `--seed`.
+- `--rl-island-tasks` replaces the split with your task lists. Lists that name
+  the same task on two islands get a warning.
+- `--rl-data-split shared` gives every island every row in the same order (the
+  behaviour before S27). Use it only for controlled experiments: the launch
+  prints a warning, because every island then trains the same prompts in every
+  round. `--external-learners` also falls back to `shared`, with the same
+  warning.
+- Sampler islands always read their own slots (sampler `k` of `S`:
+  `i % S == k`); trainers that read the sample buffer read buffer lanes.
+- The slots are fixed at launch. A relaunched or re-joined island keeps its
+  learner id and so its rows. Known limits: the rows of an island that left
+  are read by no other island, and an island added after the launch gets no
+  slot.
+- A full-parameter island restarts its round counter at 0 in every process.
+  With `--rl-checkpoint-store` it keeps its data position after every round
+  under `<store>/data-positions/`, and a process that joins the running pool
+  continues at the next row of its slot (`rl_data_position_restored`). Without
+  a store a relaunched island reads its rows from the first row again (the
+  launch warns for an island pool).
+- `--rl-data-split dispense` (S27 P2; the `auto` choice since its GPU checks): the actor
+  syncer hands out the rows (`--dispense`, docs/PROTOCOL.md "Task
+  dispenser"). Every island writes every row into its prompt file, then claims
+  a block of positions per round from the syncer and trains those rows only.
+  No row goes to two islands; a fast island claims more often, so it trains
+  more rows and never waits for a slow one; the rows a relaunched, preempted
+  or silent island did not finish go first to the next claim of any island;
+  an island added later just claims. A row counts as trained only after its
+  round trained and passed the sync boundary (the driver commits the round,
+  `rl_dispense_commit`); an island process that dies earlier leaves the
+  round's rows to the next claim (a row is trained twice only when the
+  process dies between the boundary and the syncer's answer to the commit).
+  Position `p` is row
+  `pass_order(rows, --seed, p // rows)[p % rows]`: pass 0 in data order, every
+  later pass reshuffled. A row whose group is too stale to train can be given
+  out again (`--rl-dispense-max-redo`, default 1); `--rl-data-passes N` ends
+  the data after N passes (default: unlimited): an island that cannot fill
+  a batch any more gives its rows back and ends FINISHED (`rl_data_ended`;
+  a full-parameter island of asynchronous rounds leaves without the final
+  cut). Only for islands that may end on their own (asynchronous rounds or
+  an island pool; a strict roster is refused at launch). The rows of the last
+  incomplete batches are not trained. The syncer logs every grant
+  and report in `~/yeto-output/task-dispense.jsonl`;
+  `python -m tools.eval.dispense_check` replays it (no row granted twice,
+  none trained twice, every row accounted for). The launcher next to the
+  syncer copies the log and its check into the run directory
+  (`task-dispense.jsonl`, `dispense-check.json`, one `[launcher] task
+  dispenser:` line); `yeto launch --controller head` pulls both from the head
+  when the head job ends. Miles only, not with
+  fully_async rollouts, island round cuts or a sharded head (refused at
+  launch).
+- Data mix and task labels (S27 P3, with `--rl-data-split dispense` only):
+  `--data-mix 'a.jsonl=0.7,org/ds@rev=0.3'` (instead of `--data`) names
+  several prompt data sets and their weights. The launcher writes their rows,
+  source by source, into one prompt file in the run directory
+  (`data-mix.jsonl`, each row with `metadata.yeto_data_source`), which becomes
+  the run's `--data`; the islands get the weights (`--rl-dispense-mix`). The
+  dispenser keeps one stream per source and interleaves them by weight: while
+  every island takes every stream, any prefix of the rows given out is within
+  one row of the weights, so every island's rows are within one block of
+  them. `--rl-island-task-labels 'l0=web;l1=pwn,crypto'` gives island M only
+  the rows whose `task_label` (top level or metadata) is one of its labels
+  (`-`: rows without a label); an island not listed takes every row. The
+  streams are then one per (source, label). The launch fails when a row label
+  is taken by no island or a listed label is on no row (the launcher reads
+  `--data` for this), and warns that the tokens^2/steps merge weight favours
+  islands of long answers (compare `--rl-sync-learner-weight equal`). With
+  labels the mix of the rows trained follows the islands' speeds.
+  `--rl-data-passes N` counts per stream, so near the end of a mix the
+  streams that still have rows go on alone. `dispense_check` reports per
+  stream (rows given out, trained, dropped, released, reclaimed, the share of
+  each against its weight, `mix_error`) and per island the rows of each
+  stream it trained (`--prompts` for the tape check).
+- Sampler islands on the dispenser (S27 P4): in a synced group
+  (`--rl-sample-role trainer --rl-island-sample-role M:sampler`, a syncer)
+  `--rl-data-split dispense` makes the sampler islands claim their rows from
+  the group's actor syncer instead of their fixed slots (`--rl-data-dispense
+  --rl-dispense-addr $SYNCER_ADDR`). No row goes to two samplers; a fast
+  sampler claims more; a sampler reports a row once its group is in the
+  sample buffer, so a preempted sampler's unwritten rows go first to the next
+  claim (at once when the same sampler id is relaunched, else after
+  `--rl-dispense-lease-s`); a sampler launch of its own over the same store
+  joins with `--rl-sample-role sampler --rl-single-island-no-sync
+  --rl-data-split dispense --rl-dispense-addr HOST:PORT` (the group's actor
+  syncer; the same `YETO_ISLAND_HMAC_KEY`) and just claims. Its sampler id
+  (`--rl-sampler-node`) must be new to the buffer: it writes its own shard,
+  which the trainers merge like every shard they find (the data end still
+  waits only for the shards the group launched with). The buffer trainers keep reading the buffer; the groups they
+  pass over as too stale are logged with their dispenser positions
+  (`rl_buffer_stale_skipped.stale_positions`), not given out again.
+  Refused: a store-coupled pair or a convertible pool (no syncer), and
+  `--rl-data-passes` (the samplers keep their round counts).
 
 ### Clouds, controller and images
 
@@ -687,11 +801,31 @@ not add roster shrinking or a new fleet restart controller. Syncer restart can
 resume when its checkpoint disk survives; losing that VM and disk remains a
 deployment-level durability gap.
 
+### Verify-ahead of received broadcasts
+
+A trainer apply re-checks every replaced fragment's stored chunks (finite
+FP32 values, chunk hashes, fragment digest) in its prepare. With
+`--rl-sync-verify-ahead auto` (default) each island runs that same check
+(Miles `verify_stored_fragment_chunks`) on a background thread as soon as a
+broadcast is stored, and the apply at the next boundary names the checked
+fragments (`verified_fragments`), so the trainer reads none of their chunks;
+a fragment whose check is still running is checked by the trainer as before,
+and a failed check fails the apply before the trainer changes. The applied
+values are the same either way. It needs a trainer Miles with the
+`verified_apply` transport; `--rl-sync-verify-ahead off` (island
+`--sweep-verify-ahead off`) or `YETO_FULL_PARAMETER_VERIFY_AHEAD=0` keeps the
+check on the trainer. Each `rl_full_parameter_round` event reports
+`sync/apply_verified_ahead` and `sync/apply_verify_pending`.
+
 ## Finalization and Export
 
 At `T=N*P`, the syncer stops ordinary pulls, persists the quiescent cut, and
-sends all f32 final fragments plus an exact manifest. At the next safe
-boundary, each island:
+sends all f32 final fragments plus an exact manifest. (Full-parameter
+asynchronous rounds send the manifest only unless islands evaluate or
+`--rl-sync-final-cut download` is set: each island then drains its pushes and
+ACKs the manifest without applying a final cut; the final parameters stay in
+the syncer checkpoint. See PROTOCOL.md, "Manifest-only final cut".) At the
+next safe boundary, each island:
 
 1. stops ordinary fragment submission;
 2. assembles and applies the complete final cut;
@@ -774,65 +908,45 @@ identity keeps the normal in-phase recovery behavior instead.
 
 ## Engine selection
 
-`--rl-engine {legacy,ports}` selects how an island drives Miles. It is accepted
-by `yeto launch`, `python3 -m yeto.rl.adapters.miles.island_entry`, the SSH harness (through the
-launch arguments), `scripts/benchmark_rl.py` and `yeto-rl-export`. The default
-is `ports`; the choice is never inferred from the model, island count or other
-flags, is fixed before startup, and does not change during a run.
+The Miles islands run one engine path, `ports`: Yeto's `IslandDriver`
+(`yeto/rl/engine/driver.py`) owns the island loop and uses upstream Miles as a
+library through role ports. The legacy engine (the agentenv Miles fork driven
+by its own `train.py` through `MilesPolicySync`, with the bundled
+`MILES_COMMIT` source) was removed by `rl-code-quality-cleanup` 1.10 together
+with its pins, bundle, image default and `--rl-engine legacy`. `--rl-engine`
+still parses and accepts only `ports`, so existing commands keep working; the
+launcher no longer forwards it.
 
-`legacy` stays available for one release as an explicit opt-in: pass
-`--rl-engine legacy` to keep the agentenv fork path, which is still required
-for every combination outside the ports boundary below (SAO, `dense-full` /
-full-parameter, the DeepSeek V4 recipe, critic / non-GRPO estimators, fixed
-partition, non-causal models) and for the benchmark's `native` arm. Because the
-default is `ports`, such a run without the flag now fails before startup with a
-message naming `--rl-engine legacy` instead of silently taking the fork path.
-The legacy path is deprecated and is removed after task 7.2 of the
-`rl-engine-ports` change; migrate LoRA/GRPO runs to `ports`.
-
-| path | engine source | who owns the island loop |
-| --- | --- | --- |
-| `legacy` (explicit, deprecated) | `agentenv/miles` fork at `MILES_COMMIT`, installed from the bundled git bundle | Miles `train.py`; Yeto plugs in through the external policy sync callback (`MilesPolicySync`) |
-| `ports` (default) | `michaellchung/miles` at `MILES_NEXT_COMMIT` (`c35702ee`) and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT` (`4e4148f1`), baked into `MILES_NEXT_IMAGE` (no bundle) | Yeto's `IslandDriver` (`yeto/rl/engine/driver.py`); upstream Miles is used as a library through role ports |
-
-Each path pins and verifies its own source (repository, commit, clean detached
-checkout, import path) before any model is loaded; changing one pin group never
-touches the other. With `ports`, the learner calls
-`verify_miles_revision(..., expected=MILES_NEXT_PINS)`.
-
-With `legacy`, source preparation, events, plans and exported provenance are
-byte-for-byte what they were before the flag existed (a legacy SSH plan has no
-`rl_engine` key, so its digest is unchanged, and a legacy benchmark resume
-identity has no `rl_engine` field, so existing legacy runs still resume with
-`--rl-engine legacy`). The one difference is that the learner command now
-carries `--rl-engine legacy` explicitly, because the learner's own default is
-`ports`. With `ports` (explicit or default), the selection is recorded: the
-learner command carries `--rl-engine ports`, the
-island tape starts with an `rl_engine_selected` event (`rl_engine=ports`, Miles
-commit, `rl/algorithm_spec_sha256`, placement), the SSH plan carries
-`"rl_engine": "ports"`, launcher provenance carries `rl_engine`, and
-`yeto_rl_provenance.json` of the exported adapter contains `"rl_engine": "ports"`.
-
-### Ports boundary (R0)
-
-`ports` supports exactly: causal LM + LoRA, GRPO, serial colocated execution,
-and the `strict-avg` and `decoupled` presets. Everything else is rejected
-before startup with a message pointing at `--rl-engine legacy`:
-
-| rejected on `ports` | detected from |
+| engine source | who owns the island loop |
 | --- | --- |
-| full-parameter / `dense-full` | `--parameter-mode full`, `--sync-preset dense-full`, `--tuning full` |
-| SAO streaming compaction | an `sao*` preset or `--sao-*` Miles arguments |
-| DeepSeek V4 recipe | `--rl-model-recipe deepseek-v4-flash`, `attention-routed-experts`, `--expert-full-count > 0` |
-| critic / non-GRPO | `--use-critic`, `--advantage-estimator` other than `grpo` or `ppo` (PPO goes through the algorithm spec and the critic checks, see "Critic family") |
-| fixed partition | `--rollout-num-gpus` (dedicated rollout GPUs) |
+| `michaellchung/miles` at `MILES_NEXT_COMMIT` and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT`, baked into `MILES_NEXT_IMAGE` (no bundle) | Yeto's `IslandDriver`; upstream Miles is used as a library through role ports |
+
+The learner verifies its source (repository, commit, clean detached checkout,
+import path) before any model is loaded
+(`yeto.rl.adapters.miles.revision.verify_miles_revision`, pins
+`MILES_NEXT_PINS`). The island tape starts with an `rl_engine_selected` event
+(`rl_engine=ports`, Miles commit, `rl/algorithm_spec_sha256`, placement), the
+SSH plan carries `"rl_engine": "ports"`, launcher provenance carries
+`rl_engine`, and `yeto_rl_provenance.json` of the exported adapter contains
+`"rl_engine": "ports"`.
+
+### Ports boundary
+
+`yeto.rl.engine.selection.ports_rejections` lists every combination that is
+refused before startup, each with its reason: non-causal models, full-parameter
+training under elastic island scheduling (the elastic syncer has no fragment
+frames yet), expert-full tuning without the `full-parameter` sync preset,
+`--use-critic` or an advantage estimator other than GRPO/PPO, and fixed
+partition requested through pass-through argv instead of `--rl-placement
+fixed-partition`. Full-parameter training (`--rl-sync-preset full-parameter`,
+alias `dense-full`), SAO streaming (`sao-streaming-full`) and the DeepSeek V4
+recipe run on `ports`.
 
 The ports Miles translation also rejects fork-only options with no upstream
 equivalent (`--rollout-engine-base-port`, `--train-master-base-port`,
 `--sglang-router-prometheus-port`, `--custom-agent-function-path`,
 `--tito-allowed-append-roles`) and all Miles fault-tolerance flags. The
-benchmark's `native` arm measures stock Miles' own loop and is rejected with
-`--rl-engine ports`.
+benchmark's `native` arm (stock Miles' own loop) is rejected.
 
 ### Algorithm specs (`--rl-algorithm-spec`)
 
@@ -1018,8 +1132,7 @@ Visible default-path changes on `ports` (no algorithm option given):
 The Miles argv of default GRPO is byte-identical to R0.
 
 `yeto-rl-export --rl-algorithm-spec PATH` writes `algorithm_spec`, the
-canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
-legacy provenance is unchanged.
+canonical JSON, and `algorithm_spec_sha256` to the provenance.
 
 **Event tapes of Modal islands.** A Modal island's `~/yeto-output` cannot be
 fetched. So every ports Modal island, and every `--rl-single-island-no-sync`
@@ -1045,6 +1158,8 @@ the run exit 3. A synced run still fetches its checkpoint first.
 | 4 | a fixed-roster RL island could not be recovered |
 | 5 | the Modal app was not confirmed stopped after teardown |
 | 6 | the run stalled: no island event for `--rl-stall-timeout` seconds (default 900, 0 disables) and not every island finalized |
+| 7 | Modal moved an island to a different container mid-run |
+| 8 | the trainer scheduler gave up: `--rl-trainer-max-failures` (default 3) trainer incarnations failed in a row |
 
 For exit 5, every row of `modal app list` with the run's app name must be
 `stopped` with 0 tasks; an earlier run's row with the same name counts too.
@@ -1760,20 +1875,12 @@ python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
   --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
   --data openai/gsm8k --data-revision e53f048856ff4f594e959d75785d2c2d37b678ee \
   --reward-function project.rewards:score \
-  --islands 2 --arms single,federated,decoupled --rl-engine legacy --dry-run
-
-python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
-  --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
-  --data openai/gsm8k --data-revision e53f048856ff4f594e959d75785d2c2d37b678ee \
-  --reward-function project.rewards:score \
   --islands 2 --arms single,federated,decoupled --dry-run
 ```
 
-The second command (default engine, `ports`) prints the same plan followed by
-`RL_ENGINE ports`. Without `--arms`, `ports` plans `single,federated,decoupled`
-and `legacy` plans all four arms including `native`; explicitly adding the
-`native` arm to a ports run exits with an error naming
-`--arms single,federated,decoupled`.
+The command prints the plan followed by `RL_ENGINE ports`. Without `--arms`
+it plans `single,federated,decoupled`; explicitly adding the `native` arm
+exits with an error naming `--arms single,federated,decoupled`.
 
 ### Train/inference mismatch corrections
 
@@ -2079,14 +2186,11 @@ controller of `rl-infra-spec`. What exists today:
 
 ## Benchmark
 
-[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to four local,
-equal-hardware real-Miles arms. The `native` arm is stock Miles' own loop and
-needs `--rl-engine legacy`; with the default `ports` engine the default arm set
-is `single,federated,decoupled`:
+[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to three local,
+equal-hardware real-Miles arms (default: all of `single,federated,decoupled`):
 
 | arm | purpose |
 | --- | --- |
-| `native-miles-mM` | native Miles with no Yeto synchronization |
 | `yeto-single-mM` | one strict Yeto island using all `M*G` GPUs |
 | `yeto-federated-mM` | strict full-roster FedAvg across `M` islands |
 | `yeto-decoupled-mM` | decoupled fragment synchronization across `M` islands |
@@ -2103,7 +2207,7 @@ The report includes held-out reward and pass@k, KL/ESS/clip fraction, rollout,
 train, hook and finalization time, artifact-ready time, trajectories and action
 tokens per second, GPU-hours, time-weighted GPU activity/utilization, realized
 `H`, PULL-to-PUSH latency, BCAST queue time, fragment payload traffic,
-responder count, and deltas versus native, single-island, and strict federation
+responder count, and deltas versus single-island and strict federation
 controls.
 
 The harness uses real SGLang generation, the selected real reward callable,
@@ -2161,7 +2265,7 @@ The implementation is intentionally confined to the RL boundary:
 | --- | --- |
 | `yeto/rl/core.py` | canonical LoRA, deterministic RL fragments, policy snapshots |
 | `yeto/rl/decoupled.py` | raw anchors, BCAST/PULL/PUSH state, final cut and benchmark consolidation |
-| `yeto/rl/adapters/miles/legacy/engine.py` | rollout-token validation, safe-boundary hook, island checkpoint |
+| `yeto/rl/engine/driver.py`, `yeto/rl/engine/bridges.py` | island loop, outer-sync sessions, island progress |
 | `yeto/rl/adapters/miles/island_entry.py` | Miles argument mapping and runtime configuration |
 | `yeto/rl/export.py` | authoritative checkpoint to standard PEFT |
 | `yeto/rl/initial_adapter.py` | validated Decoupled PEFT policy warm start |

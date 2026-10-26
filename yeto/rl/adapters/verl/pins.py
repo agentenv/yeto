@@ -6,6 +6,9 @@ from the fork's own ``uv.lock`` (``uv sync --frozen --all-packages --extra vllm
 --extra fsdp``), the same recipe as upstream ``docker/Dockerfile.uv.cu130``.
 """
 
+import os
+from pathlib import Path
+
 VERL_REPOSITORY = "https://github.com/michaellchung/verl"
 VERL_COMMIT = "acad9875a8bdfc81afbcb0a50d146b2630f44093"
 VERL_BASE_IMAGE = "nvidia/cuda:13.0.2-devel-ubuntu24.04"
@@ -19,6 +22,10 @@ EXPECTED_VERSIONS = {
     "transformers": "5.12.1",
     "peft": "0.19.1",
 }
+
+# yeto's object-store client (s3:// and oss:// checkpoint stores: yeto.cloud.s3_store),
+# not in the fork's uv.lock; the same pin as yeto's pyproject (a test keeps them equal).
+STORE_CLIENT_REQUIREMENTS = ("boto3==1.43.104",)
 
 # --- Ascend NPU stack (rl-verl-backend 3.11/3.14) ----------------------------
 #
@@ -73,3 +80,94 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # ``--rl-image`` value that selects the Modal-built verl image (no registry
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
+
+# S27 G-EQ2 (npu1): where the verl checkout lives inside the island's image.
+# The island has to start verl with this directory as the working directory,
+# because verl's fully_async config names its search path relative to it
+# (``fully_async_ppo_trainer.yaml``: ``hydra.searchpath:
+# - file://verl/trainer/config``). Our Modal-built image puts the checkout at
+# VERL_ROOT; a vendor image does not (the official Ascend verl image
+# quay.nju.edu.cn/ascend/verl:verl-8.5.2-910b-ubuntu22.04-py3.11-qwen3-5 has it
+# at /verl), and from the wrong directory hydra fails with "Could not load
+# 'ppo_trainer'". So the directory is resolved at run time, not assumed.
+VERL_ROOT_ENV = "YETO_VERL_ROOT"
+
+
+def verl_root() -> str | None:
+    """The directory to run verl from, or None when none can be found.
+
+    In order: ``$YETO_VERL_ROOT``, the built-in :data:`VERL_ROOT`, then the
+    parent of the importable ``verl`` package (a vendor image). Only a
+    directory that actually holds ``verl/trainer/config`` is returned, so a
+    wrong guess becomes None (verl's own default) instead of a broken cwd."""
+    candidates = [os.environ.get(VERL_ROOT_ENV), VERL_ROOT]
+    try:
+        import verl  # noqa: PLC0415 - absent outside the island image
+
+        if getattr(verl, "__file__", None):
+            candidates.append(str(Path(verl.__file__).resolve().parents[1]))
+    except Exception:  # noqa: BLE001 - import errors are a missing candidate, not a failure
+        pass
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "verl" / "trainer" / "config").is_dir():
+            return candidate
+    return None
+
+
+# --- Megatron engine image (S27 G-DC, V8) ------------------------------------
+#
+# ``--rl-image verl-megatron-build:<commit>``: the FSDP image above plus the
+# fork's ``megatron`` extra (same lock: torch, vLLM and transformers stay the
+# versions asserted above) and the Mamba training kernels the extra does not
+# list (built from source for Hopper, the fork's Nemotron example installs
+# them by hand). Versions the Megatron island asserts on top of
+# EXPECTED_VERSIONS (uv.lock of acad9875; mamba-ssm / causal-conv1d are the
+# versions S27 G-R's import check passed with, NEMOTRON-VERL.md section 2).
+MEGATRON_IMAGE_VARIANT = "megatron"
+VERL_MEGATRON_IMAGE = f"verl-{MEGATRON_IMAGE_VARIANT}-build:{VERL_COMMIT}"
+MAMBA_SSM_VERSION = "2.3.2.post1"
+CAUSAL_CONV1D_VERSION = "1.6.2.post1"
+EXPECTED_VERSIONS_MEGATRON = {
+    "megatron_core": "0.19.2+4b4acac9a",  # the lock builds Megatron-LM at 4b4acac9a (local version)
+    "megatron_bridge": "0.6.2",
+    "transformer_engine": "2.16.1",
+    "mamba_ssm": MAMBA_SSM_VERSION,
+    "causal_conv1d": CAUSAL_CONV1D_VERSION,
+}
+
+
+# --- Megatron engine stack on Ascend (S27 G-FN) -------------------------------
+#
+# The NPU Megatron path is MindSpeed's, not the CUDA image's: a different
+# Megatron-Core, a different Bridge, the NPU Transformer Engine, and MindSpeed
+# itself. These are the versions the npu1 stack actually carries and that the
+# Megatron engine was exercised on there -- the SFT training step at
+# TP=1/PP=2/EP=4 (VERL-MEGATRON-PP.md section 7.9) and the HF boundary round trip
+# over HCCL (section 7.7). They are what the island asserts, not a build it pins:
+# nothing here builds that environment, so a mismatch is a recorded problem (and
+# YETO_VERL_ALLOW_UNPINNED=1 waives it), as for every other pin on this family.
+EXPECTED_VERSIONS_MEGATRON_ASCEND = {
+    "megatron_core": "0.18.2+571370c",
+    "megatron_bridge": "0.5.0",
+    "mindspeed": "0.18.0",
+}
+
+EXPECTED_VERSIONS_MEGATRON_BY_FAMILY = {
+    "nvidia": EXPECTED_VERSIONS_MEGATRON,
+    "ascend": EXPECTED_VERSIONS_MEGATRON_ASCEND,
+}
+
+
+def expected_versions_for_engine(engine: str, device_family: str = "nvidia") -> dict:
+    """Versions an island asserts: the family pins, plus the Megatron stack of this
+    family for the Megatron engine island (the CUDA image's, or MindSpeed's on
+    Ascend). A family with no Megatron stack is an error before launch."""
+    expected = expected_versions(device_family)
+    if engine == "megatron":
+        try:
+            expected.update(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY[device_family])
+        except KeyError:
+            raise ValueError(
+                f"no verl Megatron stack pins for device family {device_family!r}; known: "
+                f"{sorted(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY)}") from None
+    return expected

@@ -9,11 +9,12 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
+from itertools import pairwise
 from typing import Protocol
 
 import torch
 
-from ..fragments import MERGE_AVG, Fragment, FragmentLayout
+from ..fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout
 from .contracts import LocalStepReceipt, TrainerUpdateManifest
 
 _ROLES_BY_ALGORITHM = {
@@ -30,6 +31,46 @@ _PARAMETER_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,511}\Z")
 _SHARD_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
 _GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+# Merge mode of every tensor that is not an embedding-like table, keyed by the
+# public option name. "avg" keeps the established all-average RL layouts.
+MATRIX_MERGES = {"avg": MERGE_AVG, "rda": MERGE_RDA}
+# Megatron global names of the vocabulary tables (input embedding and the
+# untied output projection). Their outer gradients are row-sparse, so they
+# are always direct-averaged.
+_VOCABULARY_TABLE = re.compile(
+    r"(?:^|\.)(?:embedding\.word_embeddings|output_layer)\.weight\Z"
+)
+
+
+def parameter_merge_mode(name: str, matrix_merge: str) -> int:
+    """The syncer merge mode of one canonical parameter.
+
+    Vocabulary tables are direct-averaged; every other tensor (attention,
+    experts, router, norms) uses ``matrix_merge``.
+    """
+
+    if matrix_merge not in MATRIX_MERGES:
+        raise ValueError(
+            f"matrix_merge must be one of {tuple(MATRIX_MERGES)}, got {matrix_merge!r}"
+        )
+    if _VOCABULARY_TABLE.search(name):
+        return MERGE_AVG
+    return MATRIX_MERGES[matrix_merge]
+
+
+def layout_stream_role(algorithm: str, role: str) -> str | None:
+    """The ``stream_role`` a per-role parameter stream lays out with.
+
+    Only role-lane algorithms (SAO) split their roles into separate layouts.
+    A single-role algorithm streams its one role with the plain layout, whose
+    hash carries no role field; ``role`` must still be that algorithm's role.
+    """
+
+    roles = _ROLES_BY_ALGORITHM.get(algorithm)
+    if roles is None or role not in roles:
+        raise ValueError(f"{algorithm!r} has no trainable role {role!r}")
+    return role if algorithm in _ROLE_LANE_ALGORITHMS else None
 
 
 @dataclass(frozen=True, order=True)
@@ -84,6 +125,113 @@ class ParameterSpec:
         return f"{self.role}::{self.shard_id}::{self.name}"
 
 
+@dataclass(frozen=True, order=True)
+class ParameterSlice:
+    """Rows ``[row_start, row_stop)`` of one parameter along dimension 0.
+
+    A layout splits a parameter into slices only when the parameter alone is
+    larger than the fragment bound; every other parameter is one whole slice.
+    """
+
+    spec: ParameterSpec
+    row_start: int
+    row_stop: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.row_start < self.row_stop <= self.spec.shape[0]:
+            raise ValueError(f"invalid row slice of {self.spec.wire_name!r}")
+
+    @property
+    def is_whole(self) -> bool:
+        return self.row_start == 0 and self.row_stop == self.spec.shape[0]
+
+    @property
+    def row_numel(self) -> int:
+        return self.spec.numel // self.spec.shape[0]
+
+    @property
+    def numel(self) -> int:
+        return (self.row_stop - self.row_start) * self.row_numel
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (self.row_stop - self.row_start, *self.spec.shape[1:])
+
+    @property
+    def flat_range(self) -> tuple[int, int]:
+        return self.row_start * self.row_numel, self.row_stop * self.row_numel
+
+    @property
+    def tensor_name(self) -> str:
+        """The fragment tensor name; a whole parameter keeps its wire name."""
+
+        if self.is_whole:
+            return self.spec.wire_name
+        return f"{self.spec.wire_name}#rows={self.row_start}:{self.row_stop}"
+
+    # The owner-affine grouping reads these through the spec.
+    @property
+    def role(self) -> str:
+        return self.spec.role
+
+    @property
+    def shard_id(self) -> str:
+        return self.spec.shard_id
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+
+def split_parameter_specs(
+    specs: Sequence[ParameterSpec],
+    max_numel: int | None,
+) -> tuple[ParameterSlice, ...]:
+    """Split every parameter above ``max_numel`` into balanced row slices.
+
+    The slice count is the smallest one whose largest slice fits the bound;
+    row boundaries are ``rows * i // count``. ``None`` splits nothing.
+    """
+
+    slices = []
+    for spec in sorted(specs):
+        rows = spec.shape[0]
+        if max_numel is None or spec.numel <= max_numel:
+            slices.append(ParameterSlice(spec, 0, rows))
+            continue
+        row_numel = spec.numel // rows
+        if row_numel > max_numel:
+            raise ValueError(
+                f"one dimension-0 row of {spec.wire_name!r} exceeds the fragment bound"
+            )
+        count = -(-spec.numel // max_numel)
+        while -(-rows // count) * row_numel > max_numel:
+            count += 1
+        bounds = [rows * index // count for index in range(count + 1)]
+        slices.extend(
+            ParameterSlice(spec, start, stop)
+            for start, stop in pairwise(bounds)
+        )
+    return tuple(slices)
+
+
+def _join_adjacent_slices(members: Sequence[ParameterSlice]) -> list[ParameterSlice]:
+    """Join neighbouring slices of one parameter that share a fragment."""
+
+    joined: list[ParameterSlice] = []
+    for member in members:
+        previous = joined[-1] if joined else None
+        if (
+            previous is not None
+            and previous.spec == member.spec
+            and previous.row_stop == member.row_start
+        ):
+            joined[-1] = ParameterSlice(member.spec, previous.row_start, member.row_stop)
+        else:
+            joined.append(member)
+    return joined
+
+
 @dataclass(frozen=True)
 class ParameterLayout:
     """Deterministic role-qualified layout shared by dense and PULSE exchange."""
@@ -99,6 +247,11 @@ class ParameterLayout:
         compare=False,
     )
     stream_role: str | None = None
+    _slices_by_tensor_name: Mapping[str, ParameterSlice] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def create(
@@ -110,7 +263,21 @@ class ParameterLayout:
         num_fragments: int,
         fragment_strategy: str = "balanced",
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
+        max_fragment_numel: int | None = None,
     ) -> ParameterLayout:
+        """Lay ``specs`` out as ``num_fragments`` fragments.
+
+        ``matrix_merge`` other than "avg" requires the owner-affine strategy:
+        its fragments never mix merge modes, so each fragment carries one.
+
+        ``max_fragment_numel`` (owner-affine only) splits a parameter larger
+        than the bound into dimension-0 row slices (see
+        ``split_parameter_specs``). A slice is its own fragment tensor, named
+        ``<wire_name>#rows=<start>:<stop>``: the syncer merges it as one
+        tensor, so an RDA parameter that is split gets RDA per row slice.
+        A layout that splits nothing keeps its hash.
+        """
         if algorithm not in _ROLES_BY_ALGORITHM:
             raise ValueError(f"unsupported local RL algorithm: {algorithm!r}")
         if stream_role is not None and (
@@ -141,25 +308,51 @@ class ParameterLayout:
             raise ValueError("parameter layout must contain unique parameters")
         if fragment_strategy not in {"balanced", "owner_affine"}:
             raise ValueError("unsupported parameter fragment strategy")
-        owners = sorted({(spec.role, spec.shard_id) for spec in ordered_specs})
-        minimum_fragments = 1 if fragment_strategy == "balanced" else len(owners)
-        if num_fragments < minimum_fragments or num_fragments > len(ordered_specs):
+        if matrix_merge not in MATRIX_MERGES:
+            raise ValueError(
+                f"matrix_merge must be one of {tuple(MATRIX_MERGES)}, got {matrix_merge!r}"
+            )
+        if matrix_merge != "avg" and fragment_strategy != "owner_affine":
+            raise ValueError("a non-average matrix merge requires owner-affine fragments")
+        if max_fragment_numel is not None and (
+            fragment_strategy != "owner_affine"
+            or type(max_fragment_numel) is not int
+            or max_fragment_numel < 1
+        ):
+            raise ValueError("parameter splitting needs an owner-affine positive bound")
+        units = split_parameter_specs(ordered_specs, max_fragment_numel)
+        if fragment_strategy == "balanced":
+            minimum_fragments = 1
+        else:
+            minimum_fragments = owner_affine_minimum_fragments(ordered_specs, matrix_merge)
+        if num_fragments < minimum_fragments or num_fragments > len(units):
             raise ValueError("parameter fragment count is outside the layout")
 
         if fragment_strategy == "balanced":
-            bins = _binpack_parameter_specs(ordered_specs, num_fragments)
+            bins = [
+                [ParameterSlice(spec, 0, spec.shape[0]) for spec in members]
+                for members in _binpack_parameter_specs(ordered_specs, num_fragments)
+            ]
         else:
-            bins = _owner_affine_parameter_bins(ordered_specs, num_fragments)
+            bins = [
+                _join_adjacent_slices(members)
+                for members in _owner_affine_parameter_bins(units, num_fragments, matrix_merge)
+            ]
         fragments = FragmentLayout(
             [
                 Fragment(
-                    merge_mode=MERGE_AVG,
-                    tensors=[(spec.wire_name, spec.numel) for spec in members],
-                    identity_shapes={spec.wire_name: spec.shape for spec in members},
+                    # Owner-affine bins never mix merge modes (see
+                    # _merge_groups), so the first member decides.
+                    merge_mode=parameter_merge_mode(members[0].name, matrix_merge),
+                    tensors=[(unit.tensor_name, unit.numel) for unit in members],
+                    identity_shapes={unit.tensor_name: unit.shape for unit in members},
                 )
                 for members in bins
             ]
         )
+        slices_by_tensor_name = {
+            unit.tensor_name: unit for members in bins for unit in members
+        }
         payload = {
             "schema": 1 if fragment_strategy == "balanced" else 2,
             "algorithm": algorithm,
@@ -172,6 +365,11 @@ class ParameterLayout:
         }
         if fragment_strategy != "balanced":
             payload["fragment_strategy"] = fragment_strategy
+        if matrix_merge != "avg":
+            # All-average layouts keep their established identities.
+            payload["merge_modes"] = [
+                fragment.merge_mode for fragment in fragments.fragments
+            ]
         if stream_role is not None:
             # A role lane must never collide with either the combined SAO layout
             # or a structurally identical actor-only GRPO layout.
@@ -202,15 +400,31 @@ class ParameterLayout:
             fragment_strategy=fragment_strategy,
             stream_role=stream_role,
             _specs_by_wire_name={spec.wire_name: spec for spec in ordered_specs},
+            _slices_by_tensor_name=slices_by_tensor_name,
         )
 
-    def fragment_specs(self, fragment_id: int) -> tuple[ParameterSpec, ...]:
+    @property
+    def has_split_parameters(self) -> bool:
+        return any(not unit.is_whole for unit in self._slices_by_tensor_name.values())
+
+    def fragment_slices(self, fragment_id: int) -> tuple[ParameterSlice, ...]:
+        """The row slices of one fragment, in fragment tensor order."""
+
         if not 0 <= fragment_id < self.fragments.num_fragments:
             raise ValueError("parameter fragment ID is outside the layout")
         return tuple(
-            self._specs_by_wire_name[name]
+            self._slices_by_tensor_name[name]
             for name, _ in self.fragments.fragments[fragment_id].tensors
         )
+
+    def fragment_specs(self, fragment_id: int) -> tuple[ParameterSpec, ...]:
+        """The whole parameters of one fragment's tensors.
+
+        A split parameter appears in every fragment that holds a slice of it;
+        callers that need the element range use ``fragment_slices``.
+        """
+
+        return tuple(unit.spec for unit in self.fragment_slices(fragment_id))
 
     def fragment_owner(self, fragment_id: int) -> tuple[str, str]:
         """Return the unique role/topology owner of an owner-affine fragment."""
@@ -223,79 +437,6 @@ class ParameterLayout:
         if len(owners) != 1:
             raise RuntimeError("owner-affine parameter fragment mixes owners")
         return next(iter(owners))
-
-
-def dense_sweep_session_contract_hash(
-    layout: ParameterLayout,
-    *,
-    policy_rounds: int,
-    learner_generations: Mapping[int, int],
-    training_contract_hash: str = "0" * 64,
-    backend_identity_sha256: str | None = None,
-) -> bytes:
-    """Hash the complete semantic identity of one strict dense-H=1 run.
-
-    ``backend_identity_sha256`` (decoupling 6.2, design D7): the training
-    backend's identity hash enters the contract when given; None keeps the
-    pre-phase-5 payload (and hash) unchanged.
-    """
-
-    if (
-        isinstance(policy_rounds, bool)
-        or not isinstance(policy_rounds, int)
-        or policy_rounds < 1
-    ):
-        raise ValueError("dense policy rounds must be positive")
-    if not isinstance(learner_generations, Mapping) or not learner_generations:
-        raise ValueError("dense learner generations must be a non-empty mapping")
-    if (
-        not isinstance(training_contract_hash, str)
-        or len(training_contract_hash) != 64
-        or any(value not in "0123456789abcdef" for value in training_contract_hash)
-    ):
-        raise ValueError("dense training contract hash must be a lowercase SHA256")
-    roster = []
-    for learner_id in sorted(learner_generations):
-        generation = learner_generations[learner_id]
-        if (
-            isinstance(learner_id, bool)
-            or not isinstance(learner_id, int)
-            or isinstance(generation, bool)
-            or not isinstance(generation, int)
-            or learner_id < 0
-            or generation < 0
-        ):
-            raise ValueError("dense learner roster entries must be non-negative integers")
-        roster.append({"learner_id": learner_id, "generation": generation})
-    if [entry["learner_id"] for entry in roster] != list(range(len(roster))):
-        raise ValueError("dense learner roster must contain contiguous IDs from zero")
-
-    payload = {
-        "schema": 2,
-        "parameter_layout_hash": layout.layout_hash,
-        "training_contract_hash": training_contract_hash,
-        **({} if backend_identity_sha256 is None
-           else {"backend_identity_sha256": backend_identity_sha256}),
-        "components": [asdict(component) for component in layout.components],
-        "profile": {
-            "policy_sweep_fragments": layout.fragments.num_fragments,
-            "policy_rounds": policy_rounds,
-            "wire_dtype": "fp32",
-            "outer_lr": 1,
-            "outer_momentum": 0,
-            "learner_weight": "equal",
-            "quorum": "full",
-            "membership": "fixed",
-            "pipeline": 1,
-            "local_horizon": 1,
-            "delta_correction": "none",
-            "learner_generations": roster,
-        },
-    }
-    return hashlib.sha256(
-        b"yeto-dense-sweep-session-v1\0"
-        + json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).digest()
 
 
 def _binpack_parameter_specs(
@@ -319,44 +460,114 @@ def _binpack_parameter_specs(
     return bins
 
 
-def _owner_affine_parameter_bins(
-    specs: Sequence[ParameterSpec],
-    num_fragments: int,
-) -> list[list[ParameterSpec]]:
-    """Allocate deterministic balanced bins without crossing topology owners."""
+def _merge_groups(
+    specs: Sequence[ParameterSpec | ParameterSlice],
+    matrix_merge: str,
+) -> list[list[ParameterSpec | ParameterSlice]]:
+    """Split specs into owner-affine groups that each have one merge mode.
+
+    A group is a maximal run of one topology owner's canonical spec order with
+    one merge mode. Miles applies an owner's fragments in canonical order, so a
+    group must be contiguous; with "avg" every owner is exactly one group.
+    """
 
     by_owner: dict[tuple[str, str], list[ParameterSpec]] = {}
     for spec in specs:
         by_owner.setdefault((spec.role, spec.shard_id), []).append(spec)
-    owners = tuple(sorted(by_owner))
-    counts = {owner: 1 for owner in owners}
-    totals = {owner: sum(spec.numel for spec in by_owner[owner]) for owner in owners}
-    remaining = num_fragments - len(owners)
+    groups: list[list[ParameterSpec]] = []
+    for owner in sorted(by_owner):
+        previous = None
+        for spec in sorted(by_owner[owner]):
+            mode = parameter_merge_mode(spec.name, matrix_merge)
+            if mode != previous:
+                groups.append([])
+                previous = mode
+            groups[-1].append(spec)
+    return groups
+
+
+def owner_affine_minimum_fragments(
+    specs: Sequence[ParameterSpec],
+    matrix_merge: str = "avg",
+) -> int:
+    """The smallest owner-affine fragment count: one per merge group."""
+
+    return len(_merge_groups(specs, matrix_merge))
+
+
+def fit_owner_affine_layout(
+    *,
+    algorithm: str,
+    components: Sequence[ComponentIdentity],
+    specs: Sequence[ParameterSpec],
+    minimum_fragments: int,
+    max_fragment_bytes: int,
+    stream_role: str | None = None,
+    matrix_merge: str = "avg",
+) -> ParameterLayout:
+    """The owner-affine layout with the fewest fragments, at least
+    ``minimum_fragments``, whose FP32 fragments all fit ``max_fragment_bytes``.
+
+    Parameters above the bound are split into dimension-0 row slices
+    (:func:`split_parameter_specs`). The fit is checked on the bins alone and
+    the layout (and its hash) is built once, for the first count that fits.
+    Pure: the island adapter and offline planning tools call the same function.
+    """
+
+    max_fragment_numel = max_fragment_bytes // 4
+    units = split_parameter_specs(tuple(sorted(specs)), max_fragment_numel)
+    # No count below total / bound can fit, so starting there finds the same layout.
+    by_size = -(-sum(unit.numel for unit in units) // max_fragment_numel)
+    start = max(minimum_fragments, owner_affine_minimum_fragments(specs, matrix_merge), by_size)
+    for count in range(start, len(units) + 1):
+        bins = _owner_affine_parameter_bins(units, count, matrix_merge)
+        if all(sum(unit.numel for unit in members) <= max_fragment_numel for members in bins):
+            return ParameterLayout.create(
+                algorithm=algorithm,
+                components=components,
+                specs=specs,
+                num_fragments=count,
+                fragment_strategy="owner_affine",
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+                max_fragment_numel=max_fragment_numel,
+            )
+    raise RuntimeError("owner-affine layout did not fit the fragment byte bound")
+
+
+def _owner_affine_parameter_bins(
+    specs: Sequence[ParameterSpec | ParameterSlice],
+    num_fragments: int,
+    matrix_merge: str = "avg",
+) -> list[list[ParameterSpec | ParameterSlice]]:
+    """Allocate deterministic balanced bins without crossing merge groups."""
+
+    groups = _merge_groups(specs, matrix_merge)
+    counts = [1] * len(groups)
+    totals = [sum(spec.numel for spec in group) for group in groups]
+    remaining = num_fragments - len(groups)
     while remaining:
-        eligible = [owner for owner in owners if counts[owner] < len(by_owner[owner])]
+        eligible = [index for index in range(len(groups)) if counts[index] < len(groups[index])]
         if not eligible:
             raise RuntimeError("owner-affine fragment allocation is incomplete")
-        # Split the owner with the largest current average bin. ``owners`` is
-        # already canonical, and max() retains the first item on an exact tie.
-        owner = max(
-            eligible,
-            key=lambda value: Fraction(totals[value], counts[value]),
-        )
-        counts[owner] += 1
+        # Split the group with the largest current average bin. Groups are in
+        # canonical order, and max() retains the first item on an exact tie.
+        index = max(eligible, key=lambda value: Fraction(totals[value], counts[value]))
+        counts[index] += 1
         remaining -= 1
 
     bins: list[list[ParameterSpec]] = []
-    for owner in owners:
-        bins.extend(_contiguous_parameter_bins(by_owner[owner], counts[owner]))
+    for group, count in zip(groups, counts, strict=True):
+        bins.extend(_contiguous_parameter_bins(group, count))
     if len(bins) != num_fragments or any(not members for members in bins):
         raise RuntimeError("owner-affine fragment allocation produced empty bins")
     return bins
 
 
 def _contiguous_parameter_bins(
-    specs: Sequence[ParameterSpec],
+    specs: Sequence[ParameterSpec | ParameterSlice],
     num_fragments: int,
-) -> list[list[ParameterSpec]]:
+) -> list[list[ParameterSpec | ParameterSlice]]:
     """Split canonical owner specs into balanced contiguous fragments.
 
     Owner ranks stream and apply their fragments independently.  Keeping the

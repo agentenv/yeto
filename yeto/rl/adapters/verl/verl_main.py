@@ -22,7 +22,25 @@ import sys
 import ray
 
 PLAN_ENV = "YETO_VERL_PLAN"
-FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR")
+# S27 G-EQ2 (npu1): HCCL_ and ASCEND_ join the list because an Ascend island's
+# collective and runtime settings are set on the island process (the launcher's
+# activate script: HCCL_SOCKET_IFNAME, HCCL_CONNECT_TIMEOUT, HCCL_BUFFSIZE,
+# ASCEND_RT_VISIBLE_DEVICES, ASCEND_GLOBAL_LOG_LEVEL ...). Without forwarding,
+# a Ray worker of an already-running cluster starts with none of them and picks
+# the wrong interface or the default buffer size. Neither prefix can carry a
+# cloud credential (secret-handling-hardening: the credential names are
+# AWS_, OSS_, MODAL_, NEBIUS_, HF_TOKEN; HF_ was already here and HF_TOKEN is
+# refused by the island credential guard).
+# S27 G-FS: HARBOR_ and BOAT_API_KEY join the list on the agentic path. The
+# agent-loop worker reads the Harbor task directory, the sandbox provider and
+# the boat account from its own environment (``harbor_agent_loop`` module doc);
+# without forwarding it starts with none of them. BOAT_API_KEY is a credential,
+# so it travels by exact name and only when the plan says the island is agentic
+# (``_runtime_env(agentic=...)``), never through a prefix.
+FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR",
+                        "HCCL_", "ASCEND_")
+AGENTIC_ENV_PREFIXES = ("HARBOR_",)
+AGENTIC_ENV_NAMES = ("BOAT_API_KEY",)
 
 
 @ray.remote(num_cpus=1)
@@ -38,6 +56,9 @@ class YetoTaskRunner:
 
         import yeto.rl.adapters.verl.trainer  # noqa: F401  (registers trainer_mode yeto_sync)
 
+        megatron = plan.get("engine") == "megatron"
+        if megatron or plan.get("separate"):  # S27 G-DC / G-EK: registers trainer_mode yeto_separate
+            import yeto.rl.adapters.verl.separate_trainer  # noqa: F401
         configure_verl_logging()
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
         config.transfer_queue.enable = True
@@ -50,25 +71,68 @@ class YetoTaskRunner:
                 config=config, llm_client=trainer.get_llm_client(),
                 teacher_client=trainer.get_teacher_client(),
                 reward_loop_worker_handles=trainer.get_reward_handles())
+            resolved = OmegaConf.to_container(config, resolve=True)
+            if megatron:
+                from yeto.rl.adapters.verl.megatron_ports import run_megatron_island
+
+                return run_megatron_island(trainer, manager, plan, resolved)
             from yeto.rl.adapters.verl.trainer import run_island
 
-            return run_island(trainer, manager, plan, OmegaConf.to_container(config, resolve=True))
+            return run_island(trainer, manager, plan, resolved)
         finally:
             tq.close()
 
 
-def _runtime_env() -> dict:
+# NCCL host buffers on /dev/shm in every process of the disaggregated weight sync.
+# On Modal one process could use cuMem host buffers while its peer fell back to
+# /dev/shm, and the peer then failed to attach (S26 E0.1 eff01-yeto-verl-async-e,
+# eff01-bare-verl-async-d with NCCL_DEBUG=INFO). The caller's own value wins.
+CUMEM_HOST_ENV = "NCCL_CUMEM_HOST_ENABLE"
+
+
+# Ray assigns each worker its own cards and writes them into this variable, so
+# the driver's value must not be forwarded: a worker would see every card of the
+# node and bind the wrong one (S27 G-EQ2). ``NPU_NOSET_ENV`` below is how an
+# Ascend island keeps the cards visible where Ray would blank them instead.
+NEVER_FORWARD_ENV = ("ASCEND_RT_VISIBLE_DEVICES",)
+
+
+def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
+                 agentic: bool = False) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     env = get_ppo_ray_runtime_env(None)
     env.setdefault("env_vars", {})
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
+    if fully_async:
+        env["env_vars"][CUMEM_HOST_ENV] = os.environ.get(CUMEM_HOST_ENV, "0")
+    if ascend_stack:  # S27 G-FL: install the Ascend plugin stack in every Ray worker
+        from yeto.rl import ascend_plugin_stack
+
+        os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
+        env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
+    if agentic:  # S27 G-FS: register yeto_grpo in every Ray worker (agentic_main's hook)
+        from .agentic_main import SETUP_HOOK
+
+        if env.get("worker_process_setup_hook"):
+            raise RuntimeError("an agentic verl island cannot also install the Ascend plugin hook "
+                               "(Ray takes one worker_process_setup_hook)")
+        env["worker_process_setup_hook"] = SETUP_HOOK
+        for key, value in os.environ.items():
+            if key.startswith(AGENTIC_ENV_PREFIXES) or key in AGENTIC_ENV_NAMES:
+                env["env_vars"][key] = value
     for key, value in os.environ.items():
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
         # credential matches these prefixes (secret-handling-hardening).
-        if key.startswith(FORWARD_ENV_PREFIXES):
+        if key.startswith(FORWARD_ENV_PREFIXES) and key not in NEVER_FORWARD_ENV:
             env["env_vars"][key] = value
+    # S27 G-EQ2: the Ascend NOSET switch is set on the driver by
+    # _keep_npu_visible_in_cpu_actors, but a Ray worker of an already-running
+    # cluster inherits the raylet's environment, not the driver's, so it has to
+    # travel in the runtime env as well (the caller's own value still wins).
+    if os.environ.get(NPU_NOSET_ENV):
+        env["env_vars"].setdefault(NPU_NOSET_ENV, os.environ[NPU_NOSET_ENV])
     return env
 
 
@@ -90,15 +154,22 @@ def _keep_npu_visible_in_cpu_actors() -> None:
         os.environ.setdefault(NPU_NOSET_ENV, "1")
 
 
-def _plan_and_ray() -> dict:
+def _plan_and_ray(fully_async: bool = False) -> dict:
     from yeto.island_credential_guard import check_island_credentials
 
     check_island_credentials()  # secret-handling-hardening D4 (driver, both paths)
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
+    # S27 G-DC: the Megatron island syncs weights over the same disaggregated NCCL
+    # checkpoint engine as the fully_async path, so it gets the same NCCL host setting
+    disaggregated = fully_async or plan.get("engine") == "megatron" or bool(plan.get("separate"))  # S27 G-EK
+    stack = (plan.get("ascend_plugin_stack") or {}).get("root")
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
-        ray.init(address=address, runtime_env=_runtime_env(), namespace="yeto-verl")
+        ray.init(address=address,
+                 runtime_env=_runtime_env(disaggregated, ascend_stack=stack,
+                                          agentic=bool(plan.get("agentic"))),
+                 namespace="yeto-verl")
     return plan
 
 
@@ -106,6 +177,8 @@ def main(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
 
     plan = _plan_and_ray()
+    if plan.get("agentic"):  # S27 G-FS: the driver validates algorithm.adv_estimator too
+        import yeto.rl.adapters.verl.advantage  # noqa: F401  (registers yeto_grpo)
 
     def run_ppo(config, task_runner_class=None):  # replaces verl's: our runner, our plan
         result = ray.get(YetoTaskRunner.remote().run.remote(config, plan))
@@ -125,7 +198,7 @@ def main_fully_async(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
     from verl.experimental.fully_async_policy import fully_async_main as fa_main
 
-    plan = _plan_and_ray()
+    plan = _plan_and_ray(fully_async=True)
 
     def run_ppo(config, task_runner_class=None):
         from yeto.rl.adapters.verl.fully_async_runner import YetoFullyAsyncTaskRunner
@@ -135,6 +208,28 @@ def main_fully_async(argv: list[str] | None = None) -> None:
         print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
 
     main_ppo.run_ppo = run_ppo  # fully_async_main.main imports it at call time
+    if argv is not None:
+        sys.argv = [sys.argv[0], *argv]
+    fully_async_hydra_entry(fa_main)()
+
+
+def main_buffer_trainer(argv: list[str] | None = None) -> None:
+    """S25 C2: the fully_async hydra config and fix-ups as :func:`main_fully_async`,
+    with :class:`~.buffer_trainer_runner.YetoBufferTaskRunner`: a trainer island
+    over the sample buffer (the plan's ``sample_buffer`` section), no rollouter."""
+    import verl.trainer.main_ppo as main_ppo
+    from verl.experimental.fully_async_policy import fully_async_main as fa_main
+
+    plan = _plan_and_ray(fully_async=True)
+
+    def run_ppo(config, task_runner_class=None):
+        from yeto.rl.adapters.verl.buffer_trainer_runner import YetoBufferTaskRunner
+
+        runner = ray.remote(num_cpus=1)(YetoBufferTaskRunner)
+        result = ray.get(runner.remote().run.remote(config, plan))
+        print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
+
+    main_ppo.run_ppo = run_ppo
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
     fully_async_hydra_entry(fa_main)()

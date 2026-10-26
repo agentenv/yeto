@@ -29,11 +29,11 @@ At the first start of a run, the launcher SHALL make one code pack and SHALL wri
 - **THEN** the islands use the pack named in the run manifest
 
 ### Requirement: Strict pack digest handshake
-HELLO and JOIN SHALL carry the code pack digest. The syncer SHALL reject a digest that differs from the run digest, by default.
+The code pack digest SHALL be part of the island contract hash; the frames have no separate field. The syncer SHALL reject a contract that differs from the run contract, by default, and SHALL report "backend identity mismatch".
 
 #### Scenario: Island outside the launcher
 - **WHEN** an island joins with a pack digest that differs from the run digest
-- **THEN** the syncer rejects the JOIN and names both digests
+- **THEN** the syncer rejects the JOIN with "backend identity mismatch"
 
 ### Requirement: Explicit code upgrade
 A run SHALL change its code pack only through an explicit upgrade. The upgrade SHALL be allowed only when the semantic hash of the new pack equals the current one. The run manifest SHALL record the old and the new digest.

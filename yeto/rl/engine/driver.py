@@ -36,8 +36,13 @@ keeps the R0 behaviour byte-for-byte (execution mode label
 * ``partitioned-overlap`` runs only the age-0 overlap implemented in
   ``overlap.py`` (task 2.3): evaluation of the published policy on the rollout
   GPUs overlaps train/outer_sync of the same round and is joined before the
-  next publication. Every other overlap (in particular generation ahead of
-  publication) is refused.
+  next publication. Every other overlap of the execution profile is refused.
+
+Rollout ahead (``rollout_ahead`` module) is opt-in (``rollout_ahead = 1``,
+bounded staleness only): the engines generate the next round's batch with the
+published policy while the trainer trains and runs the sync boundary; the
+driver waits for that batch before the next publication, so a weight update
+never runs while the engines generate. Off, the loop and its tape are unchanged.
 
 Reconfiguration (rl-infra-spec 3.1-3.7) is opt-in (``controller=``): the
 loop offers the :class:`~yeto.rl.engine.controller.IslandController` one safe
@@ -57,11 +62,13 @@ tape is identical to the R0 driver's.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from contextlib import contextmanager
 import math
+import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -71,8 +78,11 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
+from yeto.rl.pool_client import LeaveReason
 
+from . import phase_profile
 from .algorithm import AlgorithmSpec
+from .buffer_payload import data_end_kind
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -83,6 +93,9 @@ from .execution_profile import (
     require,
     train_blockers,
 )
+from .engine_outage import EnginesLost
+from .leave_reason import leave_reason_for
+from .offpolicy_correction import OFFPOLICY_GATE_EVENT, gate_from_carry_over
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
@@ -93,6 +106,10 @@ from .ports import (
     RolloutPool,
     TrainerGroup,
 )
+from .policy_versions import PolicyVersionConflict, PublishedPolicies
+from .rollout_ahead import EVENT as ROLLOUT_AHEAD_EVENT
+from .rollout_ahead import PendingBatch
+from .rollout_ahead import driver_problems as rollout_ahead_problems
 from .trainable_state import TrainableState, require_supported_layout
 
 EXECUTION_MODE = "colocated-serial"
@@ -117,6 +134,8 @@ _PHASE_ROLE = {
     "publish": "trainer+rollout",
     "eval": "rollout",
     "offload": "trainer",
+    "checkpoint": "trainer",
+    "rollout_offload": "rollout",
     "onload": "trainer",
 }
 _PHASE_TASK = {"sync": "outer_sync"}
@@ -124,14 +143,28 @@ _PHASE_TASK = {"sync": "outer_sync"}
 
 FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
 FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+# Set by the Modal runner: 0 for an island's first container, k for its k-th re-run.
+MODAL_INCARNATION_ENV = "YETO_MODAL_INCARNATION"
 
 
-def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
 
     Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
     ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
-    frozen code snapshot). Keys: ``publish_delay_s``.
+    frozen code snapshot). Keys: ``publish_delay_s``; ``round_delay_s`` (sleep
+    before each round's rollout, to emulate a slow island) with optional
+    ``round_delay_islands`` (learner ids it applies to; default every island).
+    ``exit_at_round`` and ``exit_islands`` (the island process exits with
+    code 137 before that rollout, only in its first Modal container, so a
+    re-run of the island is a fresh process that rejoins). With
+    ``exit_rejoined_after_rounds`` n the first re-run (incarnation 1) of those
+    islands exits once more, before the n-th round it runs itself (its round
+    ids depend on where it rejoined). ``catch_up_incarnations``: re-runs of
+    those islands that rejoin by catch-up (every fragment from the syncer,
+    fresh optimizer state) although the launcher asked for peer recovery
+    (:func:`catch_up_incarnation`); together they test both state sources in
+    one run.
     """
     import os
 
@@ -141,17 +174,68 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     if not candidate.is_file():
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"publish_delay_s"})
+    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
+                              "exit_at_round", "exit_islands", "exit_rejoined_after_rounds",
+                              "catch_up_incarnations"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
-    delay = float(raw.get("publish_delay_s", 0.0))
-    if not math.isfinite(delay) or delay < 0:
-        raise ValueError("publish_delay_s must be a non-negative number")
-    return {"publish_delay_s": delay} if delay else {}
+    out: dict[str, Any] = {}
+    for key in ("publish_delay_s", "round_delay_s"):
+        delay = float(raw.get(key, 0.0))
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError(f"{key} must be a non-negative number")
+        if delay:
+            out[key] = delay
+    if "round_delay_islands" in raw:
+        islands = raw["round_delay_islands"]
+        if not isinstance(islands, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in islands):
+            raise ValueError("round_delay_islands must be a list of learner ids")
+        if "round_delay_s" in out:
+            out["round_delay_islands"] = sorted(set(islands))
+    if "exit_at_round" in raw:
+        round_id, islands = raw["exit_at_round"], raw.get("exit_islands")
+        if type(round_id) is not int or round_id < 1:
+            raise ValueError("exit_at_round must be a positive rollout id")
+        if not isinstance(islands, list) or not islands or not all(type(i) is int for i in islands):
+            raise ValueError("exit_at_round needs exit_islands, a list of learner ids")
+        out["exit_at_round"] = round_id
+        out["exit_islands"] = sorted(set(islands))
+    elif "exit_islands" in raw:
+        raise ValueError("exit_islands needs exit_at_round")
+    if "exit_rejoined_after_rounds" in raw:
+        rounds = raw["exit_rejoined_after_rounds"]
+        if "exit_at_round" not in out:
+            raise ValueError("exit_rejoined_after_rounds needs exit_at_round")
+        if type(rounds) is not int or rounds < 1:
+            raise ValueError("exit_rejoined_after_rounds must be a positive round count")
+        out["exit_rejoined_after_rounds"] = rounds
+    if "catch_up_incarnations" in raw:
+        incarnations = raw["catch_up_incarnations"]
+        if (not isinstance(incarnations, list) or not incarnations
+                or not all(type(i) is int and i >= 1 for i in incarnations)):
+            raise ValueError("catch_up_incarnations must be a list of re-run numbers >= 1")
+        out["catch_up_incarnations"] = sorted(set(incarnations))
+    return out
+
+
+def catch_up_incarnation(environ: Mapping[str, str] | None = None) -> int | None:
+    """Test-only: this island process's incarnation when the fault injection
+    makes it rejoin by catch-up instead of peer recovery, else None."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    incarnation = int(environ.get(MODAL_INCARNATION_ENV, "0") or 0)
+    injected = load_fault_injection(environ).get("catch_up_incarnations", ())
+    return incarnation if incarnation in injected else None
 
 
 class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
+
+
+class IslandRecoveryRequired(DriverError):
+    """A node or the trainer is lost and cannot be recovered; the island stops
+    (LEAVE reason INFRA_FAILED, not a failed training check)."""
 
 
 class RebuildNotStarted(DriverError):
@@ -239,7 +323,9 @@ class SyncSession(Protocol):
 
     def finish(self, driver: "IslandDriver") -> None: ...
 
-    def close(self) -> None: ...
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        """End the session; ``reason`` is the LEAVE code (``LeaveReason``) for
+        sessions with a coordinator, ignored by the others."""
 
     # Optional: whether the round ``rollout_id`` is the island's last one
     # (strict: local_round_id >= global_rounds; decoupled: the final cut is
@@ -335,6 +421,12 @@ def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
     }
 
 
+def _batch_token(batch: RolloutBatchHandle) -> str:
+    """The token of the publication that generated ``batch`` (serial: the one
+    published for its round; rollout ahead: the one before)."""
+    return policy_token(batch.policy_version, batch.policy_hash)
+
+
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
     import hashlib
 
@@ -352,6 +444,62 @@ def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
         / total
     )
     return mean, math.sqrt(max(0.0, second - mean * mean))
+
+
+def defer_digest(driver: Any) -> bool:
+    """E1: a colocated trainer that offloads for the publication hashes the policy
+    while it offloads (``deferred`` digest, read at the publication). Needs a
+    policy state that supports it; ``YETO_RL_DEFERRED_DIGEST=0`` turns it off."""
+    import os
+
+    if os.environ.get("YETO_RL_DEFERRED_DIGEST", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return (bool(getattr(driver, "colocated", False)) and bool(getattr(driver, "publish_offloaded", False))
+            and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
+
+
+def verify_publication(driver: Any, version: int) -> bool:
+    """E1: does the publication of policy ``version`` hash the policy and read the
+    engine weight checksums back? Yes on the first publication, on a round whose safe
+    point keeps a round cut (resume relies on its policy hash), on every K-th version
+    (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
+    round cuts, or with a policy state that cannot skip it, every round is verified.
+    S27 C5: ``--rl-verify-every N`` (``driver.verify_every``) replaces K by N and also
+    verifies the last round (:func:`_verify_on_interval`).
+    The other rounds still check that the trainer holds the policy (weights version)."""
+    if bool(getattr(driver, "verify_every_round", False)):
+        return True
+    if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
+        return True
+    interval = getattr(driver, "verify_every", None)
+    if interval is not None:
+        return _verify_on_interval(driver, int(version), int(interval))
+    cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    every = int(getattr(cuts, "every", 0) or 0)
+    if cuts is None or every <= 1:
+        return True
+    if getattr(driver, "published_version", None) is None:
+        return True
+    cut_due = getattr(driver.sync, "cut_due", None)
+    if callable(cut_due) and cut_due(int(version)):
+        return True
+    return int(version) % every == 0
+
+
+def _verify_on_interval(driver: Any, version: int, interval: int) -> bool:
+    """S27 C5 (``--rl-verify-every N``, no-sync island): verify the first publication,
+    every N-th version, the policy of the last round and every round that keeps a
+    round cut (a cut needs the content hash); the round-cut interval does not apply."""
+    if interval <= 1 or getattr(driver, "published_version", None) is None:
+        return True
+    sync = getattr(driver, "sync", None)
+    cut_due = getattr(sync, "cut_due", None)
+    if callable(cut_due) and cut_due(version):
+        return True
+    final = getattr(sync, "is_final_round", None)
+    if callable(final) and final(driver, rollout_id=version - 1):
+        return True
+    return version % interval == 0
 
 
 class IslandDriver:
@@ -398,6 +546,7 @@ class IslandDriver:
         self.eval_interval = eval_interval
         self.max_rollouts = max_rollouts
         self.colocated = False
+        self.placement_kind: str | None = None  # set by handshake()
         # Colocated trainers that can publish while offloaded (declared by the
         # backend: traits.publish_while_offloaded, and enabled for this run by the
         # trainer's publish_offloaded) are offloaded right after the sync boundary,
@@ -414,6 +563,9 @@ class IslandDriver:
         # progress): set by every apply, advanced by every trained round.
         self.local_step = 0
         self.outer_version: int | None = None  # S17 M1: syncer version of the applied cut (elastic)
+        # S27 G-EM: relay mode (the groups come from external merged cuts; set by the
+        # backend's relay wiring). None (default): every identity check is unchanged.
+        self.external_policy: Any = None
         self.profile = profile
         self.observe = bool(observe)
         self.config_epoch = int(config_epoch)
@@ -423,6 +575,7 @@ class IslandDriver:
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
+        self._rounds_in_process = 0  # rounds this process started (fault injection)
         self.controller = controller
         self.ledger = ledger
         # D1/D2 wiring (6.5, d2-wire): optional ``elastic.ElasticHook``; None keeps
@@ -435,6 +588,26 @@ class IslandDriver:
         self.node_loss_poll_s = 2.0
         self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
+        # P0-S: published versions within the policy-age window (version -> hash)
+        self.published_policies = PublishedPolicies()
+        # S27 L11: where a restarted island's data position comes from when it is not
+        # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
+        # log); None: the data source cursor is restored (_restore_data_cursor).
+        self.data_position_owner: str | None = None
+        # S27 task assignment: an island whose rounds count from 0 in every process
+        # (full parameter) keeps its data position in the run store
+        # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
+        self.data_positions: Any = None
+        # S27 P2: the rollout side's end of the data (``data_end_kind``) met while
+        # the batch generated ahead was joined; the run ends after the round
+        # that joined it (``_join_ahead``). None: the data goes on.
+        self._data_end: BaseException | None = None
+        # --rl-export-hf-rounds: the model of chosen rounds as HF directories in the
+        # store (``hf_export.HfRoundExports``, set by the adapter entry); None: off.
+        self.hf_exports: Any = None
+        # S27 L11: () -> ((version, policy hash), ...) published before this process
+        # started (e.g. the store's policy releases); None: none to restore.
+        self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
         self.at_safe_point = False
         self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
@@ -451,6 +624,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -582,6 +756,7 @@ class IslandDriver:
                 "trainer group does not report grad_norm; the per-round "
                 "gradient invariant cannot be checked"
             )
+        self.placement_kind = description.kind
         self.colocated = description.kind == "colocated"
         self.weight_transport = self.traits.transport_label(str(
             description.extra.get("weight_transport")
@@ -599,7 +774,22 @@ class IslandDriver:
             **{"rl/algorithm_spec_sha256": self.algorithm.sha256()},
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
+            **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
+            **({"data_slot": self.data_slot} if self.data_slot else {}),
+            **({"data_streams": dict(self.data_streams)} if self.data_streams else {}),
+            **self._code_identity(),
         )
+
+    def _code_identity(self) -> dict[str, str]:
+        """rl-identity-tiering L9.1 dual write; absent without a code digest."""
+
+        from yeto.provenance import CODE_PACK_MODE_SOURCE_TREE
+
+        if not self.code_pack_digest:
+            return {}
+        mode = getattr(self, "code_pack_mode", None) or CODE_PACK_MODE_SOURCE_TREE
+        return {"semantic_sha256": self.algorithm.semantic_sha256(),
+                "code_pack_digest": self.code_pack_digest, "code_pack_mode": mode}
 
     # -- helpers used by sync sessions -----------------------------------
     def apply_policy(
@@ -656,16 +846,35 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if not verify_publication(self, int(policy_version)):
+            state = self.policy_state.export_identity(policy_version=int(policy_version))
+            if state is not None:
+                return state
+        if defer_digest(self):
+            return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))
 
     # -- per-round steps -------------------------------------------------
     def publish(self, state: TrainableState, *, rollout_id: int) -> None:
+        pending = self._ahead
+        if pending is not None and not pending.joined:
+            # rollout ahead: a weight write into engines that generate is refused
+            raise PublicationError(f"publication of policy v{rollout_id} while the engines "
+                                   f"generate rollout {pending.rollout_id}")
         if state.policy_version != rollout_id:
             raise PublicationError(
                 f"publication of policy version {state.policy_version} "
                 f"for rollout {rollout_id}"
             )
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and not outage.guard_publish(state, rollout_id):
+            return  # S27 G-DI: engines gone; published after the engines are back
         expected_hash = state.policy_tensor_hash()
+        # refused before any engine is touched when the version names other weights
+        try:
+            self.published_policies.check(rollout_id, expected_hash)
+        except PolicyVersionConflict as error:
+            raise PublicationError(str(error)) from error
         self.phase("publish", policy_version=rollout_id)
         delay = self.fault_injection.get("publish_delay_s")
         if delay:
@@ -684,30 +893,33 @@ class IslandDriver:
                 f"v{manifest.target_policy_version} {manifest.target_policy_hash}"
             )
         members = frozenset(self.rollout.members())
-        if not members or result.members != members:
+        # an engineless pool (trainer-only island) has no member to acknowledge;
+        # every other pool must have at least one and all must acknowledge
+        engineless = bool(getattr(self.rollout, "engineless", False))
+        if (not members and not engineless) or result.members != members:
             missing = sorted(members - result.members)
             raise PublicationError(
                 f"partial publication of policy v{rollout_id}; unacknowledged "
                 f"rollout members: {missing}"
             )
+        self._record_published_policy(rollout_id, expected_hash)
         self.expected_token = policy_token(rollout_id, expected_hash)
         self.published_version = rollout_id
-        # agentic-rollout-utilization 2.3: published hashes within the policy-age
-        # window (only kept when the limit is > 0; limit 0 needs the latest only).
-        if self._max_policy_age() > 0:
-            if not hasattr(self, "_published_hashes"):
-                self._published_hashes = {}
-            hashes = self._published_hashes
-            hashes[rollout_id] = expected_hash
-            for old in [v for v in hashes if v < rollout_id - self._max_policy_age()]:
-                del hashes[old]
         self.published_state = state
+        if self.external_policy is not None:
+            # S27 G-EM relay mode: the merged version this publication gates on
+            from .merged_release import merged_version as _merged_version
+
+            self.external_policy.published(rollout_id, _merged_version(self, state))
         self.sync.published(self, rollout_id=rollout_id, policy_hash=expected_hash)
         self.emit(
             "rl_publication",
             policy_version=rollout_id,
             **{
                 "rl/policy_token": self.expected_token,
+                # E1: only on a round whose policy content was not hashed (recorded tapes
+                # of verified rounds stay byte-identical)
+                **({"sync/publication_verified": False} if getattr(state, "verified", True) is False else {}),
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),
@@ -715,6 +927,82 @@ class IslandDriver:
                    else {"sync/outer_version": self.outer_version}),
             },
         )
+
+    def _record_published_policy(self, version: int, policy_hash: str) -> None:
+        """P0-S: record a completed publication (checked before it started).
+
+        The inference engines serve the plain version number; the version ->
+        weight hash map is kept here and handed to the rollout side, which
+        names every trajectory's policy in its evidence from it."""
+        self.published_policies.record(version, policy_hash)
+        self.published_policies.retain_from(version - self._max_policy_age())
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+
+    def _restore_published_policies(self, start_rollout_id: int) -> None:
+        """S27 L11: a restarted island learns the versions published before it
+        started, so groups the samplers generated with them pass the policy-age
+        check. Only versions below the start version within the policy-age window
+        are restored; the start version and later ones are published again."""
+        history = getattr(self, "published_policy_history", None)
+        if start_rollout_id <= 0 or not callable(history):
+            return
+        oldest = start_rollout_id - self._max_policy_age()
+        restored = {}
+        for version, policy_hash in history():
+            version = int(version)
+            if oldest <= version < start_rollout_id and policy_hash:
+                restored[version] = str(policy_hash)
+        if not restored:
+            return
+        for version, policy_hash in sorted(restored.items()):
+            self.published_policies.record(version, policy_hash)
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
+                  versions=sorted(restored))
+
+    def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """P0-S: name every group's generating policy by its label.
+
+        A group reports the engine weight version of its tokens (the plain
+        version number). The label comes from the published map; a version that
+        no publication in the window recorded keeps its raw value, and the
+        checks below refuse it."""
+        published = self.published_policies
+        labels = [published.label_of_engine_version(g.policy_token) for g in batch.groups]
+        if all(label in (None, g.policy_token) for label, g in zip(labels, batch.groups)):
+            return batch
+        groups = tuple(
+            g if label is None else dataclasses.replace(g, policy_token=label)
+            for label, g in zip(labels, batch.groups)
+        )
+        return dataclasses.replace(batch, groups=groups)
+
+    def _inject_exit(self, rollout_id: int) -> None:
+        """Test-only: kill this island process (``exit_at_round`` in the first
+        Modal container; ``exit_rejoined_after_rounds`` in the first re-run)."""
+        import os
+
+        self._rounds_in_process += 1
+        if self.learner_id not in self.fault_injection.get("exit_islands", ()):
+            return
+        incarnation = os.environ.get(MODAL_INCARNATION_ENV, "0")
+        if incarnation == "0":
+            hit = self.fault_injection.get("exit_at_round") == rollout_id
+        elif incarnation == "1":
+            hit = self.fault_injection.get("exit_rejoined_after_rounds") == self._rounds_in_process
+        else:
+            hit = False
+        if not hit:
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id,
+                  incarnation=int(incarnation), rounds_in_process=self._rounds_in_process)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(137)
 
     def _refuse_if_recovery_required(self) -> None:
         """3.7 (recovery-design.md F13): an island that opened in RECOVERY_REQUIRED
@@ -724,7 +1012,7 @@ class IslandDriver:
         if error:
             self.emit("rl_reconfiguration", rollout_id=None, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}")
 
     def _probe_nodes(self, rollout_id: int) -> None:
         """rl-multinode-island D9: before each round ask the controller whether every
@@ -737,7 +1025,7 @@ class IslandDriver:
         if error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}")
 
     def _classify_failure(self, rollout_id: int | None, error: BaseException) -> None:
         """Failure-path node-loss attribution (rl-multinode-island D9, tasks 3.3):
@@ -752,8 +1040,10 @@ class IslandDriver:
         SystemExit are never attributed."""
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
             return
-        if isinstance(error, DriverError) and "RECOVERY_REQUIRED" in str(error):
+        if isinstance(error, IslandRecoveryRequired):
             return  # already attributed by _probe_nodes/_classify_failure
+        if data_end_kind(error) is not None:
+            return  # the end of the data is no node loss (S26 E9.3, S27 P2)
         check = getattr(self.controller, "check_nodes", None) if self.controller else None
         if not callable(check) or not getattr(self.controller, "topology", None):
             return
@@ -767,7 +1057,7 @@ class IslandDriver:
                 self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                           error=str(lost), config_epoch=self.config_epoch,
                           cause=f"{type(error).__name__}: {error}")
-                raise DriverError(f"island is RECOVERY_REQUIRED: {lost}") from error
+                raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {lost}") from error
             remaining = deadline - self.clock()
             if remaining <= 0:
                 return
@@ -789,7 +1079,7 @@ class IslandDriver:
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}") from error
         if pending is not None:
             members = sorted(self.rollout.members())
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERED",
@@ -814,7 +1104,95 @@ class IslandDriver:
         self._trainer_offloaded = True
 
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
-        if self.published_version != rollout_id or self.expected_token is None:
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and outage.active:
+            self._recover_engines(rollout_id, where="generate", error=None)
+        self._before_generate(rollout_id, policy_version=rollout_id)
+        self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
+        offload_rollout = getattr(self.rollout, "offload_after_generate", None)
+        split_offload = callable(offload_rollout) and bool(getattr(self.rollout, "offloads_after_generate", False))
+        if split_offload:
+            self.rollout.defer_offload = True
+        with self._load_sampler(rollout_id):
+            # IR-3: the rollout side learns the target policy token up front.
+            batch = self._generate_watched(rollout_id)
+        # E1: a colocated rollout that frees its memory after generating (Miles
+        # --offload-rollout) does it in its own phase, not inside "generate"
+        if split_offload:
+            self.phase("rollout_offload", rollout_id=rollout_id)
+            offload_rollout()
+        return self._accept_batch(rollout_id, batch)
+
+    def _generate_watched(self, rollout_id: int) -> Any:
+        """``rollout.generate``; with an engine outage object (S27 G-DI) a generation
+        that lost its engines is rewound, the engines restored and the policy
+        republished, and the batch generated again."""
+        outage = getattr(self, "engine_outage", None)
+        if outage is None:
+            return self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
+        while True:
+            read = getattr(self.rollout, "data_cursor", None)
+            cursor = read() if callable(read) else None
+            error: BaseException | None = None
+            try:
+                with outage.watch():
+                    batch = self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
+            except Exception as exc:  # noqa: BLE001 - classified right below
+                if not outage.lost(exc):
+                    raise
+                error = exc
+            else:
+                if not outage.lost(None):
+                    return batch
+            self._rewind_lost_batch(rollout_id, cursor)
+            self._recover_engines(rollout_id, where="generate", error=error)
+
+    def _rewind_lost_batch(self, rollout_id: int, cursor: Any) -> None:
+        """The prompts of a lost batch are read again (best effort: the backend's
+        ``seek_data_cursor``, when it has one)."""
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        result: Any = "no cursor"
+        if cursor is not None and callable(seek):
+            try:
+                result = seek(cursor)
+            except Exception as exc:  # noqa: BLE001
+                result = f"seek failed: {type(exc).__name__}: {exc}"
+        self.emit("rl_engine_outage", phase="batch_lost", rollout_id=rollout_id,
+                  rewind=str(result)[:300])
+
+    def _recover_engines(self, rollout_id: int | None, *, where: str,
+                         error: BaseException | None) -> None:
+        """S27 G-DI: wait for the engines, restore them, publish the deferred policy
+        (else republish the current one) to them."""
+        outage = self.engine_outage
+        record = outage.recover(rollout_id, where=where, error=error)
+        deferred = outage.take_deferred()
+        if deferred is not None:
+            state, version = deferred
+            self.publish(state, rollout_id=version)
+        else:
+            self._republish_current()
+        self.emit("rl_engine_outage", phase="restored", rollout_id=rollout_id,
+                  policy_version=self.published_version, outage=outage.outages,
+                  **{k: v for k, v in record.items() if k not in ("phase", "rollout_id")})
+
+    def _republish_current(self) -> None:
+        """The published policy again, into engines that started without it."""
+        state = getattr(self, "published_state", None)
+        if state is None:
+            raise PublicationError("engine outage: no published policy to restore")
+        result = self.publisher.publish(state)
+        members = frozenset(self.rollout.members())
+        if result.manifest.target_policy_version != self.published_version or result.members != members:
+            raise PublicationError(
+                f"engine outage: republication of v{self.published_version} reached "
+                f"{sorted(result.members)} of {sorted(members)}")
+
+    def _before_generate(self, rollout_id: int, *, policy_version: int) -> None:
+        """Refuse to start the batch of ``rollout_id`` unless the engines serve the
+        complete publication of ``policy_version`` (serial: the same id; rollout
+        ahead: one version behind) and admission is open."""
+        if self.published_version != policy_version or self.expected_token is None:
             raise PublicationError(
                 f"rollout {rollout_id} has no complete publication manifest"
             )
@@ -830,17 +1208,29 @@ class IslandDriver:
                 generate_blockers(self.profile, self._snapshot(rollout_id)),
                 f"generation of rollout {rollout_id}",
             )
-        self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
-        with self._load_sampler(rollout_id):
-            # IR-3: the rollout side learns the target policy token up front.
-            batch = self.rollout.generate(
-                rollout_id, expected_policy_version=self.expected_token
-            )
-        if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
+
+    def _accept_batch(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """Check a generated batch of ``rollout_id`` against the publication the
+        engines served while they generated it (``published_version`` and
+        ``expected_token``; the next publication waits for this check)."""
+        if self.external_policy is not None:
+            return self._accept_external_batch(rollout_id, batch)
+        version = self.published_version
+        if batch.rollout_id != rollout_id or batch.policy_version != version:
             raise PolicyIdentityError(
                 f"rollout pool returned rollout {batch.rollout_id} "
                 f"(policy v{batch.policy_version}) for rollout {rollout_id}"
             )
+        batch = self._with_policy_labels(batch)
+        stale = getattr(batch, "buffer_stale_groups", None)
+        if stale is not None:
+            # The sample-buffer reader consumed these groups without training
+            # them (older than max_policy_age); one event per round, 0 included.
+            positions = getattr(batch, "buffer_stale_positions", None)
+            self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
+                      stale_groups=int(stale), max_policy_age=self._max_policy_age(),
+                      # S27 P4: the dispenser positions of those groups (row runs)
+                      **({"stale_positions": positions} if positions else {}))
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             # IR-3 (age 0): a sample generated by a policy other than the
@@ -853,7 +1243,7 @@ class IslandDriver:
         mismatched = batch.mismatched_groups(self.expected_token)
         segmented = tuple(g for g in batch.groups
                           if getattr(g, "policy_versions", None)
-                          and set(g.policy_versions) != {rollout_id})
+                          and set(g.policy_versions) != {version})
         limit = self._max_policy_age()
         if limit == 0 and segmented:
             # Limit 0: a token generated by an older version is never trained.
@@ -867,14 +1257,14 @@ class IslandDriver:
             from .policy_age import check_batch_ages
 
             problems = check_batch_ages(
-                tuple(dict.fromkeys(mismatched + segmented)), rollout_id, limit,
-                {**getattr(self, "_published_hashes", {}), rollout_id: batch.policy_hash})
+                tuple(dict.fromkeys(mismatched + segmented)), version, limit,
+                {**self.published_policies.hashes(), version: batch.policy_hash})
             if problems:
                 raise PolicyIdentityError(
                     f"rollout {rollout_id}: groups outside the policy-age window "
                     f"(max_policy_age={limit}): " + "; ".join(problems))
             mismatched = ()
-        if mismatched or policy_token(rollout_id, batch.policy_hash) != self.expected_token:
+        if mismatched or policy_token(version, batch.policy_hash) != self.expected_token:
             detail = ", ".join(f"{g.group_id}={g.policy_token}" for g in mismatched)
             raise PolicyIdentityError(
                 f"groups not sampled from {self.expected_token}: "
@@ -882,6 +1272,69 @@ class IslandDriver:
             )
         if not batch.groups:
             raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        if limit > 0:
+            # P0-S evidence: the generating policy of every accepted group (its
+            # label carries the weight hash of that version), so a round's
+            # trajectories can be matched against the publications.
+            self.emit("rl_group_policies", rollout_id=rollout_id, groups=[
+                [g.group_id, g.policy_token,
+                 None if g.policy_versions is None else sorted(set(g.policy_versions))]
+                for g in batch.groups])
+        return self._finish_accept(rollout_id, batch)
+
+    def _accept_external_batch(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """S27 G-EM relay mode (``yeto.rl.engine.external_policy``): the groups were
+        generated by merged cuts the syncer broadcast to spot samplers, not by this
+        island's publications. The batch still names the publication the round
+        trains from (``expected_token``); each group names the merged version of
+        its cut, and its age is counted in merged versions against the trainer's
+        merged version at that publication."""
+        from .external_policy import EXTERNAL_MERGED_CUT
+
+        version = self.published_version
+        if batch.rollout_id != rollout_id or batch.policy_version != version:
+            raise PolicyIdentityError(
+                f"rollout pool returned rollout {batch.rollout_id} "
+                f"(policy v{batch.policy_version}) for rollout {rollout_id}"
+            )
+        stale = getattr(batch, "buffer_stale_groups", None)
+        if stale is not None:
+            self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
+                      stale_groups=int(stale), max_policy_age=self._max_policy_age())
+        violations = getattr(batch, "policy_age_violation", None)
+        if violations:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: {violations} sample(s) not generated by "
+                f"{self.expected_token} (policy_age_violation)"
+            )
+        if policy_token(version, batch.policy_hash) != self.expected_token:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id} does not train from {self.expected_token}: {batch.policy_hash}")
+        merged = self.external_policy.merged_at(version)
+        if merged is None:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: no merged version was recorded for publication v{version}")
+        limit = self._max_policy_age()
+        problems, ages = self.external_policy.check_groups(batch.groups, merged, limit)
+        if problems:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: groups outside the merged policy-age window "
+                f"(merged version {merged}, max_policy_age={limit}): " + "; ".join(problems))
+        if not batch.groups:
+            raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        # the trainer's own check before training applies the same rule (Miles
+        # rollout.require_policy_tokens): its groups name merged versions, not publications
+        batch = dataclasses.replace(batch, external_cut=(merged, limit))
+        self.emit("rl_group_policies", rollout_id=rollout_id, kind=EXTERNAL_MERGED_CUT,
+                  merged_version=merged, max_policy_age=limit,
+                  ages={str(age): n for age, n in ages.items()}, groups=[
+                      [g.group_id, g.policy_token,
+                       None if g.policy_versions is None else sorted(set(g.policy_versions))]
+                      for g in batch.groups])
+        return self._finish_accept(rollout_id, batch)
+
+    def _finish_accept(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
+        """The checks after the policy identity of an accepted batch."""
         if self.eval_overlap is not None:
             self.eval_overlap.after_generate(
                 rollout_id, token=self.expected_token, published_version=self.published_version
@@ -1094,20 +1547,35 @@ class IslandDriver:
             thread.join(timeout=self.load_sample_interval_s + 5)
             # S15 evidence-window lesson: one terminal probe after generate so a
             # round whose loads mostly land after the last tick still leaves a
-            # final ``rl_load_sample`` (``terminal=True``). Observe only.
-            try:
-                sample = probe()
-            except Exception as exc:  # noqa: BLE001 - observation must not kill the round
-                import logging
+            # final ``rl_load_sample`` (``terminal=True``). Observe only, so it runs
+            # off the round's critical path (E1: a synchronous probe cost ~0.1 s/round).
+            self._join_terminal_probe()
+            self._terminal_probe = threading.Thread(
+                target=self._terminal_load_sample, args=(probe, rollout_id),
+                name="yeto-load-sample-terminal", daemon=True)
+            self._terminal_probe.start()
 
-                logging.getLogger(__name__).warning(
-                    "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
-                sample = None
-            if sample is not None:
-                self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
-                          t=self.clock(), profile_hash=self.profile_hash,
-                          epoch=self.config_epoch,
-                          weight_transport=self.weight_transport, terminal=True)
+    def _join_terminal_probe(self) -> None:
+        """Wait (bounded) for the previous round's terminal load probe: at most one runs."""
+        thread = getattr(self, "_terminal_probe", None)
+        if thread is not None:
+            thread.join(timeout=self.load_sample_interval_s + 5)
+            self._terminal_probe = None
+
+    def _terminal_load_sample(self, probe: Callable[[], Any], rollout_id: int) -> None:
+        try:
+            sample = probe()
+        except Exception as exc:  # noqa: BLE001 - observation must not kill the round
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
+            return
+        if sample is not None:
+            self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
+                      t=self.clock(), profile_hash=self.profile_hash,
+                      epoch=self.config_epoch,
+                      weight_transport=self.weight_transport, terminal=True)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -1202,14 +1670,23 @@ class IslandDriver:
     def _emit_carry_over(self, rollout_id: int, batch: Any) -> None:
         """agentic-rollout-utilization 4.1: one ``rl_rollout_carry_over`` per round of a
         limit > 0 run (carried in / back, discarded over the limit, cross-version
-        tokens and truncation). Limit 0: nothing (default tapes unchanged)."""
+        tokens and truncation). Limit 0: nothing (default tapes unchanged).
+        A rollout that overlaps training (fully_async) reports its own
+        ``execution_mode``; it replaces the profile's step-scheduling label."""
         fields = getattr(batch, "carry_over", None)
         if not fields:
             return
+        fields = dict(fields)
         groups = getattr(batch, "groups", ()) or ()
+        gate = gate_from_carry_over(fields, kept=len(groups),
+                                    backend=getattr(batch, "backend", None) or "unknown")
+        if gate:  # rl-offpolicy-correction-passthrough D6: its own event per round
+            self.emit(OFFPOLICY_GATE_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **gate)
         self.emit("rl_rollout_carry_over", rollout_id=rollout_id,
                   policy_version=int(getattr(batch, "policy_version", rollout_id)),
-                  t=self.clock(), **self._labels(), **dict(fields),
+                  t=self.clock(), **{**self._labels(), **dict(fields)},
                   trained_groups_with_older_tokens=sum(
                       1 for g in groups if getattr(g, "policy_versions", None)
                       and min(g.policy_versions) < rollout_id),
@@ -1233,6 +1710,21 @@ class IslandDriver:
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)
 
+    def _emit_round_data_rows(self, rollout_id: int, batch: Any) -> None:
+        """S27 task assignment (observe only): one ``rl_round_data_rows`` with every
+        --data row the round trained, as compact runs (not capped per sample)."""
+        rows = getattr(batch, "round_data_rows", None)
+        if not rows:
+            return
+        from .data_split import run_row_count
+        from .timeline import ROUND_DATA_ROWS_EVENT
+
+        runs = [[int(v) for v in run] for run in rows["rows"]]
+        self.emit(ROUND_DATA_ROWS_EVENT, rollout_id=rollout_id,
+                  policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                  t=self.clock(), **self._labels(), samples=int(rows["samples"]),
+                  row_count=run_row_count(runs), rows=runs)
+
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
@@ -1244,6 +1736,27 @@ class IslandDriver:
     # rl-eval-difficulty-buckets 2.2 (D6.c): start-time hold-out check report,
     # written into rl_driver_start as ``eval_guard`` only when set.
     eval_guard_report: Mapping[str, Any] | None = None
+    # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
+    # into rl_driver_start as ``island_tasks`` only when the island has its own list.
+    island_tasks: Mapping[str, Any] | None = None
+    # S27 task assignment: the island's row slot "I/N" (``data_split.DataSlot``),
+    # recorded in rl_driver_start only when the island reads a part of --data.
+    data_slot: str | None = None
+    # S27 P3: the task dispenser's streams and the ones this island takes
+    # ({"streams": [...], "accept": [...] | None}), in rl_driver_start only when set.
+    data_streams: Mapping[str, Any] | None = None
+    # rl-identity-tiering L9.1: this island's code identity, written into
+    # rl_driver_start with ``semantic_sha256`` only when set.
+    code_pack_digest: str | None = None
+    code_pack_mode: str | None = None  # None: the L9.1 transition (source tree hash)
+    # rl-trainer-cold-start-cost L0: the island's StartPhases; the first
+    # optimizer step records ``first_step_done`` (None: not recorded).
+    start_phases: Any = None
+    # S27 rollout ahead (``rollout_ahead`` module, --rl-rollout-ahead): 1 = the
+    # engines generate the next round's batch while the trainer trains this
+    # round and runs its sync boundary; 0 = serial rounds. Set by the adapter entry.
+    rollout_ahead: int = 0
+    _ahead: PendingBatch | None = None  # the batch the engines generate ahead
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1307,27 +1820,174 @@ class IslandDriver:
         # 2026-10-02 ruling (E1-D ④): an island in RECOVERY_REQUIRED never prepares or trains
         # another batch; the safe point already raised, this guards the ledger path itself.
         if self.controller is not None and getattr(self.controller, "recovery_required", None):
-            raise DriverError(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         self._probe_nodes(rollout_id)
         started = time.monotonic()
-        batch = self._generate(rollout_id)
+        self._inject_round_delay(rollout_id)
+        batch = self._take_batch(rollout_id)
         rollout_seconds = time.monotonic() - started
         if self.ledger is not None:
-            self.ledger.prepare(batch, policy_token=self.expected_token)
+            self.ledger.prepare(batch, policy_token=_batch_token(batch))
         try:
-            return self._train_round(rollout_id, batch, rollout_seconds)
+            self._start_ahead(rollout_id + 1)
+            boundary = self._train_round(rollout_id, batch, rollout_seconds)
         except BaseException as error:
+            self._abandon_ahead()
             if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
                 self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
             self._classify_failure(rollout_id, error)
             raise
+        # P4 3.1: every island's wall time per round, whatever its placement
+        # (generate + train + outer boundary + publish), for cross-island comparison.
+        self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
+                  round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
+        return boundary
+
+    # -- rollout ahead (``rollout_ahead`` module) ----------------------------------
+    def _refuse_unsupported_rollout_ahead(self) -> None:
+        problems = rollout_ahead_problems(self)
+        if problems:
+            raise DriverError(f"rollout_ahead {self.rollout_ahead} needs " + "; ".join(problems))
+
+    def _take_batch(self, rollout_id: int) -> RolloutBatchHandle:
+        """The batch that trains in ``rollout_id``: the one the engines generated
+        ahead during the previous round, else one generated now (serial)."""
+        pending, self._ahead = self._ahead, None
+        if pending is None:
+            return self._generate(rollout_id)
+        if pending.rollout_id != rollout_id or not pending.joined:
+            raise DriverError(f"rollout {rollout_id}: the batch generated ahead is rollout "
+                              f"{pending.rollout_id} (joined: {pending.joined})")
+        return pending.batch
+
+    def _start_ahead(self, rollout_id: int) -> None:
+        """Start the batch of ``rollout_id`` on the engines with the policy published
+        now (one version behind the policy that will train it), before the trainer
+        trains ``rollout_id - 1``. Nothing starts after a known final round."""
+        if not self.rollout_ahead or self._is_final_round(rollout_id - 1):
+            return
+        outage = getattr(self, "engine_outage", None)
+        if outage is not None and (outage.active or not outage.port.engines_alive()):
+            return  # S27 G-DI: the next round generates serially after the engines are back
+        self._before_generate(rollout_id, policy_version=rollout_id - 1)
+        read = getattr(self.rollout, "data_cursor", None)
+        cursor = read() if self.data_positions is not None and callable(read) else None
+        pending = PendingBatch(rollout_id=rollout_id, policy_version=rollout_id - 1, handle=None,
+                               data_cursor=cursor, started_at=time.monotonic(),
+                               started_clock=self.clock())
+        pending.sampler.enter_context(self._load_sampler(rollout_id))
+        try:
+            pending.handle = self.rollout.start_generate(
+                rollout_id, expected_policy_version=self.expected_token)
+        except BaseException:
+            pending.sampler.close()
+            raise
+        self._ahead = pending
+
+    def _join_ahead(self, *, stop: bool) -> None:
+        """Wait for the batch the engines generate ahead, so the publication that
+        follows may write their weights, and check it against the publication that
+        generated it. ``stop``: the run ends; the batch is discarded untrained."""
+        pending = self._ahead
+        if pending is None:
+            return
+        self._ahead = None  # a failed join leaves nothing in flight
+        self.phase("generate_wait", rollout_id=pending.rollout_id,
+                   policy_version=pending.policy_version)
+        waited = time.monotonic()
+        failure: Exception | None = None
+        data_end = False
+        outage = getattr(self, "engine_outage", None)
+        try:
+            with pending.sampler:
+                if outage is None:
+                    batch = self.rollout.finish_generate(pending.handle)
+                else:
+                    batch = self._finish_ahead_watched(pending, stop=stop)
+            if not stop:
+                pending.batch = self._accept_batch(pending.rollout_id, batch)
+        except Exception as error:
+            data_end = not stop and self._ends_on_data_end(error)
+            if not (stop or data_end):
+                raise
+            # nothing trains a discarded batch; only idle engines matter. S27 P2: a
+            # batch that met the end of the data ends the run after this round
+            failure = error
+            if data_end:
+                self._data_end = error
+        self._emit_ahead(pending, wait_seconds=time.monotonic() - waited,
+                         discarded=stop or data_end, failure=failure)
+        if not (stop or data_end):
+            self._ahead = pending
+
+    def _finish_ahead_watched(self, pending: PendingBatch, *, stop: bool) -> Any:
+        """S27 G-DI: join the batch generated ahead; lost engines -> restore them and
+        generate that batch again now, with the policy it was started with (the one
+        still published: the next publication comes after this join)."""
+        outage = self.engine_outage
+        error: BaseException | None = None
+        try:
+            with outage.watch():
+                batch = self.rollout.finish_generate(pending.handle)
+        except Exception as exc:  # noqa: BLE001 - classified right below
+            if not outage.lost(exc):
+                raise
+            error = exc
+        else:
+            if not outage.lost(None):
+                return batch
+        if stop:
+            raise error or EnginesLost("engines lost while the final batch generated ahead")
+        self._rewind_lost_batch(pending.rollout_id, pending.data_cursor)
+        self._recover_engines(pending.rollout_id, where="generate_wait", error=error)
+        return self._generate_watched(pending.rollout_id)
+
+    def _emit_ahead(self, pending: PendingBatch, *, wait_seconds: float, discarded: bool,
+                    failure: Exception | None) -> None:
+        """One event per batch generated ahead. ``generate_seconds`` runs from its
+        start to the end of the join: the generation time when ``wait_seconds`` > 0,
+        an upper bound otherwise."""
+        self.emit(ROLLOUT_AHEAD_EVENT, rollout_id=pending.rollout_id,
+                  policy_version=pending.policy_version,
+                  generate_seconds=time.monotonic() - pending.started_at,
+                  wait_seconds=wait_seconds,
+                  **({"discarded": True} if discarded else {}),
+                  **({"error": f"{type(failure).__name__}: {failure}"} if failure else {}))
+        if self.observe:
+            self.emit("rl_timeline_span", task="generate", role="rollout", kind="compute",
+                      start=pending.started_clock, end=self.clock(), rollout_id=pending.rollout_id,
+                      profile_hash=self.profile_hash, epoch=self.config_epoch,
+                      weight_transport=self.weight_transport)
+
+    def _abandon_ahead(self) -> None:
+        """A round failed (or the run ends) with a batch still generating ahead: stop
+        its observation and ask the pool to drop it; the original error comes first."""
+        pending, self._ahead = self._ahead, None
+        if pending is None or pending.joined:
+            return
+        pending.sampler.close()
+        cancel = getattr(self.rollout, "cancel_generate", None)
+        if callable(cancel):
+            try:
+                cancel(pending.handle)
+            except Exception:  # noqa: BLE001 - must not mask the round's own error
+                pass
+
+    def _inject_round_delay(self, rollout_id: int) -> None:
+        """Test-only slow island: sleep before the rollout, inside the round wall time."""
+        delay = self.fault_injection.get("round_delay_s")
+        islands = self.fault_injection.get("round_delay_islands")
+        if not delay or (islands is not None and self.learner_id not in islands):
+            return
+        self.emit("rl_fault_injected", kind="round_delay", seconds=delay, rollout_id=rollout_id)
+        time.sleep(delay)
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
                      rollout_seconds: float) -> SyncBoundary:
         if self.progress is not None:
             self.progress.after_generate(
                 rollout_id=rollout_id,
-                policy_token=self.expected_token,
+                policy_token=_batch_token(batch),
                 metrics={**_round_metrics(batch), "rollout_seconds": rollout_seconds},
             )
         if self.colocated:
@@ -1353,16 +2013,21 @@ class IslandDriver:
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)
         train_seconds = time.monotonic() - started
+        if self.start_phases is not None:
+            self.start_phases.mark_once("first_step_done")
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)
+        late = getattr(self.rollout, "late_cross_version_fraction", None)
+        if rollout_fraction is None and callable(late):
+            # E1: estimated in the background while this step trained (Miles fully_async)
+            rollout_fraction = late(rollout_id)
         if metrics.cross_version_truncated_fraction is None and rollout_fraction is not None:
             # agentic-rollout-utilization 4.1: an engine that estimates the
             # cross-version truncation on the rollout side (Miles carry-over)
             # reports it on the batch; the trainer metric wins when both exist.
-            import dataclasses as _dc
-
-            metrics = _dc.replace(metrics, cross_version_truncated_fraction=float(rollout_fraction))
+            metrics = dataclasses.replace(
+                metrics, cross_version_truncated_fraction=float(rollout_fraction))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
         # rl-resume-from-checkpoint: a round cut records the next round's lr from this
@@ -1425,14 +2090,25 @@ class IslandDriver:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)
             self._emit_trajectory_rewards(rollout_id, batch)
+            self._emit_round_data_rows(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
+        self._record_data_position(rollout_id)
+        self._commit_round_data(rollout_id)
+        self._export_hf_round(rollout_id, boundary)
         self._join_eval()
+        self._join_ahead(stop=boundary.stop)
         if self.colocated and self.publish_offloaded:
+            # E1: a round cut due at the next safe point writes the trainer state now,
+            # while it is resident, instead of waking the offloaded trainer for it
+            cut_due = getattr(self.sync, "cut_due", None)
+            if callable(cut_due) and cut_due(rollout_id + 1):
+                self.phase("checkpoint", rollout_id=rollout_id)
+                self.sync.prepare_cut(self, rollout_id=rollout_id + 1, state=boundary.state)
             self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
@@ -1519,6 +2195,11 @@ class IslandDriver:
             self.elastic_hook.at_safe_point(self, rollout_id)
         if not self.controller.has_pending() and not self.controller.recovery_required:
             return None
+        # E1: a reconfiguration syncs the checkpoint store itself; no round cut may still
+        # be committing it in the background
+        join_commit = getattr(getattr(self.sync, "round_cuts", None), "join_commit", None)
+        if callable(join_commit):
+            join_commit(self)
         epoch_before = self.config_epoch
         self.phase("reconfigure", rollout_id=rollout_id, config_epoch=epoch_before)
         from .controller import RecoveryRequired
@@ -1537,7 +2218,7 @@ class IslandDriver:
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}") from error
         if result is not None:
             # the reason of a refusal (REBUILT_OLD: structured publication cause + the
             # disagreeing engine ids) rides on the tape record
@@ -1605,7 +2286,8 @@ class IslandDriver:
                 or manifest.target_policy_hash != cut_policy_hash):
             raise PublicationError("re-publication after rebuild acknowledged another policy")
         members = frozenset(self.rollout.members())
-        if not members or result_pub.members != members:
+        engineless = bool(getattr(self.rollout, "engineless", False))
+        if (not members and not engineless) or result_pub.members != members:
             raise PublicationError(
                 f"partial re-publication after rebuild; missing {sorted(members - result_pub.members)}"
             )
@@ -1640,8 +2322,31 @@ class IslandDriver:
         pool that reports cursors -> DriverError (no silent re-training)."""
         if start_rollout_id <= 0:
             return
-        cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
+        owner = getattr(self, "data_position_owner", None)
+        if owner is not None:
+            # S27 L11: the island reads no data source (a synced trainer reads its
+            # buffer lane, whose cursor log resumes it); no data cursor to restore.
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=owner)
+            return
         seek = getattr(self.rollout, "seek_data_cursor", None)
+        from_cut = getattr(self.sync, "resume_data_cursor", None)
+        cut_cursor = from_cut() if callable(from_cut) else None
+        if cut_cursor is not None and callable(seek):
+            # Resume from a round cut: the cut read the data source at the safe
+            # point (P0-S: after fully_async put its untrained groups back), so
+            # its cursor wins over the ledger's per-round record.
+            landed = seek(cut_cursor)
+            landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+            if landed != cut_cursor:
+                raise DriverError(f"restart at rollout {start_rollout_id}: data source seek "
+                                  f"to the cut's cursor {cut_cursor} landed on {landed}")
+            confirm = getattr(getattr(self, "trainer", None), "confirm_resumed_data_cursor", None)
+            if callable(confirm):  # S25 N7.6: the landed cursor vs the cut's resume manifest
+                confirm(landed)
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source="round_cut",
+                      data_cursor=dict(landed))
+            return
+        cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
         fallback = getattr(self.sync, "restart_cursor_fallback", None)
         # The whole-round fallback is for an island with NO record of rollout v-1
         # (empty/absent ledger: fresh container, joined at base_version > 0). A
@@ -1683,6 +2388,70 @@ class IslandDriver:
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
 
+    def _resume_data_position(self) -> None:
+        """S27 task assignment (``data_position`` module doc): a process that joined
+        a running pool continues at the island's last recorded data position; a
+        process that starts the run writes a start record. Fail closed: a recorded
+        position the pool cannot seek to, or a seek that lands elsewhere, raises."""
+        log = self.data_positions
+        if log is None:
+            return
+        read = getattr(self.rollout, "data_cursor", None)
+        if not getattr(self.sync, "joined_running_pool", False):
+            self._write_data_position(log.start, read() if callable(read) else None)
+            return
+        record = log.last()
+        if record is None or record.cursor is None:
+            self.emit("rl_data_position_unknown", slot=log.slot,
+                      reason="no recorded data position" if record is None
+                      else "the last record has no data cursor")
+            return
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        if not callable(seek):
+            raise DriverError(f"rejoin: the data position log holds {record.cursor} but the "
+                              "rollout pool cannot seek its data source")
+        landed = seek(record.cursor)
+        landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+        if landed != record.cursor:
+            raise DriverError(f"rejoin: data source seek to the recorded position "
+                              f"{record.cursor} landed on {landed}")
+        self.emit("rl_data_position_restored", after_round=record.round, slot=log.slot,
+                  data_cursor=dict(landed))
+
+    def _record_data_position(self, rollout_id: int) -> None:
+        """S27 task assignment: the data cursor after this round's sync boundary.
+        Rollout ahead: the cursor read before the next batch drew its prompts, so a
+        relaunch draws that untrained batch's rows again."""
+        log = self.data_positions
+        read = getattr(self.rollout, "data_cursor", None)
+        if log is None or not callable(read):
+            return
+        pending = self._ahead
+        cursor = pending.data_cursor if pending is not None else read()
+        self._write_data_position(log.record, rollout_id, cursor)
+
+    def _export_hf_round(self, rollout_id: int, boundary: SyncBoundary) -> None:
+        """--rl-export-hf-rounds: this round's model as an HF directory in the store
+        (``hf_export`` module doc), before the next publication; ``final`` is the
+        round whose boundary stops the island (before its final ACK)."""
+        exports = self.hf_exports
+        if exports is None or not exports.due(rollout_id, final=boundary.stop):
+            return
+        from .hf_export import HF_EXPORT_EVENT
+
+        self.phase("hf_export", rollout_id=rollout_id)
+        record = exports.export(rollout_id, policy_version=boundary.state.policy_version,
+                                final=boundary.stop)
+        self.emit(HF_EXPORT_EVENT, rollout_id=rollout_id, t=self.clock(), **record)
+
+    def _write_data_position(self, write: Callable[..., None], *fields: Any) -> None:
+        """A record the store refuses costs a relaunch some rows read again, never
+        the round: the failure goes on the tape and the island trains on."""
+        try:
+            write(*fields)
+        except OSError as error:
+            self.emit("rl_data_position_write_failed", error=f"{type(error).__name__}: {error}")
+
     def _emit_critic_round(self, rollout_id: int) -> None:
         """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
         hashes, param mode, init source, critic weight hash, value metrics).
@@ -1717,11 +2486,14 @@ class IslandDriver:
     def _run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
+        self._refuse_unsupported_rollout_ahead()
+        failure: BaseException | None = None
         try:
             try:
                 start = None
                 try:
                     start = self.sync.start(self)
+                    self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)
@@ -1731,6 +2503,7 @@ class IslandDriver:
                         # (1b: rollouts 3, 4 re-trained rollouts 0, 1). S17 N16: same
                         # for a strict island relaunched at v > 0 (verl V2 island 1).
                         self._restore_data_cursor(start.rollout_id)
+                    self._resume_data_position()
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)
                     self._confirm_recovery(start.rollout_id)
@@ -1746,12 +2519,29 @@ class IslandDriver:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
                     self.safe_point(rollout_id)
-                    boundary = self.run_round(rollout_id)
+                    self._inject_exit(rollout_id)
+                    try:
+                        boundary = self.run_round(rollout_id)
+                    except BaseException as error:
+                        if not self._ends_on_data_end(error):
+                            raise
+                        # S26 E9.3: the samplers ended and nothing trainable is left;
+                        # S27 P2: the task dispenser has no rows left for this island.
+                        # The rounds so far are trained and published: end FINISHED
+                        self._emit_data_end(rollout_id, error)
+                        break
                     state = boundary.state
                     rollout_id += 1
+                    if self._data_end is not None and not boundary.stop:
+                        # the batch generated ahead met the end of the data: the
+                        # round just trained is the last one (``_join_ahead``)
+                        self._emit_data_end(rollout_id, self._data_end)
+                        break
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.refuse_reconfiguration_for_finalization(rollout_id)
+                self._drain_releases()
+                self._close_rollout_data(rollout_id)
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)
@@ -1764,7 +2554,100 @@ class IslandDriver:
                     error=f"{type(error).__name__}: {error}",
                 )
                 raise
+        except BaseException as error:
+            failure = error
+            raise
         finally:
+            self._abandon_ahead()
+            self._join_terminal_probe()  # its rl_load_sample lands before the tape closes
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
-            self.sync.close()
+            self._close_sync(failure)
+
+    def _ends_on_data_end(self, error: BaseException) -> bool:
+        """Whether ``error`` is the rollout side's end of the data and this island
+        may end on its own on it (a strict roster may not, S26 E9.3)."""
+        return (data_end_kind(error) is not None
+                and bool(getattr(self.sync, "ends_on_data_end", True)))
+
+    def _emit_data_end(self, rollout_id: int, error: BaseException) -> None:
+        kind = data_end_kind(error)
+        text = f"{type(error).__name__}: {error}"
+        if kind == "buffer_exhausted":
+            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text)
+        else:
+            self.emit("rl_data_ended", rollout_id=rollout_id, source=kind, error=text)
+        end = getattr(self.sync, "end_on_data", None)
+        if callable(end):  # e.g. full parameter: the island leaves without a final cut
+            end(self)
+
+    def _commit_round_data(self, rollout_id: int) -> None:
+        """S27 P2: the rows of ``rollout_id`` trained and passed the sync boundary;
+        the rollout side reports them trained to the task dispenser now (a pool
+        without a dispenser has no ``commit_dispensed``). An island that dies
+        before this point leaves the round's rows unreported, and the dispenser
+        hands them out again (``adapters.miles.task_dispense`` module doc)."""
+        commit = getattr(self.rollout, "commit_dispensed", None)
+        if not callable(commit):
+            return
+        try:
+            result = commit(rollout_id)
+        except Exception as error:  # noqa: BLE001 - bookkeeping must not fail a trained round
+            # the rows stay held; the next commit includes them (rounds <= its id)
+            self.emit("rl_dispense_commit", rollout_id=rollout_id, acked=False,
+                      error=f"{type(error).__name__}: {error}")
+            return
+        if result is not None:
+            # acked False: the report stays queued and is sent when the head answers again
+            self.emit("rl_dispense_commit", rollout_id=rollout_id, **dict(result))
+
+    def _close_rollout_data(self, rollout_id: int) -> None:
+        """S27 P2: a finished island gives its untrained dispensed rows back (a
+        batch generated ahead and discarded, prefetched blocks) before it ends."""
+        close = getattr(self.rollout, "close_dispensed", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+        except Exception as error:  # noqa: BLE001 - the lease returns them anyway
+            self.emit("rl_dispense_close", rollout_id=rollout_id,
+                      error=f"{type(error).__name__}: {error}")
+            return
+        if result is not None:
+            self.emit("rl_dispense_close", rollout_id=rollout_id, **dict(result))
+
+    def _drain_releases(self) -> None:
+        """A policy release still uploading in the background (a trainer island's
+        staged release) reaches the store before the run ends; its error fails the run."""
+        drain = getattr(self.publisher, "drain_releases", None)
+        if callable(drain):
+            drain()
+
+    def _close_sync(self, failure: BaseException | None) -> None:
+        """Close the bridge with the LEAVE reason of this departure (design D7).
+        A failed departure's detail goes to the island tape (``island_leave``);
+        only the code goes on the wire. A finished run adds no tape record."""
+        reason = leave_reason_for(failure)
+        if failure is not None:
+            self._record_leave(reason, failure)
+        if self.data_positions is not None:
+            self._close_data_positions()
+        self.sync.close(reason)
+
+    def _close_data_positions(self) -> None:
+        """Wait for the last data position commit; a commit that failed or did not
+        end goes on the tape (the tape must not mask the run's own error)."""
+        log = self.data_positions
+        try:
+            ended = log.close()
+            if log.commit_errors or not ended:
+                self.emit("rl_data_position_commit", ended=ended, errors=log.commit_errors[-5:])
+        except Exception:  # noqa: BLE001 - closing the session comes first
+            pass
+
+    def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
+        try:
+            self.emit("island_leave", reason=int(reason), reason_name=reason.name,
+                      error_type=type(failure).__name__, error=str(failure))
+        except Exception:  # noqa: BLE001 - the tape must not mask the original error
+            pass

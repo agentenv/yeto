@@ -5,12 +5,15 @@ through :class:`~.state.MilesPolicyState`):
 
 1. optionally re-export the trainer state and require its tensor hash to equal
    ``state`` (the publisher never publishes something other than ``state``);
-2. upstream ``update_weights(args, actor, rollout_executor, controller)``;
+2. upstream ``update_weights(args, actor, rollout_executor, controller)``, with
+   Miles' weight-version counter aligned first so that the update stamps the
+   yeto policy version on the engines and the rollout executor;
 3. under the controller's update lock (``start_update_weights`` ...
-   ``end_update_weights``), stamp every engine with the policy token
-   ``yeto:<version>:<policy_tensor_hash>`` (SGLang weight version) and read it
-   back; any engine failing either step aborts the lock and raises
-   :class:`PublicationError` -- a partial publication never yields a manifest;
+   ``end_update_weights``), stamp every engine with the plain policy version
+   (SGLang weight version, P0-S) and read it back; any engine failing either
+   step aborts the lock and raises :class:`PublicationError` -- a partial
+   publication never yields a manifest. The label ``yeto:<version>:<hash>``
+   stays on the yeto side (``engine.policy_versions.PublishedPolicies``);
 4. optionally collect per-engine weight checksums (upstream ``check_weights``),
    requiring one successful report per engine;
 5. return ``PublicationResult(InferencePublicationManifest(full), members)``.
@@ -36,12 +39,11 @@ Member publication (rl-infra-spec 3.5, fork M4 + 3.5a mechanism (a)),
    full publication of the same token (the engines that already serve the
    verified policy); no reference, a different shape or any difference fails
    closed and the members are never admitted;
-5. ``admit_cells(cells, expected_epoch, expected_weight_version=token)``;
-6. ``start_commit_weight_version(token, expected_epoch)`` ...
+5. ``admit_cells(cells, expected_epoch, expected_weight_version=<version>)``;
+6. ``start_commit_weight_version(<version>, expected_epoch)`` ...
    ``end_commit_weight_version``: under one hold of the controller lock, every
-   Serving engine reports the token at that epoch. The executor's integer
-   weight version (fully-async staleness only) is left to the next full
-   publication.
+   Serving engine reports the version at that epoch, and the rollout executor
+   takes it as its current version.
 """
 
 from __future__ import annotations
@@ -60,8 +62,32 @@ from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.ports import PublicationCause, PublicationResult
 from yeto.rl.engine.trainable_state import TrainableState
 from yeto.rl.engine.policy_digest import WeightsChanged, is_resident
+from yeto.rl.engine.policy_versions import engine_weight_version
 from . import LoopRunner
 from .rollout import cells_of, member_id, policy_token, running_members
+from .state_plugin import ALIGN_WEIGHT_VERSION
+
+
+async def _stamp_engine_version(
+    engines: list[Any], ids: list[str], version: int
+) -> tuple[set[str], PublicationCause]:
+    """Write the plain policy version to every engine and read it back (P0-S).
+
+    Returns the engines that failed and why; the caller holds the update lock.
+    """
+    stamp = engine_weight_version(version)
+    results = await asyncio.gather(
+        *(e.update_weight_version(stamp) for e in engines), return_exceptions=True
+    )
+    failed = {ids[i] for i, r in enumerate(results) if isinstance(r, BaseException)}
+    if failed:
+        return failed, PublicationCause.UPDATE_FAILED
+    versions = await asyncio.gather(
+        *(e.get_weight_version() for e in engines), return_exceptions=True
+    )
+    failed = {ids[i] for i, v in enumerate(versions)
+              if isinstance(v, BaseException) or str(v) != stamp}
+    return failed, PublicationCause.TOKEN_MISMATCH
 
 
 class PublicationError(RuntimeError):
@@ -316,6 +342,36 @@ def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
     return flatten_inference_engine_checksums
 
 
+def engine_checksum_digest(body: dict[str, Any]) -> str:
+    """One engine's flattened weight checksum body as one sha256 (key-sorted JSON):
+    the value a convertible node compares after loading a published version."""
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def weight_view_digest(bodies: list[dict[str, Any]], *, lora: bool) -> str | None:
+    """The digest a policy release records and its sampler compares: of the whole
+    checksum body (full parameter) or of its ``lora:*`` keys (LoRA: the base is the
+    same HF checkpoint on both sides). None when there is no body, the engines
+    disagree, or a LoRA body holds no adapter key (the adapter was never served)."""
+    views = [lora_keys(dict(b)) if lora else dict(b) for b in bodies]
+    if not views or not views[0] or any(v != views[0] for v in views):
+        return None
+    return engine_checksum_digest(views[0])
+
+
+async def read_engine_checksums(controller: Any, flatten: Callable[[Any], list[dict[str, Any]]]
+                                | None = None) -> list[dict[str, Any]]:
+    """Every rollout engine's flattened weight checksum body (``check_weights``)."""
+    raw = await controller.check_weights(action="checksum")
+    try:
+        return [dict(b) for b in (flatten or _default_flatten())(raw)]
+    except AssertionError as exc:
+        raise PublicationError(f"engine weight checksum failed: {exc}",
+                               cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+
+
 async def _maybe_await(value: Any) -> Any:
     """The trainer hook may be sync (tests, fakes) or a coroutine (real Miles
     policy state, which must not block the running loop)."""
@@ -347,6 +403,8 @@ class MilesPublisher:
         self._runner = runner or LoopRunner()
         self.last_engine_checksums: dict[str, dict[str, Any]] | None = None
         self._published_once = False
+        # (engines, ids, members) stamped by the last load_version (convertible node)
+        self._loaded_engines: tuple[list[Any], list[str], frozenset[str]] | None = None
         # (token, per-engine checksum body) of the last full publication whose
         # engines all reported the same body: the payload reference (3.5).
         self._reference: tuple[str, dict[str, Any]] | None = None
@@ -407,12 +465,19 @@ class MilesPublisher:
         return tensor_hash
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
+        started = time.monotonic()
         tensor_hash = self._check_trainer_holds(state)
         payload_hash, payload_bytes = _payload_of(state)
-        token = policy_token(
-            state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
-        )
-        members, checksums = self._runner.run(self._publish(token))
+        version = state.policy_version if token_rollout_id is None else token_rollout_id
+        token = policy_token(version, tensor_hash)
+        self.last_timing = {"check_s": time.monotonic() - started}
+        # E1: a round whose policy is not hashed (state.verified False) also skips the
+        # engine read-back; the next verified publication reads it back again
+        members, checksums = self._runner.run(
+            self._publish(version, token, read_back=getattr(state, "verified", True) is not False))
+        # E1 diagnosis: where a publication's wall time goes (driver log only)
+        print("yeto publish timing " + json.dumps(
+            {k: round(v, 3) for k, v in self.last_timing.items()}, sort_keys=True), flush=True)
         self.last_engine_checksums = checksums
         bodies = list((checksums or {}).values())
         self._reference = (
@@ -444,22 +509,9 @@ class MilesPublisher:
         )
         return PublicationResult(manifest=manifest, members=frozenset(members))
 
-    async def _publish(self, token: str) -> tuple[frozenset[str], dict[str, Any] | None]:
-        update_weights = self._update_weights or _default_update_weights()
-        offload_rollout = bool(getattr(self._args, "offload_rollout", False))
-        try:
-            # Upstream train.py: weights come back before every update except
-            # the first (engines start resident); KV comes back after it.
-            if offload_rollout and self._published_once:
-                await self._controller.onload_weights()
-            await update_weights(self._args, self._actor, self._executor, self._controller)
-            if offload_rollout:
-                await self._controller.onload_kv()
-        except Exception as exc:
-            raise PublicationError(f"upstream update_weights failed: {exc}",
-                                   cause=PublicationCause.UPDATE_FAILED) from exc
-        self._published_once = True
-
+    async def _stamp_version(self, version: int, label: str) -> tuple[list[Any], list[str], frozenset[str]]:
+        """Under the controller's update lock, stamp ``version`` on every running
+        engine and read it back. Returns the engines, their ids and the members."""
         info = await self._controller.start_update_weights()
         ok = False
         try:
@@ -469,24 +521,10 @@ class MilesPublisher:
             if not engines or not members:
                 raise PublicationError("no rollout engines are eligible for publication")
             ids = [_engine_id(e, i) for i, e in enumerate(engines)]
-            results = await asyncio.gather(
-                *(e.update_weight_version(token) for e in engines), return_exceptions=True
-            )
-            failed = {ids[i] for i, r in enumerate(results) if isinstance(r, BaseException)}
-            cause = PublicationCause.UPDATE_FAILED
-            if not failed:
-                versions = await asyncio.gather(
-                    *(e.get_weight_version() for e in engines), return_exceptions=True
-                )
-                failed = {
-                    ids[i]
-                    for i, v in enumerate(versions)
-                    if isinstance(v, BaseException) or str(v) != token
-                }
-                cause = PublicationCause.TOKEN_MISMATCH
+            failed, cause = await _stamp_engine_version(engines, ids, version)
             if failed:
                 raise PublicationError(
-                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {token}: "
+                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {label}: "
                     f"{sorted(failed)}",
                     frozenset(failed), cause=cause, engine_ids=failed,
                 )
@@ -498,15 +536,43 @@ class MilesPublisher:
                 )
             else:
                 await self._controller.abort_update_weights()
+        return engines, ids, members
+
+    async def _publish(
+        self, version: int, token: str, *, read_back: bool = True
+    ) -> tuple[frozenset[str], dict[str, Any] | None]:
+        if getattr(self._args, "debug_train_only", False):
+            # Trainer-only island (Miles --debug-train-only, samples from the store):
+            # there is no engine to update or stamp. The release written by the
+            # wrapping ReleasingPublisher is the publication (Modal run-11 stopped at
+            # the engine stamp: "no rollout engines are eligible").
+            self._published_once = True
+            return frozenset(), None
+        update_weights = self._update_weights_to(version)
+        offload_rollout = bool(getattr(self._args, "offload_rollout", False))
+        try:
+            # Upstream train.py: weights come back before every update except
+            # the first (engines start resident); KV comes back after it.
+            if offload_rollout and self._published_once:
+                await self._controller.onload_weights()
+            mark = time.monotonic()
+            await update_weights(self._args, self._actor, self._executor, self._controller)
+            self._time("update_weights_s", mark)
+            if offload_rollout:
+                await self._controller.onload_kv()
+        except Exception as exc:
+            raise PublicationError(f"upstream update_weights failed: {exc}",
+                                   cause=PublicationCause.UPDATE_FAILED) from exc
+        self._published_once = True
+        mark = time.monotonic()
+        engines, ids, members = await self._stamp_version(version, token)
+        self._time("stamp_s", mark)
 
         checksums = None
-        if self._verify_checksums:
-            raw = await self._controller.check_weights(action="checksum")
-            try:
-                bodies = (self._flatten or _default_flatten())(raw)
-            except AssertionError as exc:
-                raise PublicationError(f"engine weight checksum failed: {exc}",
-                                       cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+        if self._verify_checksums and read_back:
+            mark = time.monotonic()
+            bodies = await read_engine_checksums(self._controller, self._flatten)
+            self._time("checksum_s", mark)
             if len(bodies) != len(engines):
                 raise PublicationError(
                     f"{len(engines) - len(bodies)} engines returned no weight checksum"
@@ -514,6 +580,61 @@ class MilesPublisher:
             checksums = {ids[i]: dict(sorted(b.items())) for i, b in enumerate(bodies)}
         return members, checksums
 
+
+    def _time(self, key: str, mark: float) -> None:
+        timing = getattr(self, "last_timing", None)
+        if timing is not None:
+            timing[key] = time.monotonic() - mark
+
+    # -- convertible node (rl-trainer-start-stop L7.2) --------------------------
+    @property
+    def published_checksum(self) -> str | None:
+        """Digest of the weight checksum every engine reported at the last full
+        publication (None: no publication yet, checksums off, or engines differed)."""
+        return None if self._reference is None else engine_checksum_digest(self._reference[1])
+
+    def load_version(self, version: int) -> None:
+        """Load the trainer's weights of published ``version`` into this node's
+        engines and stamp the version.
+
+        For a convertible node going back to rollout: the caller has offloaded the
+        trainer (``update_weights`` reads its host backups) and given the engines
+        their weight memory back; KV onload and admission stay with the caller.
+        Read the result with :meth:`served_checksum` once the KV cache is back."""
+        self._runner.run(self._load_version(version))
+
+    async def _load_version(self, version: int) -> None:
+        update_weights = self._update_weights_to(version)
+        try:
+            await update_weights(self._args, self._actor, self._executor, self._controller)
+        except Exception as exc:
+            raise PublicationError(f"upstream update_weights failed: {exc}",
+                                   cause=PublicationCause.UPDATE_FAILED) from exc
+        self._loaded_engines = await self._stamp_version(version, f"version {version}")
+
+    def served_checksum(self) -> str:
+        """Digest of the weight checksum the engines of the last :meth:`load_version`
+        serve; all engines must report the same one.
+
+        Needs the KV cache back: in LoRA mode the adapter is first loaded into
+        each engine's LoRA pool by one generate (as for a member publication),
+        so the checksum covers it (G-L7.4: a generate with the KV cache released
+        crashed the engine scheduler)."""
+        if self._loaded_engines is None:
+            raise PublicationError("served_checksum needs a load_version first")
+        return self._runner.run(self._served_checksum(*self._loaded_engines))
+
+    async def _served_checksum(self, engines: list[Any], ids: list[str],
+                               members: frozenset[str]) -> str:
+        if lora_mode(self._args):
+            await self._warm_up_lora(engines, ids, [], sorted(members))
+        bodies = await read_engine_checksums(self._controller, self._flatten)
+        digests = {engine_checksum_digest(b) for b in bodies}
+        if len(digests) != 1:
+            raise PublicationError(
+                f"{len(bodies)} engines reported {len(digests)} different weight checksums",
+                cause=PublicationCause.PAYLOAD_MISMATCH)
+        return digests.pop()
 
     # -- member publication (3.5) ---------------------------------------------
     def publish_members(
@@ -529,9 +650,8 @@ class MilesPublisher:
         if bool(getattr(self._args, "offload_rollout", False)):
             raise PublicationError("member publication needs a partitioned rollout (no offload)")
         tensor_hash = self._check_trainer_holds(state)
-        token = policy_token(
-            state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
-        )
+        version = state.policy_version if token_rollout_id is None else token_rollout_id
+        token = policy_token(version, tensor_hash)
         if not self._verify_checksums:
             raise PublicationError("member publication needs the payload read-back (checksums)")
         if self._reference is None or self._reference[0] != token:
@@ -540,7 +660,7 @@ class MilesPublisher:
             )
         payload_hash, payload_bytes = _payload_of(state)
         cells = cells_of(members)
-        checksums = self._runner.run(self._publish_members(token, cells, epoch))
+        checksums = self._runner.run(self._publish_members(version, token, cells, epoch))
         manifest_hash = hashlib.sha256(
             json.dumps(
                 {"token": token, "policy_tensor_hash": tensor_hash, "payload_hash": payload_hash,
@@ -563,22 +683,41 @@ class MilesPublisher:
     def verify_serving_policy(
         self, *, epoch: int, token_rollout_id: int, state: TrainableState
     ) -> None:
-        """Every Serving engine reports the policy token at ``epoch`` (locked check)."""
-        token = policy_token(token_rollout_id, state.policy_tensor_hash())
-        self._runner.run(self._commit_version(token, epoch))
+        """Every Serving engine reports the policy version at ``epoch`` (locked check)."""
+        del state  # the version names the weights through the driver's published map
+        self._runner.run(self._commit_version(token_rollout_id, epoch))
 
-    async def _commit_version(self, token: str, epoch: int) -> None:
+    async def _commit_version(self, version: int, epoch: int) -> None:
         # fork context_lock: start_commit_weight_version is @acquires_lock -- on
         # failure it has already released the lock itself, so end (which
-        # releases) is called only after a successful start.
+        # releases) is called only after a successful start. The executor takes
+        # the same integer as its current version (fully_async staleness).
         try:
             await self._controller.start_commit_weight_version(
-                weight_version=token, expected_epoch=epoch
+                weight_version=version, expected_epoch=epoch
             )
         except Exception as exc:
-            raise PublicationError(f"serving engines do not all report {token}: {exc}",
+            raise PublicationError(f"serving engines do not all report v{version}: {exc}",
                                    cause=PublicationCause.TOKEN_MISMATCH) from exc
         await self._controller.end_commit_weight_version()
+
+    def _update_weights_to(self, version: int) -> Callable[..., Any]:
+        """The weight update that stamps ``version`` (P0-S).
+
+        Miles' ``update_weights`` stamps its own counter on the engines and the
+        rollout executor; the counter is aligned first so that it stamps the
+        yeto policy version (:func:`.state_plugin.align_weight_version`). An
+        injected ``update_weights`` replaces the whole Miles update, version
+        stamping included."""
+        if self._update_weights is not None:
+            return self._update_weights
+        miles_update_weights = _default_update_weights()
+
+        async def update_weights(*args: Any, **kwargs: Any) -> Any:
+            await self._actor.run_plugin(ALIGN_WEIGHT_VERSION, {"next_version": int(version)})
+            return await miles_update_weights(*args, **kwargs)
+
+        return update_weights
 
     def _record(self, event: str, **fields: Any) -> None:
         """Test-injection record on the journal and tape (when wired)."""
@@ -737,9 +876,9 @@ class MilesPublisher:
                 frozenset(members), cause=PublicationCause.LORA_UNVERIFIABLE, engine_ids=failed)
 
     async def _publish_members(
-        self, token: str, cells: list[str], epoch: int
+        self, version: int, token: str, cells: list[str], epoch: int
     ) -> dict[str, Any] | None:
-        update_weights = self._update_weights or _default_update_weights()
+        update_weights = self._update_weights_to(version)
         try:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
             if self._inject_block is not None and not self.injected_blocks:
@@ -792,18 +931,7 @@ class MilesPublisher:
             if snapshot != sorted(cells) or len(engines) != len(cells):
                 raise PublicationError(f"update lock covers {snapshot}, expected {sorted(cells)}")
             ids = [_engine_id(e, i) for i, e in enumerate(engines)]
-            results = await asyncio.gather(
-                *(e.update_weight_version(token) for e in engines), return_exceptions=True
-            )
-            failed = {ids[i] for i, r in enumerate(results) if isinstance(r, BaseException)}
-            cause = PublicationCause.UPDATE_FAILED
-            if not failed:
-                versions = await asyncio.gather(
-                    *(e.get_weight_version() for e in engines), return_exceptions=True
-                )
-                failed = {ids[i] for i, v in enumerate(versions)
-                          if isinstance(v, BaseException) or str(v) != token}
-                cause = PublicationCause.TOKEN_MISMATCH
+            failed, cause = await _stamp_engine_version(engines, ids, version)
             if failed:
                 raise PublicationError(f"members did not acknowledge {token}: {sorted(failed)}",
                                        frozenset(failed), cause=cause, engine_ids=failed)
@@ -881,6 +1009,95 @@ class MilesPublisher:
                 )
             checksums = {"engines": len(bodies), "reference_token": token}
         await self._controller.admit_cells(cells, expected_epoch=epoch,
-                                           expected_weight_version=token)
-        await self._commit_version(token, epoch)
+                                           expected_weight_version=engine_weight_version(version))
+        await self._commit_version(version, epoch)
         return checksums
+
+
+# ---------------------------------------------------------------------------
+# Published policy identity (rl-code-quality-cleanup 1.4).  Miles calls
+# ``set_current_published_policy_identity`` through
+# ``--external-policy-identity-setter-path``; the SAO streaming runtime reads
+# it back.
+# ---------------------------------------------------------------------------
+_PUBLISHED_POLICY_IDENTITY_ATTRIBUTE = "_yeto_rl_current_published_policy_identity"
+
+
+_LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def _validate_published_policy_identity(
+    policy_version: Any,
+    policy_hash: Any,
+) -> tuple[int, str]:
+    if type(policy_version) is not int or policy_version < 0:
+        raise ValueError("published policy version must be a non-negative integer")
+    if (
+        type(policy_hash) is not str
+        or len(policy_hash) != 64
+        or any(character not in _LOWER_HEX for character in policy_hash)
+    ):
+        raise ValueError("published policy hash must be a lowercase SHA256")
+    return policy_version, policy_hash
+
+
+def set_current_published_policy_identity(
+    args: Any,
+    *,
+    policy_version: int,
+    policy_hash: str,
+) -> tuple[int, str]:
+    """Expose an inference-ready policy identity to trajectory admission.
+
+    The full-parameter policy hook calls this only after the exact policy has
+    been applied atomically to Miles and published successfully to SGLang.
+    """
+
+    identity = _validate_published_policy_identity(policy_version, policy_hash)
+    previous = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if previous is not None:
+        if type(previous) is not tuple or len(previous) != 2:
+            raise RuntimeError("current published policy identity is malformed")
+        try:
+            previous_version, previous_hash = _validate_published_policy_identity(
+                *previous
+            )
+        except ValueError as error:
+            raise RuntimeError(
+                "current published policy identity is malformed"
+            ) from error
+        if policy_version < previous_version:
+            raise RuntimeError("published policy identity cannot move backwards")
+        if policy_version == previous_version and policy_hash != previous_hash:
+            raise RuntimeError("published policy hash changed at the same version")
+    setattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
+    # The RolloutManager owns a serialized args namespace.  Installing the
+    # identity through its remote setter is therefore also the only reliable
+    # way to tell rollout admission and evaluation which exact published
+    # policy they are sampling.
+    args.yeto_rl_policy_token = f"yeto:{policy_version}:{policy_hash}"
+    args.yeto_rl_eval_policy_version = policy_version
+    args.yeto_rl_eval_policy_hash = policy_hash
+    return identity
+
+
+def get_current_published_policy_identity(
+    args: Any,
+    *,
+    expected_policy_version: int,
+) -> tuple[int, str]:
+    """Return the exact inference-ready identity or fail closed."""
+
+    _validate_published_policy_identity(expected_policy_version, "0" * 64)
+    identity = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if type(identity) is not tuple or len(identity) != 2:
+        raise RuntimeError("Miles has no current published policy identity")
+    try:
+        policy_version, policy_hash = _validate_published_policy_identity(*identity)
+    except ValueError as error:
+        raise RuntimeError("current published policy identity is malformed") from error
+    if policy_version != expected_policy_version:
+        raise RuntimeError(
+            "current published policy version does not match the rollout"
+        )
+    return policy_version, policy_hash

@@ -18,7 +18,15 @@ from typing import Any
 from yeto.rl.engine.policy_digest import WeightsChanged
 from yeto.rl.engine.trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
 from . import LoopRunner
-from .state_plugin import APPLY_STATE, EXPORT_DIGEST, EXPORT_STATE, OPTIMIZER_MODES, WEIGHTS_VERSION
+from .state_plugin import (
+    APPLY_STATE,
+    COLLECT_DIGEST,
+    EXPORT_DIGEST,
+    EXPORT_FULL_DIGEST,
+    EXPORT_STATE,
+    OPTIMIZER_MODES,
+    WEIGHTS_VERSION,
+)
 
 
 class PolicyStateError(RuntimeError):
@@ -45,14 +53,17 @@ def require_run_plugin(controller_cls: Any = None) -> None:
         raise PolicyStateError(
             "the pinned Miles (MILES_NEXT_COMMIT "
             f"{MILES_NEXT_COMMIT[:12]}) has no TrainerController.run_plugin; "
-            "--rl-engine ports needs the michaellchung/miles yeto/ports patch "
-            "(rl-engine-ports task 1.4). Use --rl-engine legacy until the pin "
-            "carries it."
+            "the ports engine needs the michaellchung/miles yeto/ports patch "
+            "(rl-engine-ports task 1.4)."
         )
 
 
 class MilesPolicyState:
     """Export/apply the LoRA trainable state of the single-cell actor group."""
+
+    # E1: export_digest(deferred=True) is supported (LoRA digest path)
+    supports_deferred_digest = True
+    supports_unverified_rounds = True  # E1: export_identity
 
     def __init__(
         self,
@@ -111,24 +122,58 @@ class MilesPolicyState:
         results = await self._aplugin(EXPORT_STATE, {"policy_version": version})
         return self._export_result(version, results)
 
-    def export_digest(self, *, policy_version: int | None = None):
+    def export_digest(self, *, policy_version: int | None = None, deferred: bool = False):
         """rl-publish-fastpath: the trainer exports and hashes; only the digests cross
         Ray.  Returns a :class:`TrainerResidentState` whose tensors stay in the trainer
-        (``materialize`` falls back to :meth:`export`)."""
+        (``materialize`` falls back to :meth:`export`).
+
+        ``deferred`` (E1): the trainer returns once the tensors are staged and hashes
+        them in the background (e.g. while it offloads); the state's digest is a
+        :class:`~yeto.rl.engine.policy_digest.DeferredDigest` collected on first read."""
 
         import time
 
         version = self._export_version(policy_version)
         started = time.monotonic()
-        results = self._plugin(EXPORT_DIGEST, self._digest_kwargs(version))
+        kwargs = {**self._digest_kwargs(version), **({"deferred": True} if deferred else {})}
+        results = self._plugin(EXPORT_DIGEST, kwargs)
         state = self._digest_result(version, results)
         export_s = next((r.get("export_seconds") for r in results if r is not None), None)
         # Timing for the next GPU run (log only; no tape field changes): total plugin
         # round trip vs the trainer-side hashing part.
+        hashed = "deferred" if deferred else f"{state.digest.hash_seconds:.1f}s"
         print(f"[rl] publish-fastpath digest export v{version}: "
               f"total={time.monotonic() - started:.1f}s trainer_export={export_s}s "
-              f"hash={state.digest.hash_seconds:.1f}s bytes={state.digest.payload_bytes}", flush=True)
+              f"hash={hashed} tensors={len(state.digest.specs)}", flush=True)
         return state
+
+    def export_identity(self, *, policy_version: int | None = None):
+        """E1: the resident state of a round whose publication is not verified: the
+        trainer reports only its weights version (no export, no hash); the identity is
+        :func:`~yeto.rl.engine.policy_digest.unverified_identity`. The layout is the last
+        verified digest's (None before any: the caller verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        version = self._export_version(policy_version)
+        mark = self.weights_version()
+        identity = unverified_identity(version, mark)
+        digest = PolicyDigest(identity, identity, last.payload_bytes, last.specs)
+        return TrainerResidentState(
+            layout=self.layout, base_model_revision=self._revision, config_hash=self._config_hash,
+            layout_hash=self._expected_layout_hash, policy_version=version, digest=digest,
+            materialize_fn=lambda v: self.export(policy_version=v), weights_mark=mark,
+            holds_fn=self.check_holds, verified=False)
+
+    def _collect_digest(self, version: int):
+        from yeto.rl.engine.policy_digest import PolicyDigest
+
+        results = [r for r in self._plugin(COLLECT_DIGEST, {"policy_version": version}) if r is not None]
+        if len(results) != 1 or results[0].get("policy_version") != version:
+            raise PolicyStateError(f"expected exactly one main-rank digest of v{version}, got {results!r:.300}")
+        return PolicyDigest.from_wire(results[0]["digest"])
 
     def weights_version(self) -> dict[str, Any]:
         """The main trainer rank's weights version ``{process_id, version}`` (D3)."""
@@ -188,7 +233,12 @@ class MilesPolicyState:
         (result,) = results
         if result.get("policy_version") != version:
             raise PolicyStateError("exported policy version mismatch")
-        digest = PolicyDigest.from_wire(result["digest"])
+        if result.get("deferred"):
+            from yeto.rl.engine.policy_digest import DeferredDigest
+
+            digest = DeferredDigest(result["specs"], lambda: self._collect_digest(version))
+        else:
+            digest = PolicyDigest.from_wire(result["digest"])
         layout_hash = layout_hash_of(digest.specs)
         if self._expected_layout_hash is not None and layout_hash != self._expected_layout_hash:
             raise ValueError(
@@ -198,6 +248,7 @@ class MilesPolicyState:
             self._expected_layout_hash = layout_hash
             print(f"[rl] learned LoRA layout from first digest export: {len(digest.specs)} tensors, "
                   f"hash={layout_hash}", flush=True)
+        self._last_verified = digest
         return TrainerResidentState(
             layout=self.layout,
             base_model_revision=self._revision,
@@ -285,6 +336,138 @@ class MilesPolicyState:
             raise PolicyStateError(f"ranks disagree on apply result: {results!r:.300}")
         self.policy_version = lora.policy_version
 
+
+
+class MilesFullParameterLocalPolicyState(MilesPolicyState):
+    """``PolicyState`` of a no-sync full-parameter island (L4.6 sampler/trainer).
+
+    The island has no outer sync, so nothing outside the trainer reads the
+    weights: the rollout engines get them through Miles ``update_weights``.
+    The state is only a trainer-resident handle whose policy hash is a content
+    digest of every model parameter (each rank hashes its shard on the trainer,
+    see ``state_plugin.export_full_digest``).  There is no LoRA export and no
+    apply.  The layout hash is the full-parameter identity bound by run_miles.
+    """
+
+    supports_deferred_digest = False  # its export_digest hashes every rank's shard eagerly
+    # E1: every publication hashes the shards; S27 C5: --rl-verify-every N turns this on
+    # (allow_unverified_rounds) and the other rounds publish export_identity
+    supports_unverified_rounds = False
+
+    def __init__(self, *, actor_model: Any, base_model_revision: str, config_hash: str,
+                 expected_layout_hash: str | None, policy_version: int = 0,
+                 runner: LoopRunner | None = None) -> None:
+        from yeto.rl.engine.policy_digest import RESIDENT_LAYOUTS
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
+
+        if expected_layout_hash is None:
+            raise PolicyStateError("a full-parameter island needs its bound layout hash")
+        super().__init__(actor_model=actor_model, base_model_revision=base_model_revision,
+                         config_hash=config_hash, expected_layout_hash=expected_layout_hash,
+                         policy_version=policy_version, runner=runner)
+        self.layout = require_supported_layout(LAYOUT_FRAGMENTS, RESIDENT_LAYOUTS)
+
+    def export(self, *, policy_version: int | None = None):
+        return self.export_digest(policy_version=policy_version)
+
+    async def aexport(self, *, policy_version: int | None = None):
+        return self.export_digest(policy_version=policy_version)
+
+    def export_digest(self, *, policy_version: int | None = None):
+        from yeto.rl.engine.policy_digest import TrainerResidentState
+
+        version = self._export_version(policy_version)
+        digest, weights = self._full_digest(self._plugin(EXPORT_FULL_DIGEST, {"policy_version": version}),
+                                            version)
+        self._last_verified = digest
+        return TrainerResidentState(
+            layout=self.layout,
+            base_model_revision=self._revision,
+            config_hash=self._config_hash,
+            layout_hash=self.layout_hash,
+            policy_version=version,
+            digest=digest,
+            materialize_fn=_no_full_parameter_export,
+            weights_mark=weights,
+            holds_fn=self.check_holds,
+        )
+
+    def allow_unverified_rounds(self) -> None:
+        """S27 C5 (``--rl-verify-every N``): publications the driver does not verify
+        use :meth:`export_identity` (no shard hashing, about 8.4 s a round on Nano)."""
+        self.supports_unverified_rounds = True
+
+    def export_identity(self, *, policy_version: int | None = None):
+        """S27 C5: the resident state of a round whose publication is not verified: the
+        main rank reports its weights version (no shard hash); the identity is
+        :func:`~yeto.rl.engine.policy_digest.unverified_identity`. None before the first
+        verified digest (the caller then verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        version = self._export_version(policy_version)
+        mark = self.weights_version()
+        identity = unverified_identity(version, mark)
+        print(f"[rl] full-parameter publication v{version}: unverified (no shard hash; "
+              f"last verified hash {last.policy_tensor_hash[:12]})", flush=True)
+        return TrainerResidentState(
+            layout=self.layout,
+            base_model_revision=self._revision,
+            config_hash=self._config_hash,
+            layout_hash=self.layout_hash,
+            policy_version=version,
+            digest=PolicyDigest(identity, identity, last.payload_bytes, last.specs),
+            materialize_fn=_no_full_parameter_export,
+            weights_mark=mark,
+            holds_fn=self.check_holds,
+            verified=False,
+        )
+
+    def _current_digest(self, version: int):
+        digest, _ = self._full_digest(self._plugin(EXPORT_FULL_DIGEST, {"policy_version": version}), version)
+        return digest
+
+    def _full_digest(self, results: list[Any], version: int):
+        """Combine the per-rank shard digests (``run_plugin`` order) into one."""
+
+        import hashlib
+
+        from yeto.rl.engine.policy_digest import POLICY_TENSOR_PREFIX, PolicyDigest
+
+        if any(not isinstance(r, dict) or r.get("policy_version") != version for r in results):
+            raise PolicyStateError("full-parameter digest: a rank returned no digest for this version")
+        marks = [r["weights"] for r in results if r.get("weights")]
+        if len(marks) != 1:
+            raise PolicyStateError(f"expected exactly one main-rank weights version, got {len(marks)}")
+        policy = hashlib.sha256(POLICY_TENSOR_PREFIX)
+        for part in (self._revision, self._config_hash, self.layout_hash):
+            policy.update(part.encode("ascii"))
+        for rank, result in enumerate(results):
+            policy.update(f"{rank}:{result['shard_hash']}".encode("ascii"))
+        tensor_hash = policy.hexdigest()
+        payload_bytes = sum(int(r["shard_bytes"]) for r in results)
+        digest = PolicyDigest(
+            policy_tensor_hash=tensor_hash,
+            payload_hash=hashlib.sha256(f"full-parameter-payload:{tensor_hash}".encode("ascii")).hexdigest(),
+            payload_bytes=payload_bytes,
+            specs=(),
+            hash_seconds=max(float(r.get("hash_seconds", 0.0)) for r in results),
+        )
+        print(f"[rl] full-parameter digest v{version}: ranks={len(results)} bytes={payload_bytes} "
+              f"hash={digest.hash_seconds:.1f}s", flush=True)
+        return digest, dict(marks[0])
+
+    def apply(self, state: Any, *, optimizer: str, local_step: int) -> None:
+        raise PolicyStateError("a no-sync full-parameter island never applies an outside policy")
+
+    async def aapply(self, state: Any, *, optimizer: str, local_step: int) -> None:
+        self.apply(state, optimizer=optimizer, local_step=local_step)
+
+
+def _no_full_parameter_export(_policy_version: int):
+    raise PolicyStateError("full-parameter tensors stay in the trainer (no-sync island)")
 
 def _describe_tensors(tensors: Any, limit: int = 400) -> str:
     items = []

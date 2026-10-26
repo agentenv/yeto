@@ -4,7 +4,6 @@
 # 规则与约定见 yeto/rl/engine/README.md。初始 31 条（2026-10-08，基于 agentenv/main 62cec689）。
 #
 # --- 云层/启动层 import Miles 适配层（A8、A9）
-yeto/launcher.py	yeto.rl.adapters	# A8 :3336,4148,7871 overlay_setup/resolve_overlay/overlay_record —— 改前经转发桩 yeto.rl.miles_overlay 引用，检查没覆盖到；rl-code-quality-cleanup 0.6 删桩后显形，不是新增 import
 #
 # --- 引擎核心（E1-E9）
 #
@@ -12,13 +11,6 @@ yeto/launcher.py	yeto.rl.adapters	# A8 :3336,4148,7871 overlay_setup/resolve_ove
 yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
 yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
-yeto/rl/teacher_forcing.py	yeto.rl.adapters	# A5 :129 _policy_token_for_rollout（旧版引擎路径；原 yeto.rl.adapters.miles.legacy.engine，阶段 4 随 legacy 搬到 adapters/miles/legacy/engine.py，条目改名不增）
-#
-# --- harness（A6、A7、R4-R7、R14）
-yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
-yeto/rl/harness/codex/reward.py	yeto.rl.adapters	# R4 :244,288 SecRLEnv 旧版引擎清理（原 yeto.rl.adapters.miles.legacy.engine，阶段 4 随 legacy 搬家，条目改名不增）
-yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101
-yeto/rl/harness/codex/tb2_provider.py	modal	# 审计未列（扫描新发现）：:362,368,679 tb2 环境用 Modal 沙箱；云层接口时再定归属
 #
 # --- 奖励与过滤（R1-R3）
 yeto/rl/math_reward.py	miles	# R1 :24 math_utils —— 保留（D9c，运行时 math 奖励需装 Miles）

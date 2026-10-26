@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from yeto.rl.adapters.miles import binding
-from yeto.rl.adapters.miles.algorithm_flags import legacy_algorithm_argv
 from yeto.rl.engine import algorithm as alg
 from yeto.rl.engine.algorithm import AlgorithmSpec, SamplingSpec
 from yeto.rl.engine.cut import AlgorithmIdentity
@@ -50,12 +49,6 @@ def test_old_and_new_names_give_the_same_new_hash(name):
     assert from_old.sha256() == from_new.sha256() == new_hash != old_hash
 
 
-def test_miles_argv_is_byte_identical_to_the_pre_rename_argv():
-    spec = SPECS["v1_bounded_r2"][0](B_OLD)
-    assert legacy_algorithm_argv(spec)[2:] == ["--dynamic-sampling-filter-path", B_OLD]
-    assert binding.filter_argv(alg.STOCK_NONZERO_STD_FILTER) == ["--dynamic-sampling-filter-path", S_OLD]
-
-
 def test_old_version_island_is_refused():
     """A launcher/peer on the pre-4.4 code binds the old hash: contract check refuses."""
     build, old_name, old_hash, new_hash = SPECS["v2_bounded_r4"]
@@ -73,7 +66,7 @@ def test_checkpoint_cut_with_old_hash_does_not_match_the_run():
     build, old_name, old_hash, new_hash = SPECS["v1_bounded_r2"]
     cut = AlgorithmIdentity(algorithm_spec_sha256=old_hash)
     run = AlgorithmIdentity(algorithm_spec_sha256=build(old_name).sha256())
-    assert cut != run  # verify_cut reports "algorithm identity differs" and refuses the resume
+    assert cut.mismatch(run) is not None  # verify_cut refuses the resume (old cut: whole hash)
 
 
 # ---------------------------------------------------------------- 4.4a

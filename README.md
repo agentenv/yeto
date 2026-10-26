@@ -209,6 +209,7 @@ Tested — a completed Yeto fine-tuning run on real hardware:
 | `nemotron3-nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 61 |
 | `nemotron3-super` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 240 |
 | `nemotron3-ultra` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` | 1100 |
+| `nemotron35-super-vl` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | 249 |
 | `glm45-air` | `zai-org/GLM-4.5-Air` | 212 |
 | `glm46` | `zai-org/GLM-4.6` | 714 |
 | `llama4-scout` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 218 |
@@ -288,6 +289,9 @@ for a fleet, the metric tables, the debugging map, and the failure policy.
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
 
+Commit messages must be English. Install the local check once per clone:
+`pre-commit install --hook-type commit-msg` (details: `docs/EVIDENCE_STORAGE.md`).
+
 CI runs three jobs on every PR and push to main: the Rust syncer suite, the
 Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
 (`[self-hosted, gpu]` labels) — the real syncer plus two real learners
@@ -304,7 +308,6 @@ Four heavier harnesses (all support `--dry-run`):
     python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
 
     # Miles RL quality check: one Yeto island, federated and decoupled Yeto
-    # (default --rl-engine ports; add --rl-engine legacy for the native arm)
     python scripts/benchmark_rl.py <model/data/reward arguments> --dry-run
 
     # diffusion quality check with an explicit, fixed media shape

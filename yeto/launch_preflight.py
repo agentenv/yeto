@@ -185,6 +185,24 @@ def thread_message(count: ThreadCount, cfg: ThreadConfig, headline: str) -> str:
     ])
 
 
+def thread_relaxations(cfg: ThreadConfig) -> dict:
+    """The thread settings that are looser than the defaults, as ``{name: [value, default]}``.
+
+    The check is on by default; a run may only loosen it with an explicit flag, and the
+    launcher prints and records every loosened value (empty dict: defaults or stricter)."""
+
+    relaxed = {}
+    if cfg.mode == "off":
+        relaxed["mode"] = ["off", DEFAULT_THREAD_MODE]
+    if cfg.start > DEFAULT_THREAD_START:
+        relaxed["start"] = [cfg.start, DEFAULT_THREAD_START]
+    if cfg.hard > DEFAULT_THREAD_HARD:
+        relaxed["hard"] = [cfg.hard, DEFAULT_THREAD_HARD]
+    if cfg.mode == "wait" and cfg.wait_s > DEFAULT_THREAD_WAIT_S:
+        relaxed["wait_s"] = [cfg.wait_s, DEFAULT_THREAD_WAIT_S]
+    return relaxed
+
+
 def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
                      clock: Callable[[], float] = time.monotonic,
                      sleep: Callable[[float], None] = time.sleep,
@@ -197,10 +215,15 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
 
     out = sys.stderr if out is None else out
     cfg = ThreadConfig.from_args(args)
+    relaxed = thread_relaxations(cfg)
+    if relaxed:
+        print("[preflight] WARNING: thread preflight RELAXED by explicit flags: "
+              + ", ".join(f"{k} {v[0]} (default {v[1]})" for k, v in relaxed.items()),
+              file=out, flush=True)
     if cfg.mode == "off":
         print("[preflight] WARNING: thread preflight is OFF (--preflight-threads off); the "
               "s1run thread guard may tear down this run", file=out, flush=True)
-        return {"mode": "off", "disabled": True}
+        return {"mode": "off", "disabled": True, "relaxed": relaxed}
     counter = counter or count_threads
     started = clock()
     count = counter()
@@ -233,7 +256,7 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
           f"(SkyPilot API server {count.sky_api if count.sky_api_found else 'not found'})",
           file=out, flush=True)
     return {"mode": cfg.mode, "start": cfg.start, "hard": cfg.hard, "wait_s": cfg.wait_s,
-            "waited": waited, "readings": readings, **count.to_dict()}
+            "waited": waited, "readings": readings, "relaxed": relaxed, **count.to_dict()}
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +385,26 @@ def add_cli_args(p) -> None:
                    "the latest weights and the cut) or droppable (spot, comes back from the syncer "
                    "base, never from a checkpoint store); repeatable; an island without a role is "
                    "an anchor; replaces --spot")
+    g.add_argument("--rl-island-sample-role", action="append", default=None, metavar="ISLAND:ROLE",
+                   help="rl-trainer-start-stop L5.4: one launch of sampler islands and a trainer "
+                   "island over one --rl-checkpoint-store (ROLE sampler or trainer, one entry per "
+                   "--gpu island; exactly one trainer, one or more samplers; several samplers "
+                   "split --total-steps). Needs --rl-single-island-no-sync: no "
+                   "syncer, each island runs as a one-learner no-sync island with that "
+                   "--rl-sample-role. With one sampler, combine with --rl-trainer-scheduler s1 "
+                   "--rl-trainer-island M to start and stop the trainer island")
+    g.add_argument("--rl-sampler-follow", choices=("merged", "trainer"), default="merged",
+                   help="a synced group (--rl-sample-role trainer --rl-island-sample-role "
+                   "M:sampler): which model the sampler islands load. merged (default): the "
+                   "trainer with learner id 0 releases the merged version, and every sampler "
+                   "feeds every trainer's buffer lane. trainer (Miles): sampler j feeds trainer "
+                   "j %% K only and loads that trainer's own local policy, released every "
+                   "version; each trainer and its samplers share a sub-directory "
+                   "trainer<k> of --rl-checkpoint-store (sample_roles module doc)")
+    g.add_argument("--rl-sampler-spot", action="store_true",
+                   help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
+                   "capacity, the trainer island stays on demand; a reclaimed sampler island is "
+                   "started again and continues after its last round in the buffer")
     g.add_argument("--rl-negative-test-run", action="store_true",
                    help="mark this run as a negative-test run (required by --rl-island-override); "
                    "a normal run refuses to resume its checkpoint store and `yeto merge` refuses "

@@ -36,3 +36,14 @@ printf '#!/bin/sh\nexec python3 scripts/precommit_check.py\n' > .git/hooks/pre-c
 ```
 
 手动检查某些文件：`python3 scripts/precommit_check.py 文件...`。CI 不运行此检查。
+
+## commit 信息语言检查
+
+`scripts/check_commit_message.py` 在 `commit-msg` 阶段检查 commit 标题和正文，含汉字、假名、谚文、中日韩标点、全角字符即拒绝（`→`、`é` 通过；`#` 注释行跳过）。CI 不运行此检查。
+
+```bash
+pre-commit install --hook-type commit-msg      # 已装 pre-commit 时
+printf '#!/bin/sh\nexec python3 scripts/check_commit_message.py "$1"\n' > .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+```
+
+git worktree 共用主仓的 `.git/hooks`，装一次即对所有 worktree 生效。

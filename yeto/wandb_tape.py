@@ -31,6 +31,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from .rl.engine.merge_metrics import MergeMetricsFolder
 from .wandb_logger import NullRun, WandbRun
 
 log = logging.getLogger("wandb-tape")
@@ -42,6 +43,19 @@ POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
 
 def _is_merge_record(record: dict) -> bool:
     return "step" in record and record.get("event") != POLICY_SWEEP_LEDGER_EVENT
+
+
+def _is_elastic_record(record: dict) -> bool:
+    """An elastic syncer tape line (``kind`` key, see syncer/src/elastic.rs)."""
+    return "kind" in record and "step" not in record
+
+
+def record_metrics(rec: dict, folder: MergeMetricsFolder) -> dict | None:
+    """Metrics to log for one tape record, or None. Elastic records go
+    through ``folder`` and log only once per outer step (L5.5)."""
+    if _is_elastic_record(rec):
+        return folder.feed(rec)
+    return tape_metrics(rec)
 
 
 def tape_metrics(rec: dict) -> dict:
@@ -96,6 +110,8 @@ def tape_metrics(rec: dict) -> dict:
     ):
         if source in rec:
             metrics[metric] = int(rec[source])
+    if "checkpoint_ms" in rec:  # per-round checkpoint wall time (S26 E3)
+        metrics["sync/checkpoint_ms"] = float(rec["checkpoint_ms"])
     if "sweep_complete" in rec:
         metrics["sync/sweep_complete"] = int(bool(rec["sweep_complete"]))
     if expected:
@@ -104,6 +120,13 @@ def tape_metrics(rec: dict) -> dict:
         value = rec.get(optional)
         if value is not None:
             metrics[f"sync/{optional}"] = float(value)
+
+    # Late deltas of earlier rounds merged here (async rounds).
+    carried = rec.get("carried") or []
+    metrics["sync/carried"] = float(len(carried))
+    if carried:
+        metrics["sync/carried_lag_max"] = max(float(c.get("lag", 0)) for c in carried)
+        metrics["sync/carried_missed_step_min"] = min(float(c.get("missed_step", 0)) for c in carried)
 
     stalenesses = [float(r.get("staleness", 0)) for r in responders]
     if stalenesses:
@@ -126,6 +149,8 @@ def tape_metrics(rec: dict) -> dict:
         metrics[f"{learner}/c_steps"] = float(accounted_steps)
         metrics[f"{learner}/c_tokens"] = float(accounted_tokens)
         metrics[f"{learner}/base_version"] = float(responder.get("base_version", 0))
+        if "recv_seconds" in responder:  # upload time of this push (D4 timing)
+            metrics[f"{learner}/push_recv_seconds"] = float(responder["recv_seconds"])
     # A missing island logs an explicit 0 so its participation curve shows
     # the dropout instead of flatlining at its last contributed value.
     for learner_id in missed:
@@ -268,6 +293,7 @@ class TapeForwarder:
         start = self.offsets.read() if self.offsets is not None else 0
         if start:
             log.info("resuming the event tape at byte %d", start)
+        folder = MergeMetricsFolder()
         try:
             for rec in follow_jsonl(
                 self.tape_path,
@@ -275,7 +301,9 @@ class TapeForwarder:
                 on_offset=None if self.offsets is None else self.offsets.record,
                 stop=self._stop,
             ):
-                self.run.log(tape_metrics(rec))
+                metrics = record_metrics(rec, folder)
+                if metrics is not None:
+                    self.run.log(metrics)
                 if _is_merge_record(rec):
                     self.records += 1
         except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
@@ -295,6 +323,7 @@ def replay(
 ) -> int:
     """Log every record of a finished tape; returns the merge-record count."""
     count = 0
+    folder = MergeMetricsFolder()
     with open(os.path.expanduser(str(tape_path)), encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -305,7 +334,9 @@ def replay(
             except json.JSONDecodeError as e:
                 log.warning("skipping unparsable event-tape line: %s", e)
                 continue
-            run.log(tape_metrics(rec))
+            metrics = record_metrics(rec, folder)
+            if metrics is not None:
+                run.log(metrics)
             if _is_merge_record(rec):
                 count += 1
     run.summary({"sync/tape_records": count})

@@ -34,10 +34,19 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
+from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
+from .downlink import DownlinkAnchors, DownlinkChunkSink
+from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
+from . import recovery_protocol as rp
+from .wan_streams import STREAM_SCHEDULES, StreamMeter, StreamSnapshot, StreamStalledError, pick_stream
+
+if TYPE_CHECKING:
+    import numpy as np
 
 MAGIC = 0xD170C0DE
 PROTOCOL_VERSION = 4
@@ -56,6 +65,30 @@ MSG_FINAL_MANIFEST = 11
 MSG_FINAL_ACK = 12
 MSG_FINAL_FRAGMENT = 13
 MSG_BUDGET_DONE = 14
+# S26 E3b: link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
+MSG_BW_PROBE = 26
+# An island leaves the pool: u32 learner_id | u8 reason (yeto.rl.pool_client.LeaveReason).
+MSG_LEAVE = 27
+# Local-init startup (S27): the island's per-fragment INIT digests, and the
+# syncer's confirmation that every island holds the same version 0 (see
+# syncer/src/local_init.rs).
+MSG_INIT_DIGEST = 28
+MSG_INIT_CONFIRM = 29
+# S27 G-EA: receive-only subscriber (syncer subscriber.rs); 60-66 are the
+# sample relay (yeto.rl.spot_rollout.relay, syncer sample_relay.rs).
+MSG_SUBSCRIBE = 67
+SUBSCRIBER_ID_BIT = 0x8000_0000
+SUBSCRIBE_MAC_DOMAIN = b"yeto-subscribe-mac-v1\0"
+# SUBSCRIBE body trailer (inside the MAC): the sampler process's member
+# incarnation (docs/PROTOCOL.md "Sampler members"; syncer subscriber.rs).
+SUBSCRIBE_INCARNATION_MAGIC = b"YSI1"
+
+
+def encode_subscribe_incarnation(incarnation: int) -> bytes:
+    """The ``YSI1 | incarnation u64`` trailer of a SUBSCRIBE body."""
+    if not 0 < int(incarnation) < 1 << 64:
+        raise ValueError("a member incarnation is a nonzero u64")
+    return SUBSCRIBE_INCARNATION_MAGIC + struct.pack("<Q", int(incarnation))
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -66,6 +99,45 @@ DTYPE_BF16 = 2
 # base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
 # (see bulk_dtype and docs/PROTOCOL.md v4).
 DTYPE_Q4 = 3
+# Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16; INIT_PARAMS,
+# BCAST_FRAGMENT and FINAL stay exact f32. Callers still hand the client f32
+# delta bytes; the client rounds them (round-to-nearest-even, as the syncer's
+# ``half::bf16::from_f32``) on the way out.
+DTYPE_F32_PUSH_BF16 = 4
+# Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled int8
+# (``f32_bytes_to_i8``); INIT/BCAST/FINAL stay f32. Callers hand f32 bytes.
+DTYPE_F32_PUSH_I8 = 5
+# Session dtype 6 (S27 P3): PUSH_FRAGMENT deltas travel in the dtype-3 q4
+# block codec (``f32_bytes_to_q4``); INIT/BCAST/FINAL stay f32. Callers hand
+# f32 bytes; only the outer gradient is quantized.
+DTYPE_F32_PUSH_Q4 = 6
+# Session dtype 7 (S27 P3): PUSH_FRAGMENT deltas travel as linear symmetric
+# int4 with a per-block absmax scale (``f32_bytes_to_i4``); INIT/BCAST/FINAL
+# stay f32. Callers hand f32 bytes.
+DTYPE_F32_PUSH_I4 = 7
+# Full-parameter push options (CLI names) -> session dtype; f32 is exact.
+FULL_PARAMETER_PUSH_DTYPES = {
+    "f32": DTYPE_F32,
+    "bf16": DTYPE_F32_PUSH_BF16,
+    "int8": DTYPE_F32_PUSH_I8,
+    "int4": DTYPE_F32_PUSH_I4,
+    "int4-log": DTYPE_F32_PUSH_Q4,
+}
+# Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
+# between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
+DTYPE_FLAG_BCAST_DELTA = 0x80
+# Session-dtype flag (S27): quantization blocks of PUSH_FRAGMENT deltas
+# restart at every tensor boundary of the fragment, so a tensor replicated on
+# several ranks quantizes the same whatever its neighbours are. Only on the
+# block-quantized push dtypes (int8, int4, int4-log). Sessions without it
+# keep blocks running across the whole fragment, byte for byte as before.
+DTYPE_FLAG_TENSOR_BLOCKS = 0x40
+I8_BLOCK_MIN = 32
+I8_BLOCK_MAX = 1 << 20
+DEFAULT_I8_BLOCK = 128
+I4_BLOCK_MIN = 64
+I4_BLOCK_MAX = 256
+DEFAULT_I4_BLOCK = 128
 
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
@@ -87,13 +159,393 @@ _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 _BUDGET_DONE = struct.Struct("<Q")  # local steps
 
 
+# Session dtypes whose INIT/BCAST/FINAL tensors are f32 (downlink deltas allowed).
+_F32_BULK_PUSH_DTYPES = (
+    DTYPE_F32, DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4, DTYPE_F32_PUSH_I4,
+)
+
+
+_BLOCK_QUANT_PUSH_DTYPES = (DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4, DTYPE_F32_PUSH_I4)
+
+
+def session_base(dtype: int) -> int:
+    """The session dtype without its flags."""
+    return dtype & ~(DTYPE_FLAG_BCAST_DELTA | DTYPE_FLAG_TENSOR_BLOCKS)
+
+
+def tensor_blocks(dtype: int) -> bool:
+    """Whether push quantization blocks restart at each tensor boundary."""
+    return bool(dtype & DTYPE_FLAG_TENSOR_BLOCKS)
+
+
+def bcast_delta(dtype: int) -> bool:
+    """Whether the session receives bf16 downlink deltas."""
+    return bool(dtype & DTYPE_FLAG_BCAST_DELTA)
+
+
+def valid_session_dtype(dtype: int) -> bool:
+    base = session_base(dtype)
+    if tensor_blocks(dtype) and base not in _BLOCK_QUANT_PUSH_DTYPES:
+        return False
+    if base in _F32_BULK_PUSH_DTYPES:
+        return 0 <= dtype <= 0xFF
+    return base in (DTYPE_BF16, DTYPE_Q4) and not bcast_delta(dtype)
+
+
 def bulk_dtype(dtype: int) -> int:
     """Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype.
 
     Q4 applies only to push deltas (small dynamic range); full parameter
-    payloads would not survive 4 bits, so they travel as bf16.
+    payloads would not survive 4 bits, so they travel as bf16. A downlink
+    session's BCAST is reconstructed to f32 before callers see it.
     """
-    return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
+    base = session_base(dtype)
+    if base == DTYPE_Q4:
+        return DTYPE_BF16
+    if base in _F32_BULK_PUSH_DTYPES:
+        return DTYPE_F32
+    return base
+
+
+def push_wire_dtype(dtype: int) -> int:
+    """Dtype of unquantized PUSH_FRAGMENT deltas on the wire for a session dtype."""
+    base = session_base(dtype)
+    return DTYPE_BF16 if base == DTYPE_F32_PUSH_BF16 else base
+
+
+def i8_nbytes(numel: int, block: int, segments: Sequence[int] | None = None) -> int:
+    """Encoded size of an int8 push: u32 block, then per block f32 scale + i8s.
+
+    ``segments`` are the tensor sizes of a tensor-block session; blocks
+    restart at each one (``numel`` is then ignored).
+    """
+    if not I8_BLOCK_MIN <= block <= I8_BLOCK_MAX:
+        raise ValueError(f"int8 block size {block} outside {I8_BLOCK_MIN}..{I8_BLOCK_MAX}")
+    return 4 + sum(4 * -(-n // block) + n for n in (segments if segments is not None else (numel,)))
+
+
+def f32_bytes_to_i8(
+    data: bytes | bytearray | memoryview,
+    block: int,
+    *,
+    header: bool = True,
+    segments: Sequence[int] | None = None,
+) -> bytes:
+    """Quantize little-endian f32 values to block-scaled int8 (syncer ``decode_i8``).
+
+    Per block of ``block`` values (the last may be shorter): f32 scale =
+    absmax / 127, then ``round_half_even(x / scale)`` clipped to [-127, 127].
+    Decoding ``q * scale`` errs by at most absmax / 254 per element (plus f32
+    rounding). Blocks must start at multiples of ``block`` values; with
+    ``header`` the u32 block size is prepended. With ``segments`` (tensor
+    sizes) the blocks restart at every segment instead.
+    """
+    import numpy as np
+
+    i8_nbytes(0, block)  # validates the block size
+    if segments is not None:
+        head = struct.pack("<I", block) if header else b""
+        return head + _encode_segments(data, segments, lambda c: f32_bytes_to_i8(c, block, header=False))
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("int8 push delta contains a non-finite value")
+    count = values.size
+    full = count - count % block
+    parts = [struct.pack("<I", block)] if header else []
+
+    def encode(chunk: np.ndarray) -> None:  # chunk: (blocks, width)
+        absmax = np.abs(chunk).max(axis=1)
+        scale = (absmax / np.float32(127)).astype(np.float32)
+        safe = np.where(scale > 0, scale, np.float32(1))
+        q = np.clip(np.rint(chunk / safe[:, None]), -127, 127).astype(np.int8)
+        q[scale == 0] = 0
+        rows = np.empty((chunk.shape[0], 4 + chunk.shape[1]), dtype=np.uint8)
+        rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+        rows[:, 4:] = q.view(np.uint8)
+        parts.append(rows.tobytes())
+
+    if full:
+        encode(values[:full].reshape(-1, block))
+    if count > full:
+        encode(values[full:].reshape(1, -1))
+    return b"".join(parts)
+
+
+def _encode_segments(data, segments: Sequence[int], encode: Callable[[memoryview], bytes]) -> bytes:
+    """Encode each tensor-sized segment of f32 ``data`` alone, so blocks restart at its start."""
+    view = memoryview(data).cast("B")
+    if view.nbytes != 4 * sum(segments):
+        raise ValueError(f"push delta has {view.nbytes} bytes for segments of {sum(segments)} values")
+    parts, at = [], 0
+    for n in segments:
+        parts.append(encode(view[at : at + 4 * n]))
+        at += 4 * n
+    return b"".join(parts)
+
+
+def _block_aligned_chunks(
+    parts: Iterable[bytes | bytearray | memoryview], block: int, segments: Sequence[int] | None
+) -> Iterator[bytes]:
+    """Regroup f32 byte parts into chunks that start on a block boundary of a segment.
+
+    A chunk ends on a block boundary or on the end of its segment, so each
+    chunk encodes alone and only a segment's last block is short. Without
+    ``segments`` the whole stream is one segment.
+    """
+    ahead = iter(segments) if segments is not None else None
+    left = next(ahead, 0) if ahead is not None else float("inf")
+    carry = b""
+    for part in parts:
+        # Zero-copy: chunks are read-only views of the part.  Slicing bytes
+        # here copied the rest of the part at every segment cut, quadratic in
+        # the segments per part (S27 G-AA: ~14 s/GiB with 10 MiB tensors).
+        data = memoryview(part).cast("B")
+        start = 0
+        if carry:
+            # A carried partial block (under one block) is completed from the
+            # head of this part and sent alone; only those bytes are copied
+            # (S27 G-AP: joining the carry to the whole part copied ~2 parts
+            # per part boundary).
+            if left == 0:
+                raise ValueError("f32 push delta is longer than its tensor segments")
+            start = min(4 * min(left, block) - len(carry), len(data))
+            carry += bytes(data[:start])
+            if len(carry) < 4 * min(left, block):
+                continue
+            yield carry
+            left -= len(carry) // 4
+            carry = b""
+            if left == 0 and ahead is not None:
+                left = next(ahead, 0)
+        while start < len(data):
+            if left == 0:
+                raise ValueError("f32 push delta is longer than its tensor segments")
+            take = min((len(data) - start) // 4, left)
+            cut = take if take == left else take - take % block
+            if not cut:
+                break
+            yield data[start : start + 4 * cut]
+            start += 4 * cut
+            left -= cut
+            if left == 0 and ahead is not None:
+                left = next(ahead, 0)
+        carry = bytes(data[start:])
+    if len(carry) % 4:
+        raise ValueError("f32 push delta ends mid-value")
+    if carry:
+        if left == 0:
+            raise ValueError("f32 push delta is longer than its tensor segments")
+        yield carry
+
+
+def _f32_parts_to_i8(
+    parts: Iterable[bytes | bytearray | memoryview], block: int, segments: Sequence[int] | None = None
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i8`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    for chunk in _block_aligned_chunks(parts, block, segments):
+        yield f32_bytes_to_i8(chunk, block, header=False)
+
+
+def i4_nbytes(numel: int, block: int, segments: Sequence[int] | None = None) -> int:
+    """Encoded size of a linear int4 push: u32 block, per block f32 scale, 2 values/byte.
+
+    ``segments`` are the tensor sizes of a tensor-block session; blocks
+    restart at each one (``numel`` is then ignored), so each pads its own tail.
+    """
+    if not (I4_BLOCK_MIN <= block <= I4_BLOCK_MAX and block % 2 == 0):
+        raise ValueError(f"int4 block size {block} must be even and within {I4_BLOCK_MIN}..{I4_BLOCK_MAX}")
+    return 4 + sum(4 * -(-n // block) + -(-n // 2) for n in (segments if segments is not None else (numel,)))
+
+
+def f32_bytes_to_i4(
+    data: bytes | bytearray | memoryview,
+    block: int,
+    *,
+    header: bool = True,
+    rng: np.random.Generator | None = None,
+    segments: Sequence[int] | None = None,
+) -> bytes:
+    """Quantize little-endian f32 values to linear symmetric int4 (syncer ``decode_i4``).
+
+    Per block of ``block`` values (the last may be shorter): f32 scale =
+    absmax / 7, then ``q = round(x / scale)`` in [-7, 7] as two's-complement
+    nibbles, low nibble first; an odd last block pads a zero nibble. Nearest
+    rounding errs by at most absmax / 14 per value. With a numpy ``rng`` the
+    rounding is stochastic (unbiased, error below one scale step). Blocks must
+    start at multiples of ``block`` values; ``header`` prepends the u32 block.
+    With ``segments`` (tensor sizes) the blocks restart at every segment.
+    """
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    i4_nbytes(0, block)  # validates the block size
+    if segments is not None:
+        head = struct.pack("<I", block) if header else b""
+        return head + _encode_segments(data, segments, lambda c: f32_bytes_to_i4(c, block, header=False, rng=rng))
+    if rng is None:
+        # Nearest rounding: the cache-blocked encoder computes these exact bytes.
+        from .push_codec import encode_i4_nearest  # noqa: PLC0415 - keep the protocol import light
+
+        head = struct.pack("<I", block) if header else b""
+        return head + encode_i4_nearest(np.frombuffer(data, dtype="<f4"), block)
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("int4 push delta contains a non-finite value")
+    count = values.size
+    full = count - count % block
+    parts = [struct.pack("<I", block)] if header else []
+
+    def encode(chunk: np.ndarray) -> None:  # chunk: (blocks, width)
+        absmax = np.abs(chunk).max(axis=1)
+        scale = (absmax / np.float32(7)).astype(np.float32)
+        safe = np.where(scale > 0, scale, np.float32(1))
+        scaled = chunk / safe[:, None]
+        if rng is None:
+            rounded = np.rint(scaled)
+        else:
+            rounded = np.floor(scaled + rng.random(scaled.shape, dtype=np.float32))
+        q = np.clip(rounded, -7, 7).astype(np.int8)
+        q[scale == 0] = 0
+        nibbles = q.view(np.uint8) & 0x0F
+        if nibbles.shape[1] % 2:
+            nibbles = np.concatenate([nibbles, np.zeros((nibbles.shape[0], 1), np.uint8)], axis=1)
+        rows = np.empty((chunk.shape[0], 4 + nibbles.shape[1] // 2), dtype=np.uint8)
+        rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+        rows[:, 4:] = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+        parts.append(rows.tobytes())
+
+    if full:
+        encode(values[:full].reshape(-1, block))
+    if count > full:
+        encode(values[full:].reshape(1, -1))
+    return b"".join(parts)
+
+
+def i4_bytes_to_f32(
+    data: bytes | bytearray | memoryview, numel: int, segments: Sequence[int] | None = None
+) -> np.ndarray:
+    """Decode a linear int4 push (with its u32 block header) into f32 values.
+
+    ``segments`` are the tensor sizes of a tensor-block push.
+    """
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    if segments is not None:
+        if len(data) < 4:
+            raise ValueError("int4 payload is shorter than its block header")
+        block = struct.unpack_from("<I", data)[0]
+        view, out, at = memoryview(data), [], 4
+        for n in segments:
+            size = i4_nbytes(n, block) - 4
+            out.append(i4_bytes_to_f32(struct.pack("<I", block) + bytes(view[at : at + size]), n))
+            at += size
+        if at != len(data):
+            raise ValueError(f"int4 payload has {len(data)} bytes, expected {at}")
+        return np.concatenate(out) if out else np.empty(0, np.float32)
+
+    if len(data) < 4:
+        raise ValueError("int4 payload is shorter than its block header")
+    block = struct.unpack_from("<I", data)[0]
+    if len(data) != i4_nbytes(numel, block):
+        raise ValueError(f"int4 payload has {len(data)} bytes, expected {i4_nbytes(numel, block)}")
+    raw = np.frombuffer(data, np.uint8)[4:]
+
+    def decode(rows: np.ndarray, width: int) -> np.ndarray:  # rows: (blocks, 4 + bytes)
+        scale = rows[:, :4].copy().view("<f4")
+        nibbles = np.empty((rows.shape[0], 2 * (rows.shape[1] - 4)), np.int8)
+        nibbles[:, 0::2] = rows[:, 4:] & 0x0F
+        nibbles[:, 1::2] = rows[:, 4:] >> 4
+        q = np.where(nibbles > 7, nibbles - 16, nibbles)[:, :width]
+        return (q.astype(np.float32) * scale).reshape(-1)
+
+    full = numel // block
+    row = 4 + block // 2
+    parts = [decode(raw[:full * row].reshape(full, row), block)] if full else []
+    if numel > full * block:
+        parts.append(decode(raw[full * row:].reshape(1, -1), numel - full * block))
+    return np.concatenate(parts) if parts else np.empty(0, np.float32)
+
+
+def _f32_parts_to_i4(
+    parts: Iterable[bytes | bytearray | memoryview],
+    block: int,
+    rng: np.random.Generator | None = None,
+    segments: Sequence[int] | None = None,
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i4`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    for chunk in _block_aligned_chunks(parts, block, segments):
+        yield f32_bytes_to_i4(chunk, block, header=False, rng=rng)
+
+
+def f32_bytes_to_q4(data: bytes | bytearray | memoryview, *, segments: Sequence[int] | None = None) -> bytes:
+    """Quantize little-endian f32 values to the q4 wire codec (syncer ``decode_q4``).
+
+    Per block of ``Q4_BLOCK`` values (the last is zero-padded): f32 absmax
+    scale, then 128 bytes of nibbles, low nibble first. A nibble is a sign
+    bit (bit 3) and a level L: 0 is exact zero, 1..7 decodes to
+    ``2**(L-7) * scale``. L is the nearest level in log2 space, so values
+    below ``scale * 2**-6.5`` become zero and others err by at most a factor
+    of ``sqrt(2)``. Shared by SFT dtype 3 and full-parameter dtype 6. With
+    ``segments`` (tensor sizes) the blocks restart, and pad, at every segment.
+    """
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    if segments is not None:
+        return _encode_segments(data, segments, f32_bytes_to_q4)
+
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("q4 push delta contains a non-finite value")
+    blocks = -(-values.size // Q4_BLOCK)
+    padded = np.zeros(blocks * Q4_BLOCK, dtype=np.float32)
+    padded[: values.size] = values
+    padded = padded.reshape(blocks, Q4_BLOCK)
+    magnitude = np.abs(padded)
+    scale = magnitude.max(axis=1, initial=np.float32(0))
+    safe = np.where(scale > 0, scale, np.float32(1))
+    normalized = magnitude / safe[:, None]
+    with np.errstate(divide="ignore"):
+        level = np.where(
+            normalized > 0, np.clip(np.rint(np.log2(normalized)) + 7, 0, 7), 0
+        ).astype(np.uint8)
+    nibbles = (((padded < 0) & (level > 0)).astype(np.uint8) << 3) | level
+    rows = np.empty((blocks, 4 + Q4_BLOCK // 2), dtype=np.uint8)
+    rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+    rows[:, 4:] = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+    return rows.tobytes()
+
+
+def _f32_parts_to_q4(
+    parts: Iterable[bytes | bytearray | memoryview], segments: Sequence[int] | None = None
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_q4`` over parts; only a segment's final block is padded."""
+    for chunk in _block_aligned_chunks(parts, Q4_BLOCK, segments):
+        yield f32_bytes_to_q4(chunk)
+
+
+def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
+    """Round little-endian f32 values to bf16 (nearest, ties to even)."""
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    bits = np.frombuffer(data, dtype="<u4").astype(np.uint64)
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    nan = (bits & 0x7FFF_FFFF) > 0x7F80_0000
+    rounded[nan] = (bits[nan] >> 16) | 0x40  # keep NaN quiet, never round to inf
+    return rounded.astype("<u2").tobytes()
+
+
+def _f32_parts_to_bf16(parts: Iterable[bytes | bytearray | memoryview]) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_bf16`` over parts whose boundaries may split a value."""
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % 4
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_bf16(data[:whole])
+    if carry:
+        raise ValueError("f32 push delta ends mid-value")
 
 
 def layout_fingerprint(layout: FragmentLayout) -> bytes:
@@ -154,6 +606,152 @@ def read_frame(
 HELLO_MAC_DOMAIN = b"yeto-hello-mac-v1\0"
 ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
 
+# Test-only (S27 G-EY): a client started with ``recover=True`` reads its data
+# streams at most this many bytes per second (all streams together) until its
+# initial cut has arrived (``mark_initial_cut_received``: the recovery replay
+# and the versions RECOVERY_DONE names are applied). It puts a link slower
+# than the merges under a recovery replay on a GPU run (``--modal-env``).
+# Unset or not positive: no limit.
+RECOVERY_READ_BPS_ENV = "YETO_SYNC_TEST_RECOVERY_READ_BPS"
+
+
+def recovery_read_bps_from_env(environ=None) -> float | None:
+    import os
+
+    value = (os.environ if environ is None else environ).get(RECOVERY_READ_BPS_ENV, "").strip()
+    if not value:
+        return None
+    bps = float(value)
+    return bps if bps > 0 else None
+
+
+class _ReadRate:
+    """Bytes-per-second budget shared by a client's data streams."""
+
+    CHUNK = 64 * 1024
+
+    def __init__(self, bps: float, active: Callable[[], bool]) -> None:
+        self.bps = bps
+        self.active = active
+        self._lock = threading.Lock()
+        self._next = time.monotonic()
+
+    def spend(self, nbytes: int) -> None:
+        """Wait until reading ``nbytes`` more stays within the budget."""
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now) + nbytes / self.bps
+            delay = self._next - now
+        time.sleep(delay)
+
+
+# Test-only (S27 G-FE): a slow downlink while a learner runs normally (it is
+# not recovering). Value "LEARNER:BPS:FROM_STEP:SECONDS": the client of
+# learner LEARNER reads its data streams at most BPS bytes per second (all
+# streams together) for SECONDS seconds, from the first PULL it gets for a
+# syncer step >= FROM_STEP. Other learners read at full speed. The control
+# stream (PULLs) is never limited. Unset or empty: no limit.
+# S27 G-FH: FROM_STEP "connect" opens the window when the client starts (its
+# initial cut is then slow), and several comma-separated specs may name
+# different learners (at most one each), e.g. "1:3e6:connect:240,0:1.5e6:60:600".
+DOWNLINK_READ_LIMIT_ENV = "YETO_SYNC_TEST_DOWNLINK_READ_LIMIT"
+DOWNLINK_FROM_CONNECT = "connect"
+
+
+class _DownlinkWindow:
+    """The time window of the test-only downlink limit (DOWNLINK_READ_LIMIT_ENV)."""
+
+    def __init__(self, learner_id: int, bps: float, from_step: int | None, seconds: float) -> None:
+        """``from_step`` None: the window opens at :meth:`see_connect`."""
+        if not (bps > 0 and seconds > 0 and (from_step is None or from_step >= 0)):
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV}: BPS and SECONDS must be positive, FROM_STEP >= 0")
+        self.learner_id = learner_id
+        self.bps = bps
+        self.from_step = from_step
+        self.seconds = seconds
+        self._lock = threading.Lock()
+        self._started: float | None = None
+        self._ended = False
+        self.pulls_in_window: list[int] = []  # steps of the PULLs read while it is on
+
+    def _open(self, why: str) -> None:
+        with self._lock:
+            if self._started is None:
+                self._started = time.monotonic()
+                _connect_log(f"test downlink limit on: {self.bps:.0f} B/s for {self.seconds:g}s, "
+                             f"{why} (learner {self.learner_id})")
+
+    def see_connect(self) -> None:
+        """S27 G-FH: FROM_STEP "connect": start the window as the client starts."""
+        if self.from_step is None and self._started is None:
+            self._open("from connect")
+
+    def see_pull(self, step: int) -> None:
+        """Start the window at the first PULL for a step >= FROM_STEP; count
+        the PULLs read while it is on."""
+        if self._started is None and self.from_step is not None and step >= self.from_step:
+            self._open(f"PULL step {step}")
+        started = self._started
+        if started is not None and time.monotonic() - started < self.seconds:
+            self.pulls_in_window.append(step)
+
+    def active(self) -> bool:
+        started = self._started
+        if started is None or self._ended:
+            return False
+        if time.monotonic() - started < self.seconds:
+            return True
+        with self._lock:
+            if self._ended:
+                return False
+            self._ended = True
+        steps = self.pulls_in_window
+        _connect_log(f"test downlink limit off after {self.seconds:g}s (learner {self.learner_id}); "
+                     f"PULLs read while on: {len(steps)}, steps {min(steps, default=-1)}..{max(steps, default=-1)}")
+        return False
+
+
+def downlink_read_limit_from_env(learner_id: int, environ=None) -> _DownlinkWindow | None:
+    """The test-only downlink window of ``learner_id``, or None (no limit)."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(DOWNLINK_READ_LIMIT_ENV, "").strip()
+    if not value:
+        return None
+    mine = None
+    named = set()
+    for spec in value.split(","):
+        parts = spec.strip().split(":")
+        if len(parts) != 4:
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} must be LEARNER:BPS:FROM_STEP:SECONDS[,...], got {value!r}")
+        learner = int(parts[0])
+        if learner in named:
+            raise ValueError(f"{DOWNLINK_READ_LIMIT_ENV} names learner {learner} twice: {value!r}")
+        named.add(learner)
+        from_step = None if parts[2] == DOWNLINK_FROM_CONNECT else int(parts[2])
+        window = _DownlinkWindow(learner, float(parts[1]), from_step, float(parts[3]))
+        if learner == learner_id:
+            mine = window
+    return mine
+
+
+class _RateLimitedSocket:
+    """A data socket read through a :class:`_ReadRate` while it is active."""
+
+    def __init__(self, sock: socket.socket, rate: _ReadRate) -> None:
+        self._sock = sock
+        self._rate = rate
+
+    def recv_into(self, buffer, nbytes: int = 0, flags: int = 0) -> int:
+        if not self._rate.active():
+            return self._sock.recv_into(buffer, nbytes, flags)
+        got = self._sock.recv_into(buffer, min(nbytes or len(buffer), _ReadRate.CHUNK), flags)
+        self._rate.spend(got)
+        return got
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
 
 def island_hmac_key_from_env(environ=None) -> bytes | None:
     """The island HMAC key (secret-handling-hardening), or None when unset."""
@@ -163,15 +761,17 @@ def island_hmac_key_from_env(environ=None) -> bytes | None:
     return value.encode() if value else None
 
 
-def seal_hello(body: bytes, key: bytes | None) -> bytes:
-    """Append HMAC-SHA256(key, HELLO_MAC_DOMAIN || body); no-op without a key.
-    The legacy syncer with a key refuses a HELLO without this trailer."""
+def seal_hello(body: bytes, key: bytes | None, domain: bytes = HELLO_MAC_DOMAIN) -> bytes:
+    """Append HMAC-SHA256(key, domain || body); no-op without a key.
+    The legacy syncer with a key refuses a HELLO without this trailer.
+    ``domain``: HELLO_MAC_DOMAIN, or another first-frame type's domain
+    (SUBSCRIBE, RELAY_HELLO)."""
     if not key:
         return body
-    import hmac
     import hashlib
+    import hmac
 
-    return body + hmac.new(key, HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
+    return body + hmac.new(key, domain + body, hashlib.sha256).digest()
 
 
 def encode_hello(
@@ -183,7 +783,13 @@ def encode_hello(
     session_contract_hash: bytes | None = None,
     syncer_profile_hash: bytes | None = None,
     compat_group: str | None = None,
+    syncer_epoch: int | None = None,
+    recover: bool = False,
+    expert_tokens: bool = False,
 ) -> bytes:
+    """HELLO body. ``syncer_epoch``, ``recover`` and ``expert_tokens`` add the
+    extension trailer (``yeto.recovery_protocol``); with none of them the
+    bytes are the legacy ones."""
     if session_contract_hash is None:
         # Generic/legacy callers still bind the session to the semantic tensor
         # layout. Restricted profiles may supply a stronger opaque contract.
@@ -224,6 +830,34 @@ def encode_hello(
         if not 0 < len(raw) <= 64:
             raise ValueError("compat_group must be 1..64 bytes")
         parts.append(HELLO_COMPAT_MAGIC + struct.pack("<I", len(raw)) + raw)
+    parts.append(rp.encode_hello_ext(syncer_epoch, recover, expert_tokens))
+    return b"".join(parts)
+
+
+# One routed-token tag per fragment tensor (syncer protocol.rs
+# decode_expert_tags): routed u64 | layer_routed u64 | layer_experts u32.
+_EXPERT_TAG = struct.Struct("<QQI")
+DENSE_TENSOR_TAG = (0, 0, 0)
+
+
+def encode_expert_tags(tags: Sequence[tuple[int, int, int]], tensors: int) -> bytes:
+    """The routed-token tag block of one PUSH_FRAGMENT.
+
+    ``tags[i]`` belongs to fragment tensor ``i``: ``DENSE_TENSOR_TAG`` for a
+    dense tensor, else ``(tokens routed to this expert, tokens routed in its
+    layer, experts in its layer)`` over the outer interval of the push. The
+    syncer scales the island's weight for that tensor by
+    ``routed * layer_experts / layer_routed`` (0 when the layer saw no token).
+    """
+    if len(tags) != tensors:
+        raise ValueError(f"expert tags cover {len(tags)} tensors, fragment has {tensors}")
+    parts = [struct.pack("<I", tensors)]
+    for index, (routed, layer_routed, experts) in enumerate(tags):
+        if experts == 0 and (routed or layer_routed):
+            raise ValueError(f"dense tensor {index} carries routed tokens")
+        if not 0 <= routed <= layer_routed:
+            raise ValueError(f"tensor {index}: routed {routed} of {layer_routed} layer tokens")
+        parts.append(_EXPERT_TAG.pack(routed, layer_routed, experts))
     return b"".join(parts)
 
 
@@ -242,8 +876,8 @@ def _tensor_nbytes(dtype: int, numel: int) -> int:
     return numel * width
 
 
-def _q4_nbytes(numel: int) -> int:
-    return -(-numel // Q4_BLOCK) * (4 + Q4_BLOCK // 2)
+def _q4_nbytes(numel: int, segments: Sequence[int] | None = None) -> int:
+    return sum(-(-n // Q4_BLOCK) * (4 + Q4_BLOCK // 2) for n in (segments if segments is not None else (numel,)))
 
 
 def _contiguous_bytes_view(
@@ -280,7 +914,16 @@ SESSION_REJECT_PREFIXES = (
     ("HELLO is missing the required syncer semantic profile", "syncer_profile_mismatch"),
     # secret-handling-hardening: wrong or missing island HMAC key.
     ("HELLO authentication failed", "island_auth_failed"),
+    # The island was launched for an older syncer incarnation.
+    (rp.SYNCER_EPOCH_FENCE_PREFIX, "syncer_epoch_fenced"),
+    # Local init: the islands did not load the same base weights.
+    ("init digest mismatch", "init_digest_mismatch"),
 )
+
+
+class LeaseExpiredError(ConnectionError):
+    """The syncer expired this island's lease. The client redials with a new
+    connection generation (a re-JOIN); the syncer catches it up."""
 
 
 class SessionRejectedError(ProtocolError):
@@ -428,6 +1071,21 @@ class _StreamedInboundFragment:
     payload: StreamedInboundPayload
 
 
+@dataclass(frozen=True)
+class SendProgress:
+    """Outbound progress of one SyncerClient, for upload diagnostics.
+
+    ``bytes_sent`` counts bytes handed to the kernel by ``sendall`` across
+    every connection group; ``queued_chunks`` is what the live group's send
+    queues still hold; ``reconnects`` counts redial attempts."""
+
+    bytes_sent: int
+    queued_chunks: int
+    reconnects: int
+    connected: bool
+    stalls: int = 0
+
+
 @dataclass
 class _Outbound:
     data: bytes | bytearray
@@ -441,6 +1099,32 @@ def _connect_log(message: str) -> None:
     print(f"[yeto-syncer-client] {message}", file=sys.stderr, flush=True)
 
 
+@dataclass(frozen=True)
+class EncodedPush:
+    """Wire parts of one PUSH_FRAGMENT payload (``SyncerClient.encode_push_parts``)."""
+
+    fragment_id: int
+    push_base: int
+    nbytes: int
+    parts: tuple[bytes, ...]
+
+
+def timed_parts(parts: Iterable[Any], timings: dict[str, float], key: str) -> Iterator[Any]:
+    """Yield ``parts`` unchanged; add the seconds spent producing each one
+    (inside the upstream iterator) to ``timings[key]``."""
+    iterator = iter(parts)
+    timings.setdefault(key, 0.0)
+    while True:
+        started = time.monotonic()
+        try:
+            part = next(iterator)
+        except StopIteration:
+            timings[key] += time.monotonic() - started
+            return
+        timings[key] += time.monotonic() - started
+        yield part
+
+
 class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
@@ -448,6 +1132,22 @@ class SyncerClient:
     ``max_reconnects`` bounds the number of redial attempts (None = retry
     forever); once exhausted, check_health raises.
     """
+
+    # push_fragment_parts takes ``timings`` (S27 G-AG push time split).
+    push_timings_supported = True
+    # First frame and its MAC domain; a receive-only subscriber
+    # (yeto.rl.spot_rollout.subscriber) replaces both.
+    _hello_msg_type: int = MSG_HELLO
+    _hello_mac_domain: bytes = HELLO_MAC_DOMAIN
+
+    def _hello_body_suffix(self) -> bytes:
+        """Bytes after the HELLO body, inside the MAC (a subscriber's member
+        incarnation trailer); empty for a learner, whose HELLO is unchanged."""
+        return b""
+
+    # Transport defaults (S26 E3b); __init__ overrides them per client.
+    stream_schedule: str = "rr"
+    stream_stall_timeout: float | None = None
 
     def __init__(
         self,
@@ -463,11 +1163,32 @@ class SyncerClient:
         syncer_profile_hash: bytes | None = None,
         hmac_key: bytes | None = None,
         compat_group: str | None = None,
+        push_i8_block: int = DEFAULT_I8_BLOCK,
+        push_i4_block: int = DEFAULT_I4_BLOCK,
+        push_i4_stochastic_seed: int | None = None,
+        stream_schedule: str = "rr",
+        stream_stall_timeout: float | None = None,
+        syncer_epoch: int | None = None,
+        recover: bool = False,
+        owned_fragments: range | None = None,
+        expert_tokens: bool = False,
     ):
+        """``syncer_epoch``: the syncer incarnation this island was launched
+        for; a syncer with a newer epoch refuses it (not retried). ``recover``:
+        this island lost its trainer state; every HELLO asks for peer recovery
+        until the syncer sends RECOVERY_DONE (see ``yeto.rl.peer_recovery``).
+        ``expert_tokens``: every push carries per-expert routed-token tags
+        (``encode_expert_tags``) for a syncer run with expert token weights."""
+        if stream_schedule not in STREAM_SCHEDULES:
+            raise ValueError(f"stream_schedule must be one of {STREAM_SCHEDULES}, got {stream_schedule!r}")
+        if stream_stall_timeout is not None and not stream_stall_timeout > 0:
+            raise ValueError("stream_stall_timeout must be positive or None")
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
-        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4):
+        if not valid_session_dtype(dtype):
             raise ValueError(f"unsupported session dtype {dtype}")
+        i8_nbytes(0, push_i8_block)  # validates the int8 block size
+        i4_nbytes(0, push_i4_block)  # validates the int4 block size
         if layout.num_fragments < 1:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
@@ -481,22 +1202,91 @@ class SyncerClient:
             or len(syncer_profile_hash) != 32
         ):
             raise ValueError("syncer profile hash must be exactly 32 bytes")
+        if owned_fragments is None:
+            owned_fragments = range(layout.num_fragments)
+        elif (
+            owned_fragments.step != 1
+            or not 0 <= owned_fragments.start < owned_fragments.stop <= layout.num_fragments
+        ):
+            raise ValueError(
+                f"owned_fragments {owned_fragments} is not a non-empty slice of "
+                f"{layout.num_fragments} fragments"
+            )
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
+        # S27 P4b: the fragments this connection's syncer shard owns (all of
+        # them unsharded). INIT and PUSH for other fragments are refused, and
+        # finalization waits only for these (yeto/syncer_shards.py).
+        self.owned_fragments = owned_fragments
         self.dtype = dtype
+        self._push_base = session_base(dtype)
+        self.push_i8_block = push_i8_block
+        self.push_i4_block = push_i4_block
+        # Stochastic int4 rounding (off by default): one seeded stream per client.
+        self._push_i4_rng = None
+        if push_i4_stochastic_seed is not None:
+            import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+            self._push_i4_rng = np.random.default_rng(push_i4_stochastic_seed)
+        # S26 E3: f32 anchors of a bf16-downlink session (yeto/downlink.py).
+        self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
+        self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
         self.num_streams = num_streams
+        # S26 E3b: chunk placement over the data streams and the per-stream
+        # no-progress timeout (None = off, the historical behaviour).
+        self.stream_schedule = stream_schedule
+        self.stream_stall_timeout = stream_stall_timeout
+        # Index 0 is the control socket; the meters outlive connection groups
+        # so their counters are cumulative for the whole session.
+        self._meters = [StreamMeter() for _ in range(num_streams + 1)]
+        self._upload_drained_at: float | None = None
+        self._stalls = 0
+        # S26 E3b: set once the initial cut arrived. Before that a redial must
+        # replay INIT_PARAMS (learner 0), and TCP_USER_TIMEOUT stays unset:
+        # the multi-GB INIT upload and initial broadcast must not be reset by
+        # the kernel on a slow link (s26-e3b-p06-C32a).
+        self._initial_cut_received = threading.Event()
+        # Test-only (S27 G-EY, RECOVERY_READ_BPS_ENV): a slow link under the
+        # recovery replay of this client.
+        bps = recovery_read_bps_from_env() if recover else None
+        self._recovery_read_rate = (
+            None if bps is None else _ReadRate(bps, lambda: not self._initial_cut_received.is_set())
+        )
+        # Test-only (S27 G-FE, DOWNLINK_READ_LIMIT_ENV): a slow downlink in
+        # normal running. A recovery limit of this client takes precedence.
+        self._downlink_window = downlink_read_limit_from_env(learner_id)
+        self._downlink_read_rate = (
+            None if self._downlink_window is None
+            else _ReadRate(self._downlink_window.bps, self._downlink_window.active)
+        )
+        self._init_generation: int | None = None
+        # Local init: the INIT_DIGEST frame sent after every HELLO until the
+        # initial cut arrives, and the INIT_CONFIRM digest it must earn.
+        self._init_digest_frame: bytes | None = None
+        self._init_combined: bytes | None = None
+        self._init_confirmed = threading.Event()
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
         # secret-handling-hardening: HELLO carries an HMAC when the island has
         # the key (the launcher ships it as a secret env).
         self.hmac_key = hmac_key if hmac_key is not None else island_hmac_key_from_env()
         self.compat_group = compat_group
+        rp.encode_hello_ext(syncer_epoch, False)  # validates the epoch
+        self.syncer_epoch = syncer_epoch
+        self.expert_tokens = expert_tokens
+        # Set until RECOVERY_DONE: a redial during recovery asks again.
+        self._recover = threading.Event()
+        if recover:
+            self._recover.set()
+        self._recovery_events: queue.Queue = queue.Queue()
+        self._snapshot_requests: queue.Queue = queue.Queue()
+        self.lease_expiries = 0
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
         self._max_bcast_payload = max(
-            12 + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
+            self._bcast_prefix + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
             for fragment in layout.fragments
         )
         self._max_final_payload = max(
@@ -530,6 +1320,7 @@ class SyncerClient:
             | _StreamedReassembly,
         ] = {}
         self._reasm_lock = threading.Lock()
+        self._reasm_touched: dict[int, float] = {}  # msg_id -> last chunk (monotonic)
         self._inbound_chunk_sink: object | None = None
         self._msg_id = itertools.count()
         self._rr = itertools.count()
@@ -546,8 +1337,11 @@ class SyncerClient:
         self._failure = threading.Event()  # set by any thread of the live group
         self._closed = threading.Event()
         self._reconnects_used = 0
+        self._bytes_sent = 0
+        self._bytes_sent_lock = threading.Lock()
         self._reset_bcasts_on_reconnect = False
         self._supervisor: threading.Thread | None = None
+        self._watchdog: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -556,6 +1350,8 @@ class SyncerClient:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         enable_tcp_keepalive(sock)
+        if self.stream_stall_timeout is not None and self._initial_cut_received.is_set():
+            set_tcp_user_timeout(sock, self.stream_stall_timeout)
         return sock
 
     def _connect_one(self) -> socket.socket:
@@ -583,9 +1379,14 @@ class SyncerClient:
         raise ConnectionError(f"cannot reach syncer at {self.addr} after {attempts} attempt(s): {last}")
 
     def start(self) -> None:
+        if self._downlink_window is not None:
+            self._downlink_window.see_connect()
         self._connect_group(patient=True)
         self._supervisor = threading.Thread(target=self._supervise, name="yeto-supervisor", daemon=True)
         self._supervisor.start()
+        if self.stream_stall_timeout is not None:
+            self._watchdog = threading.Thread(target=self._watch_stalls, name="yeto-stall-watchdog", daemon=True)
+            self._watchdog.start()
 
     def _connect_group(self, patient: bool) -> None:
         """Dial control + data sockets, send HELLO/DATA_HELLO, start workers.
@@ -602,7 +1403,7 @@ class SyncerClient:
             control = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
             write_frame(
                 control,
-                MSG_HELLO,
+                self._hello_msg_type,
                 seal_hello(
                     encode_hello(
                         self.learner_id,
@@ -613,10 +1414,16 @@ class SyncerClient:
                         self.session_contract_hash,
                         self.syncer_profile_hash,
                         self.compat_group,
-                    ),
+                        syncer_epoch=self.syncer_epoch,
+                        recover=self._recover.is_set(),
+                        expert_tokens=self.expert_tokens,
+                    ) + self._hello_body_suffix(),
                     self.hmac_key,
+                    self._hello_mac_domain,
                 ),
             )
+            if self._init_digest_frame is not None and not self._initial_cut_received.is_set():
+                control.sendall(self._init_digest_frame)
             socks.append(control)
             for idx in range(self.num_streams):
                 s = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
@@ -643,7 +1450,7 @@ class SyncerClient:
                 q: queue.Queue[_Outbound | None] = queue.Queue(maxsize=256)
                 self._queues.append(q)
                 ts = threading.Thread(
-                    target=self._send_loop, args=(gen, s, q), name=f"yeto-send-{i}", daemon=True
+                    target=self._send_loop, args=(gen, s, q, self._meters[i]), name=f"yeto-send-{i}", daemon=True
                 )
                 tr = threading.Thread(target=self._recv_loop, args=(gen, s), name=f"yeto-recv-{i}", daemon=True)
                 self._threads += [ts, tr]
@@ -668,6 +1475,8 @@ class SyncerClient:
                 pass
         for s in socks:
             _close_socket(s)
+        for meter in self._meters:
+            meter.drop_pending()
         self._clear_partial_reassemblies()
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
         with self._lock:
@@ -689,26 +1498,42 @@ class SyncerClient:
             self._failure.wait()
             if self._closed.is_set() or self.shutdown.is_set():
                 return
+            _connect_log(f"connection to syncer {self.addr[0]}:{self.addr[1]} lost "
+                         f"(learner {self.learner_id}): {self._last_err!r}; redialing")
             self._teardown_group()
             backoff = RECONNECT_BACKOFF_START
+            # A lease expiry is the syncer asking for a re-JOIN, not a link
+            # failure: its first redial does not use the reconnect budget.
+            rejoin = isinstance(self._last_err, LeaseExpiredError)
             while True:
                 if self._closed.is_set() or self.shutdown.is_set():
                     return
-                if self.max_reconnects is not None and self._reconnects_used >= self.max_reconnects:
+                if (
+                    not rejoin
+                    and self.max_reconnects is not None
+                    and self._reconnects_used >= self.max_reconnects
+                ):
                     with self._lock:
                         self._err = self._last_err or ConnectionError("syncer connection lost")
                     with self._final_cond:
                         self._final_cond.notify_all()
                     return
-                self._reconnects_used += 1
+                if rejoin:
+                    rejoin = False
+                else:
+                    self._reconnects_used += 1
                 if self._closed.wait(backoff):
                     return
                 backoff = min(backoff * 2.0, RECONNECT_BACKOFF_CAP)
                 try:
                     self._connect_group(patient=False)
+                    _connect_log(f"reconnected to syncer {self.addr[0]}:{self.addr[1]} "
+                                 f"(redial {self._reconnects_used})")
                     break
                 except (OSError, ConnectionError) as e:
                     self._last_err = e
+                    _connect_log(f"redial {self._reconnects_used} to syncer failed: "
+                                 f"{type(e).__name__}: {e}")
 
     def close(self) -> None:
         self._closed.set()
@@ -743,11 +1568,117 @@ class SyncerClient:
         if self._err is not None:
             raise RuntimeError(f"syncer connection failed: {self._err}") from self._err
 
+    def send_progress(self) -> SendProgress:
+        with self._lock:
+            queued = sum(q.qsize() for q in self._queues)
+            connected = self._connected.is_set()
+        with self._bytes_sent_lock:
+            sent = self._bytes_sent
+        return SendProgress(
+            bytes_sent=sent,
+            queued_chunks=queued,
+            reconnects=self._reconnects_used,
+            connected=connected,
+            stalls=self._stalls,
+        )
+
+    def stream_snapshots(self) -> tuple[StreamSnapshot, ...]:
+        """Cumulative counters of each data stream (control stream excluded;
+        with ``num_streams == 0`` the control stream carries the data)."""
+        meters = self._meters[1:] if self.num_streams else self._meters[:1]
+        return tuple(meter.snapshot() for meter in meters)
+
+    @property
+    def upload_drained_at(self) -> float | None:
+        """Unix time when the data streams last became idle with nothing
+        queued, i.e. when this island's latest upload left the host."""
+        return self._upload_drained_at
+
     # -- learner-facing API ------------------------------------------------------
 
-    def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
+    def send_initial_fragments(
+        self,
+        parts_for: Callable[[int], Iterable[bytes | bytearray | memoryview]],
+    ) -> bool:
+        """Learner 0: stream INIT_PARAMS of every fragment on the live group.
+
+        ``parts_for(fragment_id)`` returns a fresh part iterable each call, so
+        the same INIT can be replayed after a redial. Returns True when every
+        fragment was queued on one connection generation; False on an outage
+        (nothing to undo: the syncer ignores INIT it already applied, and a
+        partial INIT of a dead generation is dropped by the syncer)."""
+        generation = self.connection_generation
+        try:
+            for fragment_id in self.owned_fragments:
+                if self.send_init_parts(fragment_id, parts_for(fragment_id)) is not True:
+                    return False
+        except PartialMessageGenerationLost:
+            return False
+        if generation != self.connection_generation:
+            return False
+        self._init_generation = generation
+        return True
+
+    def _check_owned(self, kind: str, fragment_id: int) -> None:
         if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+            raise ValueError(f"{kind} for unknown fragment {fragment_id}")
+        if fragment_id not in self.owned_fragments:
+            raise ValueError(
+                f"{kind} for fragment {fragment_id} sent to the syncer shard "
+                f"owning fragments {self.owned_fragments.start}..{self.owned_fragments.stop - 1}"
+            )
+
+    def init_replay_due(self) -> bool:
+        """True when the live group never carried a complete INIT and the
+        initial cut has not arrived yet (learner 0 must send INIT again)."""
+        with self._lock:
+            live = self._connected.is_set()
+            generation = self.connection_generation
+        return (
+            live
+            and not self._initial_cut_received.is_set()
+            and generation != self._init_generation
+        )
+
+    def set_init_digests(self, layout_hash: bytes, digests: Sequence[bytes]) -> None:
+        """Local init: report the SHA-256 of every fragment's INIT_PARAMS
+        tensor bytes (one per layout fragment). Call before :meth:`start`;
+        the digests then follow every HELLO until the initial cut arrives,
+        and :meth:`initial_cut_confirmed` turns true when the syncer agrees."""
+        if len(layout_hash) != 32 or len(digests) != self.layout.num_fragments:
+            raise ValueError("local init needs a 32-byte layout hash and one digest per fragment")
+        if bulk_dtype(self.dtype) != DTYPE_F32:
+            raise ValueError("local init needs an f32-bulk session")
+        owned = [bytes(digests[index]) for index in self.owned_fragments]
+        if any(len(digest) != 32 for digest in owned):
+            raise ValueError("fragment digests must be 32-byte SHA-256 values")
+        if self._connected.is_set():
+            raise RuntimeError("set_init_digests must be called before start()")
+        payload = (struct.pack("<I", self.learner_id) + bytes(layout_hash)
+                   + struct.pack("<II", self.owned_fragments.start, len(owned)) + b"".join(owned))
+        self._init_combined = hashlib.sha256(b"".join(owned)).digest()
+        self._init_digest_frame = self._frame(MSG_INIT_DIGEST, payload)
+
+    def initial_cut_confirmed(self) -> bool:
+        """True once the syncer confirmed this island's local version 0."""
+        return self._init_confirmed.is_set()
+
+    def mark_initial_cut_received(self) -> None:
+        """The initial cut arrived: INIT is no longer replayed, and the stall
+        timeout now also bounds unacknowledged data in the kernel."""
+        self._initial_cut_received.set()
+        if self.stream_stall_timeout is None:
+            return
+        with self._lock:
+            socks = list(self._socks)
+        for sock in socks:
+            try:
+                set_tcp_user_timeout(sock, self.stream_stall_timeout)
+            except OSError:
+                pass  # a dying socket; the group is being replaced anyway
+
+    def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
+        self._check_owned("INIT_PARAMS", fragment_id)
         expected = _tensor_nbytes(
             bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
         )
@@ -764,8 +1695,7 @@ class SyncerClient:
         tensor_parts: Iterable[bytes | bytearray | memoryview],
     ) -> bool:
         """Stream INIT_PARAMS without materializing its complete tensor."""
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+        self._check_owned("INIT_PARAMS", fragment_id)
         expected = _tensor_nbytes(
             bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
         )
@@ -777,6 +1707,12 @@ class SyncerClient:
             label=f"INIT_PARAMS fragment {fragment_id}",
         )
 
+    def push_segments(self, fragment_id: int) -> list[int] | None:
+        """Tensor sizes of a fragment on a tensor-block session, else ``None``."""
+        if not tensor_blocks(self.dtype):
+            return None
+        return [numel for _, numel in self.layout.fragments[fragment_id].tensors]
+
     def push_fragment(
         self,
         fragment_id: int,
@@ -787,18 +1723,23 @@ class SyncerClient:
         c_steps: int,
         c_tokens: int,
         tensor_bytes: bytes,
+        *,
+        expert_tags: Sequence[tuple[int, int, int]] | None = None,
     ) -> None:
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        """``expert_tags``: required exactly when the session sends expert
+        token counts (see ``encode_expert_tags``)."""
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
         if round_attempt < 1:
             raise ValueError("round_attempt must be positive")
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
         numel = self.layout.fragments[fragment_id].numel
+        segments = self.push_segments(fragment_id)
         expected = (
             _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
+            if self._push_base == DTYPE_Q4
+            # dtypes 4-7 callers pass f32 bytes; the client encodes them below
+            else _tensor_nbytes(bulk_dtype(self.dtype), numel)
         )
         if len(tensor_bytes) != expected:
             raise ValueError(
@@ -816,6 +1757,17 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
+        if self._push_base == DTYPE_F32_PUSH_BF16:
+            tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block, segments=segments)
+        elif self._push_base == DTYPE_F32_PUSH_Q4:
+            tensor_bytes = f32_bytes_to_q4(tensor_bytes, segments=segments)
+        elif self._push_base == DTYPE_F32_PUSH_I4:
+            tensor_bytes = f32_bytes_to_i4(
+                tensor_bytes, self.push_i4_block, rng=self._push_i4_rng, segments=segments
+            )
+        head += self._expert_tag_block(fragment_id, expert_tags)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -830,8 +1782,20 @@ class SyncerClient:
         tensor_parts: Iterable[bytes | bytearray | memoryview],
         *,
         before_last_enqueue: Callable[[], None] | None = None,
+        expert_tags: Sequence[tuple[int, int, int]] | None = None,
+        timings: dict[str, float] | None = None,
+        encoded: EncodedPush | None = None,
     ) -> bool:
         """Stream one PUSH_FRAGMENT from bounded contiguous byte parts.
+
+        ``timings`` (S27 G-AG diagnostics): when given, ``produce_s`` gets the
+        seconds spent producing the wire parts (the caller's ``tensor_parts``
+        plus the wire encoding) and ``push_s`` the whole call; the rest of
+        ``push_s`` is framing and enqueueing.  The bytes do not change.
+
+        ``encoded`` (S27 G-AG): wire parts :meth:`encode_push_parts` already
+        produced for this fragment (``tensor_parts`` must then be empty); the
+        frame is byte-identical to streaming the same deltas.
 
         The syncer observes the same logical inner frame as ``push_fragment``.
         Only one CHUNK-sized envelope is assembled at a time; neither the
@@ -840,18 +1804,17 @@ class SyncerClient:
         none could be queued. A failure after the first chunk poisons that
         connection generation and raises so callers cannot mark the push done.
         """
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
         if round_attempt < 1:
             raise ValueError("round_attempt must be positive")
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
-        numel = self.layout.fragments[fragment_id].numel
-        expected = (
-            _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
-        )
+        if encoded is None:
+            expected, tensor_parts = self._push_wire_parts(fragment_id, tensor_parts)
+        else:
+            if encoded.fragment_id != fragment_id or encoded.push_base != self._push_base:
+                raise ValueError("encoded PUSH_FRAGMENT parts belong to another fragment or codec")
+            expected, tensor_parts = encoded.nbytes, encoded.parts
         head = struct.pack(
             "<IIQIQQIQ",
             self.learner_id,
@@ -863,17 +1826,104 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
-        return self._send_large_parts(
-            MSG_PUSH_FRAGMENT,
-            head,
-            tensor_parts,
-            expected,
-            label=f"PUSH_FRAGMENT fragment {fragment_id}",
-            before_last_enqueue=before_last_enqueue,
-        )
+        head += self._expert_tag_block(fragment_id, expert_tags)
+        if timings is None:
+            return self._send_large_parts(
+                MSG_PUSH_FRAGMENT,
+                head,
+                tensor_parts,
+                expected,
+                label=f"PUSH_FRAGMENT fragment {fragment_id}",
+                before_last_enqueue=before_last_enqueue,
+            )
+        started = time.monotonic()
+        try:
+            return self._send_large_parts(
+                MSG_PUSH_FRAGMENT,
+                head,
+                timed_parts(tensor_parts, timings, "produce_s"),
+                expected,
+                label=f"PUSH_FRAGMENT fragment {fragment_id}",
+                before_last_enqueue=before_last_enqueue,
+            )
+        finally:
+            timings["push_s"] = timings.get("push_s", 0.0) + time.monotonic() - started
+
+    def _push_wire_parts(
+        self, fragment_id: int, tensor_parts: Iterable[bytes | bytearray | memoryview]
+    ) -> tuple[int, Iterable[bytes | bytearray | memoryview]]:
+        """The wire size and wire parts of one PUSH_FRAGMENT's f32 deltas."""
+        numel = self.layout.fragments[fragment_id].numel
+        segments = self.push_segments(fragment_id)
+        if self._push_base == DTYPE_Q4:
+            expected = _q4_nbytes(numel)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            expected = i8_nbytes(numel, self.push_i8_block, segments)
+            tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block, segments)
+        elif self._push_base == DTYPE_F32_PUSH_Q4:
+            expected = _q4_nbytes(numel, segments)
+            tensor_parts = _f32_parts_to_q4(tensor_parts, segments)
+        elif self._push_base == DTYPE_F32_PUSH_I4:
+            expected = i4_nbytes(numel, self.push_i4_block, segments)
+            tensor_parts = _f32_parts_to_i4(tensor_parts, self.push_i4_block, self._push_i4_rng, segments)
+        else:
+            expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
+        if self._push_base == DTYPE_F32_PUSH_BF16:
+            tensor_parts = _f32_parts_to_bf16(tensor_parts)
+        return expected, tensor_parts
+
+    @property
+    def can_encode_ahead(self) -> bool:
+        """Whether :meth:`encode_push_parts` may run off the sending thread
+        and ahead of the push: a deterministic block codec (int8, q4, int4
+        without stochastic rounding) whose output parts are fresh bytes."""
+        return self._push_base in (DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4) or (
+            self._push_base == DTYPE_F32_PUSH_I4 and self._push_i4_rng is None)
+
+    def encode_push_parts(
+        self,
+        fragment_id: int,
+        tensor_parts: Iterable[bytes | bytearray | memoryview],
+        *,
+        timings: dict[str, float] | None = None,
+    ) -> EncodedPush:
+        """Encode one fragment's f32 deltas to wire parts now (S27 G-AG).
+
+        Pure: reads only the layout and codec settings, so another thread may
+        encode the next fragments while this one sends.  ``timings`` gets
+        ``produce_s``, as in :meth:`push_fragment_parts`."""
+        if not self.can_encode_ahead:
+            raise ValueError("this push codec cannot be encoded ahead of its push")
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
+        expected, parts = self._push_wire_parts(fragment_id, tensor_parts)
+        if timings is not None:
+            parts = timed_parts(parts, timings, "produce_s")
+        materialized = tuple(bytes(part) if not isinstance(part, bytes) else part for part in parts)
+        if sum(len(part) for part in materialized) != expected:
+            raise ValueError(f"PUSH_FRAGMENT fragment {fragment_id} encoded to the wrong size")
+        return EncodedPush(fragment_id, self._push_base, expected, materialized)
+
+    def _expert_tag_block(
+        self, fragment_id: int, expert_tags: Sequence[tuple[int, int, int]] | None
+    ) -> bytes:
+        if (expert_tags is not None) != self.expert_tokens:
+            raise ValueError(
+                "PUSH_FRAGMENT expert tags are required exactly when the session "
+                "sends expert token counts"
+            )
+        if expert_tags is None:
+            return b""
+        return encode_expert_tags(expert_tags, len(self.layout.fragments[fragment_id].tensors))
 
     def heartbeat(self, local_step: int) -> None:
         self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))
+
+    def send_leave(self, reason: int, timeout: float = 5.0) -> bool:
+        """Tell the syncer why this island leaves; True once the frame was
+        written. The caller closes the client afterwards."""
+        sent = threading.Event()
+        frame = self._frame(MSG_LEAVE, struct.pack("<IB", self.learner_id, int(reason)))
+        return self._enqueue(0, frame, sent=sent) and sent.wait(timeout)
 
     def send_budget_done(
         self, local_steps: int, timeout: float | None = None
@@ -934,6 +1984,36 @@ class SyncerClient:
     def drain_updates(self) -> list[BcastFragment]:
         return self._drain(self._bcasts)
 
+    # -- peer recovery (yeto.rl.peer_recovery drives these) --------------------
+
+    @property
+    def recovering(self) -> bool:
+        return self._recover.is_set()
+
+    def next_recovery_event(self, timeout: float):
+        """Next RecoveryClock / RecoverySource / RecoveryDone, or None."""
+        try:
+            return self._recovery_events.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def drain_snapshot_requests(self) -> list[rp.SnapshotRequest]:
+        """Donor side: snapshot requests the syncer sent this island."""
+        return self._drain(self._snapshot_requests)
+
+    def send_snapshot_ready(self, request: rp.SnapshotRequest, versions, sha256: bytes, locator: str) -> bool:
+        payload = rp.encode_snapshot_ready(request, versions, sha256, locator)
+        return self._enqueue(0, self._frame(rp.MSG_PEER_SNAPSHOT_READY, payload))
+
+    def send_recovery_restored(self, versions) -> bool:
+        """``versions`` held after the restore, or None: resend every fragment."""
+        if versions is not None and len(versions) != self.layout.num_fragments:
+            raise ValueError("restored versions must list every fragment")
+        return self._enqueue(0, self._frame(rp.MSG_RECOVERY_RESTORED, rp.encode_restored(versions)))
+
+    def send_recovery_failed(self, reason: str) -> bool:
+        return self._enqueue(0, self._frame(rp.MSG_RECOVERY_FAILED, rp.encode_failed(reason)))
+
     def install_inbound_chunk_sink(self, sink: object | None) -> None:
         """Select a transactional sink for future chunked fragment receives.
 
@@ -955,6 +2035,9 @@ class SyncerClient:
                 raise TypeError(
                     "inbound chunk sink does not implement the transaction API"
                 )
+        if sink is not None and self._downlink is not None:
+            sink = DownlinkChunkSink(
+                sink, self._downlink, [f.numel for f in self.layout.fragments], MSG_BCAST_FRAGMENT)
         with self._reasm_lock:
             if self._reasm:
                 raise RuntimeError("cannot replace inbound chunk sink mid-message")
@@ -979,6 +2062,8 @@ class SyncerClient:
                     ready = []
                     missing = []
                     for fid, version in enumerate(manifest.versions):
+                        if fid not in self.owned_fragments:
+                            continue  # another syncer shard's fragment
                         cached = self._final_fragments.get(fid)
                         if cached is None or cached.version != version:
                             latest = None if cached is None else cached.version
@@ -996,6 +2081,27 @@ class SyncerClient:
                     )
                     raise TimeoutError(
                         f"finalization timed out after {timeout:.1f}s: {detail}"
+                    )
+                self._final_cond.wait(min(remaining, 0.5))
+
+    def wait_for_final_manifest(self, timeout: float | None = None) -> FinalManifest:
+        """Wait for the final version manifest only (a syncer that runs
+        ``--final-cut-payload manifest`` sends no final fragments).
+
+        The manifest names the final version of every fragment; the final
+        parameters stay with the syncer. :meth:`acknowledge_finalization`
+        then confirms this exact manifest."""
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        with self._final_cond:
+            while True:
+                self.check_health()
+                if self._final_manifest is not None:
+                    return self._final_manifest
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"finalization timed out after {timeout:.1f}s: manifest not received"
                     )
                 self._final_cond.wait(min(remaining, 0.5))
 
@@ -1094,6 +2200,8 @@ class SyncerClient:
                 if gen is not None and gen != self._gen:
                     return False
                 q = self._queues[stream]
+            meter = self._meters[stream]
+            meter.enqueued(len(data))  # before put: the sender may drain it at once
             try:
                 q.put(
                     _Outbound(data, sent),
@@ -1101,7 +2209,15 @@ class SyncerClient:
                 )  # bounded wait, then re-check the group
                 return True
             except queue.Full:
+                meter.enqueued(-len(data))
                 continue
+
+    def _next_data_stream(self) -> int:
+        """Socket index (1-based; 0 only without data streams) for the next
+        CHUNK envelope, by ``stream_schedule``."""
+        if self.num_streams == 0:
+            return 0
+        return 1 + pick_stream(self.stream_schedule, self._meters[1:], next(self._rr))
 
     def _send_large(self, msg_type: int, payload: bytes) -> None:
         inner = self._frame(msg_type, payload)
@@ -1117,7 +2233,7 @@ class SyncerClient:
         for offset in range(0, total, CHUNK_SIZE):
             chunk = inner[offset : offset + CHUNK_SIZE]
             envelope = self._frame(MSG_CHUNK, _CHUNK_HEAD.pack(msg_id, total, offset) + chunk)
-            stream = 1 + next(self._rr) % self.num_streams
+            stream = self._next_data_stream()
             if not self._enqueue(stream, envelope, gen=gen):
                 return  # group died mid-message; drop the remainder
 
@@ -1238,11 +2354,7 @@ class SyncerClient:
                         before_last_enqueue = None
                         callback()
 
-                stream = (
-                    0
-                    if self.num_streams == 0
-                    else 1 + next(self._rr) % self.num_streams
-                )
+                stream = self._next_data_stream()
                 if not self._enqueue(stream, envelope, gen=gen):
                     if enqueued_chunks:
                         raise PartialMessageGenerationLost(
@@ -1302,19 +2414,89 @@ class SyncerClient:
         with self._final_cond:
             self._final_cond.notify_all()
 
-    def _send_loop(self, gen: int, sock: socket.socket, q: queue.Queue) -> None:
+    def _send_loop(
+        self,
+        gen: int,
+        sock: socket.socket,
+        q: queue.Queue,
+        meter: StreamMeter | None = None,
+    ) -> None:
+        if meter is None:  # a sender outside a connection group (tests)
+            meter = StreamMeter()
         try:
             while True:
                 item = q.get()
                 if item is None:
                     return
-                sock.sendall(item.data)
+                # send() instead of sendall() so the meter sees byte progress
+                # inside one 4 MiB envelope (stall watchdog, per-stream rate).
+                view = memoryview(item.data)
+                meter.begin()
+                try:
+                    while view:
+                        sent = sock.send(view)
+                        meter.progress(sent)
+                        view = view[sent:]
+                finally:
+                    meter.end()
+                    view.release()
+                with self._bytes_sent_lock:
+                    self._bytes_sent += len(item.data)
+                if all(m.idle for m in self._meters):
+                    self._upload_drained_at = time.time()
                 if item.sent is not None:
                     item.sent.set()
         except BaseException as e:
             self._socket_failed(gen, e)
 
+    def _stalled_stream(self) -> str | None:
+        """Describe the first stream without progress for the stall timeout."""
+        limit = self.stream_stall_timeout
+        now = time.monotonic()
+        for index, meter in enumerate(self._meters):
+            idle_for = meter.stalled_for(now)
+            if idle_for > limit:
+                return f"outbound stream {index} made no progress for {idle_for:.0f}s"
+        with self._reasm_lock:
+            touched = dict(self._reasm_touched)
+        for msg_id, last in touched.items():
+            if now - last > limit:
+                return f"inbound message {msg_id} got no chunk for {now - last:.0f}s"
+        return None
+
+    def _watch_stalls(self) -> None:
+        """Fail the live group when one stream stops moving bytes.
+
+        A stalled TCP stream can sit for many minutes before the kernel gives
+        up (C32: 900 s with every socket still open). The failure goes
+        through the normal reconnect path, so the syncer replays its PULLs
+        and the island pushes the interrupted fragment again."""
+        period = min(1.0, self.stream_stall_timeout / 4)
+        while not self._closed.wait(period):
+            if self.shutdown.is_set():
+                return
+            with self._lock:
+                gen = self._gen
+                live = self._connected.is_set()
+            if not live:
+                continue
+            reason = self._stalled_stream()
+            if reason is None:
+                continue
+            with self._lock:
+                if gen != self._gen:
+                    continue
+                self._stalls += 1
+                socks = list(self._socks)
+            _connect_log(f"{reason} (learner {self.learner_id}); dropping the connection group")
+            self._socket_failed(gen, StreamStalledError(reason))
+            for sock in socks:  # unblock senders stuck in send()
+                _close_socket(sock)
+
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
+        test_rate = self._recovery_read_rate or self._downlink_read_rate
+        if test_rate is not None and self._socks and sock is not self._socks[0]:
+            sock = _RateLimitedSocket(sock, test_rate)
         try:
             while True:
                 msg_type, payload = read_frame(sock, self._incoming_frame_limit)
@@ -1340,8 +2522,13 @@ class SyncerClient:
             MSG_FINAL_MANIFEST: _FINAL_MANIFEST_HEAD.size
             + 8 * self.layout.num_fragments,
             MSG_SHUTDOWN: 0,
+            MSG_INIT_CONFIRM: 32,
             MSG_ERROR: MAX_ERROR_FRAME,
             MSG_CHUNK: _CHUNK_HEAD.size + CHUNK_SIZE,
+            rp.MSG_RECOVERY_CLOCK: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_PEER_SNAPSHOT_REQ: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_RECOVERY_SOURCE: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_RECOVERY_DONE: rp.MAX_RECOVERY_FRAME,
         }
         try:
             return limits[msg_type]
@@ -1382,6 +2569,7 @@ class SyncerClient:
                         sink=sink,
                         transaction=sink.begin_message(msg_id, total),
                     )
+            self._reasm_touched[msg_id] = time.monotonic()
             partial = self._reasm[msg_id]
             if isinstance(partial, _StreamedReassembly):
                 if partial.total != total:
@@ -1401,6 +2589,7 @@ class SyncerClient:
                     raise
                 if completed is not None:
                     self._reasm.pop(msg_id, None)
+                    self._reasm_touched.pop(msg_id, None)
                 return completed
             buf, filled, ranges = partial
             if len(buf) != total:
@@ -1415,6 +2604,7 @@ class SyncerClient:
             if filled[0] != total:
                 raise ValueError("chunk byte count exceeds frame length")
             del self._reasm[msg_id]
+            self._reasm_touched.pop(msg_id, None)
         magic, msg_type, length = _HEADER.unpack_from(buf)
         if magic != MAGIC or length != total - _HEADER.size:
             raise ValueError("corrupt reassembled frame")
@@ -1462,6 +2652,13 @@ class SyncerClient:
                 dtype,
                 self.layout.fragments[fragment_id].numel,
             )
+            if msg_type == MSG_BCAST_FRAGMENT and self._downlink is not None:
+                # The downlink header (kind, base version, digest) is part of
+                # the payload the wrapping sink decodes; its kind fixes the size.
+                if len(data) < tensor_start + DOWNLINK_HEADER_LEN:
+                    raise ValueError("first downlink fragment chunk is header-truncated")
+                expected_payload = DOWNLINK_HEADER_LEN + downlink_tensor_nbytes(
+                    data[tensor_start], self.layout.fragments[fragment_id].numel)
             if length != 12 + expected_payload:
                 raise ValueError(
                     f"streamed fragment {fragment_id} has {length - 12} tensor "
@@ -1575,6 +2772,7 @@ class SyncerClient:
         with self._reasm_lock:
             partials = list(self._reasm.values())
             self._reasm.clear()
+            self._reasm_touched.clear()
         for partial in partials:
             if isinstance(partial, _StreamedReassembly):
                 try:
@@ -1691,7 +2889,13 @@ class SyncerClient:
         self, gen: int, msg_type: int, payload: bytes | memoryview
     ) -> None:
         if msg_type == MSG_ERROR:
-            message = payload.decode("utf-8", errors="replace")
+            message = bytes(payload).decode("utf-8", errors="replace")
+            if message.startswith(rp.LEASE_EXPIRED_PREFIX):
+                # Not fatal: redial with a new generation; the syncer treats
+                # it as a re-JOIN and catches the island up.
+                self.lease_expiries += 1
+                self._socket_failed(gen, LeaseExpiredError(message))
+                return
             text = f"syncer rejected protocol session: {message}"
             metric = next(
                 (m for prefix, m in SESSION_REJECT_PREFIXES if message.startswith(prefix)),
@@ -1717,12 +2921,30 @@ class SyncerClient:
             with self._final_cond:
                 self._final_cond.notify_all()
             return
+        if msg_type in _RECOVERY_DECODERS:
+            event = _RECOVERY_DECODERS[msg_type](payload, self.layout.num_fragments)
+            if isinstance(event, rp.SnapshotRequest):
+                self._snapshot_requests.put(event)
+                return
+            if isinstance(event, rp.RecoveryDone):
+                self._recover.clear()
+            self._recovery_events.put(event)
+            return
+        if msg_type == MSG_INIT_CONFIRM:
+            if self._init_combined is None:
+                raise ProtocolError("INIT_CONFIRM for an island that sent no INIT_DIGEST")
+            if bytes(payload) != self._init_combined:
+                raise ProtocolError("INIT_CONFIRM digest differs from this island's fragments")
+            self._init_confirmed.set()
+            return
         if msg_type == MSG_PULL_REQ:
             if len(payload) != 16:
                 raise ValueError("PULL_REQ payload must be 16 bytes")
             fid, step, round_attempt = struct.unpack("<IQI", payload)
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"PULL_REQ for unknown fragment {fid}")
+            if self._downlink_window is not None:
+                self._downlink_window.see_pull(step)
             self._pulls.put(PullRequest(fid, step, round_attempt))
         elif msg_type == MSG_BCAST_FRAGMENT:
             if len(payload) < 12:
@@ -1730,15 +2952,19 @@ class SyncerClient:
             fid, version = struct.unpack_from("<IQ", payload)
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"BCAST_FRAGMENT for unknown fragment {fid}")
-            expected = _tensor_nbytes(
-                bulk_dtype(self.dtype), self.layout.fragments[fid].numel
-            )
-            if len(payload) - 12 != expected:
-                raise ValueError(
-                    f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
-                    f"expected {expected}"
+            if self._downlink is not None:
+                data = self._downlink.decode_whole(
+                    fid, version, payload[12:], self.layout.fragments[fid].numel)
+            else:
+                expected = _tensor_nbytes(
+                    bulk_dtype(self.dtype), self.layout.fragments[fid].numel
                 )
-            data = payload[12:]
+                if len(payload) - 12 != expected:
+                    raise ValueError(
+                        f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
+                        f"expected {expected}"
+                    )
+                data = payload[12:]
             digest = hashlib.sha256(data).digest()
             with self._bcast_lock:
                 seen = self._bcast_seen[fid]
@@ -1821,6 +3047,14 @@ class SyncerClient:
         self._protocol_failed(self._gen, ProtocolError(message))
 
 
+_RECOVERY_DECODERS = {
+    rp.MSG_RECOVERY_CLOCK: rp.RecoveryClock.decode,
+    rp.MSG_PEER_SNAPSHOT_REQ: rp.SnapshotRequest.decode,
+    rp.MSG_RECOVERY_SOURCE: rp.RecoverySource.decode,
+    rp.MSG_RECOVERY_DONE: rp.RecoveryDone.decode,
+}
+
+
 # TCP keepalive for syncer connections (rl-infra-spec pause-audit: without it
 # a NAT/LB that drops an idle flow leaves the learner blocked on recv forever;
 # seen in the 2.4 T2R2 s29 run). Probes start after KEEPIDLE s of silence and a
@@ -1843,6 +3077,14 @@ def enable_tcp_keepalive(sock: socket.socket) -> None:
         option = getattr(socket, name, None)
         if option is not None:  # Linux; other platforms keep their defaults
             sock.setsockopt(socket.IPPROTO_TCP, option, value)
+
+
+def set_tcp_user_timeout(sock: socket.socket, seconds: float) -> None:
+    """Bound how long unacknowledged data may sit before the kernel resets
+    the connection (Linux TCP_USER_TIMEOUT); other platforms keep defaults."""
+    option = getattr(socket, "TCP_USER_TIMEOUT", None)
+    if option is not None:
+        sock.setsockopt(socket.IPPROTO_TCP, option, max(1, int(seconds * 1000)))
 
 
 def _close_socket(sock: socket.socket) -> None:

@@ -7,11 +7,11 @@ User decision 2026-10-09 (tasks 5.x, design D8). ``--rl-island-role ISLAND:ROLE`
   move the syncer base) and the cut point (its checkpoint store, when one is given).
 * A droppable island runs on spot. It never resumes from a checkpoint store. When it
   comes back after a reclaim it starts fresh, JOINs with catch-up and takes the
-  current syncer base (``ElasticAvgSync.start``: optimizer reset); the data cursor
+  current syncer base (``PoolAvgSync.start``: optimizer reset); the data cursor
   comes from the syncer version (0.21 fresh-machine rule). So it syncs from the
   line of weights the anchor keeps current, never from an archive.
 * If every droppable island is gone at once, the anchor alone still closes rounds:
-  admission requires ``--rl-q-min`` <= number of anchors.
+  admission requires ``--rl-sync-q-min`` <= number of anchors.
 
 Admission (task 5.1, spec "推理型岛的定义"): elastic only (legacy refused), at least
 one anchor, no anchor on a cloud whose GPUs are always preemptible (Modal), no global
@@ -34,7 +34,7 @@ from yeto.cloud import capabilities
 ROLE_ENV = "YETO_ISLAND_ROLE"   # JSON {"role", "cloud", "region"} on every island of a role run
 ANCHOR, DROPPABLE = "anchor", "droppable"
 ROLES = (ANCHOR, DROPPABLE)
-LEGACY_REFUSED = "可丢弃岛只在 elastic 下支持 (droppable islands need --rl-island-scheduling elastic)"
+LEGACY_REFUSED = "可丢弃岛只在岛池下支持 (droppable islands need island pool options, e.g. --rl-sync-island-lease-s)"
 
 
 def parse_roles(items, num_islands: int) -> dict[int, str]:
@@ -69,9 +69,16 @@ def admit(args, clouds: list[str]) -> dict[int, str]:
         return {}
     if getattr(args, "training_mode", "sft") != "rl":
         raise ValueError("--rl-island-role needs --training-mode rl")
-    mode = getattr(args, "rl_island_scheduling", None) or "legacy"
-    if mode != "elastic":
+    from ..launch.syncer import island_pool
+
+    if not island_pool(args):
         raise ValueError(LEGACY_REFUSED)
+    if (getattr(args, "rl_sync_preset", None) == "full-parameter"
+            and getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async"):
+        # A droppable island comes back as a fresh process after a reclaim;
+        # only asynchronous rounds let a fresh process catch up and join.
+        raise ValueError("--rl-island-role: a full-parameter island joins a running pool only "
+                         "with --rl-sync-full-parameter-rounds async, so it cannot be droppable")
     roles = parse_roles(items, len(clouds))
     anchors = [i for i, r in roles.items() if r == ANCHOR]
     if not anchors:
@@ -79,10 +86,10 @@ def admit(args, clouds: list[str]) -> dict[int, str]:
     if getattr(args, "spot", False):
         raise ValueError("--rl-island-role with --spot: billing comes from the role "
                          "(anchor on-demand, droppable spot); drop --spot")
-    q_min = getattr(args, "rl_q_min", None)
+    q_min = getattr(args, "rl_sync_q_min", None)
     q_min = 1 if q_min is None else int(q_min)
     if q_min > len(anchors):
-        raise ValueError(f"--rl-q-min {q_min} > {len(anchors)} anchor island(s): rounds would stop "
+        raise ValueError(f"--rl-sync-q-min {q_min} > {len(anchors)} anchor island(s): rounds would stop "
                          "when every droppable island is reclaimed at once")
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
     for i, role in roles.items():
@@ -126,8 +133,10 @@ def role_args(args, role: str | None):
 
 def island_keeps_spot_volume(args) -> bool:
     """The legacy ``--spot`` per-island volume (completed groups, re-synced on a
-    rebuild) is a resume from an archive; a droppable island must not get it."""
-    return bool(getattr(args, "spot", False)) and getattr(args, "_island_role", None) != DROPPABLE
+    rebuild) is a resume from an archive; a droppable island must not get it, nor
+    a spot sampler island (``spot_without_volume``: its state is the buffer)."""
+    return (bool(getattr(args, "spot", False)) and getattr(args, "_island_role", None) != DROPPABLE
+            and not getattr(args, "spot_without_volume", False))
 
 
 def role_env(role: str | None, cloud: str, region: str | None) -> dict[str, str]:

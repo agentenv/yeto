@@ -151,9 +151,12 @@ def test_generate_returns_handle_with_opaque_payload(tmp_path):
     assert handle.completed == 2 and len(handle.groups) == 2
     assert "REF" not in repr(handle)  # payload excluded from repr
     require_policy_tokens(handle, TOKEN)
-    # metadata consumed; only the policy token for the rollout-side filter stays
-    assert [f.name for f in tmp_path.iterdir()] == [hook.POLICY_TOKEN_FILE]
+    # metadata consumed; only the policy token for the rollout-side filter and the
+    # round being generated stay
+    assert sorted(f.name for f in tmp_path.iterdir()) == sorted(
+        [hook.POLICY_TOKEN_FILE, hook.ROLLOUT_ROUND_FILE])
     assert (tmp_path / hook.POLICY_TOKEN_FILE).read_text() == TOKEN
+    assert (tmp_path / hook.ROLLOUT_ROUND_FILE).read_text() == "3"
 
 
 def test_injected_token_mismatch_rejected_before_training(tmp_path):
@@ -262,7 +265,7 @@ def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
             result = await super().get(rollout_id)
             nonzero = counts[rollout_id]  # computed during reward post-processing
             hook.record_round_metadata(self.args, self.kept, sink=self.sink,
-                                       nonzero_advantages=nonzero)
+                                       nonzero_advantages=nonzero, buffer_stale_groups=nonzero % 5)
             return result
 
     kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
@@ -278,7 +281,9 @@ def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
     seen = {}
     for rid in (3, 4, 5):
         current["v"] = next(versions)
-        seen[rid] = p.generate(rid).nonzero_advantages
+        batch = p.generate(rid)
+        seen[rid] = batch.nonzero_advantages
+        assert batch.buffer_stale_groups == counts[rid] % 5
     assert seen == counts
 
 

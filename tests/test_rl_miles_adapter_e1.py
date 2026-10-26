@@ -204,12 +204,13 @@ def test_member_publish_admits_only_after_payload_readback():
         ("start_update_weights", ("c2", "c3"), 1, False),
         ("end_update_weights",),
         ("check_weights",),
-        ("admit_cells", ("c2", "c3"), 1, token),
-        ("start_commit_weight_version", token, 1),
+        # P0-S: engines carry the plain policy version
+        ("admit_cells", ("c2", "c3"), 1, "1"),
+        ("start_commit_weight_version", 1, 1),
         ("end_commit_weight_version",),
     ]
     # non-members were never stamped by the member publish
-    assert ctl.engines["c2"].version == token
+    assert ctl.engines["c2"].version == "1"
 
 
 def test_member_publish_with_wrong_payload_is_never_admitted():
@@ -312,7 +313,7 @@ def test_driver_rebuild_trainer_republishes_without_outer_effects(tmp_path):
         def finish(self, d):
             pass
 
-        def close(self):
+        def close(self, reason=0):
             pass
 
     driver = IslandDriver(

@@ -96,14 +96,6 @@ def test_missing_ref_load_refused(monkeypatch):
         fp_fn.fn_fingerprint(str(REPO), "fn8s")
 
 
-def test_legacy_path_refuses_flash_next(monkeypatch):
-    from yeto.rl.adapters.miles import island_entry as learner
-
-    cfg = SimpleNamespace(model_recipe=SimpleNamespace(name=rc.RECIPE_QWEN3_8_NEXT))
-    with pytest.raises(ValueError, match="ports-only"):
-        learner._legacy_miles_argv(cfg)
-
-
 def test_launcher_forwards_and_exports_fn_env(tmp_path):
     import _pytest.monkeypatch as _m
     from rl_e2e_launch import learner_from_run

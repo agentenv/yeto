@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
 # Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 11  # 0.6: +1 pre-existing launcher->overlay import hidden by a stub
+ALLOWLIST_CAP = 5  # S26 E0.5: Codex harness removed; rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
 ADAPTERS = ("yeto.rl.adapters",)
@@ -54,19 +54,28 @@ CORE_EXCLUDED_DIRS: tuple[str, ...] = ()
 CORE_FILES = (
     # rewards / filters (audit R1-R3)
     "yeto/rl/math_reward.py", "yeto/rl/gsm8k_reward.py", "yeto/rl/length_reward.py",
+    "yeto/rl/numeric_answer_reward.py",
     "yeto/rl/filters.py",
     # algorithm extensions living beside the package (audit A1, A3, A5)
     "yeto/rl/critic_warmup.py", "yeto/rl/teacher_forcing.py", "yeto/rl/grad_audit.py",
     # harness test workload (audit R14)
     "yeto/rl/tool_wait_workload.py",
+    # S27 G-FG: Megatron masters and the HF-named boundary (they act on the objects
+    # the backend hands them; no framework import)
+    "yeto/rl/megatron_masters.py", "yeto/rl/megatron_hf_boundary.py",
+    # S27 G-FL: the Ascend recipe's plugin table (imports the user's plugin files by
+    # path at install time; no framework import of its own) and Megatron's gradient
+    # check (reads attributes off the DDP config the backend hands it)
+    "yeto/rl/ascend_plugin_stack.py", "yeto/rl/megatron_grad_checks.py",
 )
 # Backend adapters: name -> directory.  Each must not import the others.
 ADAPTER_DIRS = {"miles": ("yeto/rl/adapters/miles",),
-                "verl": ("yeto/rl/adapters/verl",)}
+                "verl": ("yeto/rl/adapters/verl",),
+                "sampler_engines": ("yeto/rl/adapters/sampler_engines",)}
 # Cloud / launch layer (audit A8, A9, C1-C3).
 CLOUD_FILES = ("yeto/launcher.py", "yeto/modal_runner.py", "yeto/cli.py",
                "yeto/rl/stage_w_entry.py")
-CLOUD_DIRS = ("yeto/shape", "yeto/cloud")
+CLOUD_DIRS = ("yeto/shape", "yeto/cloud", "yeto/launch")
 
 
 @dataclass(frozen=True)
@@ -189,7 +198,75 @@ def problems(violations: list[Violation], allowlist: dict, cap: int) -> list[str
     return out
 
 
+# Removed with the legacy Miles engine (rl-code-quality-cleanup 1.10); no file
+# anywhere, tests included, may import them again.  No allowlist.
+REMOVED = ("yeto.rl.adapters.miles.legacy", "yeto.rl.adapters.miles.models.rollout_legacy_port")
+REMOVED_SCAN_DIRS = ("yeto", "scripts", "tools", "tests")
+
+
+def removed_module_imports(root: Path = REPO) -> list[str]:
+    hits: dict[tuple[str, int], str] = {}
+    for rel in _files(root, REMOVED_SCAN_DIRS):
+        for line, name in imported_names(root / rel, rel):
+            if any(_matches(name, prefix) for prefix in REMOVED):
+                hits.setdefault((rel, line), f"{rel}:{line} import {name}")
+    return list(hits.values())
+
+
+# The import scan above misses a removed module named in text, e.g. a Miles
+# hook path ("module:attr") or a dotted path handed to load_function.  Any
+# mention of the removed packages in code, tests or docs is reported.
+REMOVED_TEXT = ("adapters.miles.legacy", "rollout_legacy_port")
+REMOVED_TEXT_SCOPES = ("yeto", "scripts", "tools", "tests", "docs")
+REMOVED_TEXT_SUFFIXES = (".py", ".md", ".sh", ".json", ".toml", ".yaml", ".yml", ".txt")
+REMOVED_TEXT_EXEMPT = ("tests/test_import_boundaries.py",)  # names them to forbid them
+
+
+def removed_module_mentions(root: Path = REPO) -> list[str]:
+    hits = []
+    for scope in REMOVED_TEXT_SCOPES:
+        base = root / scope
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            rel = path.relative_to(root).as_posix()
+            if (not path.is_file() or path.suffix not in REMOVED_TEXT_SUFFIXES
+                    or rel in REMOVED_TEXT_EXEMPT or "__pycache__" in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), start=1):
+                for needle in REMOVED_TEXT:
+                    if needle in line:
+                        hits.append(f"{rel}:{number} mentions {needle}")
+    return hits
+
+
 # ------------------------------------------------------------------ tests
+def test_removed_legacy_engine_is_never_imported():
+    assert not removed_module_imports(), "\n".join(removed_module_imports())
+
+
+def test_removed_legacy_engine_is_never_named():
+    found = removed_module_mentions()
+    assert not found, "\n".join(found)
+
+
+def test_removed_module_name_in_text_is_caught(tmp_path):
+    root = _tree(tmp_path, {
+        "yeto/hooks.py": 'HOOK = "yeto.rl.adapters.miles.legacy.engine:sync"\n',
+        "docs/notes.md": "see rollout_legacy_port.generate_rollout\n",
+    })
+    assert removed_module_mentions(root) == [
+        "yeto/hooks.py:1 mentions adapters.miles.legacy",
+        "docs/notes.md:1 mentions rollout_legacy_port",
+    ]
+
+
+def test_removed_module_import_is_caught(tmp_path):
+    root = _tree(tmp_path, {"scripts/x.py": "from yeto.rl.adapters.miles.legacy import engine\n"})
+    assert removed_module_imports(root) == ["scripts/x.py:1 import yeto.rl.adapters.miles.legacy"]
+
+
 def test_repository_respects_the_import_boundaries():
     found = problems(scan(), load_allowlist(), ALLOWLIST_CAP)
     assert not found, "\n".join(found)

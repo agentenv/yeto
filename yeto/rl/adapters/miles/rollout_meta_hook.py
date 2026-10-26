@@ -35,12 +35,26 @@ import math
 import os
 import statistics
 import tempfile
-from collections.abc import Iterable, Sequence
+import threading
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 META_SINK_ENV = "YETO_ROLLOUT_META_SINK"
 DEFAULT_SINK_ACTOR = "yeto_rollout_meta"
+# E1: per-step seconds of the last metadata hook run (printed by record_trained_groups)
+_HOOK_TIMES: dict[str, float] = {}
+
+
+def _timed(name: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    import time
+
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _HOOK_TIMES[name] = _HOOK_TIMES.get(name, 0.0) + time.monotonic() - started
 DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
@@ -54,22 +68,35 @@ _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # rollout's metadata by the driver-side reader, so they are never attributed
 # to the next round.
 ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages"})
+# E1: the cross-version IS estimate of a fully_async round, sent after the round's
+# metadata (the prefill scoring runs in the background, off the rollout's critical path)
+LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
+# buffer_stale_groups: groups the sample-buffer reader passed over this round
+# because they were older than max_policy_age (consumed, not trained)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
+# buffer_stale_positions (S27 P4): the task-dispenser positions of those groups,
+# as row runs (data_split.row_runs); only groups whose sampler had a dispenser
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
     """The training round of the rollout being processed.
 
-    Authoritative source: the policy token the driver published for this
-    rollout (``yeto:<rollout_id>:<hash>``). ``Sample.rollout_id`` is NOT used
-    when a token exists: in multi-segment agentic rollouts it is a trajectory
-    key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
-    fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
+    Authoritative source: the round the driver set for this rollout
+    (:func:`put_rollout_round`), else the version of the policy token it
+    published (``yeto:<rollout_id>:<hash>``; the two differ only under rollout
+    ahead). ``Sample.rollout_id`` is NOT used when either exists: in
+    multi-segment agentic rollouts it is a trajectory key (Miles
+    ``agentic_tool_call.py``), not the round. Without both (unit fixtures,
+    legacy) the first sample's ``rollout_id`` is the fallback.
     """
     try:
-        token = current_policy_token(sink)
+        explicit = current_rollout_round(sink)
+        token = current_policy_token(sink) if explicit is None else None
     except ImportError:  # no Ray in this process (unit fixtures): no published token
-        token = None
+        explicit = token = None
+    if explicit is not None:
+        return explicit
     if token:
         from yeto.rl.core import parse_policy_snapshot_token
 
@@ -80,15 +107,21 @@ def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> in
 
 
 def record_round_metadata(
-    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: int
+    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: Any
 ) -> None:
     """Rollout side: report this rollout's per-round counters (call once per rollout)."""
 
     del args
-    unknown = sorted(set(counts) - ROUND_METADATA_KEYS)
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS)
     if unknown:
         raise RuntimeError(f"unknown per-round metadata keys {unknown}")
     for key, value in counts.items():
+        if key in ROUND_METADATA_LIST_KEYS:
+            if not isinstance(value, list) or any(
+                    not isinstance(run, list) or any(isinstance(v, bool) or not isinstance(v, int)
+                                                     for v in run) for run in value):
+                raise RuntimeError(f"per-round metadata {key} must be a list of int runs")
+            continue
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RuntimeError(f"per-round metadata {key} must be a non-negative int")
     if isinstance(samples_or_rollout_id, int) and not isinstance(samples_or_rollout_id, bool):
@@ -134,15 +167,24 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     to its buffer (``sglang_rollout.py:505-510``); only samples aborted under
     ``--partial-rollout`` go back.
     """
+    with one_sink_view():
+        _record_trained_groups(args, data)
+
+
+def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
+    import time
 
     from yeto.rl.algos.sample_filters import apply_sample_filters
     from yeto.rl.harness.reasoning_loss_mask import apply_from_args as apply_reasoning_loss_policy
 
+    marks = [("start", time.monotonic())]
     apply_sample_filters(args, data)
+    marks.append(("sample_filters", time.monotonic()))
     # Side effect beyond filtering (S17 WP6): with --codex-exclude-reasoning-from-loss
     # this sets loss_mask 1 -> 0 on generated reasoning tokens of the kept samples
     # (before Miles converts them to train data). Default: returns at once, no sample touched.
     apply_reasoning_loss_policy(args, data, tokenizer_loader=_load_miles_tokenizer)
+    marks.append(("reasoning_mask", time.monotonic()))
     # S19 #8: a stop token forced by the engine's grammar mask (SGLang returns
     # logprob exactly 0.0 under the masked distribution) is not a model choice:
     # loss_mask 1 -> 0 before Miles converts the samples to train data.
@@ -150,12 +192,48 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
 
     setattr(args, _PLACEHOLDER_ATTR,
             mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
+    marks.append(("placeholder_mask", time.monotonic()))
     # CompactionRL: the masks above may drop optimised tokens; the per-segment
     # counts (tokens_after, gae_length) must follow the final masks.
-    from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
+    from yeto.rl.compaction import refresh_segment_counts
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
+    marks.append(("segment_counts", time.monotonic()))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
+    # S27 P2: the dispenser learns which of its rows entered this training batch
+    from .task_dispense import on_trained as dispense_on_trained
+
+    dispense_on_trained(data)
+    marks.append(("dispense", time.monotonic()))
+    # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
+    # final loss masks, for the role streams to read at the round boundary.
+    from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
+
+    if evidence_enabled(args):
+        persist_published_round_evidence(
+            args, data, current_policy_token(), published_policies(),
+            rollout_id=current_rollout_round(),
+        )
+    if getattr(args, "fully_async", False):
+        # P0-S: Miles' fully_async drains finished groups and runs no
+        # all-samples hook; the trained groups are the round report, with the
+        # prompt ledger's counts (groups drawn, stale groups dropped).
+        from .fully_async_prompts import current as current_prompt_ledger
+
+        ledger = current_prompt_ledger()
+        if ledger is None:
+            raise RuntimeError("fully_async round without the yeto prompt ledger")
+        ledger.mark_trained(data)
+        counts = ledger.take_round_counts()
+        marks.append(("ledger", time.monotonic()))
+        extract_rollout_metadata(args, data, round_counts=counts)
+        marks.append(("round_metadata", time.monotonic()))
+    # E1: where the hook's time goes (it runs on the rollout's critical path)
+    detail = " ".join(f"{k}={v:.3f}" for k, v in sorted(_HOOK_TIMES.items()))
+    _HOOK_TIMES.clear()
+    print(f"[rl] sample filter hook: total={marks[-1][1] - marks[0][1]:.3f}s "
+          + " ".join(f"{name}={t - prev:.3f}" for (_, prev), (name, t) in zip(marks, marks[1:]))
+          + (f" [{detail}]" if detail else ""), flush=True)
 
 
 def _reward(args: Any, sample: Any) -> float:
@@ -188,6 +266,11 @@ def _status(sample: Any) -> str:
 
 from yeto.rl.adapters.miles import carry_over as _carry  # noqa: E402
 from yeto.rl.engine.policy_age import token_version  # noqa: E402
+from yeto.rl.engine.policy_versions import (  # noqa: E402
+    PublishedPolicies,
+    engine_version_matches,
+    engine_version_number,
+)
 
 
 def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
@@ -216,7 +299,7 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         # spans versions; its token names the OLDEST one (the driver checks it
         # is a published version within the window) and its version segments
         # are listed. Unparsable tokens keep "mixed:" (refused, fail closed).
-        numbered = {v: token_version(v) for v in versions}
+        numbered = {v: engine_version_number(v) for v in versions}
         if None not in numbered.values():
             token = min(versions, key=lambda v: numbered[v])
             carry = _carry.group_versions_record(group)
@@ -331,7 +414,8 @@ def batch_summary_enabled(args: Any) -> bool:
 
 
 def build_metadata(
-    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None
+    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None, *,
+    defer_estimate: bool = False,
 ) -> dict[str, Any]:
     trained = getattr(args, _TRAINED_ATTR, None)
     if trained is None:
@@ -353,8 +437,8 @@ def build_metadata(
         if not samples:
             continue
         if rollout_id is None:
-            rollout_id = current_round_id(samples, sink)
-        record = group_record(args, group)
+            rollout_id = _timed("round_id", current_round_id, samples, sink)
+        record = _timed("group_record", group_record, args, group)
         tool_wait += sum(float(getattr(x, "non_generation_time", 0.0) or 0.0) for x in samples)
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
@@ -392,7 +476,9 @@ def build_metadata(
     if limit > 0:
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
         # the default key set is unchanged).
-        payload.update(carry_over_fields(args, trained_samples, sink))
+        payload.update(_timed("carry_over", carry_over_fields, args, trained_samples, sink,
+                              defer_estimate_for=rollout_id if defer_estimate and rollout_id is not None
+                              else None))
         # 5.1/5.3: agentic suspension between turns (absent when not in use)
         payload.update(_carry.suspend_fields(args, all_samples))
     if tool_wait > 0:
@@ -412,6 +498,9 @@ def build_metadata(
         # default path (old key set kept).
         payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
             args, all_samples, trained, limit=trajectory_records_limit(args))
+        rows = round_data_rows(trained_samples)
+        if rows is not None:  # S27: only on an island that reads a row slot
+            payload[ROUND_DATA_ROWS_KEY] = rows
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
@@ -427,10 +516,17 @@ def build_metadata(
 
 
 def carry_over_fields(args: Any, trained_samples: Sequence[Any],
-                      sink: str | None = None, scorer: Any = None) -> dict[str, Any]:
+                      sink: str | None = None, scorer: Any = None, *,
+                      defer_estimate_for: int | None = None) -> dict[str, Any]:
     """4.1 rollout-metadata fields under a limit > 0: what the buffer filter carried
     in / discarded this round, the trained cross-version tokens and the estimated
-    cross-version IS truncated fraction (:mod:`.carry_over`)."""
+    cross-version IS truncated fraction (:mod:`.carry_over`).
+
+    ``defer_estimate_for`` (E1, a rollout id): the estimate (one prefill of every
+    cross-version sample, about 1 s on A10G) runs in a background thread and goes
+    to the sink as a :data:`LATE_META_SCHEMA` record; the fields here then say
+    ``cross_version_estimate: "deferred"``. Its only reader, the policy-age
+    governor, runs after the train step."""
     token = current_policy_token(sink)
     version = token_version(token) if token else None
     fields: dict[str, Any] = {"max_policy_age": _carry.max_policy_age(args)}
@@ -441,10 +537,29 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
     fields["cross_version_tokens"] = crossed
     fields["trained_response_tokens"] = total
     if crossed:
-        fields.update(_carry.estimate_cross_version_truncation(
-            args, trained_samples, version,
-            scorer if scorer is not None else _carry.router_prefill_scorer(args)))
+        scorer = scorer if scorer is not None else _carry.router_prefill_scorer(args)
+        if defer_estimate_for is None:
+            fields.update(_carry.estimate_cross_version_truncation(args, trained_samples, version, scorer))
+        else:
+            _estimate_in_background(args, list(trained_samples), version, scorer, sink,
+                                    rollout_id=int(defer_estimate_for))
+            fields["cross_version_estimate"] = "deferred"
     return fields
+
+
+def _estimate_in_background(args: Any, samples: list[Any], version: int, scorer: Any,
+                            sink: str | None, *, rollout_id: int) -> None:
+    import threading
+
+    def run() -> None:
+        try:
+            late = _carry.estimate_cross_version_truncation(args, samples, version, scorer)
+        except Exception as exc:  # noqa: BLE001 - an estimate: unknown, never guessed
+            late = {"cross_version_truncated_fraction": None,
+                    "cross_version_estimate_error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        put_to_sink({"schema": LATE_META_SCHEMA, "rollout_id": rollout_id, **late}, sink)
+
+    threading.Thread(target=run, name=f"yeto-xv-estimate-{rollout_id}", daemon=True).start()
 
 
 # IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
@@ -590,8 +705,7 @@ def trajectory_reward_records(
         for s in samples:
             if len(out) >= limit:
                 return out
-            meta = getattr(s, "metadata", None)
-            meta = meta if isinstance(meta, dict) else {}
+            meta = _metadata(s)
             reward = _reward(args, s)
             success = meta.get("success")
             trajectory = meta.get("trajectory_id")
@@ -605,6 +719,7 @@ def trajectory_reward_records(
                 "reward": float(reward) if math.isfinite(reward) else None,
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
+                **_data_row(meta),
                 **trajectory_diagnostics(meta),
                 **(_carry.trajectory_fields(s, carry_round)
                    if _carry.max_policy_age(args) > 0 else {}),
@@ -612,8 +727,38 @@ def trajectory_reward_records(
     return out
 
 
+ROUND_DATA_ROWS_KEY = "round_data_rows"
+
+
+def round_data_rows(trained_samples: Iterable[Any]) -> dict[str, Any] | None:
+    """S27 task assignment: ``{"samples": n, "rows": data_split.row_runs(...)}``
+    of every trained sample that carries its --data row
+    (``metadata[DATA_ROW_KEY]``), however many there are (the reward records
+    stop at a limit); None when none does (no row slot)."""
+    from yeto.rl.engine.data_split import row_runs
+
+    rows = [row["data_row"] for row in (_data_row(_metadata(s)) for s in trained_samples) if row]
+    if not rows:
+        return None
+    return {"samples": len(rows), "rows": row_runs(rows)}
+
+
+def _metadata(sample: Any) -> dict[str, Any]:
+    meta = getattr(sample, "metadata", None)
+    return meta if isinstance(meta, dict) else {}
+
+
 _DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",
                         "max_seq_len_hit", "timed_out")
+
+
+def _data_row(meta: dict[str, Any]) -> dict[str, int]:
+    """S27 task assignment: ``{"data_row": n}`` when the island reads a row slot
+    (the row's number in the unsplit data); {} otherwise."""
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
+
+    row = meta.get(DATA_ROW_KEY)
+    return {"data_row": row} if isinstance(row, int) and not isinstance(row, bool) else {}
 
 
 def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
@@ -725,32 +870,144 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
         os.replace(tmp, directory / name)
         return
     if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).put.remote(encoded))
+        _sink_call(target, "put", encoded)
         return
     raise ValueError(f"unknown rollout metadata sink {sink!r}")
 
 
-def put_policy_token(token: str, sink: str | None = None) -> None:
-    """Driver side: publish the token the next rollout must be sampled from."""
+def _sink_target(sink: str | None) -> tuple[str, str]:
+    kind, _, target = (sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK).partition(":")
+    if kind not in ("dir", "ray"):
+        raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    return kind, target
 
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
+
+# E1: inside one hook run (:func:`one_sink_view`) each sink value is read once and
+# the sink actor is looked up once (ray.get_actor is a GCS round trip per call)
+_SINK_VIEW = threading.local()
+
+
+def _sink_call(target: str, actor_method: str, *call_args: Any) -> Any:
+    import ray
+
+    name = target or DEFAULT_SINK_ACTOR
+    memo = getattr(_SINK_VIEW, "memo", None)
+    actor = None if memo is None else memo.get(("actor", name))
+    if actor is None:
+        actor = ray.get_actor(name)
+        if memo is not None:
+            memo[("actor", name)] = actor
+    return ray.get(getattr(actor, actor_method).remote(*call_args))
+
+
+@contextmanager
+def one_sink_view():
+    """Within this block every sink value (policy token, published map, policy-age
+    limit) is read at most once per (sink, value) and reused (E1: the metadata
+    hook read the limit from the sink actor once per sample, ~70 actor calls a
+    round). A value another process writes while a block runs is seen from the
+    next block on (before, two reads inside one hook run could see two values;
+    now one run sees one view). A write from this thread inside the block drops
+    that value from the view. The sink actor handle is looked up once per block.
+    Nested blocks share the outer view."""
+    if getattr(_SINK_VIEW, "memo", None) is not None:
+        yield
+        return
+    _SINK_VIEW.memo = {}
+    try:
+        yield
+    finally:
+        _SINK_VIEW.memo = None
+
+
+def _sink_write(sink: str | None, file_name: str, text: str, actor_method: str, value: Any) -> None:
+    """Driver side: store one value (atomic file under ``dir:``, actor call under ``ray:``)."""
+    kind, target = _sink_target(sink)
+    memo = getattr(_SINK_VIEW, "memo", None)
+    if memo is not None:
+        memo.pop((kind, target, file_name), None)
     if kind == "dir":
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token)
-        os.replace(tmp, directory / POLICY_TOKEN_FILE)
+            handle.write(text)
+        os.replace(tmp, directory / file_name)
         return
-    if kind == "ray":
-        import ray
+    _sink_call(target, actor_method, value)
 
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_token.remote(token))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+
+def _sink_read(sink: str | None, file_name: str, actor_method: str) -> Any:
+    """Rollout side: the stored value (file text under ``dir:``), None when unset."""
+    kind, target = _sink_target(sink)
+    memo = getattr(_SINK_VIEW, "memo", None)
+    key = (kind, target, file_name)
+    if memo is not None and key in memo:
+        return memo[key]
+    if kind == "dir":
+        path = Path(target) / file_name
+        value = path.read_text(encoding="utf-8") if path.exists() else None
+    else:
+        value = _sink_call(target, actor_method)
+    if memo is not None:
+        memo[key] = value
+    return value
+
+
+def put_policy_token(token: str, sink: str | None = None) -> None:
+    """Driver side: publish the token the next rollout must be sampled from."""
+    _sink_write(sink, POLICY_TOKEN_FILE, token, "set_token", token)
+
+
+def current_policy_token(sink: str | None = None) -> str | None:
+    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
+    return _sink_read(sink, POLICY_TOKEN_FILE, "get_token")
+
+
+ROLLOUT_ROUND_FILE = "rollout-round"
+
+
+def put_rollout_round(rollout_id: int, sink: str | None = None) -> None:
+    """Driver side: the round the next rollout is generated for. It equals the
+    token's version, except under rollout ahead (one above: the batch trains after
+    the next publication)."""
+    _sink_write(sink, ROLLOUT_ROUND_FILE, str(int(rollout_id)), "set_round", int(rollout_id))
+
+
+def current_rollout_round(sink: str | None = None) -> int | None:
+    """Rollout side: the round stored by :func:`put_rollout_round`, if any."""
+    value = _sink_read(sink, ROLLOUT_ROUND_FILE, "get_round")
+    return None if value is None else int(value)
+
+
+PUBLISHED_POLICIES_FILE = "published-policies.json"
+
+
+def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
+    """Driver side (P0-S): the published versions in the policy-age window
+    (version -> weight hash); the rollout side names trajectory policies from it."""
+    payload = json.dumps(dict(policies), sort_keys=True)
+    _sink_write(sink, PUBLISHED_POLICIES_FILE, payload, "set_policies", payload)
+
+
+def published_policies(sink: str | None = None) -> PublishedPolicies:
+    """Rollout side: the map stored by :func:`put_published_policies` (empty if none)."""
+    payload = _sink_read(sink, PUBLISHED_POLICIES_FILE, "get_policies")
+    return PublishedPolicies.from_dict(json.loads(payload) if payload else None)
+
+
+MAX_POLICY_AGE_FILE = "max-policy-age"
+
+
+def put_max_policy_age(limit: int, sink: str | None = None) -> None:
+    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
+    _sink_write(sink, MAX_POLICY_AGE_FILE, str(int(limit)), "set_limit", int(limit))
+
+
+def max_policy_age_override(sink: str | None = None) -> int | None:
+    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
+    value = _sink_read(sink, MAX_POLICY_AGE_FILE, "get_limit")
+    return None if value is None else int(value)
 
 
 def sink_available() -> bool:
@@ -769,55 +1026,6 @@ def sink_available() -> bool:
     return bool(ray.is_initialized())
 
 
-MAX_POLICY_AGE_FILE = "max-policy-age"
-
-
-def put_max_policy_age(limit: int, sink: str | None = None) -> None:
-    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        directory = Path(target)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / MAX_POLICY_AGE_FILE).write_text(str(int(limit)), encoding="utf-8")
-        return
-    if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_limit.remote(int(limit)))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def max_policy_age_override(sink: str | None = None) -> int | None:
-    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / MAX_POLICY_AGE_FILE
-        return int(path.read_text(encoding="utf-8")) if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_limit.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def current_policy_token(sink: str | None = None) -> str | None:
-    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
-
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / POLICY_TOKEN_FILE
-        return path.read_text(encoding="utf-8") if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_token.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
 def group_matches_policy(group: Sequence[Any], token: str | None, size: int | None) -> bool:
     """Legacy ``_complete_group_for_policy`` over upstream sample versions."""
 
@@ -825,7 +1033,10 @@ def group_matches_policy(group: Sequence[Any], token: str | None, size: int | No
     if not token or not samples or (size is not None and len(group) != size):
         return False
     for sample in samples:
-        if _status(sample) not in _REUSABLE_STATUSES or _versions(sample) != {token}:
+        versions = _versions(sample)
+        if _status(sample) not in _REUSABLE_STATUSES or not versions or not all(
+            engine_version_matches(v, token) for v in versions
+        ):
             return False
     return True
 
@@ -836,7 +1047,11 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
     Groups from any other policy (or incomplete ones) are dropped from the
     buffer, exactly as legacy filtered its completed-group queue.
     """
+    with one_sink_view():
+        return _policy_buffer_filter(args, _rollout_id, buffer, num_samples)
 
+
+def _policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples: int) -> list:
     token = current_policy_token()
     limit = _carry.max_policy_age(args)
     if limit > 0:
@@ -931,19 +1146,42 @@ def elastic_metadata_enabled(args: Any) -> bool:
         ELASTIC_METADATA_ENV) == "1"
 
 
-def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
-    """``--rollout-all-samples-process-path`` hook."""
+def extract_rollout_metadata(
+    args: Any,
+    all_samples: Any,
+    data_source: Any = None,
+    *,
+    round_counts: Mapping[str, Any] | None = None,
+) -> None:
+    """``--rollout-all-samples-process-path`` hook (under fully_async: called by
+    :func:`record_trained_groups` with the trained groups)."""
 
+    with one_sink_view():
+        _extract_rollout_metadata(args, all_samples, data_source, round_counts=round_counts)
+
+
+def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
+                              round_counts: Mapping[str, Any] | None) -> None:
     try:
-        payload = build_metadata(args, all_samples)
+        # fully_async (round_counts): the trainer is waiting for this batch; the
+        # cross-version estimate is read only after its train step (E1)
+        payload = _timed("build", build_metadata, args, all_samples,
+                         defer_estimate=round_counts is not None)
         if elastic_metadata_enabled(args):
             cursor, buffer_length = data_cursor(data_source)
             if cursor is not None:
                 payload["data_cursor"] = cursor
             if buffer_length is not None:
                 payload["buffer_length"] = buffer_length
-        submitted = submitted_groups(args, data_source)
-        if submitted is not None and payload.get("max_policy_age"):
+        submitted = _timed("submitted", submitted_groups, args, data_source)
+        if round_counts is not None:
+            from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
+
+            # P0-S overlap: groups drawn this round finish in later rounds, so
+            # the draws and Miles' stale drops are reported as they are
+            # (stale_dropped_groups None = unknown), not balanced per round.
+            payload.update(round_counts, execution_mode=ROLLOUT_OVERLAP_MODE)
+        elif submitted is not None and payload.get("max_policy_age"):
             # 4.1: under partial rollout the abort does not discard; the groups
             # submitted (new + resubmitted from the buffer) and not completed
             # went back to the buffer to continue next round.
@@ -978,7 +1216,7 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             payload["over_sampling"] = over_sampling
         if hasattr(args, "rollout_over_sampling_stats"):
             args.rollout_over_sampling_stats = None
-        put_to_sink(payload)
+        _timed("put", put_to_sink, payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -265,3 +265,111 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
         truncated = True
     return CompactionEpisode(rollout_id or uuid.uuid4().hex, segments, float(env.reward()),
                              compactions, truncated, summaries_ok, kept)
+
+
+def validate_compaction_segments(segments: Sequence[Any]) -> None:
+    """Check the compaction records of one segmented Miles trajectory
+    (moved from the legacy engine's rollout check, rl-code-quality-cleanup 1.5).
+
+    Every segment carries ``metadata`` with schema version 1, one shared
+    non-empty ``compaction_trajectory_id`` and one positive integer
+    ``compaction_context_budget``; ``compaction_segment_index`` runs 0..n-1 and
+    ``compaction_segment_type`` alternates execution/summary, ending on
+    execution; all segments keep one integer (group_index, index) identity.
+    Raises ``RuntimeError`` otherwise.
+    """
+    metadata = [getattr(segment, "metadata", None) for segment in segments]
+    trajectory_ids = {
+        value.get("compaction_trajectory_id")
+        for value in metadata
+        if isinstance(value, Mapping)
+    }
+    indices = [
+        value.get("compaction_segment_index")
+        if isinstance(value, Mapping)
+        else None
+        for value in metadata
+    ]
+    types = [
+        value.get("compaction_segment_type")
+        if isinstance(value, Mapping)
+        else None
+        for value in metadata
+    ]
+    context_budgets = {
+        value.get("compaction_context_budget")
+        for value in metadata
+        if isinstance(value, Mapping)
+    }
+    if (
+        len(trajectory_ids) != 1
+        or not all(
+            isinstance(value, str) and value for value in trajectory_ids
+        )
+        or indices != list(range(len(segments)))
+        or types != [
+            "execution" if value % 2 == 0 else "summary"
+            for value in range(len(segments))
+        ]
+        or types[-1] != "execution"
+        or any(
+            not isinstance(value, Mapping)
+            or value.get("compaction_schema_version") != 1
+            for value in metadata
+        )
+        or len(context_budgets) != 1
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            for value in context_budgets
+        )
+    ):
+        raise RuntimeError("Miles returned malformed compaction segments")
+    identities = {
+        (getattr(segment, "group_index", None), getattr(segment, "index", None))
+        for segment in segments
+    }
+    if len(identities) != 1 or any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for identity in identities
+        for value in identity
+    ):
+        raise RuntimeError("Miles compaction segments changed trajectory identity")
+
+
+def _optimized_tokens(sample: Any) -> int:
+    mask = getattr(sample, "loss_mask", None) or []
+    return int(sum(1 for value in mask if value))
+
+
+def refresh_segment_counts(samples: Any) -> int:
+    """Recompute ``segment_tokens``/``tokens_after``/``gae_length`` from the final loss masks.
+
+    Segment samples (``metadata.segment_index``) count optimised tokens when
+    they are assembled; later hooks still set loss_mask 1 -> 0 (S19 #8
+    placeholder-logprob stop tokens, S17 WP6 reasoning tokens) before the
+    backend converts the samples. N_{>s} and l are optimised-token counts, so
+    they are refreshed after those hooks (s19-compaction-g1-20261010g:
+    tokens_after was 1-17 tokens high). Returns the number of segment samples
+    whose counts changed.
+    """
+    rollouts: dict[Any, list[Any]] = {}
+    for sample in samples:
+        meta = getattr(sample, "metadata", None)
+        if not isinstance(meta, dict) or not isinstance(meta.get("segment_index"), int):
+            continue
+        key = (getattr(sample, "rollout_id", None), getattr(sample, "group_index", None),
+               getattr(sample, "index", None))
+        rollouts.setdefault(key, []).append(sample)
+    changed = 0
+    for segments in rollouts.values():
+        segments.sort(key=lambda s: s.metadata["segment_index"])
+        tokens = [_optimized_tokens(s) for s in segments]
+        for index, sample in enumerate(segments):
+            new = {"segment_tokens": tokens[index], "tokens_after": sum(tokens[index + 1:]),
+                   "gae_length": sum(tokens)}
+            if any(sample.metadata.get(k) != v for k, v in new.items()):
+                changed += 1
+            sample.metadata.update(new)
+    return changed

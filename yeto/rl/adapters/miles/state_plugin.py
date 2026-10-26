@@ -30,7 +30,9 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+
+from yeto.rl.megatron_masters import MegatronMasterError
 
 CANONICAL_PREFIX = "base_model.model."
 OPTIMIZER_MODES = ("preserve", "reset")
@@ -39,7 +41,10 @@ _PLUGIN_MODULE = "yeto.rl.adapters.miles.state_plugin"
 EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 # rl-publish-fastpath: export + hash on the trainer, return only the digests.
 EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
+COLLECT_DIGEST = f"{_PLUGIN_MODULE}.collect_digest"
 WEIGHTS_VERSION = f"{_PLUGIN_MODULE}.weights_version"
+# A no-sync full-parameter island (L4.6): per-rank digest of every model parameter.
+EXPORT_FULL_DIGEST = f"{_PLUGIN_MODULE}.export_full_digest"
 
 # rl-publish-fastpath D3: version of the weights this trainer process holds.
 # Kept in each trainer process (module state), bumped on every path that writes
@@ -67,15 +72,20 @@ def weights_version(actor: Any) -> dict[str, Any] | None:
     return current_weights_version() if _is_main_rank(actor) else None
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
+ALIGN_WEIGHT_VERSION = f"{_PLUGIN_MODULE}.align_weight_version"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
+# Run in the actor's processes before its first train: a full-parameter actor
+# never calls a LoRA state plugin, which would otherwise install the recorders.
+ACTOR_RECORDERS = f"{_PLUGIN_MODULE}.install_actor_recorders"
 # rl-algo-critic-family 3.2: run in the critic's processes before its train.
 CRITIC_RECORDERS = f"{_PLUGIN_MODULE}.install_critic_recorders"
 EXPLAINED_VARIANCE_KEY = "explained_variance"
 
 
-class StatePluginError(RuntimeError):
-    pass
+# One error type for this module and the masters it re-exports (yeto.rl.megatron_masters),
+# so ``except StatePluginError`` still catches a master that cannot be read.
+StatePluginError = MegatronMasterError
 
 
 @dataclass(frozen=True)
@@ -86,301 +96,157 @@ class AdapterBinding:
     parameter: Any  # torch.nn.Parameter registered in the model
     to_hf: Callable[[Any], Any]  # megatron tensor -> canonical HF tensor
     from_hf: Callable[[Any], Any]  # canonical HF tensor -> megatron-shaped tensor
+    # One parameter holding several experts; ``name`` is its representative
+    # and the policy tensors come from :class:`PackedAdapterPolicy`.
+    packed: bool = False
 
 
 # --------------------------------------------------------------------------
-# Gradient-flow-safe master exposure (#64 / D4)
+# Packed adapters with a sparse sync policy
 # --------------------------------------------------------------------------
 
 
-def master_of(parameter: Any) -> Any:
-    """The FP32 optimizer master viewed in the parameter's shape."""
+@dataclass(frozen=True)
+class PackedSlotWrites:
+    """Writes into one packed master: zero ``frozen``, copy each ``(slot, value)``."""
 
-    import torch
+    frozen: slice
+    updates: tuple[tuple[int, Any], ...]
 
-    main = getattr(parameter, "main_param", None)
-    if main is None:
-        if parameter.dtype != torch.float32:
-            raise StatePluginError("low-precision adapter parameter has no FP32 optimizer master")
-        return parameter.detach()
-    if main.dtype != torch.float32 or main.numel() != parameter.numel():
+
+class PackedAdapterPolicy(Protocol):
+    """A model whose adapter parameters pack several experts each.
+
+    Megatron-Bridge binds a packed parameter to one representative canonical
+    name but exports one tensor per expert.  The sync policy carries only the
+    per-expert tensors in :meth:`carried_names`; the other slots are frozen at
+    zero.  A model runtime registers its policy with
+    :func:`register_packed_adapter_policy`; the model details stay there.
+    """
+
+    def packed_name(self, side: Any) -> str | None:
+        """Representative name of a packed Bridge adapter side, else ``None``."""
+
+    def is_expert_name(self, name: str) -> bool:
+        """Whether ``name`` is one expert's slice of a packed adapter."""
+
+    def carried_names(self) -> frozenset[str]:
+        """Every per-expert name the sync policy carries (all ranks, all stages)."""
+
+    def check_frozen_slots(self, name: str, master: Any) -> None:
+        """Raise if a frozen slot of this rank's packed FP32 master is nonzero."""
+
+    def slot_writes(self, name: str, packed_shape: tuple[int, ...], tensors: Mapping[str, Any]) -> PackedSlotWrites:
+        """This rank's writes of the carried tensors into the packed parameter."""
+
+    def carried_bytes(self, packed: Sequence[tuple[str, tuple[int, ...]]]) -> int:
+        """FP32 bytes of the carried tensors, given ``(name, shape)`` of local packed bindings."""
+
+
+_PACKED_POLICY: PackedAdapterPolicy | None = None
+
+
+def register_packed_adapter_policy(policy: PackedAdapterPolicy) -> None:
+    """Install the process's packed-adapter policy once.
+
+    A second registration of the same type keeps the first policy; another
+    type is refused.
+    """
+
+    global _PACKED_POLICY
+    if _PACKED_POLICY is None:
+        _PACKED_POLICY = policy
+    elif type(_PACKED_POLICY) is not type(policy):
         raise StatePluginError(
-            "adapter parameter has no complete FP32 optimizer master "
-            "(sharded distributed-optimizer masters are not supported)"
+            f"packed-adapter policy {type(_PACKED_POLICY).__name__} is already registered"
         )
-    return main.view(parameter.shape)
 
 
-def has_complete_master(parameter: Any) -> bool:
-    """FP32 itself, or a ``main_param`` covering the whole parameter.
+def packed_adapter_policy() -> PackedAdapterPolicy | None:
+    return _PACKED_POLICY
 
-    Megatron's DistributedOptimizer sets ``main_param`` to this rank's FP32
-    *shard* (``main_param_sharded=True``) on owned ranges and leaves it unset
-    elsewhere; both are DP-sharded masters, not complete ones.
+
+# One run_plugin return carries the whole policy; above this the export needs
+# a chunked transport, which the packed path does not have yet.
+MAX_PACKED_EXPORT_BYTES = 2 * 1024**3
+
+
+def _packed_policy_for(actor: Any, bindings: Sequence[AdapterBinding]) -> PackedAdapterPolicy | None:
+    """The registered policy when these bindings include a packed parameter.
+
+    Export and apply both call this before touching any state, so an
+    unsupported actor is refused before a partial write.
     """
 
-    import torch
-
-    if parameter.dtype == torch.float32:
-        return True
-    main = getattr(parameter, "main_param", None)
-    return (
-        main is not None
-        and not getattr(parameter, "main_param_sharded", False)
-        and main.numel() == parameter.numel()
-    )
-
-
-# --------------------------------------------------------------------------
-# DistributedOptimizer: DP-sharded FP32 masters (rl-infra-spec 2.4, decision (a))
-# --------------------------------------------------------------------------
-# Under Megatron's DistributedOptimizer with DP>1 a bf16 adapter parameter has
-# no ``main_param``: each DP rank's optimizer owns the FP32 main copy of a
-# sub-range ``gbuf_ranges[..]["param_map"][param]["param"]`` of the flattened
-# parameter (same layout fork-M5 v2 reads). Export gathers the full master by
-# filling each rank's range into zeros and summing over the DP group (every
-# element is owned by exactly one rank); apply writes each rank's range from
-# the full target and sets the bf16 model copy on every rank.
+    packed = [b for b in bindings if b.packed]
+    if not packed:
+        return None
+    if _PACKED_POLICY is None:  # pragma: no cover - bindings come from the policy
+        raise StatePluginError("packed adapter bindings without a packed-adapter policy")
+    has_distributed, _owned = distributed_ranges(getattr(actor, "optimizer", None))
+    if has_distributed or not all(has_complete_master(b.parameter) for b in packed):
+        raise StatePluginError("packed adapters need complete FP32 masters, not a distributed optimizer")
+    return _PACKED_POLICY
 
 
-def _optimizer_leaves(optimizer: Any) -> list[Any]:
-    chained = getattr(optimizer, "chained_optimizers", None)
-    if chained is not None:
-        return [leaf for member in chained for leaf in _optimizer_leaves(member)]
-    return [optimizer]
+def _require_packed_export_fits(policy: PackedAdapterPolicy, bindings: Sequence[AdapterBinding]) -> None:
+    size = policy.carried_bytes([(b.name, tuple(b.parameter.shape)) for b in bindings if b.packed])
+    if size > MAX_PACKED_EXPORT_BYTES:
+        raise StatePluginError(
+            f"packed adapter export is about {size / 1024**3:.1f} GiB, above the "
+            f"{MAX_PACKED_EXPORT_BYTES / 1024**3:.0f} GiB single-return limit; it needs chunked transport"
+        )
 
 
-def _is_distributed(leaf: Any) -> bool:
-    return hasattr(leaf, "gbuf_ranges") and hasattr(leaf, "model_param_group_index_map")
+def _require_carried(policy: PackedAdapterPolicy, names: Iterable[str], what: str) -> None:
+    expert_names = {name for name in names if policy.is_expert_name(name)}
+    carried = policy.carried_names()
+    if expert_names != carried:
+        missing, extra = sorted(carried - expert_names), sorted(expert_names - carried)
+        raise StatePluginError(f"{what} packed expert LoRA mismatch: missing={missing[:4]}, extra={extra[:4]}")
 
 
-def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, int, int]]]:
-    """(has a DistributedOptimizer, {id(model_param): (leaf, param, start, end)} owned here)."""
-    found, owned = False, {}
-    for leaf in _optimizer_leaves(optimizer) if optimizer is not None else ():
-        if not _is_distributed(leaf):
-            continue
-        found = True
-        if getattr(getattr(leaf, "config", None), "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False):
-            raise StatePluginError("sharded masters under the precision-aware optimizer are not supported")
-        for gbuf_range_maps in leaf.gbuf_ranges:
-            for per_bucket in gbuf_range_maps.values():
-                for bucket_range_map in per_bucket:
-                    for param, range_map in bucket_range_map["param_map"].items():
-                        r = range_map["param"]
-                        if r.end > r.start:
-                            if id(param) in owned:
-                                raise StatePluginError("a parameter range appears twice on one rank")
-                            owned[id(param)] = (leaf, param, int(r.start), int(r.end))
-    return found, owned
+# The FP32 masters (complete and DistributedOptimizer-sharded) live in the
+# backend-neutral yeto.rl.megatron_masters (S27 G-FG: the verl Megatron island
+# reads them too); re-exported here under the names this module always had.
+from yeto.rl.megatron_masters import (  # noqa: E402,F401
+    _dp_all_reduce_sum,
+    _is_distributed,
+    _leaf_for,
+    _leaf_members,
+    _optimizer_leaves,
+    _single_rank_dp,
+    assert_grad_flow_intact,
+    distributed_ranges,
+    full_masters,
+    has_complete_master,
+    master_of,
+    masters_as_module_parameters,
+    needs_gather,
+    parameter_owners,
+    write_masters,
+)
 
 
-def _leaf_members(leaf: Any) -> set[int]:
-    """ids of every model parameter this distributed leaf shards (owned here or not).
+def refresh_actor_backup(actor: Any) -> None:
+    """Refresh Miles' pinned host copy of the actor weights after an in-place write.
 
-    ``gbuf_ranges``/``model_param_group_index_map`` list only the locally owned
-    ranges; the grad buffers (``leaf.buffers[..].param_index_map``) list all.
+    Only an *existing* "actor" backup is refreshed.  Miles skips that backup when it is
+    not needed (fixed partition; colocated LoRA, where the memory saver's host copy of
+    the frozen base serves weight sync), and ``backup("actor")`` on a backuper that
+    never took one allocates a fresh pinned copy of every weight -- the whole frozen
+    base per rank (S24 T-27B: +133 GB host on Qwen3.8-27B, Ray OOM-killed the island).
+    A backuper without ``backup_tags`` (older Miles) keeps the unconditional refresh.
     """
-
-    members: set[int] = set()
-    for buffer in getattr(leaf, "buffers", None) or ():
-        members.update(id(p) for p in getattr(buffer, "param_index_map", {}) or {})
-    for gbuf_range_maps in getattr(leaf, "gbuf_ranges", None) or ():
-        for per_bucket in gbuf_range_maps.values():
-            for bucket_range_map in per_bucket:
-                members.update(id(p) for p in bucket_range_map["param_map"])
-    return members
-
-
-def _leaf_for(optimizer: Any, param: Any, owned: Mapping[int, tuple[Any, Any, int, int]]) -> Any:
-    """The distributed leaf (hence DP group) that shards ``param``.
-
-    ChainedOptimizer: dense params belong to the dense leaf (dense DP group),
-    expert params to the expert leaf (expert DP group).
-    """
-
-    if id(param) in owned:
-        return owned[id(param)][0]
-    leaves = [leaf for leaf in _optimizer_leaves(optimizer) if _is_distributed(leaf)]
-    hits = [leaf for leaf in leaves if id(param) in _leaf_members(leaf)]
-    if len(hits) == 1:
-        return hits[0]
-    if not hits and len(leaves) == 1:
-        return leaves[0]
-    raise StatePluginError("cannot tell which distributed optimizer shards an adapter parameter")
-
-
-def _dp_all_reduce_sum(leaf: Any, flat: Any) -> None:
-    import torch.distributed as dist
-
-    if not (dist.is_available() and dist.is_initialized()):
+    backuper = getattr(actor, "weights_backuper", None)
+    if backuper is None:
         return
-    dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=getattr(leaf, "data_parallel_group", None))
+    tags = getattr(backuper, "backup_tags", None)
+    if tags is not None and "actor" not in tags:
+        return
+    backuper.backup("actor")
 
 
-def needs_gather(optimizer: Any, parameters: Sequence[Any]) -> bool:
-    """Whether some low-precision parameter's master lives only in DistributedOptimizer shards."""
-
-    if optimizer is None or not any(_is_distributed(leaf) for leaf in _optimizer_leaves(optimizer)):
-        return False
-    return any(not has_complete_master(p) for p in parameters)
-
-
-def _single_rank_dp(leaf: Any) -> bool:
-    """True only when torch.distributed is up and the leaf's DP group has one rank
-    (no collective needed). Not initialised: False, the caller keeps the
-    ``_dp_all_reduce_sum`` path (a no-op there, patched in tests)."""
-    import torch.distributed as dist
-
-    if not (dist.is_available() and dist.is_initialized()):
-        return False
-    try:
-        return int(dist.get_world_size(group=getattr(leaf, "data_parallel_group", None))) == 1
-    except (RuntimeError, ValueError, TypeError, AttributeError):
-        return False  # unknown group: keep the collective path
-
-
-def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None, reduce=None,
-                 device: Any = None) -> list[Any]:
-    """FP32 masters in each parameter's shape; DP-sharded ones are gathered.
-
-    Collective over each owning leaf's DP group when any parameter is
-    DP-sharded (every rank must call it with the same parameters in the same
-    order). ``reduce(flat, leaf)`` / ``all_reduce_sum(flat)`` replace the
-    all-reduce (tests).
-
-    One flat FP32 buffer per leaf holds the gathered masters (each returned
-    master is a view of it); no second concatenated copy is made
-    (s19-compaction-g3-20261010a: the critic export ran out of GPU memory on
-    that copy). ``device``: where the gather buffers live (default: each
-    parameter's device). A leaf whose DP group has one rank needs no
-    collective, so a CPU buffer is allowed there; a CPU buffer with a
-    multi-rank group is refused (NCCL reduces GPU tensors only).
-    """
-    import torch
-
-    has_dist, owned = distributed_ranges(optimizer)
-    out: list[Any] = [None] * len(parameters)
-    pending: dict[int, tuple[Any, list[int]]] = {}
-    for i, param in enumerate(parameters):
-        if has_complete_master(param):
-            out[i] = master_of(param)
-            continue
-        if not has_dist:
-            out[i] = master_of(param)  # raises: no master anywhere
-            continue
-        leaf = _leaf_for(optimizer, param, owned)
-        pending.setdefault(id(leaf), (leaf, []))[1].append(i)
-    # Leaf order is the same on every rank of a DP group, so the per-group
-    # collectives are issued in the same order.
-    order = {id(leaf): k for k, leaf in enumerate(_optimizer_leaves(optimizer))} if pending else {}
-    for _, (leaf, items) in sorted(pending.items(), key=lambda kv: order.get(kv[0], 0)):
-        hooked = reduce is not None or all_reduce_sum is not None
-        where = device if device is not None else parameters[items[0]].device
-        if (not hooked and torch.device(where).type == "cpu"
-                and parameters[items[0]].device.type != "cpu" and not _single_rank_dp(leaf)):
-            raise StatePluginError("CPU gather buffer with a multi-rank DP group")
-        flat = torch.zeros(sum(parameters[i].numel() for i in items), dtype=torch.float32, device=where)
-        offset = 0
-        for i in items:
-            param = parameters[i]
-            n = param.numel()
-            full = flat[offset : offset + n]
-            if id(param) in owned:
-                _, _, start, end = owned[id(param)]
-                shard = owned[id(param)][0]._get_main_param_and_optimizer_states(param)["param"]
-                if shard.dtype != torch.float32 or shard.numel() != end - start:
-                    raise StatePluginError("distributed-optimizer main shard does not match its range")
-                full[start:end].copy_(shard.detach().reshape(-1))
-            out[i] = full.view(param.shape)
-            offset += n
-        if reduce is not None:
-            reduce(flat, leaf)
-        elif all_reduce_sum is not None:
-            all_reduce_sum(flat)
-        elif not _single_rank_dp(leaf):
-            _dp_all_reduce_sum(leaf, flat)
-    return out
-
-
-def write_masters(optimizer: Any, parameters: Sequence[Any], targets: Sequence[Any]) -> bool:
-    """Write full FP32 targets into the masters; returns whether model copies were set here.
-
-    For DP-sharded masters each rank writes its own range and sets the bf16
-    model copy directly (in place; ``Parameter.data`` is not reassigned).
-    """
-    import torch
-
-    has_dist, owned = distributed_ranges(optimizer)
-    wrote_model = False
-    for param, target in zip(parameters, targets, strict=True):
-        if has_complete_master(param):
-            master_of(param).copy_(target)
-            continue
-        if not has_dist:
-            master_of(param)  # raises
-        if id(param) in owned:
-            leaf, _, start, end = owned[id(param)]
-            shard = leaf._get_main_param_and_optimizer_states(param)["param"]
-            shard.data.copy_(target.reshape(-1)[start:end].reshape(shard.shape))
-        param.data.copy_(target.to(dtype=param.dtype))
-        wrote_model = True
-    return wrote_model
-
-
-def parameter_owners(modules: Iterable[Any], parameters: Iterable[Any]) -> dict[int, tuple[Any, str]]:
-    wanted = {id(p) for p in parameters}
-    owners: dict[int, tuple[Any, str]] = {}
-    for root in modules:
-        for module in root.modules():
-            for attr, param in module._parameters.items():
-                if param is not None and id(param) in wanted:
-                    owners.setdefault(id(param), (module, attr))
-    missing = wanted - set(owners)
-    if missing:
-        raise StatePluginError(f"{len(missing)} adapter parameters are not registered in the model")
-    return owners
-
-
-@contextmanager
-def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[Any], masters: Sequence[Any] | None = None):
-    """Temporarily register FP32 masters as the module parameters.
-
-    A fresh ``Parameter`` that shares the master's storage and has
-    ``requires_grad=False`` replaces the entry in ``module._parameters``; the
-    original Parameter object (with its grad-accumulation hooks and
-    ``main_grad``) is untouched and restored on exit. ``Parameter.data`` is
-    never reassigned. ``masters`` (e.g. gathered DistributedOptimizer shards,
-    see ``full_masters``) overrides ``master_of``.
-    """
-
-    import torch
-
-    owners = parameter_owners(modules, parameters)
-    swapped: list[tuple[Any, str, Any]] = []
-    try:
-        if masters is None:
-            masters = [master_of(p) for p in parameters]
-        for param, master in zip(parameters, masters, strict=True):
-            if master.data_ptr() == param.data_ptr() and master.dtype == param.dtype:
-                continue  # already FP32 and self-mastered
-            module, attr = owners[id(param)]
-            module._parameters[attr] = torch.nn.Parameter(master, requires_grad=False)
-            swapped.append((module, attr, param))
-        yield
-    finally:
-        for module, attr, param in reversed(swapped):
-            module._parameters[attr] = param
-
-
-def assert_grad_flow_intact(modules: Sequence[Any], parameters: Sequence[Any]) -> None:
-    owners = parameter_owners(modules, parameters)
-    for param in parameters:
-        module, attr = owners[id(param)]
-        if module._parameters[attr] is not param:
-            raise StatePluginError(f"adapter parameter {attr!r} was replaced")
-        if not param.requires_grad:
-            raise StatePluginError(f"adapter parameter {attr!r} no longer requires grad")
 
 
 # --------------------------------------------------------------------------
@@ -390,6 +256,10 @@ def assert_grad_flow_intact(modules: Sequence[Any], parameters: Sequence[Any]) -
 
 def _canonical(name: str) -> str:
     return name if name.startswith(CANONICAL_PREFIX) else CANONICAL_PREFIX + name
+
+
+def _no_conversion(_tensor: Any) -> Any:
+    raise StatePluginError("a packed adapter converts through its PackedAdapterPolicy")
 
 
 def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
@@ -411,11 +281,17 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     if build_tasks is None:
         raise StatePluginError("Megatron-Bridge lacks adapter conversion tasks")
     bindings = []
+    policy = packed_adapter_policy()
     tasks_by_base = build_tasks(actor.model)
     for base_name in sorted(tasks_by_base):
         for task in sorted(tasks_by_base[base_name], key=lambda t: t.adapter_key or ""):
             for side in (task.linear_in_task, task.linear_out_task):
                 if side.param_weight is None:
+                    continue
+                packed_name = None if policy is None else policy.packed_name(side)
+                if packed_name is not None:
+                    bindings.append(AdapterBinding(_canonical(packed_name), side.param_weight,
+                                                   _no_conversion, _no_conversion, packed=True))
                     continue
                 # names only: the model copy has the master's shape
                 converted = side.mapping.megatron_to_hf(side.param_weight, side.megatron_module)
@@ -505,33 +381,142 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def _digest_staging(actor: Any) -> Any:
+    """The pinned host buffer this trainer's digests reuse every round (E1). A
+    deferred digest still hashing it is waited for first."""
+    from yeto.rl.engine.policy_digest import HostStaging
+
+    _wait_deferred_digest(actor)
+    staging = getattr(actor, "_yeto_digest_staging", None)
+    if staging is None:
+        staging = actor._yeto_digest_staging = HostStaging()
+    return staging
+
+
 def export_digest(
     actor: Any, *, policy_version: int, base_model_revision: str, lora_config_hash: str,
+    deferred: bool = False,
 ) -> dict[str, Any] | None:
     """rl-publish-fastpath: :func:`export_state` on the trainer, but return only the
     publication digests (policy tensor hash, payload hash/bytes, specs) instead of
     the tensors.  The hash definitions are those of ``yeto.rl.core.policy_tensor_hash``
-    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves."""
+    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves.
+
+    ``deferred`` (E1, sync colocated mode): return once the tensors are staged on the
+    host (layout only, ``"deferred": True``) and hash them in a thread of this
+    process, so the trainer can offload meanwhile; :func:`collect_digest` returns
+    the digest (the same values)."""
 
     from yeto.rl.engine.policy_digest import digest_canonical_tensors, layout_hash_of
 
     import time
 
     started = time.monotonic()
-    exported = export_state(actor, policy_version=policy_version)
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        # E1: the tensors are only hashed here, so they may be staged in one pinned buffer
+        exported = _export_state(actor, policy_version=policy_version, staging=_digest_staging(actor))
     export_seconds = round(time.monotonic() - started, 3)
     if exported is None:
         return None
     tensors = exported["tensors"]
     specs = [(name, tuple(int(d) for d in value.shape)) for name, value in sorted(tensors.items())]
-    digest = digest_canonical_tensors(
-        tensors,
-        base_model_revision=base_model_revision,
-        lora_config_hash=lora_config_hash,
-        layout_hash=layout_hash_of(specs),
-    )
-    return {"policy_version": int(policy_version), "digest": digest.to_wire(),
-            "export_seconds": export_seconds, "weights": current_weights_version()}
+
+    def digest() -> Any:
+        return digest_canonical_tensors(
+            tensors,
+            base_model_revision=base_model_revision,
+            lora_config_hash=lora_config_hash,
+            layout_hash=layout_hash_of(specs),
+        )
+
+    out = {"policy_version": int(policy_version), "export_seconds": export_seconds,
+           "weights": current_weights_version()}
+    if not deferred:
+        return {**out, "digest": digest().to_wire()}
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-digest-deferred")
+    actor._yeto_deferred_digest = (int(policy_version), pool.submit(digest))
+    pool.shutdown(wait=False)
+    return {**out, "deferred": True, "specs": [[n, list(shape)] for n, shape in specs]}
+
+
+def collect_digest(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+    """The digest of the deferred :func:`export_digest` of ``policy_version`` (waits
+    for its hashing thread). Reads no trainer state (the trainer may be offloaded);
+    ``None`` on ranks that export nothing."""
+    pending = getattr(actor, "_yeto_deferred_digest", None)
+    if pending is None:
+        if not _is_main_rank(actor):
+            return None
+        raise StatePluginError(f"no deferred digest of policy v{policy_version} on this rank")
+    version, future = pending
+    actor._yeto_deferred_digest = None
+    if version != int(policy_version):
+        raise StatePluginError(f"the deferred digest is of policy v{version}, not v{policy_version}")
+    return {"policy_version": version, "digest": future.result().to_wire()}
+
+
+def _wait_deferred_digest(actor: Any) -> None:
+    """The staged tensors of a deferred digest are views of the reused buffer: let an
+    uncollected hashing finish before the buffer is written again."""
+    pending = getattr(actor, "_yeto_deferred_digest", None)
+    if pending is not None:
+        try:
+            pending[1].result()
+        except Exception:  # noqa: BLE001 - collect_digest reports it; only the buffer matters here
+            pass
+
+
+FULL_SHARD_PREFIX = b"yeto-rl-full-parameter-shard-v1\0"
+
+
+def export_full_digest(actor: Any, *, policy_version: int) -> dict[str, Any]:
+    """Plugin of a no-sync full-parameter island: hash this rank's model shard.
+
+    Every rank returns its own shard digest (name, dtype, shape and raw bytes of
+    each local parameter, sorted by name); the caller combines the ranks in
+    ``run_plugin`` order.  No tensor leaves the trainer and no collective runs.
+    The main rank also reports its weights version (rl-publish-fastpath D3).
+    """
+
+    import hashlib
+    import time
+
+    import torch
+
+    install_grad_norm_recorder()
+    started = time.monotonic()
+    digest = hashlib.sha256(FULL_SHARD_PREFIX)
+    total = 0
+    count = 0
+    with trainer_resident(actor):
+        named: dict[str, Any] = {}
+        for index, chunk in enumerate(actor.model):
+            for name, param in chunk.named_parameters():
+                named[f"{index}.{name}"] = param
+        for name in sorted(named):
+            value = named[name].detach()
+            if value.device.type != "cpu":
+                value = value.to("cpu")
+            value = value.contiguous()
+            encoded = name.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "little"))
+            digest.update(encoded)
+            digest.update(f"{value.dtype}|{list(value.shape)}".encode("ascii"))
+            raw = value.view(torch.uint8) if value.dim() else value.reshape(1).view(torch.uint8)
+            digest.update(memoryview(raw.numpy()).cast("B"))
+            total += raw.numel()
+            count += 1
+    return {
+        "policy_version": int(policy_version),
+        "shard_hash": digest.hexdigest(),
+        "shard_bytes": total,
+        "shard_tensors": count,
+        "hash_seconds": round(time.monotonic() - started, 3),
+        "weights": current_weights_version() if _is_main_rank(actor) else None,
+    }
 
 
 def is_native_flash_next(actor: Any) -> bool:
@@ -719,9 +704,14 @@ def _tp_ep_leader(actor: Any) -> bool:
     )
 
 
-def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
+    """``staging`` (a :class:`~yeto.rl.engine.policy_digest.HostStaging`): copy the
+    tensors into its pinned buffer with one GPU synchronization; the result is then
+    only valid until the next call with it (digest path, E1). Same values either way."""
 
     import torch
+
+    from yeto.rl.engine.policy_digest import NonFiniteTensor, stage_f32_on_host
 
     if is_native_flash_next(actor):
         return _export_flash_next(actor, policy_version=policy_version)
@@ -729,7 +719,8 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
     params = [b.parameter for b in bindings]
     tensors: dict[str, Any] = {}
     with torch.no_grad():
-        if _model_parallel(actor):
+        # Packed parameters export one tensor per expert only through the Bridge.
+        if _model_parallel(actor) or _packed_policy_for(actor, bindings) is not None:
             tensors = _collective_export(actor, bindings)
         else:
             masters = full_masters(getattr(actor, "optimizer", None), params)
@@ -737,12 +728,10 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
                 tensors[b.name] = b.to_hf(master)
         if not _is_main_rank(actor):
             return None
-        out = {}
-        for name, value in sorted(tensors.items()):
-            value = value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
-            if not torch.isfinite(value).all().item():
-                raise StatePluginError(f"{name!r} contains NaN or Inf")
-            out[name] = value
+        try:
+            out = stage_f32_on_host(tensors, staging)
+        except NonFiniteTensor as error:
+            raise StatePluginError(str(error)) from None
     assert_grad_flow_intact(actor.model, params)
     return {"policy_version": int(policy_version), "tensors": out}
 
@@ -761,13 +750,26 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     names: set[str] = set()
     params = [b.parameter for b in bindings]
     opt = getattr(actor, "optimizer", None)
+    policy = _packed_policy_for(actor, bindings)
+    if policy is not None:
+        _require_packed_export_fits(policy, bindings)
     # DistributedOptimizer (e.g. EP>1 with dense DP>1): no main_param on the
     # parameter; gather the full FP32 master within each owning leaf's DP group.
     masters = full_masters(opt, params) if needs_gather(opt, params) else None
+    if policy is not None:
+        # Frozen slots are checked once in the packed masters; the per-expert
+        # copies of frozen experts are dropped from the export below.
+        for b, master in zip(bindings, masters or [master_of(p) for p in params], strict=True):
+            if b.packed:
+                policy.check_frozen_slots(b.name, master)
+        carried = policy.carried_names()
+        expected = {b.name for b in bindings if not b.packed}
     with masters_as_module_parameters(actor.model, params, masters):
         with megatron_bridge_utils.patch_megatron_model(actor.model):
             for item in bridge.export_adapter_weights(actor.model, cpu=False, show_progress=False):
                 name = _canonical(item[0])
+                if policy is not None and policy.is_expert_name(name) and name not in carried:
+                    continue
                 names.add(name)
                 if retain:
                     value = item[1].detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -778,6 +780,8 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     # Local bindings only cover this rank's stage; the exported name set is global.
     if retain and not expected <= names:
         raise StatePluginError(f"collective LoRA export misses local tensors: {sorted(expected - names)[:4]}")
+    if policy is not None:
+        _require_carried(policy, names, "exported")
     return tensors
 
 
@@ -889,8 +893,14 @@ def _apply_state(
         raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
-    local = {b.name for b in bindings}
+    policy = _packed_policy_for(actor, bindings)
+    unpacked = [b for b in bindings if not b.packed]
+    packed = [b for b in bindings if b.packed]
+    local = {b.name for b in unpacked}
     incoming = set(tensors)
+    if policy is not None:
+        _require_carried(policy, incoming, "applied")
+        incoming = {name for name in incoming if not policy.is_expert_name(name)}
     # Under PP a rank holds a stage; every local tensor must be supplied and
     # (single-stage) nothing unknown may be supplied.
     missing = sorted(local - incoming)
@@ -898,26 +908,32 @@ def _apply_state(
     if missing or extra:
         raise StatePluginError(f"global LoRA mapping mismatch: missing={missing[:4]}, extra={extra[:4]}")
     with torch.no_grad():
-        targets = {}
-        for b in bindings:
-            value = tensors[b.name]
+        for name, value in tensors.items():
             if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
-                raise StatePluginError(f"{b.name!r} is not finite FP32")
-            target = b.from_hf(value.to(device=b.parameter.device))
+                raise StatePluginError(f"{name!r} is not finite FP32")
+        targets = {}
+        for b in unpacked:
+            target = b.from_hf(tensors[b.name].to(device=b.parameter.device))
             if target.numel() != b.parameter.numel():
                 raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
             targets[b.name] = target.reshape(b.parameter.shape)
+        slot_writes = [
+            (master_of(b.parameter), policy.slot_writes(b.name, tuple(b.parameter.shape), tensors))
+            for b in packed
+        ]
         scheduler_samples = align_scheduler(actor, local_step)
         opt = getattr(actor, "optimizer", None)
-        sharded = write_masters(opt, params, [targets[b.name] for b in bindings])
+        sharded = write_masters(opt, [b.parameter for b in unpacked], [targets[b.name] for b in unpacked])
+        for master, writes in slot_writes:
+            master[writes.frozen].zero_()
+            for slot, value in writes.updates:
+                master[slot].copy_(value)
         if not sharded:
             _copy_masters_to_model(actor, bindings)
     _barrier()
     if optimizer == "reset":
         reset_optimizer_moments(actor.optimizer)
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:  # colocated update_weights reads the CPU backup
-        backuper.backup("actor")
+    refresh_actor_backup(actor)
     assert_grad_flow_intact(actor.model, params)
     return {
         "policy_version": int(policy_version),
@@ -947,8 +963,8 @@ _RECORDER_INSTALLED = False
 def install_grad_norm_recorder() -> bool:
     """Wrap upstream ``train_one_step`` to record the grad norm it returns.
 
-    Idempotent; called from every state plugin, and the driver always exports
-    the trainable state before the first training step.
+    Idempotent; called from every state plugin, and the trainer installs it in
+    every actor process before the first training step (ACTOR_RECORDERS).
     """
 
     global _RECORDER_INSTALLED
@@ -968,7 +984,12 @@ def install_grad_norm_recorder() -> bool:
         _EV_STATS.clear()
         _POLICY_STATS.clear()
         try:
-            result = original(*args, **kwargs)
+            if getattr(args[0] if args else kwargs.get("args"), "yeto_rl_profile_trainer", False):
+                from .train_profile import profiled  # E1 observation (--rl-profile-trainer)
+
+                result = profiled(original, *args, **kwargs)
+            else:
+                result = original(*args, **kwargs)
         finally:
             bump_weights_version()  # rl-publish-fastpath: any step may have written weights
         try:
@@ -1483,6 +1504,21 @@ def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
         return _restore_critic_cut(actor, **kwargs)
 
 
+def install_actor_recorders(actor: Any) -> bool:
+    """Plugin: the per-step recorders in an actor process (idempotent).
+
+    Also installs the train-gap probe (``train_gap_probe``, S27 G-CT): timing
+    of the R3 replay fill before each step, and the ``YETO_REPLAY_FILL``
+    choice. A bad ``YETO_REPLAY_FILL`` stops the run here; any other probe
+    failure is printed and ignored."""
+
+    from .train_gap_probe import install_best_effort
+
+    installed = install_grad_norm_recorder()
+    install_best_effort(actor)
+    return installed
+
+
 def install_critic_recorders(actor: Any) -> bool:
     """Plugin: the per-step recorders in a critic process (idempotent)."""
 
@@ -1587,6 +1623,26 @@ def _arm_grad_audit(original: Any, args: tuple, kwargs: dict) -> bool:
 
 
 _GRAD_BINDINGS: dict[int, Any] = {}
+
+
+def align_weight_version(actor: Any, *, next_version: int) -> None:
+    """Plugin (P0-S): make Miles' next ``update_weights`` stamp ``next_version``.
+
+    Miles increments ``weight_updater.weight_version`` once per update, writes
+    it to the inference engines and gives it to the rollout executor as the
+    current version (the fully_async staleness filter subtracts from it). Set
+    to ``next_version - 1`` here, the update stamps the yeto policy version.
+    """
+
+    updater = getattr(actor, "weight_updater", None)
+    if updater is None:
+        if getattr(getattr(actor, "args", None), "debug_train_only", False):
+            # trainer-only island (Miles --debug-train-only): no engine and no weight
+            # updater; update_weights returns early and the policy release carries
+            # the version (Modal run-11 failed here)
+            return
+        raise RuntimeError("the trainer has no weight_updater to carry the policy version")
+    updater.weight_version = int(next_version) - 1
 
 
 def grad_norm(actor: Any) -> float:

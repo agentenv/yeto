@@ -23,6 +23,7 @@ from typing import Any, Callable
 import torch
 import torch.distributed as dist
 
+from .. import accel
 from ..fragments import (
     FRAGMENT_PATTERNS,
     MERGE_AVG,
@@ -652,7 +653,8 @@ class MilesValueIsland:
         self.parallel = get_parallel_state()
         self.global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
-        self.device = torch.device("cuda", torch.cuda.current_device())
+        # The card Miles already bound for this rank, in its device family.
+        self.device = accel.current_device(accel.device_family())
 
         self._validate_topology()
         self.is_leader = self.parallel.cp.rank == 0 and self.parallel.tp.rank == 0

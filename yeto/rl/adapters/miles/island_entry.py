@@ -3,335 +3,117 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import hashlib
-import importlib
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
-from decimal import Decimal, DecimalException
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.full_parameter_identity import (
+    full_parameter_identity,
+    identity_sha256,
+    is_sha256,
+    local_init as local_init_rule,
+)
+from yeto.rl.engine.run_flags import (
+    FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+    FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
+    ISLAND,
+    add_rl_flags,
+    rl_option_pairs,
+)
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
-from yeto.rl.adapters.miles.legacy.engine import verify_miles_revision
+from yeto.rl.adapters.miles.revision import verify_miles_revision
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The island argv parser: the schema's island flags plus the hook-owned ones."""
+
+    from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
+    from yeto.wandb_logger import add_arguments as add_wandb_arguments
+
+    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
+    add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py (P0 4.7)
+    add_recommend_arguments(parser)  # D2 elastic hook
+    add_wandb_arguments(parser)
+    return parser
+
+
+def verify_island_code_pack(digest: str | None, tree: str | Path | None = None, *,
+                            mode: str | None = None, release_manifest: str | Path | None = None,
+                            log=print) -> dict | None:
+    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack.
+
+    Release mode (L9.12): the tree must be the image's source root with the source
+    hash its build recorded; returns the release manifest. The image digest
+    (``digest``) is checked by the registry pull, not here."""
+
+    if not digest:
+        return None
+    from yeto import codepack
+
+    root = Path(tree) if tree is not None else Path(__file__).resolve().parents[4]
+    if mode == codepack.CODE_PACK_MODE_RELEASE:
+        manifest = codepack.verify_release_tree(root, release_manifest or codepack.RELEASE_MANIFEST)
+        log(f"[yeto-island] code pack release {digest} ok: commit {manifest.get('yeto_commit')}, "
+            f"tree {root.resolve()}")
+        return manifest
+    codepack.verify_tree(root, digest)
+    log(f"[yeto-island] code pack {digest} ok: tree {root}")
+    return None
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--rollout-model", default=None)
-    parser.add_argument("--rollout-model-revision", default=None)
-    parser.add_argument(
-        "--rl-model-recipe",
-        choices=["generic", "deepseek-v4-flash"],
-        default="generic",
-    )
-    parser.add_argument(
-        "--rl-training-attention-backend",
-        choices=["auto", "flash", "fused", "unfused"],
-        default="auto",
-    )
-    parser.add_argument("--expert-full-count", type=int, default=0)
-    parser.add_argument("--expert-full-lr", type=float, default=1e-6)
-    parser.add_argument("--expert-selection-sha256", default=None)
-    parser.add_argument("--expert-selection-contract-sha256", default=None)
-    parser.add_argument("--model-revision", required=True)
-    parser.add_argument("--data", required=True)
-    parser.add_argument("--data-revision", default=None)
-    parser.add_argument("--eval-data", default=None)
-    parser.add_argument("--eval-dataset-name", default=None)
-    parser.add_argument("--eval-data-sha256", default=None)
-    parser.add_argument("--eval-summary-path", default=None)
-    parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--eval-interval", type=int, default=None)
-    parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
-    parser.add_argument("--eval-temperature", type=float, default=None)
-    parser.add_argument("--eval-top-p", type=float, default=None)
-    parser.add_argument("--eval-max-prompt-len", type=int, default=None)
-    parser.add_argument("--eval-max-response-len", type=int, default=None)
-    parser.add_argument("--eval-max-context-len", type=int, default=None)
-    # Required unless --rl-single-island-no-sync (checked after parsing).
-    parser.add_argument("--syncer", default=None)
-    # rl-algo-critic-family 4.2.1: the critic channel's syncer (critic algorithms only).
-    parser.add_argument("--critic-syncer", default=None)
-    parser.add_argument(
-        "--rl-echo-events",
-        action="store_true",
-        help=(
-            "ports: echo every event-tape record to stdout as 'YETO_RL_EVENT <json>' "
-            "(the launcher sets it for Modal islands, whose ~/yeto-output is not fetchable)"
-        ),
-    )
-    parser.add_argument(
-        "--rl-single-island-no-sync",
-        action="store_true",
-        help=(
-            "ports only: one island with no syncer and no outer sync (G1 smoke "
-            "entry for --rl-allow-unverified-mechanism, design D11); refused "
-            "with --syncer, several learners or a non-default sync preset"
-        ),
-    )
-    parser.add_argument("--learner-id", type=int, required=True)
-    parser.add_argument("--num-learners", type=int, default=1)
-    parser.add_argument("--learner-generation", type=int, default=0)
-    parser.add_argument("--reward-function", required=True)
-    parser.add_argument("--rl-prompt-column", default=None)
-    parser.add_argument("--rl-label-column", default=None)
-    parser.add_argument("--reward-sha256", required=True)
-    parser.add_argument("--source-sha256", required=True)
-    parser.add_argument("--global-rounds", type=int, required=True)
-    parser.add_argument(
-        "--parameter-mode",
-        choices=["lora", "full"],
-        default="lora",
-    )
-    parser.add_argument(
-        "--sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full"],
-        default="strict-avg",
-    )
-    parser.add_argument("--fragments", type=int, default=1)
-    parser.add_argument("--parameter-layout-sha256", default=None)
-    parser.add_argument("--pipeline", type=int, default=1)
-    parser.add_argument("--local-horizon", type=int, default=1)
-    parser.add_argument("--total-fragment-steps", type=int, default=None)
-    parser.add_argument("--initial-adapter", default=None)
-    parser.add_argument("--initial-adapter-sha256", default=None)
-    parser.add_argument("--groups-per-round", type=int, required=True)
-    parser.add_argument("--samples-per-group", type=int, required=True)
-    parser.add_argument("--over-sampling-batch-size", type=int, required=True)
-    parser.add_argument("--dynamic-sampling-filter-path", default=None)
-    parser.add_argument("--dynamic-sampling-max-replacements", type=int, default=None)
-    parser.add_argument(
-        "--secrlenv-max-infrastructure-replacements", type=int, default=None
-    )
-    parser.add_argument("--rl-offload-train", action="store_true")
-    parser.add_argument("--rl-distributed-timeout-minutes", type=int, default=10)
-    parser.add_argument("--optimizer-steps", type=int, required=True)
-    parser.add_argument("--rollout-max-response-len", type=int, required=True)
-    parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
-    parser.add_argument("--custom-generate-function-path", default=None)
-    parser.add_argument("--custom-agent-function-path", default=None)
-    parser.add_argument("--codex-harness-contract", type=json.loads, default=None)
-    parser.add_argument(
-        "--codex-reasoning-effort",
-        choices=["xhigh"],
-        default=None,
-    )
-    parser.add_argument("--agent-max-seq-len", type=int, default=None)
-    parser.add_argument("--use-session-server", action="store_true")
-    parser.add_argument("--session-server-ip", default=None)
-    parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
-    parser.add_argument("--session-server-workers", type=int, default=None)
-    parser.add_argument("--tito-model", default=None)
-    parser.add_argument("--codex-backend-profile", default=None)
-    parser.add_argument("--codex-exclude-reasoning-from-loss", action="store_true")
-    parser.add_argument(
-        "--tito-allowed-append-roles",
-        nargs="+",
-        choices=["tool", "user", "system"],
-        default=None,
-    )
-    parser.add_argument("--completed-groups-path", required=True)
-    parser.add_argument("--event-tape", required=True)
-    parser.add_argument("--audit-dir", default=None)
-    parser.add_argument("--actor-num-nodes", type=int, required=True)
-    parser.add_argument("--actor-num-gpus-per-node", type=int, required=True)
-    parser.add_argument("--tensor-parallel", type=int, default=1)
-    parser.add_argument("--pipeline-parallel", type=int, default=1)
-    parser.add_argument("--expert-parallel", type=int, default=None)
-    parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
-    parser.add_argument("--rollout-num-gpus", type=int, default=None)
-    # rl-infra-spec 2.1 (ports only): LoRA fixed partition + reserved standby
-    # GPUs, read by engine.run_config.resolve_rl_run_config.
-    parser.add_argument(
-        "--rl-placement", choices=["colocated", "fixed-partition"], default="colocated"
-    )
-    parser.add_argument("--rl-standby-gpus", type=int, default=0)
-    # rl-infra-spec 2.3 / 3.x (ports only, off by default; the default island
-    # and its Miles argv are unchanged): eval||train overlap and the E1
-    # elastic rollout controller.
-    parser.add_argument("--rl-overlap-eval", action="store_true")
-    # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
-    parser.add_argument("--rl-observe-timeline", action="store_true")
-    # ports: Miles rollout/train debug dumps next to the event tape (flat .pt
-    # names, so the Modal tape mirror picks them up).
-    parser.add_argument("--rl-debug-dump", action="store_true")
-    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
-    # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
-    # else off (0 disables explicitly).
-    parser.add_argument("--rl-heartbeat-interval", type=float, default=None)
-    parser.add_argument("--rl-resource-sample-interval", type=float, default=None)
-    from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
-    add_recommend_arguments(parser)  # D2 elastic hook
-    # ports LoRA training-time dropout (default 0 = unchanged argv)
-    parser.add_argument("--rl-lora-dropout", type=float, default=None)
-    # Flash-Next native recipe: routed-expert LoRA rank (default: profile's 8)
-    parser.add_argument("--rl-lora-expert-rank", type=int, default=None)
-    # Print the attestation runtime_fingerprint (same Miles argv as the island)
-    # and exit before Ray/GPU (ports only).
-    parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
-    parser.add_argument("--rl-boot-only", action="store_true")
-    # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
-    # in the learner and every Ray worker; off by default.
-    parser.add_argument("--rl-deterministic-trainer", action="store_true")
-    # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
-    # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
-    parser.add_argument("--rl-elastic-tool-wait-board", action="store_true")
-    parser.add_argument("--rl-elastic", action="store_true")
-    parser.add_argument("--rl-elastic-resources", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-attestation", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
-    parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
-    # rl-multinode-island: GPUs per island node when the island spans nodes (the
-    # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
-    parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
-    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
-    # bundle map derived by the launcher from the elastic cfg placement; None =
-    # the leading-bundle layout (trainer first, then rollout, then standby).
-    parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
-    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (default: TP stays in a node)
-    parser.add_argument("--rl-allow-cross-node-tp", action="store_true")
-    parser.add_argument("--rl-allow-cross-node-engine-tp", action="store_true")
-    # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
-    parser.add_argument("--rl-elastic-declare-cells", action="store_true")
-    # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
-    # wires MilesTrainerOps and the pool GPU ids)
-    parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
-    # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
-    parser.add_argument("--rl-elastic-accept-rebind", action="store_true")
-    # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
-    # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
-    parser.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy")
-    # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
-    parser.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto")
-    parser.add_argument("--rl-max-policy-age", type=int, default=0)
-    # decoupling 7.7a: "<vendor>-<card>" from the launcher's card catalog
-    # (yeto.hw.catalog); falls back to $YETO_RL_COMPAT_GROUP, unset -> error.
-    parser.add_argument("--rl-compat-group", default=None)
-    parser.add_argument("--rl-syncer-epoch", type=int, default=0)
-    parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-pause-margin", type=float, default=None)
-    # controller D4 timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
-    parser.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
-    # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
-    parser.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None)
-    # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
-    # synced after every commit point and restored on an empty state dir (machine replaced)
-    parser.add_argument("--rl-elastic-checkpoint-store", default=None, metavar="PATH")
-    # rl-resume-from-checkpoint (S17 C4): resume across launches WITHOUT --rl-elastic
-    # (single island, no sync). The store path is on the island (a Modal Volume mount, a
-    # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
-    parser.add_argument("--rl-resume-store", default=None, metavar="PATH")
-    parser.add_argument("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH")
-    parser.add_argument("--rl-cut-every", type=int, default=None)
-    parser.add_argument("--rl-cut-keep", type=int, default=None)
-    parser.add_argument("--rl-resume-allow-config-change", action="store_true")
-    parser.add_argument("--rl-stop-after-rounds", type=int, default=None)
-    parser.add_argument("--sglang-tp-size", type=int, default=None)
-    parser.add_argument("--sglang-dp-size", type=int, default=None)
-    parser.add_argument("--sglang-ep-size", type=int, default=None)
-    parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.4)
-    parser.add_argument("--sglang-attention-backend", default=None)
-    parser.add_argument(
-        "--sglang-deterministic-inference",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--sglang-page-size", type=int, default=None)
-    parser.add_argument("--sglang-max-running-requests", type=int, default=None)
-    parser.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
-    parser.add_argument("--use-rollout-routing-replay", action="store_true")
-    parser.add_argument("--lora-r", type=int, default=None)
-    parser.add_argument(
-        "--lora-targets",
-        choices=[
-            "auto",
-            "attention",
-            "attention-routed-experts",
-            "all-linear",
-        ],
-        default=None,
-    )
-    parser.add_argument("--inner-lr", type=float, required=True)
-    parser.add_argument("--seq-len", type=int, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--wan-streams", type=int, default=4)
-    parser.add_argument("--miles-root", required=True)
-    parser.add_argument(
-        "--rl-engine",
-        choices=["legacy", "ports"],
-        default="ports",
-        help="RL engine path (default ports); ports rejects unsupported combinations at startup",
-    )
-    # rl-algorithm-capabilities D8/D9/D11 (ports only; refused on legacy).
-    parser.add_argument(
-        "--rl-algorithm-spec",
-        default=None,
-        help="AlgorithmSpec JSON (v1 or v2) for --rl-engine ports",
-    )
-    parser.add_argument(
-        "--rl-expected-algorithm-sha256",
-        default=None,
-        help="algorithm hash the launcher expects every island to build (ports)",
-    )
-    parser.add_argument(
-        "--rl-allow-unverified-mechanism",
-        action="append",
-        default=None,
-        metavar="NAME",
-        help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
-    )
-    # rl-algo-critic-family D5: the critic warm-up stage product the main stage loads
-    parser.add_argument("--rl-critic-load", default=None, metavar="DIR",
-                        help="critic warm-up checkpoint (ports main stage --critic-load)")
-    parser.add_argument("--rl-critic-init-sha256", default=None, metavar="HEX",
-                        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)")
-    # rl-algo-critic-family 5.3: without --rl-critic-load, a critic algorithm with
-    # a warm-up runs stage W itself before the main stage (critic_warmup.run_ports_warmup)
-    parser.add_argument("--rl-critic-warmup-dir", default="~/yeto-rl/critic-warmup",
-                        metavar="DIR",
-                        help="stage-W product cache (one product per algorithm + initial actor)")
-    parser.add_argument("--rl-critic-baseline-run", action="store_true",
-                        help=argparse.SUPPRESS)  # set by run_critic_baseline: no tape echo
-    parser.add_argument("--rl-critic-baseline-rounds", type=int, default=0, metavar="N",
-                        help="critic warm-up: first run N rounds of the same algorithm without "
-                             "the warm-up (randomly initialized value head) as the explained-"
-                             "variance baseline (own event tape / completed-groups path; "
-                             "--rl-single-island-no-sync only)")
-    parser.add_argument("--miles-source-sha256", default=None)
-    parser.add_argument("--megatron-ref-load", default=None)
-    parser.add_argument("--trust-remote-code", action="store_true")
-    from yeto.wandb_logger import add_arguments as add_wandb_arguments
-
-    add_wandb_arguments(parser)
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.parameter_mode == "lora" and (
         args.lora_r is None or args.lora_targets is None
     ):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
-    if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
-        parser.error("--parameter-mode full requires --sync-preset dense-full")
+    from yeto.rl.engine.selection import (
+        FULL_PARAMETER_SYNC_PRESET,
+        FULL_PARAMETER_SYNC_PRESETS,
+        SAO_STREAMING_SYNC_PRESET,
+    )
+
+    if (args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS
+            and not _no_sync_island(args)):
+        parser.error(
+            "--parameter-mode full requires a full-parameter --sync-preset "
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or "
+            "--rl-single-island-no-sync"
+        )
+    if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
+        parser.error(
+            f"--sync-preset {FULL_PARAMETER_SYNC_PRESET} requires --parameter-mode full "
+            "or --expert-full-count"
+        )
+    if args.sync_preset == SAO_STREAMING_SYNC_PRESET and args.parameter_mode != "full":
+        parser.error("--sync-preset sao-streaming-full requires --parameter-mode full")
+    sao_runtime = (
+        args.sao_streaming_runtime,
+        args.sao_streaming_runtime_sha256,
+        args.sao_context_sha256,
+    )
+    if (args.sync_preset == SAO_STREAMING_SYNC_PRESET) != all(value is not None for value in sao_runtime):
+        parser.error(
+            "--sync-preset sao-streaming-full requires --sao-streaming-runtime, "
+            "--sao-streaming-runtime-sha256 and --sao-context-sha256, and only it takes them"
+        )
     if not args.eval_only and not args.inner_lr > 0:
         # A zero LR would only surface as the zero-LR invariant failing round 1.
         parser.error(f"--inner-lr must be > 0 for a training run (got {args.inner_lr})")
-    if args.rl_engine == "ports":
-        try:
-            _require_ports_supported(args)
-        except ValueError as error:
-            parser.error(str(error))
+    try:
+        _require_ports_supported(args)
+    except ValueError as error:
+        parser.error(str(error))
     if (args.rl_critic_load is None) != (args.rl_critic_init_sha256 is None):
         parser.error("--rl-critic-load and --rl-critic-init-sha256 go together")
     if args.rl_critic_baseline_rounds < 0:
@@ -339,11 +121,10 @@ def parse_args(argv=None):
     if args.rl_critic_baseline_run and not getattr(args, "rl_single_island_no_sync", False):
         parser.error("--rl-critic-baseline-run needs --rl-single-island-no-sync")
     if args.rl_critic_baseline_rounds and not (
-        args.rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False)
-        and args.rl_critic_load is None
+        getattr(args, "rl_single_island_no_sync", False) and args.rl_critic_load is None
     ):
-        parser.error("--rl-critic-baseline-rounds needs --rl-engine ports, "
-                     "--rl-single-island-no-sync and no --rl-critic-load")
+        parser.error("--rl-critic-baseline-rounds needs --rl-single-island-no-sync "
+                     "and no --rl-critic-load")
     try:
         _check_ports_infra_switches(args)
         _check_single_island_no_sync(args)
@@ -369,7 +150,7 @@ def build_ports_launch(args, run_config, extra_argv=()):
     from yeto.rl.adapters.miles.algorithm_flags import absorb_extra_argv
     from yeto.rl.adapters.miles.config import translate_run_config
 
-    base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
+    base_algorithm = resolve_ports_algorithm(args)
     absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
     run_config = dataclasses.replace(
         run_config,
@@ -378,22 +159,25 @@ def build_ports_launch(args, run_config, extra_argv=()):
         ),
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
-                                max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0))
+                                max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
+                                async_buffer_rounds=getattr(args, "rl_async_buffer_rounds", None),
+                                full_parameter_sync=not _no_sync_island(args),
+                                rollout_ahead=int(getattr(args, "rl_rollout_ahead", 0) or 0))
 
 
-_ELASTIC_COMPANIONS = (
-    ("rl_elastic_resources", "--rl-elastic-resources"),
-    ("rl_elastic_attestation", "--rl-elastic-attestation"),
-    ("rl_elastic_state_dir", "--rl-elastic-state-dir"),
-    ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
-    ("rl_elastic_cells", "--rl-elastic-cells"),
-    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
-    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
-    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
-    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
-    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
-    ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
-    ("rl_elastic_checkpoint_store", "--rl-elastic-checkpoint-store"),
+_ELASTIC_COMPANIONS = rl_option_pairs(
+    "rl_elastic_resources",
+    "rl_elastic_attestation",
+    "rl_elastic_state_dir",
+    "rl_elastic_initial_config",
+    "rl_elastic_cells",
+    "rl_elastic_quorum_timeout_s",
+    "rl_elastic_idle_flow_timeout_s",
+    "rl_elastic_pause_margin",
+    "rl_elastic_drain_timeout_s",
+    "rl_elastic_recovery_timeout_s",
+    "rl_elastic_max_recovery_attempts",
+    "rl_elastic_checkpoint_store",
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
@@ -405,11 +189,8 @@ _ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",
 
 
 def _check_ports_infra_switches(args) -> None:
-    """``--rl-overlap-eval`` / ``--rl-elastic``: explicit and ports-only."""
+    """``--rl-elastic`` and its companions: explicit, never implied."""
 
-    ports = getattr(args, "rl_engine", "ports") == "ports"
-    if getattr(args, "rl_overlap_eval", False) and not ports:
-        raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
@@ -417,19 +198,28 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
-    if getattr(args, "rl_observe_timeline", False) and not ports:
-        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     from yeto.rl.adapters.miles.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
-    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
+    # S27 G-DI design v2: a two-cluster island with an engine outage budget declares its
+    # rollout cells without --rl-elastic (the launcher sets the env with the flags)
+    from yeto.rl.engine.engine_outage import outage_budget_s
+
+    outage_cells = (bool(getattr(args, "rl_elastic_declare_cells", False))
+                    and not getattr(args, "rl_elastic", False) and outage_budget_s(os.environ) is not None)
+    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False) \
+            and not outage_cells:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
-    _check_resume_switches(args, ports=ports)
+    _check_resume_switches(args)
+    _check_hf_exports(args)
+    _check_sample_store(args)
     if not getattr(args, "rl_elastic", False):
+        if outage_cells:
+            if not _elastic_cells(args.rl_elastic_cells):
+                raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
+            given = [flag for flag in given if flag != "--rl-elastic-cells"]
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
         return
-    if not ports:
-        raise ValueError("--rl-elastic only applies to --rl-engine ports")
     missing = [flag for name, flag in _ELASTIC_COMPANIONS
                if name in _ELASTIC_REQUIRED and not getattr(args, name, None)]
     if missing:
@@ -444,31 +234,50 @@ def _check_ports_infra_switches(args) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
 
 
-def _check_resume_switches(args, *, ports: bool) -> None:
-    """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync and
-    ports-only; the cut cadence flags need a store (elastic or resume)."""
+def _check_sample_store(args) -> None:
+    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` (engine-neutral rule)."""
+    from yeto.rl.engine.sample_roles import check_sample_store
+
+    check_sample_store(args)
+
+
+_CUT_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+              ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+              ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+              ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"))
+
+
+def _check_resume_switches(args) -> None:
+    """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync;
+    ``--rl-island-cut-store`` (S27 R-2) is a synced island's; the cut cadence flags
+    need a store (elastic, resume or island cuts)."""
+    from yeto.rl.engine.cut_interval import cut_interval_for
+
     store = getattr(args, "rl_resume_store", None)
-    has_store = bool(store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
-    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+    island_store = getattr(args, "rl_island_cut_store", None)
+    has_store = bool(store) or bool(island_store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
+    for name, flag in _CUT_FLAGS:
         value = getattr(args, name, None)
-        if value is not None and not int(value) >= 1:
-            raise ValueError(f"{flag} must be >= 1")
-    given = [f for n, f in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                            ("rl_stop_after_rounds", "--rl-stop-after-rounds"))
-             if getattr(args, n, None) is not None]
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive" if isinstance(value, float) else f"{flag} must be >= 1")
+    cut_interval_for(every=getattr(args, "rl_cut_every", None),
+                     auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
+                     max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
+    given = [f for n, f in _CUT_FLAGS if getattr(args, n, None) is not None]
     if getattr(args, "rl_resume_allow_config_change", False):
         given.append("--rl-resume-allow-config-change")
     if given and not has_store:
-        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store)")
-    if getattr(args, "rl_cut_keep", None) is not None and not store:
-        raise ValueError("--rl-cut-keep applies to --rl-resume-store (the elastic store keeps every cut)")
+        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store "
+                         "or --rl-island-cut-store)")
+    if getattr(args, "rl_cut_keep", None) is not None and not (store or island_store):
+        raise ValueError("--rl-cut-keep applies to --rl-resume-store or --rl-island-cut-store "
+                         "(the elastic store keeps every cut)")
+    if island_store:
+        _check_island_cut_store(args)
     if getattr(args, "rl_stop_after_rounds", None) is not None and not store:
         raise ValueError("--rl-stop-after-rounds needs --rl-resume-store")
     if not store:
         return
-    if not ports:
-        raise ValueError("--rl-resume-store only applies to --rl-engine ports")
     if getattr(args, "rl_elastic", False):
         raise ValueError("--rl-resume-store is the non-elastic store; with --rl-elastic use "
                          "--rl-elastic-checkpoint-store")
@@ -477,8 +286,112 @@ def _check_resume_switches(args, *, ports: bool) -> None:
                          "is not implemented yet: rl-resume-from-checkpoint 3.3)")
 
 
+def _check_island_cut_store(args) -> None:
+    """S27 R-2: island round cuts belong to a synced island (engine-neutral check,
+    shared with the verl island since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import check_island_cut_store
+
+    check_island_cut_store(args)
+
+
+def _check_hf_exports(args) -> None:
+    """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``): the launcher sends it
+    with ``--rl-export-hf-store`` to islands that generate and train."""
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if bool(rounds) != bool(getattr(args, "rl_export_hf_store", None)):
+        raise ValueError(f"{EXPORT_HF_FLAG} and --rl-export-hf-store go together")
+    if rounds and getattr(args, "rl_elastic", False):
+        raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
+    if rounds and sample_roles.sample_role(args) != sample_roles.BOTH:
+        raise ValueError(f"{EXPORT_HF_FLAG} needs an island that generates and trains (sample role both)")
+
+
+def hf_export_config(args) -> dict[str, Any] | None:
+    """The island's ``--rl-export-hf-rounds``: ``{"rounds"`` (the flag's canonical
+    text), ``"store"`` (its own export store)``}``, None when off."""
+    from yeto.rl.engine.hf_export import ExportRounds, export_store_path
+
+    rounds = ExportRounds.parse(getattr(args, "rl_export_hf_rounds", None))
+    if not rounds:
+        return None
+    return {"rounds": str(rounds),
+            "store": export_store_path(str(args.rl_export_hf_store), learner_id=int(args.learner_id))}
+
+
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
     return tuple(c.strip() for c in (value or "").split(",") if c.strip())
+
+
+def apply_sample_role(args, miles_args, environ=None) -> None:
+    """L4.6 (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
+    and the environment of the buffer rollout functions (forwarded to the Ray
+    workers by ``connect_island_ray``). Role ``both`` sets nothing."""
+    from yeto.rl.engine import sample_roles
+
+    from .buffer_rollout import island_env
+
+    env = os.environ if environ is None else environ
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
+        # S27 G-EA: island 0 publishes its fragment layout for the spot subscribers
+        from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
+
+        env[PUBLISH_ENV] = "1"
+    if sample_roles.sample_role(args) == sample_roles.BOTH:
+        return
+    config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    miles_args.yeto_rl_sample_buffer = config
+    node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
+    # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
+    sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
+    env.update(island_env(
+        config.role, store_root=config.store, sampler_id=sampler,
+        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
+        shard=node, shards=getattr(args, "rl_buffer_shards", None),
+        lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None)))
+    miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
+    if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
+        env.update(sample_relay_env(args))
+    if getattr(args, "rl_spot_syncer", None) and config.role == sample_roles.SAMPLER:
+        env.update(spot_sampler_env(args))
+
+
+def spot_sampler_env(args) -> dict[str, str]:
+    """S27 G-EA (--rl-spot-syncer, sampler island): weights from that syncer as a
+    receive-only subscriber, groups to its relay channel --rl-spot-channel."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
+
+    host, port = _syncer_address(args.rl_spot_syncer)
+    return {SPOT_SYNCER_ENV: f"{host}:{port}", RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(getattr(args, "rl_spot_channel", 0) or 0))}
+
+
+def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
+    """S27 G-EA (--rl-sample-relay, trainer island): the spot samplers' groups come
+    through the head's sample relay. The trainer reads them from a buffer on local
+    disk (the relay pump fills it: ``yeto.rl.spot_rollout.relay_buffer``) and makes
+    no policy releases (the samplers follow the syncer as subscribers)."""
+    import tempfile
+
+    from yeto.rl.spot_rollout.relay_buffer import trainer_relay_env
+
+    from .buffer_rollout import BUFFER_ROOT_ENV
+
+    root = Path(tmp_root or tempfile.gettempdir()) / "yeto-relay-buffer" / f"island{int(args.learner_id)}"
+    root.mkdir(parents=True, exist_ok=True)
+    return {BUFFER_ROOT_ENV: str(root),
+            **trainer_relay_env(_syncer_address(args.syncer), int(args.learner_id),
+                                groups_per_round=int(args.groups_per_round),
+                                prefetch=getattr(args, "rl_sample_relay_prefetch", None))}
+
+
+def _cut_auto(args) -> dict[str, float]:
+    """The timed cut interval flags (empty: every N rounds; engine-neutral since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import cut_auto_options
+
+    return cut_auto_options(args)
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
@@ -487,12 +400,25 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+        miles_args.yeto_rl_verify_every_round = True
+    if getattr(args, "rl_verify_every", None) is not None:  # S27 C5: read by entry (driver.verify_every)
+        from yeto.rl.engine.run_flags import check_verify_every
+
+        check_verify_every(args)
+        miles_args.yeto_rl_verify_every = int(args.rl_verify_every)
+    if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
+        miles_args.yeto_rl_profile_trainer = True
+        from yeto.rl.engine import phase_profile
+
+        phase_profile.enable()  # samples the thread that drives the phases
     if getattr(args, "rl_debug_dump", False):
         out = os.path.dirname(os.path.abspath(os.path.expanduser(
             getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
         miles_args.save_debug_rollout_data = f"{out}/miles-rollout-{{rollout_id}}.pt"
         miles_args.save_debug_train_data = f"{out}/miles-train-{{rollout_id}}_{{rank}}.pt"
     if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
+        from .harbor_agent import AGENT_FUNCTION as HARBOR_AGENT_FUNCTION
         from .policy_age import SUPPORT, check_task
 
         SUPPORT.check(int(args.rl_max_policy_age))
@@ -500,7 +426,17 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
                    custom_generate=getattr(miles_args, "custom_generate_function_path", None),
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
                    recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
+        if getattr(miles_args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
+            from .harbor_agent import check_suspend_config
+
+            check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    if getattr(args, "rl_rollout_ahead", 0):  # read by entry (driver) and carry_over
+        miles_args.yeto_rl_rollout_ahead = int(args.rl_rollout_ahead)
+    apply_sample_role(args, miles_args, environ)
+    exports = hf_export_config(args)
+    if exports is not None:  # read by entry.hf_exports_for
+        miles_args.yeto_rl_hf_exports = exports
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
@@ -528,15 +464,27 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
-    if getattr(args, "rl_resume_store", None):
+    auto = _cut_auto(args)
+    if auto:
+        miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
+    island_store = getattr(args, "rl_island_cut_store", None)
+    if getattr(args, "rl_resume_store", None) or island_store:
+        from yeto.rl.engine.cut_interval import island_cut_store_for
+
+        every = getattr(args, "rl_cut_every", None)
         miles_args.yeto_rl_resume = {
-            "store": str(args.rl_resume_store),
+            "store": (str(args.rl_resume_store) if not island_store
+                      else island_cut_store_for(island_store, args.learner_id)),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            # None: the default timed interval (cut_interval module doc)
+            "every": None if auto or every is None else int(every),
+            **auto,
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
                            else int(args.rl_stop_after_rounds)),
+            # S27 R-2: a synced island writes its cuts only (no resume from them)
+            **({"write_only": True} if island_store else {}),
         }
         from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 
@@ -562,7 +510,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["accept_rebind"] = True
     if getattr(args, "rl_elastic_checkpoint_store", None):
         miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
-    if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
+    if getattr(args, "rl_island_pool", False):
         miles_args.yeto_rl_elastic["island_scheduling"] = "elastic"
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
@@ -587,8 +535,6 @@ def _check_single_island_no_sync(args) -> None:
             raise ValueError("--syncer is required (unless --rl-single-island-no-sync)")
         return
     problems = []
-    if getattr(args, "rl_engine", "ports") != "ports":
-        problems.append("--rl-engine legacy")
     if getattr(args, "syncer", None) is not None:
         problems.append("--syncer")
     if int(getattr(args, "num_learners", 1) or 1) != 1:
@@ -611,17 +557,6 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
 
     from yeto.rl.engine.algorithm import check_unverified_allowance
 
-    rl_engine = getattr(args, "rl_engine", "ports")
-    if rl_engine != "ports" and (
-        getattr(args, "rl_placement", "colocated") != "colocated"
-        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
-    ):
-        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
-    if rl_engine != "ports":
-        from yeto.rl.engine.algorithm import resolve_ports_algorithm
-
-        resolve_ports_algorithm(args, rl_engine=rl_engine)  # raises if any is used
-        return
     # D11 as written: any outer sync refuses the allowance. The learner CLI
     # always joins a syncer (--syncer is required), so the island count it
     # receives (--num-learners is not sent to Miles islands) is not relied on.
@@ -651,42 +586,15 @@ def install_event_echo() -> bool:
     if echo_enabled():
         return False
     enable_echo()
-    from yeto.rl.adapters.miles.legacy import engine as miles
-
-    if "append_record" not in miles._append_rl_event.__code__.co_names:
-        _wrap_legacy_tape_writer(miles)  # a writer not yet on append_record
+    # The tape writer (yeto.rl.engine.events.append_tape_event) writes through
+    # event_echo.append_record, so enabling the echo is enough; the old
+    # code-object probe for a pre-append_record writer is gone
+    # (rl-code-quality-cleanup 1.9).
     return True
 
 
-def _wrap_legacy_tape_writer(miles) -> None:
-    """Echo for a ``_append_rl_event`` that writes the file itself (pre
-    echo-writers patch): read back exactly the whole lines it appended."""
-
-    import threading
-
-    from yeto.rl.event_echo import PREFIX
-
-    original = miles._append_rl_event
-    lock = threading.Lock()
-
-    def echo(args, event):
-        with lock:
-            path = Path(args.yeto_rl_event_tape).expanduser()
-            before = path.stat().st_size if path.exists() else 0
-            original(args, event)
-            with path.open("rb") as handle:
-                handle.seek(before)
-                data = handle.read()
-        written = data[: data.rfind(b"\n") + 1].decode("utf-8")
-        for line in written.splitlines():
-            if line.strip():
-                print(PREFIX + line, flush=True)
-
-    miles._append_rl_event = echo
-
-
 def _append_ports_event(args, miles_args, event: dict) -> None:
-    from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
+    from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
@@ -700,14 +608,20 @@ class AlgorithmMismatchError(RuntimeError):
 def verify_ports_algorithm(args, miles_args, launch) -> None:
     """D9/D11: before the island joins outer sync (no bridge exists yet).
 
-    Plugins are re-hashed and imported; the island's algorithm hash is
+    Plugins are re-hashed and imported (a stale source hash: warning event,
+    rl-identity-tiering L9.2); the island's algorithm hash is
     compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
     refusal; missing: warning event, for manually started islands);
     absorbed flags and unverified allowances are recorded.
     """
 
     algorithm = launch.algorithm
-    algorithm.verify_plugins()
+    for warning in algorithm.verify_plugins():
+        _append_ports_event(args, miles_args, {
+            "event": "rl_plugin_source_mismatch",
+            "level": "warning",
+            "message": warning,
+        })
     from yeto.rl.engine.algorithm import island_problems
 
     problems = island_problems(algorithm, {
@@ -747,6 +661,7 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
             f"island {args.learner_id} algorithm hash {actual} differs from the launcher's "
             f"expected {expected.lower()}; refusing to join outer sync"
         )
+    _append_correction_record(args, miles_args, algorithm)
     miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
     miles_args.yeto_rl_outer_sync = not getattr(args, "rl_single_island_no_sync", False)
     # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
@@ -759,6 +674,29 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
     )
 
 
+def _append_correction_record(args, miles_args, algorithm) -> None:
+    """rl-offpolicy-correction-passthrough D8: the island tape records the full
+    correction group, the Miles values and ``prox_anchor``. A field Miles
+    cannot map refuses the start (phase 2, L6b.2), after the record and its
+    ``correction_config_warning`` events are on the tape."""
+    from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
+                                                     refuse_correction_warnings)
+
+    from .offpolicy_correction import BACKEND, correction_mapping
+
+    if algorithm.correction.is_default():
+        return  # default tapes unchanged; the run manifest still records the group
+    mapping = correction_mapping(algorithm)
+    _append_ports_event(args, miles_args, {
+        "event": CORRECTION_RECORD_EVENT,
+        **correction_record(algorithm.correction, mapping, backend=BACKEND),
+    })
+    warnings = [warning.event() for warning in mapping.warnings]
+    for warning in warnings:
+        _append_ports_event(args, miles_args, warning)
+    refuse_correction_warnings(warnings)
+
+
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
     """Reject combinations outside the R0 ports matrix before any startup."""
 
@@ -767,36 +705,100 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
     require_ports_supported(
         sync_preset=getattr(args, "sync_preset", "strict-avg"),
         parameter_mode=getattr(args, "parameter_mode", "lora"),
-        model_recipe=getattr(args, "rl_model_recipe", "generic"),
-        lora_targets=getattr(args, "lora_targets", None),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
+        island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
         extra_argv=tuple(extra_argv),
     )
 
 
-def _canonical_sha256(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(payload).hexdigest()
+_canonical_sha256 = identity_sha256  # yeto/rl/engine/full_parameter_identity.py
 
 
+# Miles flags whose values may differ between islands of one full-parameter run:
+# routing ports, the rollout seed, the training data (P3: each island may train
+# on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
+# training islands may carry none, or their own). Value counts: one, except
+# where listed in the two maps below.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
+        "--prompt-data",
         "--rollout-seed",
         "--rollout-engine-base-port",
         "--session-server-port",
         "--sglang-router-port",
         "--sglang-router-prometheus-port",
         "--train-master-base-port",
+        "--eval-interval",
+        "--n-samples-per-eval-prompt",
+        "--eval-temperature",
+        "--eval-top-p",
+        "--eval-max-prompt-len",
+        "--eval-max-response-len",
+        "--eval-max-context-len",
     }
 )
 
+# One or more values (up to the next flag).
 _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS = frozenset(
     {
         "--session-server-port",
+        "--eval-prompt-data",  # name + path
     }
 )
+
+# No value.
+_DENSE_ISLAND_LOCAL_MILES_SWITCHES = frozenset(
+    {
+        "--skip-eval-before-train",
+        "--log-passrate",
+    }
+)
+
+# Placement flags left out of the contract only when the launch gives islands
+# their own placement (P4 --rl-per-island-placement): the GPU split, trainer
+# shape and weight transfer path then differ by design. A uniform launch keeps
+# them in, so islands with different GPU splits are still refused. The rollout
+# engine size (--rollout-num-gpus-per-engine) always stays in: it sets the
+# engine TP, which can change sampling numerics, and has no per-island value.
+_DENSE_PLACEMENT_MILES_FLAGS = frozenset(
+    {
+        "--actor-num-nodes",
+        "--actor-num-gpus-per-node",
+        "--num-gpus-per-node",
+        "--rollout-num-gpus",
+        "--update-weight-transfer-mode",
+        "--yeto-placement-map",
+    }
+)
+_DENSE_PLACEMENT_MILES_SWITCHES = frozenset(
+    {
+        "--colocate",
+        "--offload-train",
+        "--no-offload-train",
+    }
+)
+
+# Parallel-shape flags left out of the contract only with a shape-free
+# full-parameter layout (--rl-sync-layout shape-free): each island then trains
+# with its own TP/PP/CP/EP split and micro-batching, which change how the
+# global batch is computed but not what it computes. Expert tensor parallelism
+# stays in (the shape-free layout needs 1 everywhere).
+_SHAPE_FREE_PARALLEL_MILES_FLAGS = frozenset(
+    {
+        "--tensor-model-parallel-size",
+        "--pipeline-model-parallel-size",
+        "--context-parallel-size",
+        "--expert-model-parallel-size",
+        "--decoder-first-pipeline-num-layers",
+        "--decoder-last-pipeline-num-layers",
+        "--num-layers-per-virtual-pipeline-stage",
+        "--max-tokens-per-gpu",
+        "--micro-batch-size",
+    }
+)
+_SHAPE_FREE_PARALLEL_MILES_SWITCHES = frozenset({"--sequence-parallel"})
 
 _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
     {
@@ -809,7 +811,316 @@ _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
 )
 
 
-def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> None:
+def _require_env(name: str, value: str) -> None:
+    current = os.environ.get(name)
+    if current not in (None, value):
+        raise ValueError(f"{name} must be unset or {value}, got {current!r}")
+    os.environ[name] = value
+
+
+def _configure_deepseek_v4_env(args, *, clone_only_lora: bool, expert_full: bool) -> None:
+    """Process-wide switches the DeepSeek V4 runtime patches read (sitecustomize).
+
+    Ray workers inherit them.
+    """
+
+    from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import (
+        CLONE_ONLY_ENV_FLAG,
+        ENV_FLAG,
+    )
+
+    if clone_only_lora or expert_full:
+        _require_env("YETO_DSV4_EXPERT_CLONE", "1")
+    if clone_only_lora:
+        _require_env(CLONE_ONLY_ENV_FLAG, "1")
+    if clone_only_lora or expert_full:
+        if os.environ.get("SGLANG_OPT_FUSE_WQA_WKV") not in (None, "0"):
+            raise ValueError("SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA")
+        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
+    if expert_full:
+        _require_env(ENV_FLAG, "1")
+        _require_env("YETO_DSV4_EXPERT_FULL_COUNT", str(args.expert_full_count))
+        _require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
+        _require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+
+
+def _trains_base_parameters(args) -> bool:
+    """Full-parameter or DeepSeek V4 expert-full: the full-parameter sync carries the cut."""
+
+    return (
+        getattr(args, "parameter_mode", "lora") == "full"
+        or int(getattr(args, "expert_full_count", 0) or 0) > 0
+    )
+
+
+_is_sha256 = is_sha256  # yeto/rl/engine/full_parameter_identity.py
+_full_parameter_identity = full_parameter_identity  # the same rule for every engine
+
+
+def _no_sync_island(args) -> bool:
+    """A no-sync island (a sampler / trainer island, L4.6, or a single island
+    with both roles, S26 E11): it has no outer sync, so full parameter mode runs
+    without the full-parameter sync preset."""
+    return bool(getattr(args, "rl_single_island_no_sync", False))
+
+
+def _full_parameter_mode(args, sync_preset: str) -> bool:
+    """True for a full-parameter island.
+
+    Full parameter mode needs a full-parameter preset, and a full-parameter
+    preset needs full parameter mode, except that the full-parameter sweep also
+    carries the DeepSeek V4 expert-full LoRA hybrid (P0 1.7b.2).
+    """
+
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESETS
+
+    full_mode = getattr(args, "parameter_mode", "lora") == "full"
+    full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
+    if full_mode and not full_preset and not _no_sync_island(args):
+        raise ValueError("full parameter mode needs a full-parameter sync preset "
+                         "(or --rl-single-island-no-sync)")
+    if full_preset and not _trains_base_parameters(args):
+        raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
+    if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:
+        raise ValueError(f"the {sync_preset} sync needs full parameter mode")
+    return full_mode
+
+
+def _check_full_parameter_sync(args, *, yeto_policy_sync: bool) -> None:
+    """Every full-parameter island runs the ports full-parameter sync (P0-D8)."""
+
+    if not yeto_policy_sync:
+        raise ValueError("full-parameter training requires Yeto policy sync")
+    if getattr(args, "eval_only", False):
+        raise ValueError("full-parameter mode does not run eval-only")
+
+
+def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
+    """Dense full-parameter GRPO is the strict-sweep profile of the ports
+    full-parameter sync (P0-D8): one role, H=1, whole-round fragment sweeps.
+
+    The Milestone-1 limits (version-0 start, generation-0 roster, pinned Miles
+    source tree) are gone (P0-D7); the syncer's authoritative fragments decide
+    the start version and the launcher owns the roster.
+    """
+
+    _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
+    if _full_parameter_async(args):
+        # S27 P2 asynchronous rounds: H local rounds per fragment push, at
+        # most FULL_PARAMETER_ASYNC_MAX_PIPELINE fragment rounds in flight;
+        # no sweep-only options.
+        if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) < 1:
+            raise ValueError("dense full-parameter asynchronous rounds need H >= 1 "
+                             "and one optimizer step")
+        if not 1 <= getattr(args, "pipeline", 1) <= min(FULL_PARAMETER_ASYNC_MAX_PIPELINE, args.fragments):
+            raise ValueError("dense full-parameter asynchronous rounds need --pipeline "
+                             f"1..min({FULL_PARAMETER_ASYNC_MAX_PIPELINE}, P)")
+        if getattr(args, "sweep_overlap", False):
+            raise ValueError("--sweep-overlap needs the strict sweep")
+    elif args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
+        raise ValueError("the dense full-parameter strict sweep requires H=1")
+    elif getattr(args, "rl_sync_matrix_merge", "avg") != "avg":
+        raise ValueError("the dense full-parameter strict sweep merges by plain averaging")
+    elif getattr(args, "sweep_expert_token_weights", False):
+        raise ValueError("--sweep-expert-token-weights needs asynchronous rounds "
+                         "(the strict sweep merges with equal weights)")
+    elif int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The sweep publishes whole rounds in lockstep with the syncer. The
+        # asynchronous rounds take a policy-age limit counted in local
+        # publications (yeto.rl.engine.full_parameter_sync module doc).
+        raise ValueError("the dense full-parameter strict sweep requires --rl-max-policy-age 0")
+    if (
+        type(args.global_rounds) is not int
+        or args.global_rounds < 1
+        or type(args.fragments) is not int
+        or args.fragments < 1
+        or args.total_fragment_steps != args.global_rounds * args.fragments
+        or not _is_sha256(args.parameter_layout_sha256)
+    ):
+        raise ValueError("dense full-parameter fragment budget must equal rounds*fragments")
+    if not _is_sha256(getattr(args, "syncer_profile_sha256", None)):
+        raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")
+
+
+def _private_trajectory_evidence_dir(args) -> Path:
+    """A fresh owner-only directory for this island's trajectory evidence."""
+
+    parent = (
+        Path(args.audit_dir).expanduser()
+        if getattr(args, "audit_dir", None)
+        else Path(args.completed_groups_path).expanduser().parent
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = Path(
+        tempfile.mkdtemp(prefix=f"trajectory-evidence-{args.learner_id}-", dir=parent)
+    )
+    if directory.stat().st_mode & 0o077:
+        raise RuntimeError("trajectory evidence directory is not private")
+    return directory
+
+
+def _roster_generations(args) -> tuple[int, ...]:
+    """The launcher's island roster: every peer at generation 0, this island at its own."""
+
+    generations = [0] * int(getattr(args, "num_learners", 1))
+    generations[args.learner_id] = int(getattr(args, "learner_generation", 0))
+    return tuple(generations)
+
+
+def _full_parameter_async(args) -> bool:
+    """S27 P2: ``--full-parameter-rounds async`` (asynchronous sharded rounds)."""
+    return getattr(args, "full_parameter_rounds", "sweep") == "async"
+
+
+def _local_init(args, async_rounds: bool) -> bool:
+    """Local init (S27): every island launched by one run loads the same base
+    checkpoint, so async rounds keep it as version 0 by default; the syncer
+    refuses the run if the islands' fragment digests disagree."""
+    return local_init_rule(getattr(args, "init_mode", "auto"), async_rounds)
+
+
+def _dense_full_sync_config(
+    args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
+):
+    """The dense full-parameter sync as a one-role :class:`FullParameterSyncConfig`:
+    the strict sweep, or (S27 P2) the streaming profile with a partial quorum."""
+
+    from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
+    from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
+    from yeto.rl.local_learner import ComponentIdentity
+
+    async_rounds = _full_parameter_async(args)
+    syncers = _syncer_addresses(args.syncer) if async_rounds else [_syncer_address(args.syncer)]
+    actor = RoleStreamConfig(
+        algorithm="grpo",
+        role="actor",
+        component=ComponentIdentity(
+            role="actor",
+            model_revision=args.model_revision.lower(),
+            config_hash=model_config_sha256,
+        ),
+        syncer_addr=syncers[0],
+        syncer_shards=tuple(syncers) if len(syncers) > 1 else (),
+        learner_id=args.learner_id,
+        learner_generation=int(getattr(args, "learner_generation", 0)),
+        learner_generations=_roster_generations(args),
+        total_fragment_steps=args.total_fragment_steps,
+        expected_fragments=args.fragments,
+        expected_layout_hash=args.parameter_layout_sha256,
+        local_horizon=int(args.local_horizon) if async_rounds else 1,
+        optimizer_steps_per_round=args.optimizer_steps,
+        training_contract_hash=training_contract_sha256,
+        syncer_profile_hash=args.syncer_profile_sha256,
+        pipeline_depth=int(args.pipeline) if async_rounds else 1,
+        algorithm_spec_sha256=algorithm_spec_sha256,
+        wait_timeout=_sweep_wait_timeout_s(args),
+        wan_streams=args.wan_streams,
+        wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
+        wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
+        push_dtype=getattr(args, "sweep_push_dtype", "f32"),
+        push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
+        max_fragment_bytes=int(getattr(args, "sweep_fragment_max_bytes", 2 << 30)),
+        push_int4_block=int(getattr(args, "sweep_push_int4_block", 128)),
+        push_tensor_blocks=not getattr(args, "sweep_push_no_tensor_blocks", False),
+        push_int4_stochastic=bool(getattr(args, "sweep_push_int4_stochastic", False)),
+        push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
+        expert_token_weights=bool(getattr(args, "sweep_expert_token_weights", False)),
+        final_cut=getattr(args, "sweep_final_cut", "download"),
+        verify_ahead=getattr(args, "sweep_verify_ahead", "auto") != "off",
+        bcast_delta=bool(getattr(args, "bcast_delta", False)),
+        # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
+        # overlap's outer-step lag is bound into the session contract.
+        overlap=bool(getattr(args, "sweep_overlap", False)),
+        partial_quorum=async_rounds,
+        local_init=_local_init(args, async_rounds),
+        matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
+        shape_free=shape_free_granularity(args),
+        peer_recovery=peer_recovery_options(args),
+        # an island pool sets the epoch (and lease); else peer recovery may
+        **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
+    )
+    return FullParameterSyncConfig((actor,), sweep=not async_rounds,
+                                   max_local_rounds_ahead=_max_local_rounds_ahead(args, async_rounds))
+
+
+def _max_local_rounds_ahead(args, async_rounds: bool) -> int | None:
+    """``--sweep-max-local-rounds-ahead`` (launcher ``--rl-sync-max-local-rounds-ahead``):
+    the S27 G-AG lead cap of the asynchronous rounds; None (off) by default."""
+    value = getattr(args, "sweep_max_local_rounds_ahead", None)
+    if value is None:
+        return None
+    if not async_rounds:
+        raise ValueError("--sweep-max-local-rounds-ahead needs --full-parameter-rounds async")
+    if type(value) is not int or not 1 <= value <= MAX_LOCAL_ROUNDS_AHEAD:
+        raise ValueError(f"--sweep-max-local-rounds-ahead must be an integer within 1..{MAX_LOCAL_ROUNDS_AHEAD}")
+    return value
+
+
+def _sweep_wait_timeout_s(args) -> float:
+    """``--sweep-wait-timeout-s`` (launcher ``--rl-sync-wait-timeout-s``); 900 s by default."""
+    value = float(getattr(args, "sweep_wait_timeout_s", 900.0) or 900.0)
+    if not 0 < value <= 7 * 86400:
+        raise ValueError("--sweep-wait-timeout-s must be within (0, 604800] seconds")
+    return value
+
+
+PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"  # "1": the launcher relaunched this island (launch.peer_recovery)
+
+
+def _island_syncer_epoch(args) -> int | None:
+    """S27 E-3: the HELLO carries the syncer epoch only when the launcher sent one."""
+    value = getattr(args, "rl_syncer_epoch", None)
+    return None if value is None or getattr(args, "rl_peer_recovery_store", None) is None else int(value)
+
+
+def peer_recovery_options(args, environ=None):
+    """S27 E-3: peer recovery of a full-parameter island, or None without
+    ``--rl-peer-recovery-store`` (engine-neutral since S27 G-ED, shared with
+    the verl island: :func:`yeto.rl.engine.stream_recovery.peer_recovery_options`)."""
+    from yeto.rl.engine.stream_recovery import peer_recovery_options as options
+
+    return options(args, environ)
+
+
+def _island_pool_membership(args) -> dict:
+    """Island pool (``--rl-island-pool``, set by the launcher with any
+    --rl-sync-* membership option): the syncer lease the session heartbeats
+    for and the syncer epoch of its HELLO. {} for a fixed roster."""
+    if not getattr(args, "rl_island_pool", False):
+        return {}
+    from yeto.rl.pool_client import DEFAULT_ISLAND_LEASE_S
+
+    lease = getattr(args, "rl_sync_island_lease_s", None)
+    return {"island_lease_s": DEFAULT_ISLAND_LEASE_S if lease is None else float(lease),
+            "syncer_epoch": int(getattr(args, "rl_syncer_epoch", 0) or 0)}
+
+
+def _load_sao_streaming_runtime(args):
+    """Load the hash-bound SAO streaming contract before any GPU work.
+
+    The role pairing is checked when the runtime is bound (still before Ray
+    starts), once the island's algorithm spec hash is known.
+    """
+
+    from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
+
+    runtime = load_sao_streaming_runtime(
+        args.sao_streaming_runtime,
+        expected_sha256=args.sao_streaming_runtime_sha256,
+        expected_sao_context_sha256=args.sao_context_sha256,
+    )
+    if runtime.actor.learner_id != args.learner_id:
+        raise ValueError("SAO streaming runtime names a different learner")
+    if not getattr(args, "critic_syncer", None):
+        raise ValueError("SAO streaming requires --critic-syncer")
+    runtime = runtime.with_syncer_addresses(
+        actor=_syncer_address(args.syncer),
+        critic=_syncer_address(args.critic_syncer),
+    )
+    return runtime
+
+
+def _require_unquantized_full_parameter_rollout_model(model_path: str | Path) -> None:
     """Enable the pinned SGLang BF16 hook fallback only for an exact safe model.
 
     The public SGLang pin used by the Milestone-1 gate predates the optional
@@ -821,7 +1132,7 @@ def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> Non
 
     config_path = Path(model_path) / "config.json"
     if not config_path.is_file():
-        raise ValueError("dense full-parameter rollout model has no config.json")
+        raise ValueError("full-parameter rollout model has no config.json")
 
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -837,9 +1148,9 @@ def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> Non
             object_pairs_hook=unique_object,
         )
     except (OSError, UnicodeError, ValueError) as exc:
-        raise ValueError("dense full-parameter rollout config is malformed") from exc
+        raise ValueError("full-parameter rollout config is malformed") from exc
     if not isinstance(config, dict):
-        raise TypeError("dense full-parameter rollout config must be an object")
+        raise TypeError("full-parameter rollout config must be an object")
     configured = sorted(
         name
         for name in _DENSE_FULL_QUANTIZATION_CONFIG_KEYS
@@ -852,34 +1163,131 @@ def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> Non
         )
 
 
+def shape_free_granularity(args: Any):
+    """The island's shape-free granularity (``--rl-sync-shape-free-*``), or None
+    with the shape-bound layout (``--rl-sync-layout``, default shape-bound)."""
+
+    from yeto.rl.engine.shape_free_layout import LAYOUT_SHAPE_FREE, Granularity
+
+    if getattr(args, "rl_sync_layout", "shape-bound") != LAYOUT_SHAPE_FREE:
+        return None
+    return Granularity(
+        tp_units=int(getattr(args, "rl_sync_shape_free_tp_units", 1)),
+        expert_classes=int(getattr(args, "rl_sync_shape_free_expert_classes", 8)),
+        dense_groups=int(getattr(args, "rl_sync_shape_free_dense_groups", 8)),
+        split_layers=bool(getattr(args, "rl_sync_shape_free_split_layers", False)),
+    )
+
+
+def shape_free_layout_contract(args: Any) -> dict[str, Any] | None:
+    """The shape-free granularity as a contract entry; None with the shape-bound layout."""
+
+    granularity = shape_free_granularity(args)
+    if granularity is None:
+        return None
+    return {
+        "tp_units": granularity.tp_units,
+        "expert_classes": granularity.expert_classes,
+        "dense_groups": granularity.dense_groups,
+        "split_layers": granularity.split_layers,
+    }
+
+
+def _expert_full_contract(args: Any) -> dict[str, Any]:
+    """Expert-full selection that reaches Miles through the environment, not argv.
+
+    Empty for dense full-parameter runs, so their contract hash is unchanged.
+    """
+
+    count = int(getattr(args, "expert_full_count", 0) or 0)
+    if not count:
+        return {}
+    return {
+        "expert_full": {
+            "count": count,
+            "lr": float(args.expert_full_lr),
+            "selection_sha256": args.expert_selection_sha256,
+            "selection_contract_sha256": args.expert_selection_contract_sha256,
+        }
+    }
+
+
+def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
+    """The LoRA identity hash; expert-full adds its expert selection.
+
+    Plain LoRA keeps the canonical hash unchanged, so existing identities hold.
+    """
+
+    from yeto.rl.core import canonical_lora_config_hash
+
+    base = canonical_lora_config_hash(rank=args.lora_r, target_modules=canonical_targets)
+    expert_full = _expert_full_contract(args)
+    if not expert_full:
+        return base
+    return _canonical_sha256(
+        {"schema": "yeto-lora-expert-full-config-v1", "lora_config_sha256": base, **expert_full}
+    )
+
+
+def _dense_shared_miles_argv(
+    miles_argv: Sequence[str], *, per_island_placement: bool = False, shape_free: bool = False
+) -> list[str]:
+    """``miles_argv`` without the island-local flags and their values.
+
+    ``per_island_placement`` also drops the placement flags and switches;
+    ``shape_free`` (a shape-free full-parameter layout) the parallel-shape ones.
+    """
+
+    local_flags = _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS
+    local_switches = _DENSE_ISLAND_LOCAL_MILES_SWITCHES
+    if per_island_placement:
+        local_flags |= _DENSE_PLACEMENT_MILES_FLAGS
+        local_switches |= _DENSE_PLACEMENT_MILES_SWITCHES
+    if shape_free:
+        local_flags |= _SHAPE_FREE_PARALLEL_MILES_FLAGS
+        local_switches |= _SHAPE_FREE_PARALLEL_MILES_SWITCHES
+    shared_argv = []
+    index = 0
+    while index < len(miles_argv):
+        value = miles_argv[index]
+        index += 1
+        if value in local_switches:
+            continue
+        if value not in local_flags:
+            shared_argv.append(value)
+            continue
+        value_count = 0
+        while index < len(miles_argv) and not miles_argv[index].startswith("--"):
+            index += 1
+            value_count += 1
+            if value not in _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
+                break
+        if value_count < 1:
+            raise ValueError(f"Miles flag has no value: {value}")
+    return shared_argv
+
+
 def _dense_full_training_contract_sha256(
     args: Any,
     miles_argv: Sequence[str],
     *,
     model_config_sha256: str,
-    prompt_data_sha256: str,
 ) -> str:
-    """Hash shared training semantics while excluding island-local routing."""
+    """Hash shared training semantics while excluding island-local routing,
+    data, eval and (with per-island placement) placement.
 
-    shared_argv = []
-    index = 0
-    while index < len(miles_argv):
-        value = miles_argv[index]
-        if value in _DENSE_ISLAND_LOCAL_MILES_FLAGS:
-            if index + 1 >= len(miles_argv):
-                raise ValueError(f"Miles flag has no value: {value}")
-            index += 1
-            value_count = 0
-            while index < len(miles_argv) and not miles_argv[index].startswith("--"):
-                index += 1
-                value_count += 1
-                if value not in _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
-                    break
-            if value_count < 1:
-                raise ValueError(f"Miles flag has no value: {value}")
-            continue
-        shared_argv.append(value)
-        index += 1
+    Each island may train on its own task list (P3), so the training data
+    (``--data``, its revision and the prompt file) stays out of the contract.
+    Evaluation does not change the trained weights and runs on the eval island
+    (P3-Q3), so its settings stay out too. With per-island placement (P4) the
+    placement flags stay out as well; ``per_island_placement`` records that (v6).
+    """
+
+    per_island_placement = bool(getattr(args, "rl_per_island_placement", False))
+    shape_free = shape_free_layout_contract(args)
+    shared_argv = _dense_shared_miles_argv(
+        miles_argv, per_island_placement=per_island_placement, shape_free=shape_free is not None
+    )
     explicit_rollout_seed = getattr(args, "rollout_seed", None)
     rollout_seed_contract = (
         {"mode": "fixed", "value": explicit_rollout_seed}
@@ -888,417 +1296,44 @@ def _dense_full_training_contract_sha256(
     )
     return _canonical_sha256(
         {
-            "schema": "yeto-dense-full-training-contract-v3",
+            **_expert_full_contract(args),
+            # A shape-bound layout keeps its v6 contract hash unchanged.
+            **({} if shape_free is None else {"shape_free_layout": shape_free}),
+            "schema": "yeto-dense-full-training-contract-v6",
             "shared_miles_argv": shared_argv,
+            "per_island_placement": per_island_placement,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
             "model_revision": args.model_revision.lower(),
             "model_config_sha256": model_config_sha256,
-            "prompt_data_sha256": prompt_data_sha256,
-            "data": args.data,
-            "data_revision": args.data_revision,
-            "evaluation": (
-                None
-                if getattr(args, "eval_interval", None) is None
-                else {
-                    "data": getattr(args, "eval_data", None),
-                    "data_sha256": getattr(args, "eval_data_sha256", None),
-                    "dataset_name": getattr(args, "eval_dataset_name", None),
-                    "interval": args.eval_interval,
-                    "samples_per_prompt": getattr(
-                        args, "eval_samples_per_prompt", None
-                    ),
-                    "temperature": getattr(args, "eval_temperature", None),
-                    "top_p": getattr(args, "eval_top_p", None),
-                    "max_prompt_len": getattr(args, "eval_max_prompt_len", None),
-                    "max_response_len": getattr(
-                        args, "eval_max_response_len", None
-                    ),
-                    "max_context_len": getattr(args, "eval_max_context_len", None),
-                }
-            ),
             "yeto_source_sha256": args.source_sha256,
-            "miles_source_sha256": args.miles_source_sha256,
+            "miles_backend_identity_sha256": _backend_identity_sha256(args),
             "reward_sha256": args.reward_sha256,
-            "codex_harness_contract": getattr(
-                args,
-                "codex_harness_contract",
-                None,
-            ),
+            # The Codex harness contract left with the harness (S26 E0.5); the
+            # key stays so the v6 contract hash of existing runs is unchanged.
+            "codex_harness_contract": None,
         }
     )
 
 
-def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
-    """Parse exact, typed JSON semantics independent of object-key order."""
+def miles_revision_pins(args: Any) -> Any:
+    """The Miles commit the island checks for ``--miles-commit`` (full SHA); None
+    without it (``verify_miles_revision`` then checks the pinned MILES_NEXT_PINS)."""
+    from yeto.provenance import is_immutable_commit
+    from yeto.rl.adapters.miles.pins import (
+        MILES_NEXT_FORMER_REPOSITORIES,
+        MILES_NEXT_REPOSITORY,
+        MilesRevisionPins,
+    )
 
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        value: dict[str, Any] = {}
-        for name, item in pairs:
-            if name in value:
-                raise ValueError(f"duplicate JSON object key: {name!r}")
-            value[name] = item
-        return value
-
-    def finite_number(name: str) -> None:
-        raise ValueError(f"non-finite JSON number: {name}")
-
-    try:
-        value = json.loads(
-            path.read_bytes(),
-            object_pairs_hook=unique_object,
-            parse_constant=finite_number,
-            parse_float=Decimal,
-            parse_int=Decimal,
-        )
-    except (OSError, UnicodeError, ValueError, DecimalException) as exc:
-        raise ValueError("Codex app-server schema is malformed JSON") from exc
-
-    def typed_semantics(item: Any) -> tuple[Any, ...]:
-        if item is None:
-            return ("null",)
-        if isinstance(item, bool):
-            return ("boolean", item)
-        if isinstance(item, Decimal):
-            return ("number", item)
-        if isinstance(item, str):
-            return ("string", item)
-        if isinstance(item, list):
-            return ("array", tuple(typed_semantics(value) for value in item))
-        if isinstance(item, dict):
-            return (
-                "object",
-                tuple(
-                    sorted(
-                        (name, typed_semantics(value))
-                        for name, value in item.items()
-                    )
-                ),
-            )
-        raise TypeError(f"unsupported parsed JSON value: {type(item).__name__}")
-
-    return typed_semantics(value)
-
-
-def _canonical_schema_sha256(path: Path) -> str | None:
-    from yeto.provenance import canonical_json_sha256
-
-    try:
-        return canonical_json_sha256(path)
-    except (OSError, ValueError):
+    commit = getattr(args, "miles_commit", None)
+    if not commit:
         return None
-
-
-def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
-    try:
-        pinned_semantics = _strict_json_file_semantics(pinned)
-        generated_semantics = _strict_json_file_semantics(generated)
-    except ValueError as exc:
-        raise ValueError("live stock Codex app-server schema drifted") from exc
-    if generated_semantics != pinned_semantics:
-        raise ValueError("live stock Codex app-server schema drifted")
-
-
-def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
-    """Attest the in-tree OpenEnv adapter (forwarded to harness.codex.preflight)."""
-
-    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
-
-    forward_legacy_openenv_preflight(args, profile_name)
-
-
-def _preflight_codex_harness(args) -> None:
-    """Fail before model allocation if the signed Codex surface has drifted."""
-
-    from yeto.rl import (
-        CODEX_APP_SERVER_PROTOCOL_REVISION,
-        CODEX_APP_SERVER_SCHEMA_SHA256,
-        CODEX_BASE_INSTRUCTIONS_SHA256,
-        CODEX_CLI_VERSION,
-        CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH,
-        CODEX_CONTAINER_BINARY_PATH,
-        CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-        CODEX_HARNESS_AGENT,
-        CODEX_HARNESS_AGENT_SHA256,
-        CODEX_LINUX_BINARY_SHA256,
-        CODEX_LINUX_BINARY_SIZE_BYTES,
-        CODEX_LINUX_TARGET,
-        CODEX_NPM_PACKAGE,
-        CODEX_NPM_TARBALL_SHA256,
-        CODEX_OPENENV_AGENT,
-        CODEX_OPENENV_IDENTITY_ENV,
-        CODEX_PACKAGE_MANIFEST_SHA256,
-        CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
-        SIGNED_CODEX_AGENTS,
+    if not is_immutable_commit(commit) or len(str(commit)) != 40:
+        raise ValueError(f"--miles-commit must be a full 40-hex commit, got {commit!r}")
+    return MilesRevisionPins(
+        MILES_NEXT_REPOSITORY, str(commit).lower(), MILES_NEXT_FORMER_REPOSITORIES
     )
-
-    contract = getattr(args, "codex_harness_contract", None)
-    if args.custom_agent_function_path not in SIGNED_CODEX_AGENTS:
-        if contract is not None:
-            raise ValueError(
-                "--codex-harness-contract requires a signed Codex agent"
-            )
-        return
-    if not isinstance(contract, dict):
-        raise ValueError("the signed Codex agent requires its harness contract")
-    required = {
-        "agent_function_path",
-        "agent_source_sha256",
-        "controller_binary_path",
-        "controller_package_manifest_path",
-        "controller_app_server_schema_path",
-        "bundle_binary_path",
-        "bundle_package_manifest_path",
-        "bundle_app_server_schema_path",
-        "container_binary_path",
-        "container_app_server_schema_path",
-        "binary_sha256",
-        "binary_size_bytes",
-        "cli_version",
-        "npm_package",
-        "target",
-        "npm_tarball_sha256",
-        "package_manifest_sha256",
-        "app_server_protocol_revision",
-        "app_server_schema_sha256",
-        "base_instructions_sha256",
-        "terminal_exec_tool_schema_sha256",
-        "submit_tool_schema_sha256",
-        "dynamic_tools_schema_sha256",
-        "reasoning_effort",
-        "backend",
-    }
-    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
-        required.add("openenv_identity_env")
-    if set(contract) != required:
-        raise ValueError("stock Codex harness contract shape drifted")
-    pinned = {
-        "agent_function_path": CODEX_HARNESS_AGENT,
-        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
-        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
-        "container_app_server_schema_path": (
-            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
-        ),
-        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
-        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
-        "cli_version": CODEX_CLI_VERSION,
-        "npm_package": CODEX_NPM_PACKAGE,
-        "target": CODEX_LINUX_TARGET,
-        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
-        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
-        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
-        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-        "reasoning_effort": "xhigh",
-    }
-    if any(contract.get(name) != expected for name, expected in pinned.items()):
-        raise ValueError("stock Codex runtime identity drifted")
-    if (
-        args.custom_agent_function_path == CODEX_OPENENV_AGENT
-        and contract.get("openenv_identity_env") != CODEX_OPENENV_IDENTITY_ENV
-    ):
-        raise ValueError("stock Codex OpenEnv surface identity drifted")
-    from yeto.rl.codex_backend import (
-        stock_codex_backend_contract_with_reasoning_policy,
-        validate_stock_codex_fields,
-    )
-
-    profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
-    expected_backend = stock_codex_backend_contract_with_reasoning_policy(
-        profile_name,
-        args.rollout_max_response_len,
-        not getattr(args, "codex_exclude_reasoning_from_loss", False),
-    )
-    validate_stock_codex_fields(
-        tito_model=args.tito_model,
-        codex_backend_profile=profile_name,
-        rl_model_recipe=args.rl_model_recipe,
-        model=args.model,
-        model_revision=args.model_revision,
-        rollout_model=getattr(args, "rollout_model", None),
-        rollout_model_revision=getattr(args, "rollout_model_revision", None),
-        apply_chat_template_kwargs=args.apply_chat_template_kwargs,
-        tito_allowed_append_roles=args.tito_allowed_append_roles,
-        codex_reasoning_effort=args.codex_reasoning_effort,
-        # The signed Qwen rollout backend profile predates full-parameter
-        # training and uses ``attention`` only as its legacy tuning-profile
-        # discriminator.  Full mode emits no LoRA runtime flags below.
-        lora_targets=(
-            args.lora_targets
-            if getattr(args, "parameter_mode", "lora") == "lora"
-            else "attention"
-        ),
-        expert_full_count=getattr(args, "expert_full_count", 0),
-        lora_expert_rank=(
-            int(getattr(args, "rl_lora_expert_rank", None) or 0)
-            if getattr(args, "parameter_mode", "lora") == "lora"
-            else 0
-        ),
-    )
-    if contract.get("backend") != expected_backend:
-        raise ValueError("stock Codex backend/TITO identity drifted")
-    from yeto.provenance import file_sha256
-
-    # OpenEnv owns and attests its adapter inside the pinned Miles source.  The
-    # legacy SecRLEnv-backed Codex adapter remains an optional integration, but
-    # it must not be required for the independent Terminal-Bench path.
-    if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
-        try:
-            from yeto.rl.harness.codex import codex_harness_agent
-
-            live_identity = codex_harness_agent.codex_harness_identity()
-        except (
-            ImportError,
-            AttributeError,
-            TypeError,
-            ValueError,
-            RuntimeError,
-        ) as exc:
-            raise ValueError("cannot attest the Yeto Codex harness adapter") from exc
-        identity_names = (
-            "base_instructions_sha256",
-            "terminal_exec_tool_schema_sha256",
-            "submit_tool_schema_sha256",
-            "dynamic_tools_schema_sha256",
-        )
-        if live_identity != {name: contract.get(name) for name in identity_names}:
-            raise ValueError("Yeto Codex adapter identity drifted")
-
-        adapter_path = Path(codex_harness_agent.__file__)
-        if adapter_path.is_symlink() or not adapter_path.is_file():
-            raise ValueError("Yeto Codex adapter source identity drifted")
-        adapter_path = adapter_path.resolve()
-        if file_sha256(adapter_path) != contract.get("agent_source_sha256"):
-            raise ValueError("Yeto Codex adapter source identity drifted")
-    binary = Path(CODEX_CONTAINER_BINARY_PATH)
-    manifest = Path("/opt/yeto/codex/codex-package.json")
-    schema = Path(CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH)
-    if (
-        binary.is_symlink()
-        or not binary.is_file()
-        or binary.stat().st_size != CODEX_LINUX_BINARY_SIZE_BYTES
-        or file_sha256(binary) != CODEX_LINUX_BINARY_SHA256
-        or manifest.is_symlink()
-        or not manifest.is_file()
-        or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
-        or schema.is_symlink()
-        or not schema.is_file()
-        or _canonical_schema_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
-    ):
-        raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
-    try:
-        version = subprocess.run(
-            [str(binary), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("cannot execute the pinned stock Codex binary") from exc
-    if version != CODEX_CLI_VERSION:
-        raise ValueError("stock Codex executable version drifted")
-    try:
-        with tempfile.TemporaryDirectory(prefix="yeto-codex-schema-") as temporary:
-            root = Path(temporary)
-            output = root / "schema"
-            subprocess.run(
-                [
-                    str(binary),
-                    "app-server",
-                    "generate-json-schema",
-                    "--experimental",
-                    "--out",
-                    str(output),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            generated_schema = (
-                output / "codex_app_server_protocol.v2.schemas.json"
-            )
-            if (
-                generated_schema.is_symlink()
-                or not generated_schema.is_file()
-            ):
-                raise ValueError("live stock Codex app-server schema drifted")
-            _verify_live_codex_app_server_schema(schema, generated_schema)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("cannot verify the stock Codex app-server schema") from exc
-    expected_env = {
-        "YETO_CODEX_BINARY_PATH": CODEX_CONTAINER_BINARY_PATH,
-        "YETO_CODEX_BINARY_SHA256": CODEX_LINUX_BINARY_SHA256,
-        "YETO_CODEX_BINARY_SIZE_BYTES": str(CODEX_LINUX_BINARY_SIZE_BYTES),
-        "YETO_CODEX_VERSION": CODEX_CLI_VERSION,
-        "YETO_CODEX_APP_SERVER_PROTOCOL_REVISION": (
-            CODEX_APP_SERVER_PROTOCOL_REVISION
-        ),
-        "YETO_CODEX_APP_SERVER_SCHEMA_SHA256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "YETO_CODEX_BASE_INSTRUCTIONS_SHA256": contract[
-            "base_instructions_sha256"
-        ],
-        "YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256": contract[
-            "terminal_exec_tool_schema_sha256"
-        ],
-        "YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256": contract[
-            "submit_tool_schema_sha256"
-        ],
-        "YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256": contract[
-            "dynamic_tools_schema_sha256"
-        ],
-        "YETO_CODEX_REASONING_EFFORT": "xhigh",
-        "YETO_CODEX_BACKEND_MAX_TOKENS": str(args.rollout_max_response_len),
-        "YETO_CODEX_BACKEND_REASONING_EFFORT": expected_backend[
-            "reasoning_effort"
-        ],
-        "YETO_CODEX_BACKEND_THINKING": "enabled",
-        "YETO_CODEX_CHAT_TEMPLATE": expected_backend["chat_template"],
-        "YETO_CODEX_CHAT_TEMPLATE_KWARGS": json.dumps(
-            expected_backend["chat_template_kwargs"],
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        "YETO_CODEX_TITO_ALLOWED_APPEND_ROLES": "tool,user",
-        "YETO_CODEX_HARNESS_CONTRACT_SHA256": _canonical_sha256(contract),
-    }
-    mismatched = [
-        name for name, expected in expected_env.items() if os.getenv(name) != expected
-    ]
-    if mismatched:
-        raise ValueError(
-            "stock Codex container environment drifted: " + ", ".join(mismatched)
-        )
-    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
-        _preflight_codex_openenv_adapter(args, profile_name)
-
-
-def _provider_value(provider, *names: str):
-    for name in names:
-        value = getattr(provider, name, None)
-        if value is not None:
-            return value
-    raise ValueError(
-        f"Megatron-Bridge provider {type(provider).__name__} lacks {names[0]}"
-    )
-
-
-def _positive_int(provider, *names: str) -> int:
-    value = _provider_value(provider, *names)
-    if not isinstance(value, int) or value <= 0:
-        raise ValueError(f"Megatron-Bridge provider has invalid {names[0]}={value!r}")
-    return value
-
-
-def _text(value: Any) -> str:
-    return str(getattr(value, "value", value))
 
 
 def _miles_callable(spec: str) -> str:
@@ -1306,500 +1341,6 @@ def _miles_callable(spec: str) -> str:
     if not separator or not module or not function.isidentifier():
         raise ValueError("RL callable must be package.module:function")
     return f"{module}.{function}"
-
-
-_ROUTED_EXPERT_LORA_MODULE = re.compile(
-    r"^model\.layers\.(?P<layer>\d+)\.mlp\.experts\.\d+\."
-    r"(?P<projection>gate_proj|up_proj|down_proj)$"
-)
-
-_MEGATRON_LAYER_MODULE = re.compile(
-    r"^(?P<prefix>(?:.*\.)?decoder\.layers\.)\d+(?P<suffix>\..+)$"
-)
-
-
-def _pipeline_local_target(target: str, pipeline_parallel: int) -> str:
-    if pipeline_parallel <= 1:
-        return target
-    # Pipeline stages renumber their physical decoder layers from zero.
-    # Bridge's PEFT matcher accepts ``*`` here, so retain the exact module
-    # type while making the target independent of that local renumbering.
-    # Canonical HF specs still define and validate global layer ownership.
-    match = _MEGATRON_LAYER_MODULE.fullmatch(target)
-    if match is None:
-        return target
-    return f"{match.group('prefix')}*{match.group('suffix')}"
-
-
-def megatron_adapter_targets(
-    specs,
-    bridge,
-    *,
-    standard_grouped_experts: bool = False,
-    pipeline_parallel: int = 1,
-    attention_output_gate: bool = False,
-) -> list[str]:
-    """Map the exact PEFT contract onto Bridge's Megatron module paths.
-
-    ``attention_output_gate`` (the provider flag) fails closed on q/k/v: the
-    CanonicalLoRA split adapters are not gate-aware, so their export layout
-    cannot match PEFT's (see ``export.target_modules``).
-    """
-
-    model_bridge = getattr(bridge, "_model_bridge", None)
-    if model_bridge is None:
-        raise ValueError("Megatron-Bridge does not expose its model mapping")
-    registry = model_bridge.mapping_registry()
-    modules = {
-        spec.name.removeprefix("base_model.model.").rsplit(".lora_", 1)[0]
-        for spec in specs
-    }
-    targets = set()
-    for module in modules:
-        expert = _ROUTED_EXPERT_LORA_MODULE.fullmatch(module)
-        if standard_grouped_experts and expert is not None:
-            branch = (
-                "linear_fc2"
-                if expert.group("projection") == "down_proj"
-                else "linear_fc1"
-            )
-            targets.add(
-                _pipeline_local_target(
-                    f"decoder.layers.{expert.group('layer')}.mlp.experts.{branch}",
-                    pipeline_parallel,
-                )
-            )
-            continue
-        hf_weight = f"{module}.weight"
-        mapping = registry.hf_to_megatron_lookup(hf_weight)
-        if mapping is None:
-            raise ValueError(f"PEFT module {module!r} has no Megatron-Bridge mapping")
-        megatron_module = mapping.megatron_param.removesuffix(".weight")
-        prefix, separator, leaf = megatron_module.rpartition(".")
-        if not separator:
-            raise ValueError(f"invalid Megatron adapter module {megatron_module!r}")
-        if leaf == "linear_qkv" and attention_output_gate:
-            raise ValueError(
-                f"PEFT module {module!r} cannot use canonical Megatron LoRA: "
-                "CanonicalLoRA split q/k/v adapters ignore attention_output_gate"
-            )
-        if leaf in {"linear_qkv", "linear_fc1"}:
-            hf_params = mapping.hf_param
-            component = next(
-                (
-                    name
-                    for name, value in hf_params.items()
-                    if value == hf_weight
-                ),
-                None,
-            ) if isinstance(hf_params, dict) else None
-            allowed = {"q", "k", "v"} if leaf == "linear_qkv" else {"gate", "up"}
-            if component not in allowed:
-                raise ValueError(
-                    f"PEFT module {module!r} cannot use canonical Megatron LoRA"
-                )
-            leaf = (
-                f"linear_{component}"
-                if leaf == "linear_qkv"
-                else f"linear_fc1_{component}"
-            )
-        target = f"{prefix}.{leaf}"
-        targets.add(_pipeline_local_target(target, pipeline_parallel))
-    return sorted(targets)
-
-
-def build_miles_argv(
-    args,
-    *,
-    model_path: str | Path,
-    rollout_model_path: str | Path | None = None,
-    prompt_path: str | Path,
-    eval_prompt_path: str | Path | None = None,
-    provider,
-    target_modules: list[str],
-    yeto_policy_sync: bool = True,
-) -> list[str]:
-    """Construct Miles arguments from Bridge's actual model provider.
-
-    Two layers: ``resolve_rl_run_config`` validates and resolves the
-    engine-agnostic run; ``_legacy_miles_argv`` is the pure legacy (agentenv
-    Miles fork) translation of that config.
-    """
-
-    from yeto.rl.engine.run_config import resolve_rl_run_config
-
-    config = resolve_rl_run_config(
-        args,
-        model_path=model_path,
-        rollout_model_path=rollout_model_path,
-        prompt_path=prompt_path,
-        eval_prompt_path=eval_prompt_path,
-        provider=provider,
-        target_modules=target_modules,
-        yeto_policy_sync=yeto_policy_sync,
-    )
-    return _legacy_miles_argv(config)
-
-
-def _legacy_miles_argv(config) -> list[str]:
-    """Translate an ``RLRunConfig`` into legacy Miles argv (order is load-bearing)."""
-
-    from yeto.rl.engine.run_config import (
-        RECIPE_DEEPSEEK_V4_FLASH,
-        RECIPE_QWEN3_5,
-        RECIPE_QWEN3_8_NEXT,
-    )
-    from yeto.rl.adapters.miles.lr_schedule import lr_schedule_argv
-
-    if config.model_recipe.name == RECIPE_QWEN3_8_NEXT:
-        # The native Flash-Next recipe (raw torch_dist, qwen4_exp provider, per-expert
-        # LoRA) exists only on the ports path; the legacy translation would fall
-        # through to the generic Bridge branch and silently train the wrong model.
-        raise ValueError(
-            "the Qwen3.8-Flash-Next recipe is ports-only; use --rl-engine ports"
-        )
-
-    geometry = config.geometry
-    parallel = config.parallel
-    trainable = config.trainable
-    batch = config.batch
-    recipe = config.model_recipe
-    serving = config.serving
-    agent = config.agent
-    columns = config.data.columns
-    lora = trainable.parameter_mode == "lora"
-    deepseek = recipe.name == RECIPE_DEEPSEEK_V4_FLASH
-
-    if config.algorithm.advantage_estimator != "grpo":
-        raise ValueError("legacy Miles translation supports only GRPO")
-    if parallel.colocated:
-        placement_values = ["--colocate"]
-    else:
-        placement_values = [
-            "--rollout-num-gpus",
-            str(parallel.dedicated_rollout_gpus),
-            "--bridge-distributed-weight-sync",
-            "--allow-missing-unquantized-weight-update-hooks",
-            "--update-weight-transfer-mode",
-            "broadcast",
-            "--rollout-weight-version-format",
-            "yeto-policy",
-        ]
-
-    model_recipe_values: list[str] = []
-    if deepseek:
-        model_name = "deepseekv4"
-    elif recipe.name == RECIPE_QWEN3_5:
-        model_name = "qwen3_5"
-        model_recipe_values = [
-            "--spec",
-            "miles_plugins.models.qwen3_5",
-            "get_qwen3_5_spec",
-            "--apply-layernorm-1p",
-            "--attention-output-gate",
-            "--attention-dropout",
-            "0.0",
-            "--hidden-dropout",
-            "0.0",
-        ]
-    else:
-        model_name = recipe.provider_class
-
-    lora_values: list[str] = []
-    if lora:
-        lora_values = [
-            "--lora-rank",
-            str(trainable.lora_rank),
-            "--lora-alpha",
-            str(trainable.lora_rank),
-            "--lora-dropout",
-            "0",
-            "--lora-type",
-            "lora" if trainable.routed_expert_lora else "canonical_lora",
-            "--target-modules",
-            ",".join(trainable.target_modules),
-            "--lora-base-cpu-backup",
-        ]
-
-    values = [
-        "train.py",
-        "--train-backend", "megatron",
-        "--hf-checkpoint", config.hf_checkpoint,
-        "--ref-load", config.ref_load,
-        "--megatron-to-hf-mode", "bridge",
-        "--model-name", model_name,
-        *model_recipe_values,
-        "--num-layers", str(geometry.num_layers),
-        "--hidden-size", str(geometry.hidden_size),
-        "--num-attention-heads", str(geometry.num_attention_heads),
-        "--num-query-groups", str(geometry.num_query_groups),
-        "--kv-channels", str(geometry.kv_channels),
-        "--ffn-hidden-size", str(geometry.ffn_hidden_size),
-        "--max-position-embeddings", str(geometry.max_position_embeddings),
-        "--seq-length", str(batch.seq_len),
-        "--normalization", geometry.normalization,
-        "--norm-epsilon", str(geometry.norm_epsilon),
-        "--position-embedding-type", geometry.position_embedding_type,
-        "--rotary-base", str(geometry.rotary_base),
-        "--rotary-percent", str(geometry.rotary_percent),
-        "--vocab-size", str(geometry.vocab_size),
-        *lora_values,
-        "--actor-num-nodes", str(parallel.actor_num_nodes),
-        "--actor-num-gpus-per-node", str(parallel.actor_num_gpus_per_node),
-        "--num-gpus-per-node", str(parallel.visible_gpus_per_node),
-        "--rollout-num-gpus-per-engine", str(parallel.rollout_num_gpus_per_engine),
-        *placement_values,
-        "--offload-train" if serving.offload_train else "--no-offload-train",
-        "--sglang-mem-fraction-static", str(serving.mem_fraction_static),
-        "--tensor-model-parallel-size", str(parallel.tensor_parallel),
-        "--pipeline-model-parallel-size", str(parallel.pipeline_parallel),
-        "--context-parallel-size", "1",
-        "--expert-model-parallel-size", str(parallel.expert_parallel),
-        "--expert-tensor-parallel-size", "1",
-        "--prompt-data", config.data.prompt_path,
-        "--input-key", columns.input_key,
-        "--label-key", columns.label_key,
-        "--metadata-key", columns.metadata_key,
-        "--rollout-seed", str(config.algorithm.rollout_seed),
-        "--num-rollout", str(0 if batch.eval_only else batch.global_rounds),
-        "--rollout-batch-size", str(batch.groups_per_round),
-        "--n-samples-per-prompt", str(batch.samples_per_group),
-        "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
-        "--num-steps-per-rollout", str(batch.optimizer_steps),
-        "--global-batch-size", str(batch.global_batch),
-        *lr_schedule_argv(config.algorithm.lr_schedule),
-        "--balance-data",
-        "--rollout-max-context-len", str(batch.seq_len),
-        "--rollout-max-response-len", str(batch.rollout_max_response_len),
-        "--rollout-function-path",
-        (
-            "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
-            if config.yeto_policy_sync
-            else "miles.rollout.sglang_rollout.generate_rollout"
-        ),
-        "--custom-rm-path", _miles_callable(config.algorithm.reward_function),
-        "--advantage-estimator", "grpo",
-        "--lr", str(config.algorithm.lr),
-        "--accumulate-allreduce-grads-in-fp32",
-        "--attention-softmax-in-fp32",
-        "--attention-backend", recipe.training_attention_backend,
-        "--no-gradient-accumulation-fusion",
-        "--bf16",
-        "--no-load-optim",
-        "--no-load-rng",
-        "--no-save-optim",
-        "--no-save-rng",
-        "--finetune",
-        "--seed", str(config.algorithm.seed),
-        "--pin-rollout-manager-to-head",
-    ]
-    if lora:
-        values.extend(("--sglang-max-lora-rank", str(trainable.lora_rank)))
-    evaluation = config.eval
-    if evaluation is not None:
-        values.extend(
-            (
-                "--eval-function-path",
-                "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
-                "--eval-prompt-data",
-                evaluation.dataset_name,
-                evaluation.prompt_path,
-                "--eval-interval",
-                str(evaluation.interval),
-                "--skip-eval-before-train",
-                "--n-samples-per-eval-prompt",
-                str(evaluation.samples_per_prompt),
-                "--log-passrate",
-            )
-        )
-        for flag, value in (
-            ("--eval-temperature", evaluation.temperature),
-            ("--eval-top-p", evaluation.top_p),
-            ("--eval-max-prompt-len", evaluation.max_prompt_len),
-            ("--eval-max-response-len", evaluation.max_response_len),
-            ("--eval-max-context-len", evaluation.max_context_len),
-        ):
-            if value is not None:
-                values.extend((flag, str(value)))
-    if trainable.expert_full:
-        values.extend(
-            (
-                "--optimizer", "adam",
-                "--adam-beta1", "0.9",
-                "--adam-beta2", "0.98",
-                "--adam-eps", str(1e-8),
-                "--weight-decay", "0",
-                "--clip-grad", "1.0",
-                "--kl-coef", "0.001",
-            )
-        )
-    if serving.deterministic_inference:
-        values.append("--sglang-enable-deterministic-inference")
-    if deepseek:
-        values.extend(
-            (
-                "--transformer-impl", "transformer_engine",
-                "--qkv-format", "bshd",
-                "--recompute-granularity", "full",
-                "--recompute-method", "uniform",
-                "--recompute-num-layers", "1",
-                "--micro-batch-size", "1",
-                "--train-memory-margin-bytes", str(3 * 1024**3),
-                "--moe-token-dispatcher-type", "alltoall",
-                "--moe-router-freeze-gate",
-                "--freeze-e-score-correction-bias",
-                "--attention-dropout", "0.0",
-                "--hidden-dropout", "0.0",
-                "--sglang-moe-runner-backend", "triton",
-                "--sglang-disable-shared-experts-fusion",
-            )
-        )
-        if trainable.routed_expert_lora:
-            values.append("--no-sglang-lora-use-virtual-experts")
-    if parallel.uneven_pipeline_layers is not None:
-        first_layers, last_layers = parallel.uneven_pipeline_layers
-        values.extend(
-            (
-                "--decoder-first-pipeline-num-layers",
-                str(first_layers),
-                "--decoder-last-pipeline-num-layers",
-                str(last_layers),
-            )
-        )
-    if config.data.apply_chat_template:
-        values.append("--apply-chat-template")
-    if parallel.tensor_parallel > 1:
-        values.append("--sequence-parallel")
-    values.extend(
-        ("--distributed-timeout-minutes", str(config.distributed_timeout_minutes))
-    )
-    if config.data.chat_template_kwargs:
-        values.extend(
-            (
-                "--apply-chat-template-kwargs",
-                json.dumps(
-                    config.data.chat_template_kwargs,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            )
-        )
-    if config.yeto_policy_sync:
-        policy_sync_path = (
-            "yeto.rl.adapters.miles.models.full_parameter_dense."
-            "create_miles_full_parameter_dense_sync"
-            if trainable.parameter_mode == "full"
-            else "yeto.rl.adapters.miles.legacy.engine.create_policy_sync"
-        )
-        values.extend(
-            (
-                "--rollout-all-samples-process-path",
-                "yeto.rl.adapters.miles.legacy.engine.queue_completed_groups",
-                "--external-policy-sync-path",
-                policy_sync_path,
-            )
-        )
-    ports = config.ports
-    for flag, value in (
-        ("--rollout-engine-base-port", ports.rollout_engine_base_port),
-        ("--sglang-router-port", ports.sglang_router_port),
-        ("--sglang-router-prometheus-port", ports.sglang_router_prometheus_port),
-        ("--train-master-base-port", ports.train_master_base_port),
-        ("--sglang-tp-size", serving.tp_size),
-        ("--sglang-dp-size", serving.dp_size),
-        ("--sglang-ep-size", serving.ep_size),
-        ("--sglang-attention-backend", serving.attention_backend),
-        ("--sglang-page-size", serving.page_size),
-        ("--sglang-max-running-requests", serving.max_running_requests),
-        ("--sglang-chunked-prefill-size", serving.chunked_prefill_size),
-    ):
-        if value is not None:
-            values.extend((flag, str(value)))
-    if agent.use_rollout_routing_replay:
-        values.append("--use-rollout-routing-replay")
-    if agent.custom_generate_function_path:
-        values.extend(
-            ("--custom-generate-function-path", agent.custom_generate_function_path)
-        )
-    if agent.custom_agent_function_path:
-        values.extend(
-            (
-                "--custom-agent-function-path",
-                agent.custom_agent_function_path,
-                "--max-seq-len",
-                str(agent.agent_max_seq_len),
-            )
-        )
-    if agent.dynamic_sampling_filter_path:
-        values.extend(
-            ("--dynamic-sampling-filter-path", agent.dynamic_sampling_filter_path)
-        )
-    if agent.use_session_server:
-        values.append("--use-session-server")
-        if agent.session_server_ip:
-            values.extend(("--session-server-ip", agent.session_server_ip))
-        if agent.session_server_port:
-            values.append("--session-server-port")
-            values.extend(str(port) for port in agent.session_server_port)
-        if agent.session_server_workers is not None:
-            values.extend(("--session-server-workers", str(agent.session_server_workers)))
-        if agent.tito_model:
-            from miles.utils.chat_template_utils import (
-                resolve_reasoning_and_tool_call_parser,
-            )
-
-            values.extend(("--tito-model", agent.tito_model))
-            reasoning_parser, tool_call_parser = (
-                resolve_reasoning_and_tool_call_parser(agent.tito_model)
-            )
-            if reasoning_parser is not None:
-                values.extend(("--sglang-reasoning-parser", reasoning_parser))
-            if tool_call_parser is not None:
-                values.extend(("--sglang-tool-call-parser", tool_call_parser))
-        if agent.tito_allowed_append_roles:
-            values.append("--tito-allowed-append-roles")
-            values.extend(agent.tito_allowed_append_roles)
-    if geometry.group_query_attention:
-        values.append("--group-query-attention")
-    if geometry.rope_type is not None:
-        values.extend(("--rope-type", geometry.rope_type))
-    if geometry.mrope_section is not None:
-        values.append("--mrope-section")
-        values.extend(str(value) for value in geometry.mrope_section)
-    if geometry.gated_linear_unit:
-        values.append("--swiglu")
-    if geometry.untie_embeddings_and_output_weights:
-        values.append("--untie-embeddings-and-output-weights")
-    if geometry.disable_bias_linear:
-        values.append("--disable-bias-linear")
-    if geometry.add_qkv_bias:
-        values.append("--add-qkv-bias")
-    if geometry.qk_layernorm:
-        values.append("--qk-layernorm")
-    if recipe.gdn.gated_delta_net:
-        values.extend(("--qkv-format", recipe.gdn.qkv_format))
-    moe = geometry.moe
-    if moe is not None:
-        values.extend(
-            (
-                "--num-experts", str(moe.num_experts),
-                "--moe-ffn-hidden-size", str(moe.ffn_hidden_size),
-                "--moe-router-topk", str(moe.router_topk),
-                "--moe-layer-freq", str(moe.layer_freq),
-            )
-        )
-        if moe.shared_expert_intermediate_size is not None:
-            values.extend(
-                (
-                    "--moe-shared-expert-intermediate-size",
-                    str(moe.shared_expert_intermediate_size),
-                )
-            )
-    if geometry.multi_latent_attention:
-        values.append("--multi-latent-attention")
-        for name, value in geometry.mla_dims:
-            values.extend((f"--{name.replace('_', '-')}", str(value)))
-    return values
 
 
 def _column(row: dict[str, Any], column: str, flag: str) -> Any:
@@ -1828,18 +1369,10 @@ def _messages(row: dict[str, Any], prompt_column: str | None = None) -> list[dic
 
 def _prompt_split(source, revision: str | None) -> str:
     """`train`, or a Hub dataset's only split when it has no `train`
-    (e.g. HuggingFaceH4/MATH-500 ships just `test`)."""
-    if not isinstance(source, str) or os.path.exists(os.path.expanduser(source)):
-        return "train"
-    try:
-        from datasets import get_dataset_split_names
+    (``yeto.data.prompt_split``; the launcher's label check reads the same split)."""
+    from yeto.data import prompt_split
 
-        names = list(get_dataset_split_names(source, revision=revision))
-    except Exception:  # noqa: BLE001 - load_rows reports the real error
-        return "train"
-    if "train" not in names and len(names) == 1:
-        return names[0]
-    return "train"
+    return prompt_split(source, revision)
 
 
 def prepare_prompt_data(
@@ -1848,20 +1381,34 @@ def prepare_prompt_data(
     output_path: str | Path,
     prompt_column: str | None = None,
     label_column: str | None = None,
+    slot: Any = None,
+    number_rows: bool = False,
 ) -> Path:
+    """Write ``source`` (local file or Hub dataset) as Miles prompt rows.
+
+    ``slot`` (``data_split.DataSlot``, S27 task assignment): keep only the
+    slot's rows, in data order; each kept row records its row number in the
+    unsplit data as ``metadata["yeto_data_row"]``. ``number_rows`` (the task
+    dispenser, S27 P2): keep every row and record every row number."""
     from yeto.data import load_rows
+    from yeto.rl.engine.data_split import DATA_ROW_KEY
 
     split = _prompt_split(source, revision)
     if split == "train":
         rows = load_rows(source, revision=revision)
     else:
         rows = load_rows(source, split=split, revision=revision)
+    split_rows = slot is not None and not slot.whole
+    if split_rows and number_rows:
+        raise ValueError("a data slot and the task dispenser exclude each other")
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
     count = 0
     with temporary.open("w", encoding="utf-8") as handle:
-        for raw in rows:
+        for number, raw in enumerate(rows):
+            if split_rows and not slot.owns(number):
+                continue
             row = dict(raw)
             metadata = dict(row.get("metadata") or {})
             metadata.update(
@@ -1871,6 +1418,8 @@ def prepare_prompt_data(
                     if key not in {"messages", "metadata"}
                 }
             )
+            if split_rows or number_rows:
+                metadata[DATA_ROW_KEY] = number
             normalized = {
                 "messages": _messages(row, prompt_column),
                 "label": (
@@ -1893,85 +1442,140 @@ def prepare_prompt_data(
             count += 1
     if count == 0:
         temporary.unlink(missing_ok=True)
-        raise ValueError("RL prompt dataset is empty")
+        raise ValueError("RL prompt dataset is empty" if not split_rows
+                         else f"data slot {slot.env()} of the RL prompt dataset is empty")
     os.replace(temporary, output)
     return output
 
 
+def _verify_island_task_data(args) -> dict[str, Any] | None:
+    """rl-per-island-tasks: check this island's own prompt file against the
+    launcher's SHA256 before any training; None when the island shares ``--data``."""
+
+    expected = getattr(args, "data_sha256", None)
+    if not expected:
+        return None
+    from yeto.rl.island_tasks import verify_island_data
+
+    return verify_island_data(args.data, expected)
+
+
+def _island_dispense(args) -> bool:
+    """S27 P2: the island claims its rows from the actor syncer's dispenser
+    (``--rl-data-dispense``). Refused where it does not apply (as the slot)."""
+
+    if not getattr(args, "rl_data_dispense", False):
+        return False
+    from yeto.rl.engine import sample_roles
+
+    if getattr(args, "rl_data_slot", None):
+        raise ValueError("--rl-data-dispense and --rl-data-slot exclude each other")
+    if getattr(args, "data_sha256", None):
+        raise ValueError("--rl-data-dispense and per-island task data (--data-sha256) exclude each other")
+    role = sample_roles.sample_role(args)
+    if getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-dispense and --rl-sampler-data-slot exclude each other")
+    if role == sample_roles.SAMPLER:  # S27 P4: a sampler island claims its rows too
+        if not getattr(args, "rl_dispense_addr", None):
+            raise ValueError("--rl-data-dispense on a sampler island needs --rl-dispense-addr")
+    elif role != sample_roles.BOTH:
+        raise ValueError("--rl-data-dispense belongs to an island that generates (a training "
+                         "island that generates and trains, or a sampler island)")
+    if getattr(args, "eval_only", False):
+        raise ValueError("--rl-data-dispense: an eval-only island evaluates every row")
+    return True
+
+
+def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
+    """``miles_args.yeto_rl_data_dispense``: what the rollout executor needs to
+    open its dispenser connection (``adapters.miles.task_dispense.install``)."""
+
+    if not _island_dispense(args):
+        return None
+    if getattr(miles_args, "fully_async", False):
+        raise ValueError("--rl-data-dispense does not cover Miles fully_async rollouts yet")
+    from yeto.rl.engine.task_dispense import file_fingerprint
+
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.task_dispense import sampler_holder_id
+
+    rows, digest = file_fingerprint(prompt_path)
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:
+        # S27 P4: the sampler's dispenser (a synced group's actor syncer); its island
+        # id comes from its sampler id, apart from the training islands' learner ids
+        host, port = _syncer_addresses(args.rl_dispense_addr)[0]
+        sampler = getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
+        learner_id = sampler_holder_id(sampler)
+    else:
+        host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+        learner_id = int(args.learner_id)
+    block = int(getattr(miles_args, "over_sampling_batch_size", None)
+                or getattr(miles_args, "rollout_batch_size"))
+    config = {"address": f"{host}:{port}", "learner_id": learner_id, "rows": rows,
+              "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
+              "block": block,
+              "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
+    config.update(_dispense_streams(args, prompt_path, rows, digest))
+    return config
+
+
+def _dispense_streams(args, prompt_path, rows: int, digest: bytes) -> dict[str, Any]:
+    """S27 P3: the streams of ``--rl-dispense-mix`` / ``--rl-dispense-by-label``
+    and this island's ``--rl-dispense-labels``; {} for the plain P2 data. An
+    island whose labels are on no row fails here, before any training."""
+
+    mix = getattr(args, "rl_dispense_mix", None)
+    by_label = bool(getattr(args, "rl_dispense_by_label", False))
+    labels = getattr(args, "rl_dispense_labels", None)
+    if not (mix or by_label or labels):
+        return {}
+    from yeto.rl.engine.task_dispense import StreamTable
+
+    table = StreamTable.from_prompts(prompt_path, mix=mix.split(",") if mix else None,
+                                     by_label=by_label or bool(labels))
+    if table.total_rows != rows or table.fingerprint != digest:
+        raise ValueError("the prompt file changed while its streams were read")
+    accept = table.accept(labels.split(",")) if labels else None
+    if table.single and accept is None:
+        return {}
+    return {"streams": table.to_config(), "accept": accept, "stream_record": table.record()}
+
+
+def _island_data_slot(args) -> Any:
+    """S27 task assignment: the island's ``--rl-data-slot`` (``data_split.DataSlot``),
+    None when the island reads every row. A slot belongs to a training island
+    that reads ``--data`` itself: refused with per-island task data, on a
+    sampler (``--rl-sampler-data-slot``) and on an eval-only island."""
+
+    text = getattr(args, "rl_data_slot", None)
+    if not text:
+        return None
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.data_split import DataSlot
+
+    if getattr(args, "data_sha256", None):
+        raise ValueError("--rl-data-slot and per-island task data (--data-sha256) exclude each other")
+    if sample_roles.sample_role(args) != sample_roles.BOTH or getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-slot belongs to a training island that generates and trains "
+                         "(a sampler reads --rl-sampler-data-slot)")
+    if getattr(args, "eval_only", False):
+        raise ValueError("--rl-data-slot: an eval-only island evaluates every row")
+    return DataSlot.parse(text)
+
+
 def _verify_eval_dataset_identity(args) -> Path | None:
-    """Verify the immutable source bytes for an eval-only or dense heldout run."""
+    """Verify the immutable source bytes for an eval-only or training heldout run."""
 
     if getattr(args, "eval_interval", None) is None:
         if getattr(args, "eval_only", False) or getattr(args, "eval_data", None):
             raise ValueError("--eval-only requires evaluation configuration")
         return None
     eval_only = getattr(args, "eval_only", False)
-    dense_train_eval = (
-        not eval_only
-        and getattr(args, "parameter_mode", None) == "full"
-        and getattr(args, "sync_preset", None) == "dense-full"
-    )
-    from yeto.rl.engine.run_config import ports_training_eval
+    from yeto.rl.engine.run_config import ports_training_eval, verify_eval_dataset_file
 
-    ports_train_eval = ports_training_eval(
-        args, parameter_mode=getattr(args, "parameter_mode", None)
-    )
-    if not eval_only and not dense_train_eval and not ports_train_eval:
-        raise ValueError(
-            "evaluation configuration requires --eval-only, dense full mode "
-            "or the ports LoRA engine"
-        )
-    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise ValueError("evaluation dataset requires an immutable SHA256")
-    source_value = args.data if eval_only else getattr(args, "eval_data", None)
-    if not isinstance(source_value, str) or not source_value:
-        raise ValueError("training-time evaluation requires --eval-data")
-    source = Path(source_value).expanduser()
-    if source.is_symlink() or not source.is_file():
-        raise ValueError("evaluation requires one regular local dataset file")
-    if (dense_train_eval or ports_train_eval) and (
-        source.resolve() == Path(args.data).expanduser().resolve()
-    ):
-        raise ValueError("training-time evaluation must use a distinct heldout dataset")
-    from yeto.provenance import file_sha256
-
-    actual = file_sha256(source)
-    if actual != expected:
-        raise ValueError(
-            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
-        )
-    return source
-
-
-def _jsonl_record_count(path: str | Path) -> int:
-    source = Path(path)
-    count = 0
-    try:
-        with source.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    raise ValueError("evaluation prompt data contains a blank row")
-                value = json.loads(line)
-                if not isinstance(value, dict):
-                    raise ValueError("evaluation prompt row is not a JSON object")
-                count += 1
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("evaluation prompt data is not canonical JSONL") from exc
-    if count < 1:
-        raise ValueError("evaluation prompt data is empty")
-    return count
-
-
-def _parse_miles_args(argv: list[str]):
-    previous = sys.argv
-    try:
-        sys.argv = argv
-        from miles.utils.arguments import parse_args as parse_miles_args
-
-        return parse_miles_args()
-    finally:
-        sys.argv = previous
+    if not eval_only and not ports_training_eval(args):
+        raise ValueError("evaluation configuration requires --eval-only or the ports engine")
+    return verify_eval_dataset_file(args, eval_only=eval_only)
 
 
 def miles_lr_schedule_sha256(miles_args):  # noqa: D103 - see lr_schedule.miles_lr_schedule_sha256
@@ -1987,13 +1591,19 @@ def _backend_identity_sha256(args) -> str:
 
     # agentic-rollout-utilization 2.1: a non-zero policy-age limit is bound into
     # the identity the syncer compares (limit 0: unchanged).
-    identity = backend_identity(getattr(args, "rl_engine", "ports") or "ports",
-                                compat_group=getattr(args, "rl_compat_group", None))
+    identity = backend_identity(compat_group=getattr(args, "rl_compat_group", None))
     return bind_policy_age(identity.sha256(),
                            int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 
 from yeto.hw.catalog import HARDWARE_EVENT  # noqa: E402
+
+
+def _island_code_pack_digest(args) -> str | None:
+    """rl-identity-tiering: the run code pack digest (L9.4, checked at startup),
+    else (L9.1 transition) the attested source tree hash. Both are lowercase
+    sha256 hex; the value is the fourth slot of the island contract (L9.7)."""
+    return getattr(args, "code_pack_digest", None) or getattr(args, "source_sha256", None)
 
 
 def _island_compat_group(args) -> str:
@@ -2017,10 +1627,20 @@ def _island_compat_group(args) -> str:
 
 
 def _syncer_address(value: str) -> tuple[str, int]:
+    """One ``HOST:PORT``; a sharded head's list is only for
+    :func:`_syncer_addresses` (asynchronous full-parameter rounds)."""
+    if "," in value:
+        raise ValueError("a sharded syncer head (comma-separated --syncer) needs "
+                         "--full-parameter-rounds async")
     host, separator, port = value.rpartition(":")
     if not separator or not host:
         raise ValueError("--syncer must be HOST:PORT")
     return host, int(port)
+
+
+def _syncer_addresses(value: str) -> list[tuple[str, int]]:
+    """``HOST:PORT[,HOST:PORT...]``: one syncer, or every shard in shard order."""
+    return [_syncer_address(item.strip()) for item in value.split(",")]
 
 
 def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
@@ -2032,8 +1652,8 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     import socket
 
     connect = connect or socket.create_connection
-    addrs = [_syncer_address(v) for v in (getattr(args, "syncer", None),
-                                          getattr(args, "critic_syncer", None)) if v]
+    addrs = [addr for v in (getattr(args, "syncer", None), getattr(args, "critic_syncer", None))
+             if v for addr in _syncer_addresses(v)]
     for host, port in addrs:
         last = "not tried"
         for i in range(max(1, attempts)):
@@ -2051,93 +1671,53 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     return addrs
 
 
-EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
+def probe_wan_link(args, *, probe=None) -> None:
+    """S26 E3b: measure this container's link to the actor syncer before any
+    model work; exit EXIT_SLOW_LINK below the configured rates so the launcher
+    can request another container. Off unless a minimum rate is set."""
+    min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
+    min_down = float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0)
+    if min_up <= 0 and min_down <= 0:
+        return
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.wan_probe import EXIT_SLOW_LINK, PROBE_EVENT, PROBE_MARKER, probe_link
+
+    result = (probe or probe_link)(
+        _syncer_addresses(args.syncer)[0],  # shard 0 of a sharded head
+        streams=max(1, int(args.wan_streams)),
+        bytes_per_direction=int(getattr(args, "wan_probe_mib", 256)) << 20,
+        key=island_hmac_key_from_env(),
+    )
+    accepted = result.accepted(min_up, min_down)
+    record = {"event": PROBE_EVENT, "accepted": accepted,
+              "wan_probe/min_upload_mbps": min_up, "wan_probe/min_download_mbps": min_down,
+              **result.fields()}
+    print(f"{PROBE_MARKER} {'accepted' if accepted else 'rejected'}: up {result.upload_mbps:.1f} MB/s "
+          f"(min {min_up}), down {result.download_mbps:.1f} MB/s (min {min_down}), "
+          f"{result.streams} stream(s){'' if result.error is None else '; ' + result.error}", flush=True)
+    if getattr(args, "event_tape", None):
+        from yeto.rl.engine.driver import EventTape
+
+        if getattr(args, "rl_echo_events", False):
+            install_event_echo()  # the launcher reads the verdict from the log stream
+        EventTape(args.event_tape, int(getattr(args, "learner_id", 0) or 0)).append(record)
+    if not accepted:
+        raise SystemExit(EXIT_SLOW_LINK)
 
 
-def require_ports_router_mode(miles_args, environ=None) -> None:
-    """Ports path: upstream Miles owns the SGLang router.
+def require_ports_router_mode(miles_args) -> None:
+    """Upstream Miles owns the SGLang router.
 
-    Upstream launches the router as an ``inference-router`` Ray worker with
-    a 120 s readiness budget (the legacy 30 s deadline that
-    ``start_external_sglang_router`` works around is gone), and it removed
-    external router mode: a pre-set ``sglang_router_ip`` without its
-    per-model router map is an assertion failure.  So ``YETO_RL_EXTERNAL_ROUTER``
-    is a no-op here, and a pre-set router address is refused before launch.
+    Upstream launches the router as an ``inference-router`` Ray worker and
+    removed external router mode: a pre-set ``sglang_router_ip`` without its
+    per-model router map is an assertion failure, so it is refused before launch.
     """
 
-    environ = os.environ if environ is None else environ
     if getattr(miles_args, "sglang_router_ip", None) is not None:
         raise ValueError(
-            "--rl-engine ports does not support an external SGLang router "
-            "(--sglang-router-ip); upstream Miles launches its own router"
+            "an external SGLang router (--sglang-router-ip) is not supported; "
+            "upstream Miles launches its own router"
         )
-    if environ.get(EXTERNAL_ROUTER_ENV) == "1":
-        print(
-            f"[rl] {EXTERNAL_ROUTER_ENV}=1 ignored on --rl-engine ports: "
-            "upstream Miles launches the SGLang router as a Ray worker",
-            flush=True,
-        )
-
-
-def start_external_sglang_router(
-    miles_args,
-    *,
-    timeout_s: float = 300.0,
-    popen=subprocess.Popen,
-    connect=None,
-    sleep=None,
-):
-    """Start the SGLang router ourselves and hand Miles its address.
-
-    Miles launches the router in a `spawn` child that must re-import
-    `miles.utils.http_utils` (which pulls in Megatron-Bridge, ~27 s on a
-    Modal H100 container) and then gives it a hard-coded 30 s to listen,
-    so on slower CPUs the island dies before the first rollout. Miles
-    skips its own launch when `sglang_router_ip` is set; the standalone
-    router CLI starts in ~2 s and gets a generous deadline here."""
-    import atexit
-    import random
-    import socket
-    import time
-
-    from miles.utils.http_utils import find_available_port, get_host_info
-
-    connect = connect or (lambda host, port: socket.create_connection((host, port), timeout=1).close())
-    sleep = sleep or time.sleep
-    host = get_host_info()[1]
-    port = getattr(miles_args, "sglang_router_port", None) or find_available_port(
-        random.randint(3000, 4000)
-    )
-    command = [
-        sys.executable, "-m", "sglang_router.launch_router",
-        "--host", host,
-        "--port", str(port),
-        "--prometheus-port", str(find_available_port(random.randint(4000, 5000))),
-        "--log-level", "warn",
-        "--request-timeout-secs",
-        str(getattr(miles_args, "sglang_router_request_timeout_secs", 14400)),
-    ]
-    policy = getattr(miles_args, "sglang_router_policy", None)
-    if policy:
-        command.extend(("--policy", str(policy)))
-    process = popen(command)
-    atexit.register(process.terminate)
-    deadline = time.monotonic() + timeout_s
-    while True:
-        if process.poll() is not None:
-            raise RuntimeError(f"SGLang router exited with {process.returncode} before listening")
-        try:
-            connect(host, port)
-            break
-        except OSError:
-            if time.monotonic() > deadline:
-                process.terminate()
-                raise RuntimeError(f"SGLang router at {host}:{port} not ready after {timeout_s}s")
-            sleep(0.5)
-    miles_args.sglang_router_ip = host
-    miles_args.sglang_router_port = port
-    print(f"[rl] external SGLang router listening at {host}:{port}", flush=True)
-    return process
 
 
 def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
@@ -2210,16 +1790,18 @@ def run_miles(
     rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
     eval_prompt_path: str | Path | None = None,
+    island_tasks: Mapping[str, Any] | None = None,
     yeto_policy_sync: bool = True,
     extra_argv: Sequence[str] = (),
 ) -> None:
-    """Run one Miles job, optionally with Yeto's external policy boundary."""
+    """Run one Miles job, optionally with Yeto's external policy boundary.
 
-    rl_engine = getattr(args, "rl_engine", "ports")
-    if rl_engine not in ("legacy", "ports"):
-        raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    ``island_tasks`` (rl-per-island-tasks) is this island's checked task list,
+    recorded in ``rl_driver_start``.
+    """
+
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
-    if rl_engine == "ports" and (
+    if (
         getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_echo_events", False)
     ) and not getattr(args, "rl_critic_baseline_run", False):
         # The critic baseline run (run_critic_baseline) keeps its records in its
@@ -2232,62 +1814,31 @@ def run_miles(
         from yeto.island_overrides import island_startup
 
         island_startup(args, int(getattr(args, "learner_id", 0) or 0))
-    if rl_engine == "ports":
-        _require_ports_supported(args, extra_argv)
-        from yeto.rl.adapters.miles.state import require_run_plugin
+    _require_ports_supported(args, extra_argv)
+    from yeto.rl.adapters.miles.state import require_run_plugin
 
-        require_run_plugin()
+    require_run_plugin()
+    from yeto.rl.engine.selection import (
+        FULL_PARAMETER_SYNC_PRESET,
+        FULL_PARAMETER_SYNC_PRESETS,
+        SAO_STREAMING_SYNC_PRESET,
+    )
+
     parameter_mode = getattr(args, "parameter_mode", "lora")
     sync_preset = getattr(args, "sync_preset", "strict-avg")
-    dense_full = parameter_mode == "full" or sync_preset == "dense-full"
-    if dense_full and not (
-        parameter_mode == "full" and sync_preset == "dense-full"
-    ):
-        raise ValueError("dense-full sync and full parameter mode must be selected together")
+    full_parameter = _full_parameter_mode(args, sync_preset)
+    # P0-D8: every full-parameter preset runs the one full-parameter sync; the
+    # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
+    full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
+    dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
+    if _trains_base_parameters(args) and not full_parameter_sync and not _no_sync_island(args):
+        raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
+    sao_runtime = None
     if dense_full:
-        if not yeto_policy_sync:
-            raise ValueError("dense full-parameter GRPO requires Yeto policy sync")
-        miles_source_sha256 = getattr(args, "miles_source_sha256", None)
-        if (
-            type(miles_source_sha256) is not str
-            or len(miles_source_sha256) != 64
-            or any(value not in "0123456789abcdef" for value in miles_source_sha256)
-        ):
-            raise ValueError(
-                "dense full-parameter GRPO requires an exact Miles source SHA256"
-            )
-        if (
-            args.optimizer_steps != 1
-            or getattr(args, "local_horizon", 1) != 1
-        ):
-            raise ValueError("dense full-parameter GRPO requires H=1")
-        if getattr(args, "eval_only", False):
-            raise ValueError("Milestone-1 dense full-parameter mode does not run eval-only")
-        if (
-            type(args.global_rounds) is not int
-            or args.global_rounds < 1
-            or type(args.fragments) is not int
-            or args.fragments < 1
-            or args.total_fragment_steps != args.global_rounds * args.fragments
-            or not isinstance(args.parameter_layout_sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", args.parameter_layout_sha256)
-        ):
-            raise ValueError(
-                "dense full-parameter fragment budget must equal rounds*fragments"
-            )
-        num_learners = getattr(args, "num_learners", 1)
-        generation = getattr(args, "learner_generation", 0)
-        if (
-            type(num_learners) is not int
-            or num_learners < 1
-            or type(args.learner_id) is not int
-            or args.learner_id not in range(num_learners)
-            or type(generation) is not int
-            or generation != 0
-        ):
-            raise ValueError(
-                "Milestone-1 dense full-parameter mode requires a fixed generation-0 roster"
-            )
+        _check_dense_full_sweep(args, yeto_policy_sync=yeto_policy_sync)
+    elif sync_preset == SAO_STREAMING_SYNC_PRESET:
+        _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
+        sao_runtime = _load_sao_streaming_runtime(args)
 
     if (
         yeto_policy_sync
@@ -2301,40 +1852,16 @@ def run_miles(
         and args.lora_targets == "attention-routed-experts"
     )
     expert_full = int(getattr(args, "expert_full_count", 0) or 0) > 0
-    if dense_full and expert_full:
+    if full_parameter and expert_full:
         raise ValueError("full-parameter mode cannot also select expert-full tuning")
 
-    def require_env(name: str, value: str) -> None:
-        current = os.environ.get(name)
-        if current not in (None, value):
-            raise ValueError(f"{name} must be unset or {value}, got {current!r}")
-        os.environ[name] = value
-
-    if dense_full:
-        _require_unquantized_dense_full_rollout_model(
+    if full_parameter:
+        _require_unquantized_full_parameter_rollout_model(
             rollout_model_path or model_path
         )
-        require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
-
-    if clone_only_lora or expert_full:
-        require_env("YETO_DSV4_EXPERT_CLONE", "1")
-    if clone_only_lora:
-        require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
-    if clone_only_lora or expert_full:
-        fuse_wqa_wkv = os.environ.get("SGLANG_OPT_FUSE_WQA_WKV")
-        if fuse_wqa_wkv not in (None, "0"):
-            raise ValueError(
-                "SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA"
-            )
-        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
-    if expert_full:
-        require_env("YETO_DSV4_EXPERT_FULL", "1")
-        require_env(
-            "YETO_DSV4_EXPERT_FULL_COUNT",
-            str(args.expert_full_count),
-        )
-        require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
-        require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+    if full_parameter_sync:
+        _require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
+    _configure_deepseek_v4_env(args, clone_only_lora=clone_only_lora, expert_full=expert_full)
 
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
         from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
@@ -2353,9 +1880,7 @@ def run_miles(
         # 5.12.1 has no such model type).  Miles registers the HF alias and
         # trains through its own plugin, so build a read-only provider view
         # from the aliased AutoConfig instead (FN-IMAGE-PLAN option (c)).
-        if rl_engine != "ports":
-            raise ValueError("Qwen3.8-Flash-Next runs only on the ports engine")
-        if dense_full or expert_full or clone_only_lora:
+        if full_parameter or expert_full or clone_only_lora:
             raise ValueError("the Qwen3.8-Flash-Next recipe is native-LoRA only")
         if yeto_policy_sync:
             raise ValueError(
@@ -2368,17 +1893,34 @@ def run_miles(
         )
         attention_specs = specs = ()
         canonical_targets = flash_next.target_modules()
-        miles_targets = []
+    elif getattr(args, "rl_model_recipe", "generic") == "glm5_next":
+        # AutoBridge cannot read glm5_next (transformers has no such model type);
+        # Miles trains it through its plugin spec, so the island reads the geometry
+        # from config.json (models/glm5_next.provider_view). Full-parameter only.
+        from yeto.rl.adapters.miles.models import glm5_next as glm5_next_recipe
+
+        if not full_parameter:
+            raise ValueError("the glm5_next recipe is full-parameter only")
+        model_bridge = None
+        provider = glm5_next_recipe.glm5_next_provider(model_path)
+        attention_specs = specs = ()
+        canonical_targets = []
     else:
         from megatron.bridge import AutoBridge
 
+        from yeto.rl.adapters.miles.models.nemotron_h import register_miles_bridges
+
+        # Nemotron-H: read the checkpoint with the Miles trainer's bridge (MTP
+        # dropped; a VL checkpoint as its language model), so the recipe checks
+        # the model Miles builds.
+        register_miles_bridges(model_path)
         model_bridge = AutoBridge.from_hf_pretrained(
             model_path,
             trust_remote_code=args.trust_remote_code,
         )
         provider = model_bridge.to_megatron_provider(load_weights=False)
         provider.finalize()
-        attention_specs = () if dense_full else derive_peft_lora_specs(
+        attention_specs = () if full_parameter else derive_peft_lora_specs(
             model_path,
             None,
             rank=args.lora_r,
@@ -2406,116 +1948,70 @@ def run_miles(
                     )
                 )
             )
-        canonical_targets = [] if dense_full else adapter_targets(attention_specs)
-        miles_targets = [] if dense_full else megatron_adapter_targets(
-            attention_specs,
-            model_bridge,
-            standard_grouped_experts=clone_only_lora,
-            pipeline_parallel=getattr(args, "pipeline_parallel", 1),
-            attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
-        )
-    ports_launch = ports_algorithm = None
-    if rl_engine == "ports":
-        # Same engine-agnostic RLRunConfig as legacy; only the translation
-        # differs (design D8).
-        from yeto.rl.adapters.miles.config import parse_miles_args
-        from yeto.rl.engine.run_config import resolve_rl_run_config
+        canonical_targets = [] if full_parameter else adapter_targets(attention_specs)
 
-        boot_only = bool(getattr(args, "rl_boot_only", False))
-        ref_probe = probe_ref_load(args, model_path) if boot_only else None
-        run_config = resolve_rl_run_config(
-            args,
-            model_path=model_path,
-            rollout_model_path=rollout_model_path,
-            prompt_path=prompt_path,
-            eval_prompt_path=eval_prompt_path,
-            provider=provider,
-            # Upstream Miles resolves HF module names itself (canonical_lora
-            # via Bridge); the fork's per-layer Megatron names have no Bridge
-            # mapping upstream.
-            target_modules=canonical_targets,
-            yeto_policy_sync=yeto_policy_sync,
-            # boot-only: the ref-load was probed (and recorded) above; a
-            # missing torch_dist must not stop the argv build.
-            verify_ref_load=not boot_only,
-        )
-        if not boot_only and not getattr(args, "rl_print_attestation_fingerprint", False):
-            run_config = _run_critic_warmup_stage(args, run_config, extra_argv)
-        ports_launch = build_ports_launch(args, run_config, extra_argv)
-        ports_algorithm = ports_launch.algorithm
-        miles_argv = list(ports_launch.argv)
-        miles_args = parse_miles_args(ports_launch)
-        verify_ports_algorithm(args, miles_args, ports_launch)
-        if print_attestation_fingerprint(args, ports_launch):
-            return  # CPU entry: nothing below (Ray, GPU, sync) runs
-        if boot_only:
-            write_boot_only_marker(args, ports_launch, run_config, ref_probe)
-            return  # boot-only: exit 0 before Ray/GPU work; no training
-    else:
-        miles_argv = build_miles_argv(
-            args,
-            model_path=model_path,
-            rollout_model_path=rollout_model_path,
-            prompt_path=prompt_path,
-            eval_prompt_path=eval_prompt_path,
-            provider=provider,
-            target_modules=miles_targets,
-            yeto_policy_sync=yeto_policy_sync,
-        )
-        _reject_lr_schedule_overrides(extra_argv)
-        miles_argv.extend(extra_argv)
-        miles_args = _parse_miles_args(miles_argv)
+    from yeto.rl.adapters.miles.config import parse_miles_args
+    from yeto.rl.engine.run_config import resolve_rl_run_config
 
-    if getattr(args, "codex_exclude_reasoning_from_loss", False):
-        # S17 WP6: read by rollout_meta_hook.record_trained_groups in the
-        # rollout process (both engines, with or without Yeto policy
-        # sync); absent (default) == reasoning counted, no-op.
-        if rl_engine != "ports":
-            # Only the ports path installs that hook; refuse instead of a
-            # silent no-op on legacy.
-            raise ValueError("--codex-exclude-reasoning-from-loss requires --rl-engine ports")
-        miles_args.yeto_rl_codex_reasoning_in_loss = False
-        from yeto.rl.codex_backend import stock_codex_reasoning_markers
+    boot_only = bool(getattr(args, "rl_boot_only", False))
+    ref_probe = probe_ref_load(args, model_path) if boot_only else None
+    run_config = resolve_rl_run_config(
+        args,
+        model_path=model_path,
+        rollout_model_path=rollout_model_path,
+        prompt_path=prompt_path,
+        eval_prompt_path=eval_prompt_path,
+        provider=provider,
+        # Upstream Miles resolves HF module names itself (canonical_lora
+        # via Bridge); the fork's per-layer Megatron names have no Bridge
+        # mapping upstream.
+        target_modules=canonical_targets,
+        yeto_policy_sync=yeto_policy_sync,
+        # boot-only: the ref-load was probed (and recorded) above; a
+        # missing torch_dist must not stop the argv build.
+        verify_ref_load=not boot_only,
+    )
+    if not boot_only and not getattr(args, "rl_print_attestation_fingerprint", False):
+        run_config = _run_critic_warmup_stage(args, run_config, extra_argv)
+    ports_launch = build_ports_launch(args, run_config, extra_argv)
+    ports_algorithm = ports_launch.algorithm
+    miles_argv = list(ports_launch.argv)
+    miles_args = parse_miles_args(ports_launch)
+    verify_ports_algorithm(args, miles_args, ports_launch)
+    if print_attestation_fingerprint(args, ports_launch):
+        return  # CPU entry: nothing below (Ray, GPU, sync) runs
+    if boot_only:
+        write_boot_only_marker(args, ports_launch, run_config, ref_probe)
+        return  # boot-only: exit 0 before Ray/GPU work; no training
 
-        miles_args.yeto_rl_codex_reasoning_markers = list(
-            stock_codex_reasoning_markers(
-                getattr(args, "codex_backend_profile", None) or args.tito_model
-            )
-            or ()
-        )
+    # The full-parameter sync contracts bind the spec hash (4.8). The island
+    # contract v3 (strict, decoupled, elastic) binds the semantic hash and the
+    # run code pack instead (rl-identity-tiering L9.7); placement capabilities
+    # stay out of both.
+    algorithm_spec_sha256 = ports_algorithm.sha256()
+    algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
+    code_pack_digest = _island_code_pack_digest(args)
+    # every island (also --rl-single-island-no-sync): the remote-code prewarm reads it
+    miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
     if yeto_policy_sync:
-        if dense_full:
+        if full_parameter_sync:
             from yeto.provenance import file_sha256
 
             model_config_path = Path(model_path) / "config.json"
             if not model_config_path.is_file():
                 raise ValueError("full-parameter model has no config.json")
             model_config_hash = file_sha256(model_config_path)
-            training_contract_hash = _dense_full_training_contract_sha256(
-                args,
-                miles_argv,
-                model_config_sha256=model_config_hash,
-                prompt_data_sha256=file_sha256(prompt_path),
-            )
-            layout_hash = model_config_hash
-            lora_config_hash = _canonical_sha256(
-                {
-                    "schema": "yeto-full-parameter-mode-v1",
-                    "model_config_sha256": model_config_hash,
-                }
-            )
+            if dense_full:
+                training_contract_hash = _dense_full_training_contract_sha256(
+                    args, miles_argv, model_config_sha256=model_config_hash
+                )
+        if full_parameter:
+            layout_hash, lora_config_hash = _full_parameter_identity(model_config_hash)
         else:
-            from yeto.rl.core import (
-                canonical_layout_hash,
-                canonical_lora_config_hash,
-            )
+            from yeto.rl.core import canonical_layout_hash
 
             layout_hash = canonical_layout_hash(specs)
-            lora_config_hash = canonical_lora_config_hash(
-                rank=args.lora_r,
-                target_modules=canonical_targets,
-            )
-        miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
+            lora_config_hash = _lora_config_hash(args, canonical_targets)
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
         miles_args.yeto_rl_base_model_revision = args.model_revision
@@ -2537,21 +2033,8 @@ def run_miles(
                 spec.name for spec in specs
             )
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
-        miles_args.yeto_rl_codex_harness_contract = getattr(
-            args,
-            "codex_harness_contract",
-            None,
-        )
-        miles_args.yeto_rl_codex_backend_profile = getattr(
-            args,
-            "codex_backend_profile",
-            None,
-        )
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
-        )
-        miles_args.yeto_rl_secrlenv_max_infrastructure_replacements = getattr(
-            args, "secrlenv_max_infrastructure_replacements", None
         )
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape
@@ -2564,90 +2047,50 @@ def run_miles(
         miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
         if getattr(args, "eval_only", False):
             miles_args.yeto_rl_eval_policy_version = args.global_rounds
-        elif dense_full and getattr(args, "eval_interval", None) is not None:
-            if eval_prompt_path is None:
-                raise ValueError("dense full evaluation prompt path is unavailable")
-            summary_path = Path(
-                str(getattr(args, "eval_summary_path", "") or "")
-            ).expanduser()
-            if (
-                not summary_path.is_absolute()
-                or summary_path.exists()
-                or summary_path.is_symlink()
-                or not summary_path.parent.is_dir()
-                or summary_path.parent.is_symlink()
-            ):
-                raise ValueError(
-                    "dense full evaluation summary requires a fresh absolute path"
-                )
-            miles_args.yeto_rl_eval_policy_versions = (0, args.global_rounds)
-            miles_args.yeto_rl_eval_dataset_name = args.eval_dataset_name
-            miles_args.yeto_rl_eval_prompt_count = _jsonl_record_count(
-                eval_prompt_path
-            )
-            miles_args.yeto_rl_eval_samples_per_prompt = (
-                args.eval_samples_per_prompt
-            )
-            miles_args.yeto_rl_eval_summary_path = str(summary_path)
         miles_args.yeto_rl_sync_preset = sync_preset
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
         if dense_full:
-            from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepConfig
-            from yeto.rl.local_learner import ComponentIdentity
-            from yeto.rl.adapters.miles.models.full_parameter_dense import MilesDenseFullParameterConfig
+            from yeto.rl.adapters.miles.full_parameter.session import CONFIG_ATTRIBUTE
+            from yeto.rl.trajectory_evidence import REWARD_FUNCTION_EVIDENCE_KIND
 
-            evidence_parent = (
-                Path(args.audit_dir).expanduser()
-                if getattr(args, "audit_dir", None)
-                else Path(args.completed_groups_path).expanduser().parent
-            )
-            evidence_parent.mkdir(parents=True, exist_ok=True)
-            evidence_directory = Path(
-                tempfile.mkdtemp(
-                    prefix=f"trajectory-evidence-{args.learner_id}-",
-                    dir=evidence_parent,
-                )
-            )
-            if evidence_directory.stat().st_mode & 0o077:
-                raise RuntimeError("trajectory evidence directory is not private")
-            learner_generations = (0,) * getattr(args, "num_learners", 1)
-            miles_args.yeto_rl_model_config_sha256 = model_config_hash
-            miles_args.yeto_rl_miles_source_sha256 = args.miles_source_sha256
-            miles_args.yeto_rl_dense_training_contract_sha256 = (
-                training_contract_hash
-            )
             miles_args.external_policy_identity_setter_path = (
-                "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
+                "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
             )
-            miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
-            miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
-            miles_args.yeto_rl_trajectory_evidence_schema_version = (
-                2 if bool(getattr(miles_args, "sao_compaction", False)) else 1
+            miles_args.yeto_rl_trajectory_evidence_dir = str(
+                _private_trajectory_evidence_dir(args)
             )
-            miles_args.yeto_rl_num_fragments = args.fragments
-            miles_args.yeto_rl_total_sweeps = args.global_rounds
-            miles_args.yeto_rl_total_fragment_steps = args.total_fragment_steps
-            miles_args.yeto_rl_learner_generation = 0
-            miles_args.yeto_rl_learner_generations = learner_generations
-            miles_args.yeto_rl_dense_full_parameter_config = (
-                MilesDenseFullParameterConfig(
-                    component=ComponentIdentity(
-                        role="actor",
-                        model_revision=args.model_revision.lower(),
-                        config_hash=model_config_hash,
-                    ),
-                    wire=DenseSweepConfig(
-                        syncer_addr=_syncer_address(args.syncer),
-                        learner_id=args.learner_id,
-                        learner_generation=0,
-                        policy_rounds=args.global_rounds,
-                        wan_streams=args.wan_streams,
-                    ),
-                    learner_generations=learner_generations,
-                    minimum_fragments=args.fragments,
-                    training_contract_hash=training_contract_hash,
-                    expected_layout_hash=args.parameter_layout_sha256,
+            miles_args.yeto_rl_trajectory_evidence_kind = REWARD_FUNCTION_EVIDENCE_KIND
+            miles_args.yeto_rl_trajectory_evidence_schema_version = 1
+            setattr(
+                miles_args,
+                CONFIG_ATTRIBUTE,
+                _dense_full_sync_config(
+                    args,
+                    model_config_sha256=model_config_hash,
+                    training_contract_sha256=training_contract_hash,
+                    algorithm_spec_sha256=algorithm_spec_sha256,
+                ),
+            )
+        elif sao_runtime is not None:
+            from yeto.rl.adapters.miles.full_parameter.sao_binding import (
+                bind_sao_streaming_runtime,
+            )
+
+            # Two-role (actor + critic) full-parameter sync; the ports rollout
+            # hook writes the round evidence the runtime directory names.
+            # The contract names a fresh evidence directory under the island's
+            # run root; the island creates that root, the bind the directory
+            # (0o700, checked there).  A root that already exists may be
+            # readable by others (the evidence directory is private), but no
+            # one else may write to it: they could replace the directory.
+            evidence_root = sao_runtime.trajectory_evidence_dir.parent
+            evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if evidence_root.stat().st_mode & 0o022:
+                raise ValueError(
+                    f"SAO trajectory evidence root {evidence_root} is writable by others"
                 )
+            bind_sao_streaming_runtime(
+                miles_args, sao_runtime, algorithm_spec_sha256=algorithm_spec_sha256
             )
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
@@ -2665,7 +2108,10 @@ def run_miles(
                 raise ValueError(
                     "decoupled RL total fragment steps must equal sweeps*fragments"
                 )
-            layout = build_rl_fragment_layout(specs, args.fragments)
+            matrix_merge = getattr(args, "rl_sync_matrix_merge", "avg")
+            layout = build_rl_fragment_layout(
+                specs, args.fragments, matrix_merge=matrix_merge
+            )
             sync_fingerprint = layout_fingerprint(layout).hex()
             miles_args.yeto_rl_num_fragments = args.fragments
             miles_args.yeto_rl_pipeline = args.pipeline
@@ -2693,7 +2139,11 @@ def run_miles(
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_semantic_sha256=algorithm_semantic_sha256,
+                code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                matrix_merge=matrix_merge,
+                **_island_pool_membership(args),
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(
@@ -2713,12 +2163,16 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_semantic_sha256=algorithm_semantic_sha256,
+                code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )
-            if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
-                # rl-inter-island-scheduling 0.15 (legacy sets nothing)
-                miles_args.yeto_rl_island_scheduling = "elastic"
+            if getattr(args, "rl_island_pool", False):
+                # a fixed roster sets nothing
+                miles_args.yeto_rl_island_pool = True
                 miles_args.yeto_rl_syncer_epoch = int(getattr(args, "rl_syncer_epoch", 0))
+                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_sync_island_lease_s", None)
             # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
             # the critic specs/layout, built by build_sync once Miles created it.
             miles_args.yeto_rl_critic_syncer_addr = (
@@ -2726,89 +2180,54 @@ def run_miles(
                 if getattr(args, "critic_syncer", None) else None
             )
 
-    if yeto_policy_sync:
-        _configure_applied_lr(
-            args, miles_args, rl_engine, dense_full=dense_full
-        )
-    _configure_grad_audit(args, miles_args, rl_engine)
+    _configure_grad_audit(args, miles_args)
+    require_ports_router_mode(miles_args)
+    miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    # S27 task assignment: the island's row slot (rl_driver_start, data passes) and
+    # where a full-parameter island keeps its data position across processes
+    slot = _island_data_slot(args)
+    miles_args.yeto_rl_data_slot = None if slot is None or slot.whole else slot.env()
+    miles_args.yeto_rl_data_position_store = getattr(args, "rl_data_position_store", None)
+    miles_args.yeto_rl_data_dispense = _dispense_config(args, miles_args, prompt_path)
+    if miles_args.yeto_rl_data_dispense is not None:
+        miles_args.yeto_rl_data_position_store = None  # the dispenser keeps the position
+    if full_parameter and not yeto_policy_sync:
+        # A no-sync buffer island (L4.6) trains every parameter without the sync
+        # block above: bind the same full-parameter identity for _run_ports.
+        from yeto.provenance import file_sha256
 
-    if rl_engine == "ports":
-        require_ports_router_mode(miles_args)
-    elif os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
-        start_external_sglang_router(miles_args)
+        model_config_path = Path(model_path) / "config.json"
+        if not model_config_path.is_file():
+            raise ValueError("full-parameter model has no config.json")
+        miles_args.yeto_rl_parameter_mode = parameter_mode
+        miles_args.yeto_rl_layout_hash, miles_args.yeto_rl_lora_config_hash = (
+            _full_parameter_identity(file_sha256(model_config_path)))
+    miles_args.yeto_rl_code_pack_digest = code_pack_digest
+    if getattr(args, "code_pack_digest", None):
+        from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
 
-    if rl_engine == "ports":
-        _run_ports(
-            args,
-            miles_args,
-            ports_launch,
-            ports_algorithm,
-            specs=specs,
-            canonical_targets=canonical_targets,
-            yeto_policy_sync=yeto_policy_sync,
-            native_lora_export=native_lora_export,
-        )
-        # Last tape record: a rebuilt (no-sync) tape without it is incomplete.
-        _append_ports_event(args, miles_args, {"event": "rl_learner_finalized"})
-        print(f"[rl] learner {args.learner_id} finalized (rl_engine=ports)")
-        return
-
-    from train import train as miles_train
-
-    asyncio.run(miles_train(miles_args))
+        miles_args.yeto_rl_code_pack_mode = (getattr(args, "code_pack_mode", None)
+                                             or CODE_PACK_MODE_GIT_PATCH)
+    _run_ports(
+        args,
+        miles_args,
+        ports_launch,
+        ports_algorithm,
+        specs=specs,
+        canonical_targets=canonical_targets,
+        yeto_policy_sync=yeto_policy_sync,
+        native_lora_export=native_lora_export,
+    )
+    # Last tape record: a rebuilt (no-sync) tape without it is incomplete.
+    _append_ports_event(args, miles_args, {"event": "rl_learner_finalized"})
     print(f"[rl] learner {args.learner_id} finalized")
 
 
-def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
-    """Legacy twin of the ports ``check_extra_argv`` LR-schedule check.
-
-    The schedule is decided by ``resolve_lr_schedule``; an extra-argv override
-    (e.g. warmup, or a decay style for decoupled) would silently diverge from
-    ports and could trip or defeat the zero-LR invariant.
-    """
-
-    from yeto.rl.adapters.miles.lr_schedule import LR_SCHEDULE_FLAGS
-
-    for token in extra_argv:
-        flag = str(token).split("=", 1)[0]
-        if flag in LR_SCHEDULE_FLAGS:
-            raise ValueError(
-                f"{flag} is owned by yeto's LR schedule and cannot be overridden"
-            )
-
-
-def _configure_applied_lr(args, miles_args, rl_engine: str, *, dense_full: bool) -> bool:
-    """Legacy: record each optimizer step's applied LR (zero-LR invariant, D4).
-
-    Ports reads it in the state plugin's ``train_one_step`` recorder. Legacy
-    uses the fork's before-train-step hook with the combined
-    :data:`yeto.rl.applied_lr.HOOK_PATH`, which also runs the grad audit hook
-    when that is configured (``_configure_grad_audit`` keeps it).
-    """
-
-    from yeto.rl import applied_lr
-
-    if rl_engine == "ports" or dense_full or getattr(args, "eval_only", False):
-        return False
-    existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
-    if existing and existing != applied_lr.HOOK_PATH:
-        raise ValueError(
-            f"applied-LR recording conflicts with before-train-step hook {existing!r}"
-        )
-    parent = Path(args.event_tape).expanduser().parent
-    parent.mkdir(parents=True, exist_ok=True)
-    directory = tempfile.mkdtemp(prefix=f"applied-lr-{args.learner_id}-", dir=parent)
-    setattr(miles_args, applied_lr.APPLIED_LR_DIR_ATTR, directory)
-    miles_args.custom_megatron_before_train_step_hook_path = applied_lr.HOOK_PATH
-    return True
-
-
-def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
+def _configure_grad_audit(args, miles_args) -> bool:
     """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing, design D12): export pre-clip LoRA grads.
 
-    Both engines write next to the round audit (``args.audit_dir``). Ports arms
-    the capture from its ``train_one_step`` recorder; legacy through Miles'
-    before-train-step hook, which the fork already calls (fork code untouched).
+    The grads are written next to the round audit (``args.audit_dir``); the
+    ports state plugin arms the capture from its ``train_one_step`` recorder.
     """
 
     from yeto.rl import grad_audit
@@ -2819,19 +2238,6 @@ def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
     if not directory:
         raise ValueError(f"{grad_audit.GRAD_AUDIT_ENV}=1 requires an audit_dir")
     setattr(miles_args, grad_audit.GRAD_AUDIT_DIR_ATTR, str(Path(directory).expanduser()))
-    if rl_engine != "ports":
-        from yeto.rl import applied_lr
-
-        existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
-        if existing == applied_lr.HOOK_PATH:
-            # Combined hook: records the applied LR, then runs the grad audit
-            # (it reads the audit directory set above).
-            return True
-        if existing and existing != grad_audit.HOOK_PATH:
-            raise ValueError(
-                f"{grad_audit.GRAD_AUDIT_ENV}=1 conflicts with before-train-step hook {existing!r}"
-            )
-        miles_args.custom_megatron_before_train_step_hook_path = grad_audit.HOOK_PATH
     return True
 
 
@@ -2839,7 +2245,7 @@ def _ports_spec(args, extra_argv: Sequence[str] = ()):
     from yeto.rl.engine.algorithm import resolve_ports_algorithm
     from yeto.rl.adapters.miles.algorithm_flags import absorb_extra_argv
 
-    spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args, rl_engine="ports"),
+    spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args),
                                    tuple(extra_argv))
     return spec
 
@@ -2954,17 +2360,21 @@ def _run_ports(
     learns it from the first export (before any receipt) and pins it after.
     """
 
-    from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
+    from yeto.rl.core import canonical_layout_hash
     from yeto.rl.adapters.miles.entry import run_ports_island
 
-    lora_config_hash = canonical_lora_config_hash(
-        rank=args.lora_r, target_modules=canonical_targets
-    )
-    if native_lora_export is not None:
+    if getattr(miles_args, "yeto_rl_parameter_mode", None) == "full":
+        # run_miles already bound the full-parameter identity (model config
+        # hash); there is no LoRA rank or adapter layout to derive here.
+        lora_config_hash = miles_args.yeto_rl_lora_config_hash
+        layout_hash = miles_args.yeto_rl_layout_hash
+        print(f"[rl] full-parameter identity: layout={layout_hash}", flush=True)
+    elif native_lora_export is not None:
         if specs:
             raise ValueError("native LoRA export must not carry predicted specs")
         if yeto_policy_sync:
             raise ValueError("native LoRA export runs only without Yeto policy sync")
+        lora_config_hash = _lora_config_hash(args, canonical_targets)
         layout_hash = None
         miles_args.yeto_rl_native_lora_export = native_lora_export
         print(
@@ -2973,6 +2383,7 @@ def _run_ports(
             flush=True,
         )
     else:
+        lora_config_hash = _lora_config_hash(args, canonical_targets)
         layout_hash = canonical_layout_hash(specs)
         print(
             f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
@@ -2982,7 +2393,6 @@ def _run_ports(
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
-    miles_args.yeto_rl_engine = "ports"
     # fleet-dashboard 1.4: the ports EventTape tees into W&B (wandb_rl.tee)
     # off the same namespace fields as run_miles.
     miles_args.wandb = getattr(args, "wandb", False)
@@ -2991,6 +2401,13 @@ def _run_ports(
     miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
     if _run_test_debug_rollout_replay(args, miles_args):
+        return
+    from yeto.rl.engine.sample_roles import SAMPLER, sample_role
+
+    if sample_role(args) == SAMPLER:  # L4.6: generate into the sample buffer, never train
+        from yeto.rl.adapters.miles.sampler_island import run_sampler_island
+
+        run_sampler_island(miles_args)
         return
     run_ports_island(
         miles_args,
@@ -3005,6 +2422,9 @@ def _run_ports(
 
 
 def main(argv=None) -> None:
+    from yeto.modal_runner import allow_any_ptracer
+
+    allow_any_ptracer()  # S27 RAY-SEGV R5: only with YETO_STACK_SAMPLE_S (py-spy sampling on gVisor)
     learner_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     from yeto.provenance import (
@@ -3014,7 +2434,15 @@ def main(argv=None) -> None:
         verify_source_tree_sha256,
     )
 
-    verify_source_tree_sha256(args.source_sha256)
+    # rl-identity-tiering D6: with a run code pack the pack digest check replaces
+    # the source tree check (the launcher attests --source-sha256 on the pack tree).
+    if getattr(args, "code_pack_digest", None):
+        release = verify_island_code_pack(args.code_pack_digest,
+                                          mode=getattr(args, "code_pack_mode", None))
+        if release is not None:  # the launcher's --source-sha256 is its local tree, not the image's
+            args.source_sha256 = release["source_tree_sha256"]
+    else:
+        verify_source_tree_sha256(args.source_sha256)
     if not is_immutable_commit(args.model_revision):
         raise ValueError("RL model revision must be an immutable commit")
     if not is_local_reference(args.data) and not is_immutable_commit(
@@ -3030,21 +2458,13 @@ def main(argv=None) -> None:
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
-    if getattr(args, "rl_engine", "ports") == "ports":
-        from yeto.rl import MILES_NEXT_PINS
-
-        verify_miles_revision(miles_root, expected=MILES_NEXT_PINS)
+    pins = miles_revision_pins(args)
+    if pins is None:
+        verify_miles_revision(miles_root)  # the pinned MILES_NEXT_PINS
     else:
-        verify_miles_revision(
-            miles_root,
-            expected_source_sha256=(
-                args.miles_source_sha256
-                if args.parameter_mode == "full"
-                else None
-            ),
-        )
-    _preflight_codex_harness(args)
+        verify_miles_revision(miles_root, expected=pins)
     probe_syncers(args)
+    probe_wan_link(args)
 
     from miles.utils.misc import load_function
 
@@ -3053,16 +2473,6 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from yeto.rl import CODEX_HARNESS_AGENT, SECRLENV_AGENT
-
-    if args.custom_agent_function_path in {
-        SECRLENV_AGENT,
-        CODEX_HARNESS_AGENT,
-    }:
-        from yeto.rl.harness.codex.client import require_daemon_ready
-
-        require_daemon_ready()
-        print("[rl] secrlenv episode daemon ready")
     from huggingface_hub import snapshot_download
 
     from yeto.models import resolve
@@ -3084,6 +2494,8 @@ def main(argv=None) -> None:
             revision=args.rollout_model_revision,
         )
     eval_source = _verify_eval_dataset_identity(args)
+    island_tasks = _verify_island_task_data(args)
+    slot = _island_data_slot(args)
     columns = dict(
         prompt_column=getattr(args, "rl_prompt_column", None),
         label_column=getattr(args, "rl_label_column", None),
@@ -3093,6 +2505,8 @@ def main(argv=None) -> None:
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
         **columns,
+        slot=slot,
+        number_rows=_island_dispense(args),
     )
     eval_prompt_path = None
     if eval_source is not None:
@@ -3114,6 +2528,7 @@ def main(argv=None) -> None:
         rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
         eval_prompt_path=eval_prompt_path,
+        island_tasks=island_tasks,
         # --rl-single-island-no-sync: LocalOnlySync, no syncer connection.
         yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False),
     )
@@ -3138,7 +2553,7 @@ if __name__ == "__main__":
     except BaseException as error:  # noqa: BLE001
         if _rejoin_exhausted(error):
             # 0.22: the island gave up re-joining the elastic pool (not 4/6).
-            from yeto.rl.elastic_client import ELASTIC_REJOIN_FAILED_EXIT
+            from yeto.rl.pool_client import ELASTIC_REJOIN_FAILED_EXIT
 
             print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
             raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error

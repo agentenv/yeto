@@ -68,10 +68,12 @@ def test_modal_runner_passes_engine_built_image_refs_through():
         image_ref_from_rl_image("verl-build:latest")
 
 
-def test_verl_run_config_rules_refuse_multi_gpu_and_megatron_options():
+def test_verl_run_config_rules_parallel_shapes():
+    # S27 G-DC (V8): data parallel on either engine; TP/PP > 1 (Megatron engine) must divide
     rules = backends.module("run_config_rules", "verl")
-    rules.check_trainer_parallel(1, 1, 1)
-    for bad in ((2, 1, 1), (1, 2, 1)):
+    for good in ((1, 1, 1), (2, 1, 1), (8, 1, 1), (8, 2, 1), (8, 2, 2)):
+        rules.check_trainer_parallel(*good)
+    for bad in ((1, 2, 1), (3, 2, 1), (0, 1, 1), (8, 0, 1)):
         with pytest.raises(ValueError):
             rules.check_trainer_parallel(*bad)
     with pytest.raises(ValueError):
@@ -94,7 +96,7 @@ def test_verl_run_config_rules_refuse_multi_gpu_and_megatron_options():
     (dict(top_p=0.9), "top_p"),
     (dict(top_k=50), "top_p/top_k"),
     (dict(temperature=0.7), "温度"),
-    (dict(n_gpus=2), "1 张卡"),
+    (dict(n_gpus=0), "n_gpus 必须 >= 1"),
 ])
 def test_config_rules_refuse(kw, match):
     with pytest.raises(vconf.VerlConfigError, match=match):
@@ -159,7 +161,7 @@ def test_param_map_hash_is_stable_and_feeds_the_identity():
     assert param_map_sha256(dict(pn.PARAM_MAP)) == verl_identity.PARAM_MAP_SHA256
     from yeto.rl.adapters.miles import identity as miles_identity
 
-    assert ident.sha256() != miles_identity.backend_identity("ports").sha256()
+    assert ident.sha256() != miles_identity.backend_identity().sha256()
 
 
 def test_miles_and_verl_session_contracts_differ_for_the_same_layout():
@@ -167,7 +169,7 @@ def test_miles_and_verl_session_contracts_differ_for_the_same_layout():
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     fp = bytes(range(32))
-    a = session_contract_hash(fp, miles_identity.backend_identity("ports").sha256())
+    a = session_contract_hash(fp, miles_identity.backend_identity().sha256())
     b = session_contract_hash(fp, verl_identity.backend_identity().sha256())
     c = session_contract_hash(fp, verl_identity.backend_identity().sha256())
     assert a != b and b == c
@@ -317,10 +319,35 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     for other, anchor, *_ in patch_verl.PATCHES[1:]:
         (tmp_path / other).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / other).write_text("def g(self):\n" + anchor + "            return 1\n")
+    # S27 G-EK: the fsdp profile also takes the two zmq SUB patches (one file, both anchors)
+    zmq = tmp_path / patch_verl.ZMQ_TARGET
+    zmq.parent.mkdir(parents=True, exist_ok=True)
+    zmq.write_text("".join("def g(self):\n" + anchor + "        pass\n" for _t, anchor, *_r in patch_verl.ZMQ_SUB))
+    # S27 G-EQ2: the auto-class patch (its own file)
+    auto = tmp_path / patch_verl.AUTO_CLASS[0]
+    auto.parent.mkdir(parents=True, exist_ok=True)
+    auto.write_text("def h(hf_config):\n" + patch_verl.AUTO_CLASS[1] + "    return auto_class\n")
+    # S27 G-EZ2: the meta-init patch (the FSDP engine's module builder)
+    meta = tmp_path / patch_verl.META_INIT[0]
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("def build(self):\n" + patch_verl.META_INIT[1] + "        return module\n"
+                    # S27 G-EQ3: the tenth patch (the NemotronH torch-path fix), same file
+                    + patch_verl.NEMOTRON_FIX[1] + "        pass\n"
+                    # S27 G-EZ2: the ninth patch's other anchors in the same file
+                    "def shard(self):\n" + patch_verl.RANK0_STATE_ANCHOR
+                    + "            if offload:\n" + patch_verl.PIN_ANCHOR)
+    load = tmp_path / patch_verl.RANK0_LOAD_TARGET
+    load.parent.mkdir(parents=True, exist_ok=True)
+    load.write_text("def load(model):\n" + patch_verl.RANK0_LOAD_ANCHOR + "    else:\n        pass\n")
     patch_verl.apply(tmp_path)
     patch_verl.apply(tmp_path)  # idempotent
     text = target.read_text()
     assert text.count("_yeto_after_add_lora(self, VLLM_LORA_INT_ID)") == 1
+    assert meta.read_text().count('init_context, "__name__"') == 1  # replaced once, not twice
+    assert meta.read_text().count("nemotron_h_torch_fix: ") == 1  # the same for the NemotronH fix
+    assert meta.read_text().count("nemotron_h_recompute: ") == 1  # S27 G-EQ4: and the recompute hook
+    assert meta.read_text().count("YETO_VERL_RANK0_CHECKPOINT_DTYPE") == 2  # the hook and its error text
+    assert load.read_text().count("t.is_meta") == 1
     target.write_text("nothing here\n")
     with pytest.raises(SystemExit):
         patch_verl.apply(tmp_path)
@@ -341,8 +368,11 @@ def test_unmapped_reward_and_algorithm_fields_are_refused():
     with pytest.raises(reward_fn.UnmappedReward):
         reward_fn.function_for("my_reward:score")
     golden = json.loads(Path("tests/golden/decoupling/grpo_tis.json").read_text())["algorithm_spec"]
+    loss = golden["loss"]
+    # eps_clip / eps_clip_high: read by the Megatron island only (S27 G-DC)
     assert island_entry.algorithm_options(golden) == {"correction": "tis", "tis_upper": 2.0,
-                                                      "tis_lower": 0.0}
+                                                      "tis_lower": 0.0, "eps_clip": loss.get("eps_clip"),
+                                                      "eps_clip_high": loss.get("eps_clip_high")}
     assert island_entry.algorithm_options(None)["correction"] == "none"
 
 
@@ -353,6 +383,19 @@ def test_image_recipe_is_pinned():
     assert VERL_COMMIT in cmds[0] and "uv sync --frozen --all-packages --extra vllm --extra fsdp" in cmds[1]
     with pytest.raises(ValueError):
         image.build_commands("c" * 40)
+
+
+def test_image_adds_the_store_client_at_the_yeto_pin():
+    import tomllib
+    from pathlib import Path
+
+    from yeto.rl.adapters.verl import image
+    from yeto.rl.adapters.verl.pins import STORE_CLIENT_REQUIREMENTS
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
+    pins = set(project["dependencies"]).union(*project["optional-dependencies"].values())
+    assert set(STORE_CLIENT_REQUIREMENTS) <= pins
+    assert image.store_client_commands()[0].endswith(" ".join(STORE_CLIENT_REQUIREMENTS))
 
 
 def test_verl_capabilities_accept_default_and_tis_specs_only():
@@ -434,3 +477,226 @@ def test_verl_data_cursor_refuses_what_it_cannot_honour():
         cur.seek({"sample_offset": 2})
     with pytest.raises(RuntimeError, match="twice"):
         VerlDataCursor(trainer)
+
+
+def test_fully_async_runtime_env_keeps_nccl_host_buffers_on_shm(monkeypatch):
+    # S26 E0.1: a cuMem host-buffer sender and a /dev/shm receiver cannot attach on Modal
+    import sys
+    import types
+
+    pkg = types.ModuleType("verl.trainer.constants_ppo")
+    pkg.get_ppo_ray_runtime_env = lambda _x: {"env_vars": {}}
+    for name in ("verl", "verl.trainer"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.trainer.constants_ppo", pkg)
+    ray_stub = types.ModuleType("ray")
+    ray_stub.remote = lambda *a, **k: (lambda cls: cls)
+    monkeypatch.setitem(sys.modules, "ray", sys.modules.get("ray") or ray_stub)
+    monkeypatch.setitem(sys.modules, "yeto.rl.adapters.verl.verl_main", None)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main")
+    from yeto.rl.adapters.verl import verl_main
+
+    monkeypatch.delenv(verl_main.CUMEM_HOST_ENV, raising=False)
+    assert verl_main._runtime_env(fully_async=True)["env_vars"][verl_main.CUMEM_HOST_ENV] == "0"
+    assert verl_main.CUMEM_HOST_ENV not in verl_main._runtime_env()["env_vars"]
+    monkeypatch.setenv(verl_main.CUMEM_HOST_ENV, "1")
+    assert verl_main._runtime_env(fully_async=True)["env_vars"][verl_main.CUMEM_HOST_ENV] == "1"
+
+
+def test_vllm_prefix_renaming_is_undone():
+    """Qwen3.5 VL in vLLM serves 'model.language_model.*' as 'language_model.model.*' (E10)."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.verl import param_names as pn
+
+    mapper = SimpleNamespace(orig_to_new_prefix={"model.language_model.": "language_model.model.",
+                                                 "model.visual.": "visual.", "mtp.": None})
+    hf = pn.hf_prefixes_from_mapper(mapper)
+    assert hf == {"language_model.model.": "model.language_model.", "visual.": "model.visual."}
+    assert pn.vllm_to_canonical("language_model.model.layers.0.linear_attn.out_proj", "B", None, hf) == \
+        "base_model.model.model.language_model.layers.0.linear_attn.out_proj.lora_B.weight"
+    assert pn.vllm_to_canonical("model.layers.0.self_attn.o_proj", "A", None, hf) == \
+        "base_model.model.model.layers.0.self_attn.o_proj.lora_A.weight"
+
+
+def test_verl_expert_parallel_runs_on_the_megatron_engine():
+    # S26 E7 refused verl+EP; S27 G-DC (V8) wires the Megatron engine island: EP must
+    # divide the trainer GPUs, and the run must be one the Megatron island can run.
+    import argparse
+
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    rules.check_expert_parallel(8, 1)
+    rules.check_expert_parallel(8, 8)
+    with pytest.raises(ValueError, match="EP=3"):
+        rules.check_expert_parallel(8, 3)
+    good = argparse.Namespace(tuning="full", rl_single_island_no_sync=True, rl_placement="fixed-partition",
+                              rl_max_policy_age=0, tensor_parallel=1, pipeline_parallel=1, expert_parallel=8)
+    rules.check_engine_shape(good)
+    assert rules.megatron_run(good) and rules.hf_export_supported(good)
+    for name, value, missing in (("tuning", "lora", "--tuning full"),
+                                 ("rl_single_island_no_sync", False, "--rl-single-island-no-sync"),
+                                 ("rl_placement", "colocated", "--rl-placement fixed-partition"),
+                                 ("rl_max_policy_age", 1, "--rl-max-policy-age 0")):
+        bad = argparse.Namespace(**{**vars(good), name: value})
+        with pytest.raises(ValueError, match=missing):
+            rules.check_engine_shape(bad)
+    fsdp = argparse.Namespace(**{**vars(good), "expert_parallel": 1, "tuning": "lora"})
+    rules.check_engine_shape(fsdp)  # FSDP2 runs are not this check's business
+    assert not rules.megatron_run(fsdp) and not rules.hf_export_supported(fsdp)
+
+
+# ------------------------------------------- verl agentic island (S27 G-FS, VERL-PARITY #33)
+
+def _agentic_cfg(**kw) -> "vconf.VerlRunConfig":
+    base = dict(model_path="/snap/model", train_file="/t.parquet", val_file="/v.parquet", out_dir="/o",
+                parameter_mode="full", lora_rank=0, lora_alpha=0, groups_per_round=2, samples_per_group=4,
+                max_prompt_len=1024, max_response_len=2048, max_model_len=3072, total_rounds=2,
+                correction="none", reward_path="/r.py", reward_name="compute_score_gsm8k")
+    return vconf.VerlRunConfig(**{**base, **kw})
+
+
+def test_agentic_island_overrides_select_the_loop_and_the_estimator():
+    from yeto.rl.adapters.verl.run_config_rules import AGENTIC_ADV_ESTIMATOR
+
+    overrides = vconf.build_overrides(_agentic_cfg(agentic=True, agent_loop_config="/o/agent-loop.yaml"))
+    assert f"algorithm.adv_estimator={AGENTIC_ADV_ESTIMATOR}" in overrides
+    assert "actor_rollout_ref.rollout.agent.agent_loop_config_path=/o/agent-loop.yaml" in overrides
+    assert "actor_rollout_ref.rollout.agent.num_workers=1" in overrides
+    # a non-agentic island is unchanged
+    plain = vconf.build_overrides(_agentic_cfg())
+    assert "algorithm.adv_estimator=grpo" in plain
+    assert not [o for o in plain if "rollout.agent." in o]
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(agentic=True), "agent_loop_config"),
+    (dict(agent_loop_config="/x"), "只在 agentic 岛"),
+    (dict(agentic=True, agent_loop_config="/x", agent_loop_workers=0), "agent_loop_workers"),
+])
+def test_bad_agentic_config_is_refused(kw, match):
+    with pytest.raises(vconf.VerlConfigError, match=match):
+        vconf.validate(_agentic_cfg(**kw))
+
+
+def test_agentic_shapes_the_island_cannot_run_are_refused():
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    def args(**kw):
+        base = dict(rl_agentic_harbor=True, tensor_parallel=1, pipeline_parallel=1, expert_parallel=1,
+                    rl_max_policy_age=0, rl_rollout_ahead=0, rl_sample_role=None,
+                    rl_island_sample_role=None, rl_eval_interval=None)
+        return argparse.Namespace(**{**base, **kw})
+
+    rules.check_agentic(args())  # the covered shape passes
+    assert rules.agentic_problems(args()) == []
+    for kw, needle in ((dict(expert_parallel=8), "Megatron"), (dict(rl_max_policy_age=2), "policy-age"),
+                       (dict(rl_sample_role="sampler"), "采样岛"), (dict(rl_eval_interval=2), "eval-interval")):
+        with pytest.raises(ValueError, match="rl-agentic-harbor"):
+            rules.check_agentic(args(**kw))
+        assert any(needle in p for p in rules.agentic_problems(args(**kw))), (kw, rules.agentic_problems(args(**kw)))
+
+
+def test_agentic_rows_pass_through_prepare_data(tmp_path):
+    """``task_lists.verl_rows`` output must survive the island's data preparation:
+    before S27 G-FS it rewrote every row into the math schema and lost agent_name."""
+    import pandas as pd
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
+
+    rows = [{"data_source": "tb2", "agent_name": VERL_AGENT_LOOP,
+             "prompt": [{"role": "user", "content": f"TB2.1 task t{i}"}],
+             "reward_model": {"style": "rule", "ground_truth": ""},
+             "extra_info": {"index": i, "agent_task": {"task_id": f"t{i}", "agent": "codex"}}}
+            for i in range(3)]
+    data = tmp_path / "x-tasks.jsonl"
+    data.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    train, val = island_entry.prepare_data(str(data), None, tmp_path / "work", val_rows=1)
+    frame = pd.read_parquet(train)
+    assert list(frame["agent_name"]) == [VERL_AGENT_LOOP] * 3
+    assert [r["agent_task"]["task_id"] for r in frame["extra_info"]] == ["t0", "t1", "t2"]
+    assert [r["split"] for r in frame["extra_info"]] == ["train"] * 3
+    assert len(pd.read_parquet(val)) == 1
+
+
+def test_agent_loop_registry_file_is_read_the_way_verl_reads_it(tmp_path):
+    """verl loads the file and *iterates* it, taking ``.name`` off each entry
+    (fork acad9875, ``agent_loop.py:554-556``).  A top-level mapping iterates over
+    its keys and dies with "'str' object has no attribute 'name'", which is how
+    S27 G-FS run s27-fs-2 failed; so parse it here as verl does, not as text.
+    """
+    # OmegaConf is not in the CPU test environment; PyYAML parses the same file
+    # into the same Python structure, and what this test pins is the structure.
+    import yaml
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
+
+    fields = island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=True), out_dir=str(tmp_path))
+    assert fields["agentic"] is True and fields["agent_loop_workers"] == 1
+    loaded = yaml.safe_load(Path(fields["agent_loop_config"]).read_text())
+    assert isinstance(loaded, list), f"verl iterates the file; a {type(loaded).__name__} iterates over its keys"
+    registry = {}
+    for entry in loaded:  # verl's own loop
+        registry[entry["name"]] = entry
+    assert set(registry) == {VERL_AGENT_LOOP}
+    assert registry[VERL_AGENT_LOOP]["_target_"] == island_entry.AGENT_LOOP_TARGET
+    assert island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=False), out_dir=str(tmp_path)) == {}
+
+
+def test_records_proxy_environment_is_derived_from_the_island_config(monkeypatch):
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.gateway import records_env
+
+    monkeypatch.setenv(records_env.TEMPLATE_ENV, "qwen3_2507")
+    run = _agentic_cfg(agentic=True, agent_loop_config="/o/agent-loop.yaml")
+    env = island_entry.agentic_records_env(run, model_path="/snap/model", card="H200")
+    assert env["YETO_AGENTIC_RECORDER"] == "yeto.rl.harness.gateway.recorder:recorder_from_env"
+    assert env[records_env.PROXY_ENV] == "yeto.rl.adapters.verl.rollout_engine:records_proxy_from_env"
+    assert env[records_env.TOKENIZER_ENV] == "/snap/model"
+    assert json.loads(env[records_env.SAMPLING_ENV]) == {
+        "temperature": run.temperature, "top_p": run.top_p, "top_k": run.top_k,
+        "max_tokens": run.max_response_len}
+    assert env[records_env.MAX_MODEL_LEN_ENV] == str(run.max_model_len)
+    # The gateway refuses any model name other than this one ("model is fixed by
+    # the gateway"), and the agent sends AgentTask.model_name. Pin the equality:
+    # a name taken from the checkpoint path would refuse every model call.
+    from dataclasses import fields
+
+    from yeto.rl.agentic import AgentTask
+
+    default_model = next(f for f in fields(AgentTask) if f.name == "model_name").default
+    assert env[records_env.MODEL_ENV] == default_model
+    assert "snap" not in env[records_env.MODEL_ENV] and "model_path" not in env[records_env.MODEL_ENV]
+    # the tunnel owns the port and the public base; the island must not pin them
+    assert records_env.PROXY_PORT_ENV not in env and records_env.PROXY_PUBLIC_BASE_ENV not in env
+    assert env[records_env.PROXY_HOST_ENV] == "0.0.0.0"  # the tunnel reaches it from outside
+    monkeypatch.delenv(records_env.TEMPLATE_ENV)
+    with pytest.raises(SystemExit, match=records_env.TEMPLATE_ENV):
+        island_entry.agentic_records_env(run, model_path="/snap/model", card="H200")
+
+
+def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
+    """On the agentic path the row's prompt is a label; the real prompt is the
+    joined agent conversation, so the 512-token cap of a single-turn data prompt
+    aborts every sample (S27 G-FS run s27-fs-3: 8 of 8 ABORTED with
+    prompt_exceeds_prompt_length, agent n_input_tokens 7585..64960, after which
+    verl refused the step -- "response_mask must contain at least one valid token").
+    """
+    from yeto.rl.adapters.verl import island_entry
+
+    source = Path(island_entry.__file__).read_text()
+    # the rule itself, read off the module: the agentic branch uses the budget
+    assert "if agentic_island(args) else 512" in source
+    agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
+    plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
+
+    def cap(args):  # the expression at island_entry.py's max_prompt
+        return (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
+                if island_entry.agentic_island(args) else 512)
+
+    assert cap(agentic) == 81920 - 8192
+    assert cap(plain) == 512  # a math run is unchanged
+    tiny = argparse.Namespace(rl_agentic_harbor=True, seq_len=1024, rollout_max_response_len=8192)
+    assert cap(tiny) == 512  # never below the floor

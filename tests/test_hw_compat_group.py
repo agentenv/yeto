@@ -12,7 +12,7 @@ import struct
 
 import pytest
 
-from yeto.gpu_spec import _GPU_CANONICAL, device_type_of, parse_gpu_spec
+from yeto.gpu_spec import _GPU_CANONICAL, device_family_of, parse_gpu_spec
 from yeto.hw import catalog
 from yeto.hw.catalog import (CompatGroupMismatch, UnknownCardType, check_compat_group,
                              compat_group, compat_refusal, island_compat_group)
@@ -32,7 +32,7 @@ def test_compat_group_values_from_the_catalog():
     assert compat_group("910b4") == "ascend-910b4"
     # every card the launcher accepts has a group (no launch reaches the island without one)
     for card in _GPU_CANONICAL.values():
-        vendor = "ascend" if device_type_of(card) == "npu" else "nvidia"
+        vendor = catalog.VENDOR_BY_DEVICE_FAMILY[device_family_of(card)]
         assert compat_group(card).startswith(vendor + "-")
 
 
@@ -47,10 +47,10 @@ def test_missing_island_group_is_an_error_before_start(monkeypatch):
     with pytest.raises(UnknownCardType, match="not set"):
         island_compat_group()
     with pytest.raises(UnknownCardType):
-        miles_identity.backend_identity("ports")
+        miles_identity.backend_identity()
     with pytest.raises(UnknownCardType):
         verl_identity.backend_identity()
-    assert miles_identity.backend_identity("ports", compat_group="nvidia-h200").compat_group == "nvidia-h200"
+    assert miles_identity.backend_identity(compat_group="nvidia-h200").compat_group == "nvidia-h200"
     monkeypatch.setenv(catalog.COMPAT_GROUP_ENV, "nvidia-h200")
     assert island_compat_group() == "nvidia-h200"
     with pytest.raises(ValueError):
@@ -58,8 +58,8 @@ def test_missing_island_group_is_an_error_before_start(monkeypatch):
 
 
 def test_compat_group_is_in_the_identity_hash():
-    h100 = miles_identity.backend_identity("ports", compat_group="nvidia-h100")
-    h200 = miles_identity.backend_identity("ports", compat_group="nvidia-h200")
+    h100 = miles_identity.backend_identity(compat_group="nvidia-h100")
+    h200 = miles_identity.backend_identity(compat_group="nvidia-h200")
     assert h100.sha256() != h200.sha256()
     assert h100.to_dict()["compat_group"] == "nvidia-h100"
     assert type(h100).from_dict(h100.to_dict()) == h100
@@ -77,13 +77,13 @@ def test_comparison_rules():
 
 
 def test_identity_check_names_both_card_types():
-    h100 = miles_identity.backend_identity("ports", compat_group="nvidia-h100")
+    h100 = miles_identity.backend_identity(compat_group="nvidia-h100")
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 对 nvidia-h200"):
-        check_identity_match(h100, miles_identity.backend_identity("ports", compat_group="nvidia-h200"))
+        check_identity_match(h100, miles_identity.backend_identity(compat_group="nvidia-h200"))
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 对 ascend-910b"):
         check_identity_match(h100, verl_identity.backend_identity(compat_group="ascend-910b"))
-    check_identity_match(miles_identity.backend_identity("ports", compat_group="nvidia-h200"),
-                         miles_identity.backend_identity("ports", compat_group="nvidia-h200"))
+    check_identity_match(miles_identity.backend_identity(compat_group="nvidia-h200"),
+                         miles_identity.backend_identity(compat_group="nvidia-h200"))
     with pytest.raises(BackendIdentityMismatch):  # same card, other backend: old rule
         check_identity_match(h100, verl_identity.backend_identity(compat_group="nvidia-h100"))
 
@@ -109,3 +109,53 @@ def test_dashboard_shows_hardware_record():
     view = red.page_view(now=2.0)
     assert view["islands"]["0"]["hardware"] == {"compat_group": "nvidia-h100",
                                                 "driver_version": "550.54", "cuda_version": "12.8"}
+
+
+def test_launch_compat_group_explicit_replaces_the_card_group():
+    # G-DF C8: `yeto launch --rl-compat-group` declares one group on every island (mixed cards)
+    assert catalog.launch_compat_group("H100") == "nvidia-h100"
+    assert catalog.launch_compat_group("H100", None) == "nvidia-h100"
+    assert catalog.launch_compat_group("H100", "nvidia-h200") == "nvidia-h200"
+    assert catalog.launch_compat_group("H200", "nvidia-h200") == "nvidia-h200"
+    with pytest.raises(ValueError):
+        catalog.launch_compat_group("H100", "H200")  # not '<vendor>-<card>' lower case
+    with pytest.raises(catalog.UnknownCardType):
+        catalog.launch_compat_group("NOT-A-CARD", "nvidia-h200")  # the card is still checked
+
+
+def test_launcher_exports_the_declared_group_to_each_island(capsys):
+    from types import SimpleNamespace
+
+    from yeto.launch.rl_island_task import _island_compat_group
+
+    spec = SimpleNamespace(gpu="H100")
+    assert _island_compat_group(SimpleNamespace(), spec, 1) == "nvidia-h100"
+    assert capsys.readouterr().err == ""
+    assert _island_compat_group(SimpleNamespace(rl_compat_group="nvidia-h200"), spec, 1) == "nvidia-h200"
+    err = capsys.readouterr().err
+    assert "island 1: --rl-compat-group nvidia-h200 replaces the card group nvidia-h100" in err
+    assert _island_compat_group(SimpleNamespace(rl_compat_group="nvidia-h200"), SimpleNamespace(gpu="H200"), 0) \
+        == "nvidia-h200"
+    assert capsys.readouterr().err == ""
+
+
+def test_launch_parser_accepts_rl_compat_group():
+    from yeto import cli
+
+    launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
+    actions = {opt: a for a in launch._actions for opt in a.option_strings}
+    assert actions["--rl-compat-group"].default is None
+
+
+def test_spot_without_volume_drops_the_island_bucket():
+    # G-DF T3: a Nebius spot island without a store credential keeps no completed-groups bucket
+    from types import SimpleNamespace
+
+    from yeto import cli
+    from yeto.cloud.droppable import island_keeps_spot_volume
+
+    launch = cli.build_parser()._subparsers._group_actions[0].choices["launch"]
+    actions = {opt: a for a in launch._actions for opt in a.option_strings}
+    assert actions["--spot-without-volume"].dest == "spot_without_volume"
+    assert island_keeps_spot_volume(SimpleNamespace(spot=True))
+    assert not island_keeps_spot_volume(SimpleNamespace(spot=True, spot_without_volume=True))

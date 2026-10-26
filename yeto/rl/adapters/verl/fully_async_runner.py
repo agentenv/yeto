@@ -15,7 +15,9 @@ the yeto ``IslandDriver`` calls through the ports of :mod:`.fully_async_ports`:
 * ``yeto_push_weights`` -- ``checkpoint_manager.update_weights(global_steps=
   current_param_version)`` + the rollouter's ``reset_staleness``;
 * ``yeto_export_lora`` / ``yeto_call_workers`` -- the LoRA hooks of
-  ``ports_impl.VerlPolicyState`` on the trainer's actor worker group (6.4b item 2).
+  ``ports_impl.VerlPolicyState`` on the trainer's actor worker group (6.4b item 2);
+  ``yeto_call_workers`` / ``yeto_call_workers_shared`` also carry a full-parameter
+  island's fragment reads and applies (S27 G-EW, :mod:`.fully_async_full`).
 
 Only exercised on a GPU (rl-verl-backend 6.6); the logic it relies on is in the
 CPU-tested :mod:`.fully_async_round` and :mod:`.fully_async_ports`.
@@ -30,6 +32,7 @@ import ray
 from verl.experimental.fully_async_policy import fully_async_main as fa_main
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 
+from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 from .fully_async_round import RESUME_CALLS_KEY
 
 _TrainerBase = getattr(FullyAsyncTrainer, "__ray_actor_class__", FullyAsyncTrainer)
@@ -95,7 +98,11 @@ class _YetoTrainerMixin:
         self._collect_metrics_from_samples(batch, self.metrics)
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         self._yeto_batch = batch
-        return {"samples": len(kept), "queue_size": int(await self.message_queue_client.get_queue_size())}
+        return {"samples": len(kept), "queue_size": await self._yeto_queue_size()}
+
+    async def _yeto_queue_size(self):
+        """Samples left in verl's MessageQueue (a buffer trainer has none: None)."""
+        return int(await self.message_queue_client.get_queue_size())
 
     def _yeto_criteria(self, batch) -> dict:
         from yeto.rl.engine import mismatch_criteria
@@ -119,6 +126,24 @@ class _YetoTrainerMixin:
         crit["param_version"] = int(self.current_param_version)
         return crit
 
+    def _yeto_offpolicy_source(self, batch) -> dict:
+        """Per-source log-prob mismatch of the step (S25 N2.5); ``rollout_id`` is set by the driver."""
+        from .ports_impl import source_error, source_event
+
+        version = int(self.current_param_version)
+        try:
+            train_lp, infer_lp = batch.batch["old_log_probs"], batch.batch["rollout_log_probs"]
+            mask = batch.batch["response_mask"]
+            width = min(train_lp.shape[-1], infer_lp.shape[-1], mask.shape[-1])
+            provenance = batch.non_tensor_batch.get("provenance")
+            return source_event(train_lp[..., :width], infer_lp[..., :width], mask[..., :width],
+                                None if provenance is None else list(provenance),
+                                "ok" if provenance is not None else "missing: no provenance field",
+                                rollout_id=-1, trainer_version=version,
+                                tis_upper=float(getattr(self, "yeto_tis_upper", 2.0)))
+        except Exception as exc:  # noqa: BLE001 - archival, training continues
+            return source_error(exc, rollout_id=-1, trainer_version=version)
+
     def yeto_configure(self, tis_upper: float, thresholds_key) -> None:
         self.yeto_tis_upper = float(tis_upper)
         self.yeto_thresholds_key = tuple(thresholds_key)
@@ -127,10 +152,18 @@ class _YetoTrainerMixin:
         batch, self._yeto_batch = self._yeto_batch, None
         if batch is None:
             raise RuntimeError("yeto_train_step without an assembled batch")
+        # S27 G-FT (blocker B16): verl's own old-log-prob pass reads an MFU entry
+        # its Megatron engine never fills, so the first Megatron training step
+        # raises before any of our code runs.  One narrow run-time patch, logged
+        # once; see .verl_megatron_patches for the defect and when to drop this.
+        from .verl_megatron_patches import install as install_verl_patches
+
+        install_verl_patches()
         t0 = time.time()
         batch = self._fit_compute_reward(batch)
         batch = self._fit_compute_log_prob(batch)
         criteria = self._yeto_criteria(batch)  # 6.4b item 6: re-hooked after old log-probs
+        source = self._yeto_offpolicy_source(batch)
         batch = self._fit_compute_ref_log_prob(batch)
         batch = self._fit_compute_critic(batch)
         batch = self._fit_compute_advantage(batch)
@@ -145,7 +178,8 @@ class _YetoTrainerMixin:
         self.global_steps += 1
         numeric = {k: float(v) for k, v in self.metrics.items()
                    if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        return {"metrics": numeric, "criteria": criteria, "param_version": int(self.current_param_version)}
+        return {"metrics": numeric, "criteria": criteria, "offpolicy_source": source,
+                "param_version": int(self.current_param_version)}
 
     async def yeto_push_weights(self):
         t0 = time.time()
@@ -159,10 +193,20 @@ class _YetoTrainerMixin:
         workers = self.actor_rollout_wg.workers
         return list(await asyncio.gather(*[w.__ray_call__.remote(fn, *args) for w in workers]))
 
+    async def yeto_call_workers_shared(self, fn, *args):
+        """``yeto_call_workers`` with every argument put in the object store once
+        (S27 G-EW: whole parameter tensors of a full-parameter apply)."""
+        return await self.yeto_call_workers(fn, *[ray.put(arg) for arg in args])
+
     async def yeto_export_lora(self):
         from .ports_impl import remote_export_lora
 
         return (await self.yeto_call_workers(remote_export_lora))[0]
+
+    async def yeto_export_digest(self, kwargs):
+        from .ports_impl import remote_export_digest
+
+        return next(r for r in await self.yeto_call_workers(remote_export_digest, kwargs) if r is not None)
 
 
 YetoFullyAsyncTrainer = ray.remote(num_cpus=10)(type("YetoFullyAsyncTrainer", (_YetoTrainerMixin, _TrainerBase), {}))
@@ -175,7 +219,11 @@ _TaskRunnerBase = getattr(fa_main.FullyAsyncTaskRunner, "__ray_actor_class__", f
 
 class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     """verl's component set-up (trainer, rollouter, MessageQueue, initial weight
-    sync); then the yeto driver instead of ``_run_training_loop``."""
+    sync); then the yeto driver instead of ``_run_training_loop``.
+
+    ``trainer_actor``: the Ray actor class :meth:`_create_trainer` builds."""
+
+    trainer_actor = YetoFullyAsyncTrainer
 
     def run(self, config, plan: dict):
         from yeto.island_credential_guard import check_island_credentials
@@ -192,6 +240,12 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
 
         def start_rollouter():
             state["future"] = rollouter.fit.remote()
+
+        def seek_rollouter(prompts: int):
+            # S26 E9.2: before fit, in the rollouter actor (fully_async_cut)
+            from .fully_async_cut import skip_rollouter_prompts
+
+            return ray.get(rollouter.__ray_call__.remote(skip_rollouter_prompts, int(prompts)))
 
         def call(name, *args, timeout=None):
             # timeout (s): S19 async5 hung 33 min in a push whose vLLM side had died;
@@ -211,7 +265,8 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
 
         try:
             return run_fully_async_island(call, start_rollouter, plan,
-                                          OmegaConf.to_container(config, resolve=True))
+                                          OmegaConf.to_container(config, resolve=True),
+                                          seek_rollouter=seek_rollouter)
         finally:
             if state["future"] is not None:
                 ray.cancel(state["future"])
@@ -219,7 +274,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
 
     def _create_trainer(self, config) -> None:
         """verl's ``_create_trainer`` (fork acad9875, fully_async_main.py:138), building
-        :data:`YetoFullyAsyncTrainer`.  Setting ``fa_main.FullyAsyncTrainer`` did not
+        :attr:`trainer_actor`.  Setting ``fa_main.FullyAsyncTrainer`` did not
         reach verl's method inside the Ray actor (s19-verl64b-async7-20261010a: the
         trainer was verl's own class, "no attribute yeto_configure"), so the method is
         overridden here instead of relying on that module global."""
@@ -229,7 +284,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         print("[ASYNC MAIN] Starting create trainer (yeto)...")
         mapping = {role: cls for role, cls in self.components["role_worker_mapping"].items()
                    if role != Role.Rollout}
-        trainer = YetoFullyAsyncTrainer.remote(
+        trainer = self.trainer_actor.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=mapping,
@@ -240,4 +295,4 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         trainer.yeto_configure  # noqa: B018 - fail fast (AttributeError) if this is not our class
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
-        print("[ASYNC MAIN] YetoFullyAsyncTrainer created and initialized successfully")
+        print("[ASYNC MAIN] yeto trainer actor created and initialized successfully")

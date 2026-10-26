@@ -157,3 +157,38 @@ def test_standby_placement_describes_m1_roles_and_detects_rewrites():
     groups["standby"] = (None, [0, 3], [0, 3])
     with pytest.raises(PlacementRewriteError, match="overlapping"):
         MilesPlacement(req, groups)
+
+
+# -- trainer-only fixed partition (S25 T-INTEG2: full-parameter trainer reading the store) --
+TRAINER_ONLY = PlacementRequest("fixed-partition", trainer_gpus=24, rollout_gpus=0, gpus_per_engine=1)
+
+
+def test_trainer_only_request_has_no_rollout_bundles():
+    assert TRAINER_ONLY.trainer_only and not PARTITION.trainer_only
+    assert TRAINER_ONLY.expected_layout() == (24, 24)
+    assert TRAINER_ONLY.role_bundles()["rollout"] == ()
+    with pytest.raises(ValueError, match="positive int"):
+        PlacementRequest("colocated", trainer_gpus=4, rollout_gpus=0, gpus_per_engine=1)
+    with pytest.raises(ValueError, match="trainer-only"):
+        PlacementRequest("fixed-partition", trainer_gpus=4, rollout_gpus=0, gpus_per_engine=1,
+                         standby_gpus=4)
+
+
+def test_trainer_only_needs_debug_train_only():
+    ok = args(colocate=False, actor_num_nodes=3, actor_num_gpus_per_node=8, rollout_num_gpus=0,
+              rollout_num_gpus_per_engine=1, debug_train_only=True)
+    check_placement_not_rewritten(TRAINER_ONLY, ok)
+    with pytest.raises(PlacementRewriteError, match="debug_train_only=True"):
+        check_placement_not_rewritten(TRAINER_ONLY, args(**{**vars(ok), "debug_train_only": False}))
+    # A partition with engines still refuses debug_train_only.
+    with pytest.raises(PlacementRewriteError, match="debug_train_only=True"):
+        check_placement_not_rewritten(PARTITION, args(colocate=False, actor_num_gpus_per_node=2,
+                                                      rollout_num_gpus=2, rollout_num_gpus_per_engine=1,
+                                                      debug_train_only=True))
+
+
+def test_trainer_only_description():
+    placement = MilesPlacement(TRAINER_ONLY, {"actor": pg(range(24), range(24)), "rollout": pg([], [])},
+                               logical=True)
+    d = placement.describe()
+    assert (d.kind, len(d.trainer_gpus), d.rollout_gpus) == ("fixed-partition", 24, ())

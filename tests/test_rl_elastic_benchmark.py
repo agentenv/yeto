@@ -95,7 +95,9 @@ def test_edited_manifest_is_rejected_by_recorded_hash(tmp_path):
 # --- 1.2 configs, edges, pool, attestation ----------------------------------
 
 
-def test_config_rejections_keep_reasons_instead_of_substituting():
+def test_config_rejections_keep_reasons_instead_of_substituting(monkeypatch):
+    from yeto.rl.adapters.miles import pins
+
     manifest = example_manifest()
     manifest["resources"]["configs"]["P71"] = {"trainer": 7, "rollout": 1}
     manifest["resources"]["configs"]["P80"] = {"trainer": 8, "rollout": 0}
@@ -105,6 +107,10 @@ def test_config_rejections_keep_reasons_instead_of_substituting():
     assert "not divisible" in table["P71"]["reason"]
     assert "rollout" in table["P80"]["reason"]
     dense = dict(manifest["profile"], parameter_mode="full")
+    # The pinned Miles has data-parallel replicas (S27 closing): a dense profile may use DP>1.
+    assert caps.config_rejection(configs["P62"], profile=dense, pool_size=8) is None
+    # A pin without them (8edea35a7) keeps the dense profile at DP 1.
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
     assert "DP=1" in caps.config_rejection(configs["P62"], profile=dense, pool_size=8)
     assert caps.config_rejection(configs["P62"], profile=manifest["profile"], pool_size=4).startswith("uses 8")
 

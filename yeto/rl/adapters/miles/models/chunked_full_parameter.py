@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+import json
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from yeto.rl.contracts import LocalStepReceipt
-from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
+from yeto.rl.hybrid_params import check_frozen_excluded
+from yeto.rl.local_learner import (
+    ComponentIdentity,
+    ParameterLayout,
+    ParameterSpec,
+    fit_owner_affine_layout,
+)
+from yeto.rl.engine.shape_free_layout import (
+    LAYOUT_SHAPE_BOUND,
+    LAYOUT_SHAPE_FREE,
+    Granularity,
+    LocalParameter,
+    RankParameters,
+    ShapeFreePlan,
+    plan_shape_free_layout,
+)
+from yeto.rl.moe_layout import check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 
@@ -66,6 +83,21 @@ class StoredAuthoritativeFragment:
     descriptor: Any
     refs: list[object | None]
     wire_payload_hash: str
+    # S27 G-CG verify-ahead: the off-trainer check of these chunks (a future
+    # of Miles' verify_stored_fragment_chunks), None when none was started.
+    verification: Any = field(default=None, compare=False, repr=False)
+
+    def verified_payload_hash(self) -> str | None:
+        """The payload hash an apply may name in ``verified_fragments``: the
+        off-trainer check ended without error.  None while it runs or when
+        there is none (the trainer then checks the chunks itself); a failed
+        check raises its error."""
+
+        future = self.verification
+        if future is None or not future.done():
+            return None
+        future.result()
+        return self.descriptor.payload_hash
 
     def release(self) -> int:
         released = 0
@@ -74,6 +106,31 @@ class StoredAuthoritativeFragment:
                 self.refs[index] = None
                 released += 1
         return released
+
+
+class StoredFragmentVerifier:
+    """Verify-ahead (S27 G-CG): run the trainer prepare's check of a stored
+    broadcast (Miles ``verify_stored_fragment_chunks``: finite FP32 chunks,
+    chunk hashes, fragment digest) on one background thread as soon as the
+    fragment is stored, so the apply at the next boundary can name it in
+    ``verified_fragments`` and the trainer reads none of its chunks."""
+
+    def __init__(self, ray_module=None) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.ray_module = ray_module
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-fp-verify")
+
+    def submit(self, stored: StoredAuthoritativeFragment):
+        from miles.backends.megatron_utils.full_parameter_state import verify_stored_fragment_chunks
+
+        # The tuple keeps the objects alive even if the fragment is released meanwhile.
+        return self._pool.submit(verify_stored_fragment_chunks, stored.descriptor, tuple(stored.refs),
+                                 parameter_layout_hash=stored.parameter_layout_hash,
+                                 plan_hash=stored.plan_hash, ray_module=self.ray_module)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
 
 class AuthoritativeFragmentSink:
@@ -87,6 +144,16 @@ class AuthoritativeFragmentSink:
         self.reference = _metadata_only_reference(reference)
         self.ray_module = ray_module
         self._stored: dict[tuple[int, int], StoredAuthoritativeFragment] = {}
+        # Set by the role stream when verify-ahead is on; every newly stored
+        # fragment then starts its off-trainer check.
+        self.verifier: StoredFragmentVerifier | None = None
+
+    def with_verification(self, stored: StoredAuthoritativeFragment) -> StoredAuthoritativeFragment:
+        """``stored`` with its off-trainer check started (unchanged without a verifier)."""
+
+        if self.verifier is None:
+            return stored
+        return replace(stored, verification=self.verifier.submit(stored))
 
     def __call__(
         self,
@@ -128,11 +195,118 @@ class AuthoritativeFragmentSink:
             refs=refs,
             wire_payload_hash=payload_hash,
         )
+        stored = self.with_verification(stored)
+        self._stored[key] = stored
+        return stored
+
+    def adopt(
+        self,
+        cut: ReferencedPolicyCut,
+        fragment_id: int,
+        version: int,
+        wire_payload_hash: str,
+    ) -> StoredAuthoritativeFragment:
+        """Register ``cut``'s own chunks of one fragment without copying them.
+
+        Local init: the island's version-0 anchors are exactly its exported
+        version-0 cut. Sharing the cut's Ray refs keeps one model-sized copy
+        in the object store instead of two (s27-gh-a: 27B spilled ~165 GB
+        before the first round and later filled the container disk). The
+        anchor holds its own ref list, so releasing either side leaves the
+        other intact."""
+
+        if cut.layout_hash != self.reference.layout_hash:
+            raise ValueError("adopted cut layout changed")
+        key = (fragment_id, version)
+        previous = self._stored.get(key)
+        if previous is not None:
+            if previous.wire_payload_hash != wire_payload_hash:
+                raise RuntimeError("authoritative fragment replay changed bytes")
+            return previous
+        shard = _fragment_owner_shard(cut.transport_cut, fragment_id)
+        ((descriptor, refs),) = [
+            (descriptor, refs)
+            for descriptor, refs in zip(shard.fragments, shard.chunk_refs, strict=True)
+            if descriptor.fragment_id == fragment_id
+        ]
+        expected = next(
+            descriptor
+            for descriptor in _fragment_owner_shard(self.reference.transport_cut, fragment_id).fragments
+            if descriptor.fragment_id == fragment_id
+        )
+        if not _same_fragment_geometry(expected, descriptor):
+            raise ValueError("adopted fragment geometry changed")
+        if any(reference is None for reference in refs):
+            raise ValueError("adopted fragment chunks are released")
+        stored = StoredAuthoritativeFragment(
+            fragment_id=fragment_id,
+            version=version,
+            parameter_layout_hash=shard.parameter_layout_hash,
+            topology=shard.topology,
+            plan_hash=shard.plan_hash,
+            descriptor=descriptor,
+            refs=list(refs),
+            wire_payload_hash=wire_payload_hash,
+        )
         self._stored[key] = stored
         return stored
 
     def release_all(self) -> int:
         return sum(fragment.release() for fragment in self._stored.values())
+
+
+LAYOUT_PROBE_LOG_PREFIX = "[yeto-layout-probe] "
+
+
+def layout_attestation_record(
+    adapter: MilesChunkedFullParameterAdapter,
+    components: Sequence[ComponentIdentity],
+) -> dict[str, object]:
+    """One role's layout in the role shape of a SAO layout attestation.
+
+    The fields are those ``yeto.rl.sao_streaming_runtime`` checks for each
+    role (``miles.sao-streaming-layouts.v2``); ``component`` is the single
+    component the layout was derived for.
+    """
+
+    if len(components) != 1:
+        raise ValueError("a layout attestation record names exactly one component")
+    (component,) = components
+    layout = adapter.layout
+    fragments = []
+    for fragment_id, fragment in enumerate(layout.fragments.fragments):
+        role, shard_id = layout.fragment_owner(fragment_id)
+        fragments.append(
+            {
+                "fragment_id": fragment_id,
+                "role": role,
+                "shard_id": shard_id,
+                "parameter_count": len(layout.fragment_specs(fragment_id)),
+                "scalar_count": fragment.numel,
+                "payload_bytes": fragment.numel * 4,
+            }
+        )
+    return {
+        "role": component.role,
+        "component": {
+            "model_revision": component.model_revision,
+            "config_sha256": component.config_hash,
+        },
+        "parameter_layout_sha256": layout.layout_hash,
+        "expected_fragments": layout.fragments.num_fragments,
+        "parameter_tensor_count": adapter.expected_parameter_tensor_count,
+        "parameter_scalar_count": adapter.expected_parameter_scalar_count,
+        "fragments": fragments,
+        "manifests": [
+            {
+                "topology": asdict(manifest.topology),
+                "source_layout_sha256": manifest.layout_hash,
+                "parameter_count": len(manifest.specs),
+                "scalar_count": sum(spec.numel for spec in manifest.specs),
+            }
+            for manifest in adapter.manifests
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -159,22 +333,50 @@ class MilesChunkedFullParameterAdapter:
         max_fragment_bytes: int = 2 << 30,
         max_chunk_bytes: int = 256 << 20,
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
+        layout_mode: str = LAYOUT_SHAPE_BOUND,
+        granularity: Granularity | None = None,
     ) -> tuple[MilesChunkedFullParameterAdapter, ReferencedPolicyCut]:
-        manifests = tuple(
-            sorted(
-                await group.full_parameter_shard_manifests(),
-                key=lambda value: value.topology,
+        """``layout_mode`` ``shape-free`` (``yeto.rl.engine.shape_free_layout``):
+        the layout comes from global tensors, so islands of different TP/EP/DP
+        shapes share one session; ``granularity`` is its session constants."""
+
+        if layout_mode == LAYOUT_SHAPE_FREE:
+            manifests, plan = await cls.shape_free_plan(
+                group,
+                algorithm=algorithm,
+                components=components,
+                minimum_fragments=minimum_fragments,
+                max_fragment_bytes=max_fragment_bytes,
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+                granularity=granularity or Granularity(),
             )
-        )
-        adapter = cls.create(
-            manifests,
-            algorithm=algorithm,
-            components=components,
-            minimum_fragments=minimum_fragments,
-            max_fragment_bytes=max_fragment_bytes,
-            max_chunk_bytes=max_chunk_bytes,
-            stream_role=stream_role,
-        )
+            adapter = cls.create_shape_free(
+                plan,
+                manifests,
+                max_fragment_bytes=max_fragment_bytes,
+                max_chunk_bytes=max_chunk_bytes,
+            )
+        elif layout_mode == LAYOUT_SHAPE_BOUND:
+            manifests = tuple(
+                sorted(
+                    await group.full_parameter_shard_manifests(),
+                    key=lambda value: value.topology,
+                )
+            )
+            adapter = cls.create(
+                manifests,
+                algorithm=algorithm,
+                components=components,
+                minimum_fragments=minimum_fragments,
+                max_fragment_bytes=max_fragment_bytes,
+                max_chunk_bytes=max_chunk_bytes,
+                stream_role=stream_role,
+                matrix_merge=matrix_merge,
+            )
+        else:
+            raise ValueError(f"unknown full-parameter layout mode {layout_mode!r}")
         actual_fragments = adapter.layout.fragments.num_fragments
         if (
             expected_fragments is not None and actual_fragments != expected_fragments
@@ -185,12 +387,25 @@ class MilesChunkedFullParameterAdapter:
             fragment_bytes = tuple(
                 fragment.numel * 4 for fragment in adapter.layout.fragments.fragments
             )
+            # The refusal doubles as a layout probe: print the observed layout
+            # in the shape of a layout attestation, so a probe run with a
+            # placeholder hash yields the real values to freeze.
+            print(
+                LAYOUT_PROBE_LOG_PREFIX
+                + json.dumps(
+                    layout_attestation_record(adapter, components),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
             raise RuntimeError(
                 "Miles full-parameter layout differs from the frozen probe: "
                 f"expected_fragments={expected_fragments}, "
                 f"actual_fragments={actual_fragments}, "
                 f"expected_layout_hash={expected_layout_hash}, "
                 f"actual_layout_hash={adapter.layout.layout_hash}, "
+                f"topology={describe_topology([m.topology.shard_id for m in manifests])}, "
                 f"fragment_bytes={fragment_bytes}"
             )
         installed = await group.install_full_parameter_fragment_plans(adapter.plans)
@@ -214,6 +429,7 @@ class MilesChunkedFullParameterAdapter:
         max_fragment_bytes: int,
         max_chunk_bytes: int,
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
     ) -> MilesChunkedFullParameterAdapter:
         from miles.backends.megatron_utils.full_parameter_state import (
             FullParameterFragmentPlan,
@@ -244,28 +460,33 @@ class MilesChunkedFullParameterAdapter:
             or max_fragment_bytes % 4
         ):
             raise ValueError("Miles semantic fragment byte bound is invalid")
-        start = max(minimum_fragments, len(ordered))
-        layout = None
-        for count in range(start, len(specs) + 1):
-            candidate = ParameterLayout.create(
-                algorithm=algorithm,
-                components=components,
-                specs=specs,
-                num_fragments=count,
-                fragment_strategy="owner_affine",
-                stream_role=stream_role,
-            )
-            if all(
-                fragment.numel * 4 <= max_fragment_bytes
-                for fragment in candidate.fragments.fragments
-            ):
-                layout = candidate
-                break
-        if layout is None:
-            raise ValueError(
-                "a single topology-owned parameter exceeds the fragment byte bound"
-            )
+        # MoE: every expert must have exactly one owner (each EP rank pushes
+        # its own experts); a dense model passes through unchanged.
+        check_expert_partition(specs)
+        # No full-parameter run trains a vision tower: the RL samples carry no
+        # images, so a trainable tower would only decay. A Nemotron-H VL
+        # checkpoint trains its language model (Miles builds no vision part).
+        check_frozen_excluded(spec.name for spec in specs)
+        # A parameter above the bound spans several fragments as dimension-0
+        # row slices; with no such parameter the layout is unchanged.
+        layout = fit_owner_affine_layout(
+            algorithm=algorithm,
+            components=components,
+            specs=specs,
+            minimum_fragments=minimum_fragments,
+            max_fragment_bytes=max_fragment_bytes,
+            stream_role=stream_role,
+            matrix_merge=matrix_merge,
+        )
 
+        if layout.has_split_parameters and "flat_ranges" not in getattr(
+            FullParameterFragmentPlan, "__dataclass_fields__", {}
+        ):
+            raise RuntimeError(
+                "a parameter exceeds the fragment byte bound and this Miles "
+                "cannot split it (needs FullParameterFragmentPlan.flat_ranges, "
+                "Miles s27-fragbound-split)"
+            )
         manifests_by_owner = {}
         for manifest in ordered:
             owners = {(spec.role, spec.shard_id) for spec in manifest.specs}
@@ -284,11 +505,21 @@ class MilesChunkedFullParameterAdapter:
             for fragment_id, fragment in enumerate(layout.fragments.fragments):
                 if layout.fragment_owner(fragment_id) != owner:
                     continue
+                slices = layout.fragment_slices(fragment_id)
+                # Only a fragment holding part of a parameter names flat
+                # ranges (Miles s27-fragbound-split); unsplit plans keep
+                # their plan hash and install on older Miles images.
+                ranges = (
+                    {}
+                    if all(unit.is_whole for unit in slices)
+                    else {"flat_ranges": tuple(unit.flat_range for unit in slices)}
+                )
                 fragments.append(
                     FullParameterFragmentPlan(
                         fragment_id=fragment_id,
-                        wire_names=tuple(name for name, _ in fragment.tensors),
+                        wire_names=tuple(unit.spec.wire_name for unit in slices),
                         numel=fragment.numel,
+                        **ranges,
                     )
                 )
             plans.append(
@@ -310,19 +541,208 @@ class MilesChunkedFullParameterAdapter:
             max_fragment_bytes=max_fragment_bytes,
         )
 
+    @classmethod
+    async def shape_free_plan(
+        cls,
+        group: Any,
+        *,
+        algorithm: str,
+        components: Sequence[ComponentIdentity],
+        minimum_fragments: int,
+        max_fragment_bytes: int,
+        stream_role: str | None,
+        matrix_merge: str,
+        granularity: Granularity,
+    ) -> tuple[tuple[Any, ...], ShapeFreePlan]:
+        """Plan the shape-free layout from the ranks' partition reports, install
+        the owners it gives on every rank, and return the manifests that result."""
+
+        if "shape_free_layout" not in _local_transport_features() or not hasattr(
+            group, "full_parameter_partition_reports"
+        ):
+            raise RuntimeError(
+                "a shape-free full-parameter layout needs a Miles with the "
+                "shape_free_layout transport feature (yeto/s27-shape-free-layout)"
+            )
+        reports = tuple(sorted(await group.full_parameter_partition_reports(), key=lambda value: value.topology))
+        plan = plan_shape_free_layout(
+            tuple(rank_parameters(report) for report in reports),
+            algorithm=algorithm,
+            components=components,
+            role=_single_role(report.role for report in reports),
+            granularity=granularity,
+            minimum_fragments=minimum_fragments,
+            max_fragment_bytes=max_fragment_bytes,
+            stream_role=stream_role,
+            matrix_merge=matrix_merge,
+        )
+        await group.install_full_parameter_owner_maps(
+            {report.topology: plan.owner_maps[report.global_rank] for report in reports}
+        )
+        manifests = tuple(sorted(await group.full_parameter_shard_manifests(), key=lambda value: value.topology))
+        return manifests, plan
+
+    @classmethod
+    def create_shape_free(
+        cls,
+        plan: ShapeFreePlan,
+        manifests: Sequence[Any],
+        *,
+        max_fragment_bytes: int,
+        max_chunk_bytes: int,
+    ) -> MilesChunkedFullParameterAdapter:
+        """Owner plans of a shape-free layout: each fragment is read by its owner
+        as flat segments of its local masters (``free_member_order``)."""
+
+        from miles.backends.megatron_utils.full_parameter_state import (
+            FullParameterFragmentPlan,
+            FullParameterOwnerFragmentPlan,
+        )
+
+        ordered = tuple(sorted(manifests, key=lambda value: value.topology))
+        if not ordered or len({value.topology for value in ordered}) != len(ordered):
+            raise ValueError("Miles full-parameter manifests are incomplete")
+        by_rank = {manifest.global_rank: manifest for manifest in ordered}
+        if set(by_rank) != set(plan.ranks):
+            raise RuntimeError("Miles manifests and the shape-free plan name different ranks")
+        for rank, manifest in by_rank.items():
+            if manifest.topology != plan.ranks[rank].key:
+                raise RuntimeError(f"Miles rank {rank} changed its topology after the partition report")
+            owned = {name for name, (owner, _writers) in plan.owner_maps[rank].items() if owner == rank}
+            if {spec.name for spec in manifest.specs} != owned:
+                raise RuntimeError(f"Miles rank {rank} does not own what the shape-free owner map says")
+        plans = []
+        for rank, manifest in sorted(by_rank.items(), key=lambda item: item[1].topology):
+            wire = {spec.name: spec.wire_name for spec in manifest.specs}
+            fragments = tuple(
+                FullParameterFragmentPlan(
+                    fragment_id=fragment.fragment_id,
+                    wire_names=tuple(wire[name] for name, _start, _stop in fragment.members),
+                    numel=fragment.numel,
+                    flat_ranges=tuple((start, stop) for _name, start, stop in fragment.members),
+                )
+                for fragment in plan.owned_fragments(rank)
+            )
+            plans.append(
+                FullParameterOwnerFragmentPlan(
+                    topology=manifest.topology,
+                    parameter_layout_hash=plan.layout.layout_hash,
+                    fragments=fragments,
+                    free_member_order=True,
+                )
+            )
+        if sum(len(owner.fragments) for owner in plans) != plan.layout.fragments.num_fragments:
+            raise RuntimeError("owner fragment plans do not cover the layout")
+        # The same checks as the shape-bound layout, on the global units.
+        check_expert_partition(plan.layout.specs)
+        check_frozen_excluded(unit.parameter.name for unit in plan.units.values())
+        native = [spec for manifest in ordered for spec in manifest.specs]
+        if sum(spec.numel for spec in native) != sum(spec.numel for spec in plan.layout.specs):
+            raise RuntimeError("the owned Miles masters and the shape-free units hold different scalar counts")
+        return cls(
+            layout=plan.layout,
+            manifests=ordered,
+            plans=tuple(plans),
+            # Miles counts the local parameters each owner applies.
+            expected_parameter_tensor_count=len(native),
+            expected_parameter_scalar_count=sum(spec.numel for spec in native),
+            max_chunk_bytes=max_chunk_bytes,
+            max_fragment_bytes=max_fragment_bytes,
+        )
+
     async def capture(
         self,
         group: MilesChunkedFullParameterGroup,
         *,
         policy_version: int,
         local_step_generation: int,
+        defer_payload: bool = False,
+        lazy: bool = False,
     ) -> ReferencedPolicyCut:
+        """``defer_payload``: Miles hashes every fragment (same descriptors,
+        same cut identity) but stores none in Ray; :meth:`materialize` stores
+        the fragments a push needs while the masters still hold them.
+
+        ``lazy`` (with ``defer_payload``): Miles reads no master; every row
+        carries a label instead of a content hash, so the cut identity names
+        this capture without proving its content.  :meth:`materialize` with
+        ``describe=True`` returns the content descriptor of each fragment it
+        stores (:func:`lazy_capture_supported`)."""
+
+        if lazy and not defer_payload:
+            raise ValueError("a lazy capture must defer its payload")
         cut = await group.export_full_parameter_chunked_cut(
             policy_version,
             local_step_generation,
             max_chunk_bytes=self.max_chunk_bytes,
+            **({"defer_payload": True} if defer_payload else {}),
+            **({"lazy": True} if lazy else {}),
         )
         return self.validate_cut(cut, policy_version, local_step_generation)
+
+    @staticmethod
+    def deferred_fragment_ids(cut: ReferencedPolicyCut) -> frozenset[int]:
+        """Fragments of ``cut`` whose chunk refs are deferred-export markers."""
+
+        try:
+            from miles.backends.megatron_utils.full_parameter_state import (
+                is_deferred_full_parameter_chunk,
+            )
+        except ImportError:  # an old Miles never defers
+            return frozenset()
+        return frozenset(
+            descriptor.fragment_id
+            for shard in cut.transport_cut.shards
+            for descriptor, references in zip(shard.fragments, shard.chunk_refs, strict=True)
+            if any(is_deferred_full_parameter_chunk(reference) for reference in references)
+        )
+
+    async def materialize(
+        self,
+        group: MilesChunkedFullParameterGroup,
+        cut: ReferencedPolicyCut,
+        fragment_ids: Sequence[int],
+        *,
+        describe: bool = False,
+    ) -> dict[int, Any]:
+        """Store the deferred fragments ``fragment_ids`` of ``cut`` in Ray.
+
+        The owner ranks export them again from their masters, refuse when the
+        masters changed since the cut, and check the bytes against the cut's
+        descriptors; the refs then replace the markers in ``cut``'s rows (the
+        cut identity does not change).  Returns ``{fragment_id: descriptor}``
+        for the fragments stored: the row's descriptor, or with ``describe``
+        the content descriptor Miles computed (required for a lazy cut,
+        whose rows carry labels; a reader of the stored chunks passes it as
+        ``local_descriptor``)."""
+
+        deferred = self.deferred_fragment_ids(cut)
+        wanted = tuple(sorted({fragment_id for fragment_id in fragment_ids if fragment_id in deferred}))
+        if not wanted:
+            return {}
+        if describe:
+            described = await group.materialize_full_parameter_fragments(
+                cut.transport_cut, wanted, return_descriptors=True)
+            stored = {fragment_id: row[1] for fragment_id, row in described.items()}
+        else:
+            stored = await group.materialize_full_parameter_fragments(cut.transport_cut, wanted)
+            described = None
+        if set(stored) != set(wanted):
+            raise RuntimeError("Miles materialized the wrong full-parameter fragments")
+        descriptors: dict[int, Any] = {}
+        for shard in cut.transport_cut.shards:
+            for descriptor, references in zip(shard.fragments, shard.chunk_refs, strict=True):
+                refs = stored.get(descriptor.fragment_id)
+                if refs is None:
+                    continue
+                if len(refs) != len(references):
+                    raise RuntimeError("Miles materialized a fragment with the wrong chunk count")
+                content = descriptor if described is None else described[descriptor.fragment_id][0]
+                if not _same_fragment_geometry(descriptor, content):
+                    raise RuntimeError("Miles described a materialized fragment with another geometry")
+                references[:] = refs
+                descriptors[descriptor.fragment_id] = content
+        return descriptors
 
     def validate_cut(
         self,
@@ -392,13 +812,16 @@ class MilesChunkedFullParameterAdapter:
         local_fragment_id: int,
         *,
         ray_module=None,
+        local_descriptor: Any = None,
     ) -> Callable[[], Any]:
         """Stream ``local - authoritative`` for one arbitrary local horizon.
 
         The authoritative fragment may have arrived independently of the
         learner's current complete cut.  Miles validates its exact owner,
         plan, chunk geometry, values, and refs while keeping both operands
-        reference-backed.
+        reference-backed.  ``local_descriptor``: the content descriptor
+        :meth:`materialize` returned for a lazy row (the local chunks are
+        checked against it instead of the row's labels).
         """
 
         from miles.ray.full_parameter_transport import (
@@ -428,6 +851,8 @@ class MilesChunkedFullParameterAdapter:
         ):
             raise ValueError("authoritative fragment provenance changed")
 
+        override = {} if local_descriptor is None else {"local_descriptor": local_descriptor}
+
         def parts():
             return iter_full_parameter_authoritative_fragment_delta_parts(
                 local.transport_cut,
@@ -438,6 +863,7 @@ class MilesChunkedFullParameterAdapter:
                 authoritative_descriptor=stored.descriptor,
                 authoritative_refs=stored.refs,
                 ray_module=ray_module,
+                **override,
             )
 
         return parts
@@ -509,8 +935,12 @@ class MilesChunkedFullParameterAdapter:
         role: str,
         expected_local_step_generation: int,
         expected_optimizer_steps: int,
+        check_model: bool = True,
     ) -> LocalStepReceipt:
-        """Bind one actor or critic local round to exact rank receipts."""
+        """Bind one actor or critic local round to exact rank receipts.
+
+        ``check_model=False`` (only before a lazy capture): the ranks skip
+        their whole-model model/master comparison."""
 
         if role not in {"actor", "critic"}:
             raise ValueError("Miles local-round role is unsupported")
@@ -537,12 +967,7 @@ class MilesChunkedFullParameterAdapter:
             or not trajectories.envelopes
             or (
                 role == "actor"
-                and trajectories.behavior_policy_hash
-                != (
-                    anchor.content_hash
-                    if self.layout.algorithm == "sao"
-                    else anchor.policy_hash
-                )
+                and trajectories.behavior_policy_hash != anchor.policy_hash
             )
         ):
             raise ValueError("Miles local-round evidence does not bind the anchor")
@@ -550,6 +975,7 @@ class MilesChunkedFullParameterAdapter:
             await group.record_full_parameter_local_step(
                 base_policy_version=anchor.policy_version,
                 rollout_id=rollout_id,
+                **({} if check_model else {"check_model": False}),
             )
         )
         expected_topologies = {manifest.topology for manifest in self.manifests}
@@ -585,11 +1011,7 @@ class MilesChunkedFullParameterAdapter:
             learner_id=learner_id,
             learner_generation=learner_generation,
             base_policy_version=anchor.policy_version,
-            base_policy_hash=(
-                anchor.content_hash
-                if self.layout.algorithm == "sao"
-                else anchor.policy_hash
-            ),
+            base_policy_hash=anchor.policy_hash,
             input_batch_hash=trajectories.input_batch_hash,
             trajectory_ids=trajectories.trajectory_ids,
             trained_tokens=trajectories.trained_tokens,
@@ -612,8 +1034,14 @@ class MilesChunkedFullParameterAdapter:
         self,
         reference: ReferencedPolicyCut,
         fragments: Sequence[StoredAuthoritativeFragment],
+        *,
+        allow_newer: bool = False,
     ) -> None:
-        """Require the syncer's authoritative v0 bytes to equal the checkpoint."""
+        """Require the syncer's authoritative v0 bytes to equal the checkpoint.
+
+        ``allow_newer``: an island joining a running pool receives some
+        fragments at newer versions; those must match the layout, topology and
+        plan, but their content is the pool's, not the checkpoint's."""
 
         expected = {
             descriptor.fragment_id: (shard, descriptor)
@@ -626,11 +1054,11 @@ class MilesChunkedFullParameterAdapter:
             if (
                 row is None
                 or stored.fragment_id in observed
-                or stored.version != 0
+                or (stored.version != 0 and not allow_newer)
                 or stored.parameter_layout_hash != self.layout.layout_hash
                 or stored.topology != row[0].topology
                 or stored.plan_hash != row[0].plan_hash
-                or stored.descriptor != row[1]
+                or (stored.version == 0 and stored.descriptor != row[1])
             ):
                 raise RuntimeError("dense syncer version-zero fragment changed")
             observed[stored.fragment_id] = stored
@@ -728,18 +1156,121 @@ class MilesChunkedFullParameterAdapter:
         )
         return self.validate_cut(target, target_policy_version, 0)
 
+    def rebase_fragment(
+        self,
+        stored: StoredAuthoritativeFragment,
+        current: ReferencedPolicyCut,
+        base: ReferencedPolicyCut,
+        *,
+        ray_module=None,
+    ) -> StoredAuthoritativeFragment:
+        """Sync/train overlap: ``stored + (current - base)`` for one fragment.
+
+        The result is stored like an inbound authoritative fragment (same
+        id, version and provenance, fresh Ray refs) so ``assemble_mixed_target``
+        validates and applies it unchanged. The caller keeps ``stored`` as
+        the anchor and releases the result after the apply."""
+
+        import numpy as np
+        from miles.backends.megatron_utils.full_parameter_state import (
+            _resolve_ray_module,
+        )
+
+        from yeto.rl.engine.sync_overlap import rebase_values
+
+        fragment_id = stored.fragment_id
+        for cut in (current, base):
+            if cut.layout_hash != self.layout.layout_hash:
+                raise ValueError("Miles rebase cut layout changed")
+        owner = _fragment_owner_shard(current.transport_cut, fragment_id)
+        if (
+            stored.parameter_layout_hash != self.layout.layout_hash
+            or stored.topology != owner.topology
+            or stored.plan_hash != owner.plan_hash
+        ):
+            raise ValueError("authoritative fragment provenance changed")
+        ray = _resolve_ray_module(ray_module)
+        chunks = sorted(zip(stored.descriptor.chunks, stored.refs, strict=True),
+                        key=lambda row: row[0].flat_offset)
+        anchor_parts, offset = [], 0
+        for descriptor, reference in chunks:
+            if reference is None or descriptor.flat_offset != offset:
+                raise ValueError("authoritative fragment chunks are released or not contiguous")
+            value = ray.get(reference)
+            anchor_parts.append(value.detach().to("cpu").reshape(-1).numpy())
+            offset += descriptor.numel
+
+        def flat(cut: ReferencedPolicyCut) -> np.ndarray:
+            raw = b"".join(bytes(part) for part in self.fragment_parts(
+                cut, fragment_id, ray_module=ray_module)())
+            return np.frombuffer(raw, dtype="<f4")
+
+        values = rebase_values(np.concatenate(anchor_parts).astype("<f4", copy=False),
+                               flat(current), flat(base))
+        sink = AuthoritativeFragmentSink(current, ray_module=ray_module)
+        return sink(fragment_id, stored.version, values.tobytes())
+
+    def relabel_local_progress(
+        self,
+        cut: ReferencedPolicyCut,
+        *,
+        local_rounds: int,
+    ) -> ReferencedPolicyCut:
+        """Sync/train overlap: label a rebased cut with its local progress.
+
+        ``apply`` resets the local step generation to 0, but a rebased cut
+        (``G + (current - base)``) still holds ``local_rounds`` rounds of
+        progress over its anchor ``G``, and Miles pushes only cuts with
+        progress (generation >= 1). Values, chunk hashes and refs are shared
+        with ``cut`` (fresh ref lists, so releasing one leaves the other);
+        only the generation label changes."""
+
+        from dataclasses import replace
+
+        from miles.ray.full_parameter_transport import FullParameterChunkedCut
+
+        if isinstance(local_rounds, bool) or not isinstance(local_rounds, int) or local_rounds < 1:
+            raise ValueError("a rebased cut needs at least one local round")
+        if cut.layout_hash != self.layout.layout_hash or cut.local_step_generation != 0:
+            raise ValueError("only an applied (generation 0) cut is relabeled")
+        transport = cut.transport_cut
+        relabeled = FullParameterChunkedCut(
+            policy_version=transport.policy_version,
+            local_step_generation=local_rounds,
+            parameter_layout_hash=transport.parameter_layout_hash,
+            shards=tuple(
+                replace(shard, local_step_generation=local_rounds,
+                        chunk_refs=[list(references) for references in shard.chunk_refs])
+                for shard in transport.shards
+            ),
+        )
+        return self.validate_cut(relabeled, cut.policy_version, local_rounds)
+
     async def apply(
         self,
         group: MilesChunkedFullParameterGroup,
         target: ReferencedPolicyCut,
         *,
         commit_token: str | None = None,
+        verified_fragments: Mapping[int, str] | None = None,
     ) -> int:
+        """``verified_fragments``: ``{fragment: payload hash}`` of replaced
+        fragments whose stored chunks were already checked off the trainer
+        (``StoredAuthoritativeFragment.verified_payload_hash``); the trainer
+        does not read them in its prepare.  Ignored by a Miles without it."""
         if target.layout_hash != self.layout.layout_hash:
             raise ValueError("Miles target layout changed")
+        # The role stream builds every target from its current cut, which is
+        # the cut the trainer last exported or committed.  A Miles that can
+        # skip resident fragments then reads and copies only the fragments
+        # this apply replaces; the applied values are the same.
+        extra = {"skip_resident_fragments": True} if skip_resident_supported(group) else {}
+        if verified_fragments and verified_apply_supported(group):
+            extra["verified_fragments"] = dict(verified_fragments)
         applied = await group.apply_full_parameter_chunked_cut(
             target.transport_cut,
             commit_token=commit_token,
+            **extra,
         )
         if applied != self.expected_parameter_tensor_count:
             raise RuntimeError("Miles applied an incomplete reference-backed cut")
@@ -758,6 +1289,214 @@ class MilesChunkedFullParameterAdapter:
         return (
             (policy_version - 1) * self.layout.fragments.num_fragments + fragment_id + 1
         )
+
+
+SKIP_RESIDENT_ENV = "YETO_FULL_PARAMETER_SKIP_RESIDENT"
+
+
+_SKIP_RESIDENT_REPORTED: set[str] = set()
+
+
+def rank_parameters(report: Any) -> RankParameters:
+    """A Miles ``FullParameterPartitionReport`` as the engine-neutral rank description."""
+
+    if report.expert_tensor_parallel_size != 1:
+        raise RuntimeError("a shape-free full-parameter layout needs expert tensor parallelism 1")
+    return RankParameters(
+        key=report.topology,
+        shard_id=report.topology.shard_id,
+        rank=report.global_rank,
+        tp_rank=report.topology.tp_rank,
+        tp_size=report.topology.tp_size,
+        dense_ranks=tuple(report.dense_ranks),
+        expert_ranks=None if report.expert_ranks is None else tuple(report.expert_ranks),
+        tensor_parallel_ranks=tuple(report.tensor_parallel_ranks),
+        parameters=tuple(
+            LocalParameter(
+                name=item.name,
+                shape=tuple(item.shape),
+                expert=item.expert,
+                partition_dim=item.partition_dim,
+                partition_sizes=tuple(item.partition_sizes),
+            )
+            for item in report.parameters
+        ),
+    )
+
+
+def _single_role(roles) -> str:
+    values = set(roles)
+    if len(values) != 1:
+        raise RuntimeError(f"Miles ranks report different roles: {sorted(values)}")
+    return next(iter(values))
+
+
+def _takes_skip_resident(function: Any) -> bool | None:
+    return _takes_parameter(function, "skip_resident_fragments")
+
+
+def _takes_parameter(function: Any, name: str) -> bool | None:
+    """True/False when ``function``'s signature names or lacks the
+    parameter; None when it only forwards ``*args, **kwargs``."""
+
+    import inspect
+
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return None
+    return False
+
+
+def _local_transport_features() -> frozenset[str]:
+    try:
+        from miles.ray import full_parameter_transport
+    except ImportError:
+        return frozenset()
+    return frozenset(getattr(full_parameter_transport, "FULL_PARAMETER_TRANSPORT_FEATURES", ()))
+
+
+def transport_supports(group: Any, method: str, parameter: str, feature: str) -> bool:
+    """Whether ``group.<method>`` takes ``parameter`` (Miles transport ``feature``).
+
+    A signature that names or lacks the parameter decides; a forwarding
+    handle (``*args, **kwargs``, Miles' ``RayWorkerHandle``) is decided by the
+    Miles in this process, which is the trainer's Miles (same image)."""
+
+    function = getattr(group, method, None)
+    if function is None:
+        return False
+    takes = _takes_parameter(function, parameter)
+    if takes is not None:
+        return takes
+    return feature in _local_transport_features()
+
+
+# The switch names live in the engine stream (one switch for every engine).
+from yeto.rl.engine.full_parameter_stream import DEFER_CAPTURE_ENV, LAZY_CAPTURE_ENV, capture_switch_on  # noqa: E402
+
+
+def defer_capture_supported(group: Any) -> bool:
+    """Deferred capture needs the deferred export, on-demand materialization
+    and the skip-resident apply (a deferred row is only ever skipped).
+    ``YETO_FULL_PARAMETER_DEFER_CAPTURE=0`` keeps the full capture."""
+
+    if not capture_switch_on(DEFER_CAPTURE_ENV):
+        return _report_feature("deferred capture", False, f"{DEFER_CAPTURE_ENV}=0")
+    enabled = (
+        skip_resident_supported(group)
+        and transport_supports(group, "export_full_parameter_chunked_cut", "defer_payload", "deferred_export")
+        and getattr(group, "materialize_full_parameter_fragments", None) is not None
+        and ("deferred_export" in _local_transport_features()
+             or _takes_parameter(group.materialize_full_parameter_fragments, "fragment_ids") is True)
+    )
+    return _report_feature("deferred capture", enabled, "group and local Miles transport")
+
+
+def lazy_capture_supported(group: Any) -> bool:
+    """Lazy capture: a local round's capture reads no master (labels, no
+    hash) and its receipt skips the whole-model model/master check; each
+    pushed fragment is hashed, NaN-checked and model-checked when it is
+    materialized.  Needs the deferred capture and the Miles ``lazy_export``
+    transport.  ``YETO_FULL_PARAMETER_LAZY_CAPTURE=0`` keeps hashing every
+    fragment every round."""
+
+    if not capture_switch_on(LAZY_CAPTURE_ENV):
+        return _report_feature("lazy capture", False, f"{LAZY_CAPTURE_ENV}=0")
+    enabled = (
+        defer_capture_supported(group)
+        and transport_supports(group, "export_full_parameter_chunked_cut", "lazy", "lazy_export")
+        and transport_supports(group, "materialize_full_parameter_fragments", "return_descriptors", "lazy_export")
+        and transport_supports(group, "record_full_parameter_local_step", "check_model", "lazy_export")
+    )
+    return _report_feature("lazy capture", enabled, "group and local Miles transport")
+
+
+VERIFY_AHEAD_ENV = "YETO_FULL_PARAMETER_VERIFY_AHEAD"
+
+
+def verified_apply_supported(group: Any) -> bool:
+    """Verify-ahead (S27 G-CG): a broadcast's stored chunks are checked off
+    the trainer as soon as they arrive, and the apply names them so the
+    trainer's prepare reads none of them.  Needs the Miles ``verified_apply``
+    transport (``verify_stored_fragment_chunks``).
+    ``YETO_FULL_PARAMETER_VERIFY_AHEAD=0`` keeps the check on the trainer."""
+
+    import os
+
+    if os.environ.get(VERIFY_AHEAD_ENV, "1") == "0":
+        return _report_feature("verify-ahead", False, f"{VERIFY_AHEAD_ENV}=0")
+    try:
+        from miles.backends.megatron_utils.full_parameter_state import verify_stored_fragment_chunks  # noqa: F401
+    except ImportError:
+        return _report_feature("verify-ahead", False, "local Miles has no verify_stored_fragment_chunks")
+    enabled = transport_supports(group, "apply_full_parameter_chunked_cut", "verified_fragments", "verified_apply")
+    return _report_feature("verify-ahead", enabled, "group and local Miles transport")
+
+
+def optimizer_proof_without_model_check_supported(group: Any) -> bool:
+    return transport_supports(group, "full_parameter_optimizer_states", "check_model",
+                              "optimizer_state_check_model")
+
+
+_FEATURES_REPORTED: set[str] = set()
+
+
+def _report_feature(name: str, enabled: bool, reason: str) -> bool:
+    key = f"{name}:{enabled}:{reason}"
+    if key not in _FEATURES_REPORTED:
+        _FEATURES_REPORTED.add(key)
+        import sys
+
+        print(f"[yeto-full-parameter] {name}: {'enabled' if enabled else 'disabled'} ({reason})",
+              file=sys.stderr, flush=True)
+    return enabled
+
+
+def skip_resident_supported(group: Any) -> bool:
+    """Whether ``group``'s apply takes ``skip_resident_fragments`` (and it is not disabled).
+
+    The production group is Miles' ``RayWorkerHandle`` around the
+    TrainerController actor: its ``__getattr__`` returns a generic
+    ``call(*args, **kwargs)`` that forwards to the remote method, so its
+    signature says nothing (s27-gr-c ran the whole-model apply for this
+    reason). A forwarding signature is then decided by the Miles installed in
+    this process, which is the trainer's Miles (same image):
+    ``full_parameter_transport.apply_chunked_cut`` must name the parameter.
+
+    ``YETO_FULL_PARAMETER_SKIP_RESIDENT=0`` keeps the whole-model apply."""
+
+    import os
+
+    if os.environ.get(SKIP_RESIDENT_ENV, "1") == "0":
+        return _report_skip_resident(False, f"{SKIP_RESIDENT_ENV}=0")
+    apply = getattr(group, "apply_full_parameter_chunked_cut", None)
+    if apply is None:
+        return _report_skip_resident(False, "group has no chunked apply")
+    takes = _takes_skip_resident(apply)
+    if takes is not None:
+        return _report_skip_resident(takes, "group apply signature")
+    try:
+        from miles.ray import full_parameter_transport
+    except ImportError:
+        return _report_skip_resident(False, "forwarding group and no local Miles transport")
+    local = _takes_skip_resident(full_parameter_transport.apply_chunked_cut) is True
+    return _report_skip_resident(local, "forwarding group; local Miles transport")
+
+
+def _report_skip_resident(enabled: bool, reason: str) -> bool:
+    key = f"{enabled}:{reason}"
+    if key not in _SKIP_RESIDENT_REPORTED:
+        _SKIP_RESIDENT_REPORTED.add(key)
+        import sys
+
+        print(f"[yeto-full-parameter] skip resident fragments: "
+              f"{'enabled' if enabled else 'disabled'} ({reason})", file=sys.stderr, flush=True)
+    return enabled
 
 
 def _fragment_owner_shard(cut: Any, fragment_id: int) -> Any:
@@ -822,3 +1561,86 @@ def _metadata_only_reference(reference: ReferencedPolicyCut) -> ReferencedPolicy
         content_hash=reference.content_hash,
         transport_cut=metadata,
     )
+
+
+# -- S27 G-AG diagnostics: one line per Miles trainer-group call ---------------
+
+OP_TIMING_ENV = "YETO_FULL_PARAMETER_OP_TIMING"
+
+
+class TimedGroup:
+    """Forward every attribute of a Miles trainer group; log each method call.
+
+    The production group is a ``RayWorkerHandle`` around the TrainerController
+    actor, whose ``run_plugin`` log lines carry no operation name.  Each call
+    through this wrapper prints ``[yeto-full-parameter] miles op=<method>
+    role=<role> elapsed_s=<s> ok=<bool>`` on the driver once it returns, so
+    the controller's ``run_plugin`` lines of that interval belong to it (one
+    group method may run several plugins, e.g. apply: topology, prepare,
+    commit, finalize).  ``functools.wraps`` keeps each method's signature, so
+    the feature checks above see the wrapped method unchanged."""
+
+    def __init__(self, group: Any, label: str) -> None:
+        object.__setattr__(self, "_timed_group", group)
+        object.__setattr__(self, "_timed_label", label)
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._timed_group, name)
+        if name.startswith("_") or not callable(value):
+            return value
+        import functools
+        import inspect
+        import time
+
+        label = self._timed_label
+
+        @functools.wraps(value)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
+            try:
+                result = value(*args, **kwargs)
+            except BaseException:
+                _log_group_call(name, label, started, ok=False)
+                raise
+            if not inspect.isawaitable(result):
+                _log_group_call(name, label, started, ok=True)
+                return result
+            return _timed_await(result, name, label, started)
+
+        return call
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._timed_group, name, value)
+
+    def __repr__(self) -> str:
+        return f"TimedGroup({self._timed_group!r})"
+
+
+async def _timed_await(awaitable: Any, name: str, label: str, started: float) -> Any:
+    try:
+        result = await awaitable
+    except BaseException:
+        _log_group_call(name, label, started, ok=False)
+        raise
+    _log_group_call(name, label, started, ok=True)
+    return result
+
+
+def _log_group_call(name: str, label: str, started: float, *, ok: bool) -> None:
+    import sys
+    import time
+
+    print(f"[yeto-full-parameter] miles op={name} role={label} "
+          f"elapsed_s={time.monotonic() - started:.3f} ok={'true' if ok else 'false'}",
+          file=sys.stderr, flush=True)
+
+
+def timed_group(group: Any, label: str) -> Any:
+    """``group`` wrapped in :class:`TimedGroup` (``YETO_FULL_PARAMETER_OP_TIMING=0``:
+    unchanged)."""
+
+    import os
+
+    if group is None or isinstance(group, TimedGroup) or os.environ.get(OP_TIMING_ENV, "1") == "0":
+        return group
+    return TimedGroup(group, label)

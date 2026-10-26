@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 
 import torch
 
-from ..fragments import MERGE_AVG, Fragment, FragmentLayout
+from ..fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout, is_embedding_name
 from ..protocol import layout_fingerprint
+from .engine.selection import RL_MATRIX_MERGES
 
 _PEFT_LORA_NAME = re.compile(r"\.lora_(?:A|B)\.weight\Z")
 # rl-algo-critic-family 4.2.3: full-parameter critic tensors on the critic syncer
@@ -173,12 +174,25 @@ def bounded_tensor_groups(
 def build_rl_fragment_layout(
     specs: Sequence[CanonicalTensorSpec],
     num_fragments: int,
+    *,
+    matrix_merge: str = "avg",
 ) -> FragmentLayout:
-    """Build the deterministic all-AVG binpack used by decoupled RL."""
+    """Build the deterministic binpack used by decoupled RL.
+
+    ``matrix_merge="avg"`` (the default) merges every fragment by weighted
+    averaging. ``"rda"`` (S27 P1) merges each fragment that holds no
+    embedding-like tensor by radial-directional averaging; a fragment with an
+    embedding tensor stays averaged (``yeto.fragments`` rule). The merge modes
+    are part of the layout fingerprint, so islands and syncer must agree.
+    """
 
     ordered = tuple(sorted(specs, key=lambda spec: (-spec.numel, spec.name)))
     if num_fragments < 2:
         raise ValueError("decoupled RL requires at least 2 fragments")
+    if matrix_merge not in RL_MATRIX_MERGES:
+        raise ValueError(
+            f"decoupled RL matrix merge must be one of {RL_MATRIX_MERGES}, got {matrix_merge!r}"
+        )
     if num_fragments > len(ordered):
         raise ValueError("decoupled RL fragments exceed canonical tensor count")
     if len({spec.name for spec in ordered}) != len(ordered):
@@ -193,13 +207,21 @@ def build_rl_fragment_layout(
     return FragmentLayout(
         [
             Fragment(
-                merge_mode=MERGE_AVG,
+                merge_mode=_rl_fragment_merge_mode(members, matrix_merge),
                 tensors=[(spec.name, spec.numel) for spec in members],
                 identity_shapes={spec.name: spec.shape for spec in members},
             )
             for members in bins
         ]
     )
+
+
+def _rl_fragment_merge_mode(
+    members: Sequence[CanonicalTensorSpec], matrix_merge: str
+) -> int:
+    if matrix_merge == "rda" and not any(is_embedding_name(spec.name) for spec in members):
+        return MERGE_RDA
+    return MERGE_AVG
 
 
 def canonical_layout_hash(specs: Sequence[CanonicalTensorSpec]) -> str:

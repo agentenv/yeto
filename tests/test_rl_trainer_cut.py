@@ -284,8 +284,8 @@ def test_context_is_checked_before_any_rank_writes(tmp_path):
 def test_missing_optimizer_coverage_is_refused(tmp_path, monkeypatch):
     from yeto.rl.adapters.miles import cut_plugin
 
-    real = cut_plugin._save
-    monkeypatch.setattr(cut_plugin, "_save", lambda *a, **k: {**real(*a, **k), "optimizer_names": ["lora_A"]})
+    real = cut_plugin._write
+    monkeypatch.setattr(cut_plugin, "_write", lambda *a, **k: {**real(*a, **k), "optimizer_names": ["lora_A"]})
     with pytest.raises(CutError, match="no optimizer state"):
         _trainer(RankGroup([_trained_rank()])).save_cut(epoch=1, context=_context(tmp_path))
 

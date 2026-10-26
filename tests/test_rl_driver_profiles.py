@@ -62,9 +62,9 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
-# Always emitted since the 1b/2a request (not an observation event); the R0
-# comparison removes exactly this event and nothing else.
-ACCOUNTING_EVENTS = {"rl_round_trained"}
+# Always emitted since the 1b/2a request and P4 3.1 (not observation events);
+# the R0 comparison removes exactly these events and nothing else.
+ACCOUNTING_EVENTS = {"rl_round_trained", "rl_round_wall"}
 
 
 R0_TAPE = json.loads(
@@ -98,7 +98,10 @@ def test_profile_none_matches_the_recorded_r0_tape(tmp_path):
                             capabilities=fake_capabilities())
         driver.run()
         events = _events(tmp_path / f"{kind}.jsonl")
-        trained = [e for e in events if e["event"] in ACCOUNTING_EVENTS]
+        trained = [e for e in events if e["event"] == "rl_round_trained"]
+        walls = [e for e in events if e["event"] == "rl_round_wall"]
+        assert [(e["rollout_id"], e["placement"]) for e in walls] == [(r, kind) for r in range(3)]
+        assert all(e["round_seconds"] >= e["rollout_seconds"] >= 0 for e in walls)
         assert [(e["trained_groups"], e["trained_samples"]) for e in trained] == [
             (engine_groups, engine_groups * engine_samples) for _ in range(3)
         ]
@@ -315,3 +318,113 @@ def test_observed_events_carry_labels_and_feed_load_windows(tmp_path):
                          profile=_profile("colocated-serial"), observe=False)
     driver2.run()
     assert load_windows(_events(tmp_path / "off.jsonl"), 1.0) == []
+
+
+def test_round_delay_applies_only_to_named_islands(tmp_path, monkeypatch):
+    from yeto.rl.engine import driver as drv
+
+    cfg = tmp_path / "fi.json"
+    cfg.write_text('{"round_delay_s": 0.01, "round_delay_islands": [1]}')
+    assert drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(cfg)}) == {
+        "round_delay_s": 0.01, "round_delay_islands": [1]}
+    monkeypatch.setenv(drv.FAULT_INJECTION_ENV, str(cfg))
+    engine = _engine(placement_kind="fixed-partition")
+    driver, _ = _driver(engine, tmp_path, profile=_profile("partitioned-serial"))
+    driver.run()  # learner 0: not named, no delay
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert "round_delay" not in kinds
+    driver.fault_injection = {"round_delay_s": 0.01}  # every island
+    driver._inject_round_delay(7)
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert kinds.count("round_delay") == 1
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"round_delay_s": 1, "round_delay_islands": "1"}')
+    with pytest.raises(ValueError):
+        drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
+
+
+def test_fault_injection_process_exit_keys(tmp_path):
+    from yeto.rl.engine.driver import FAULT_INJECTION_ENV, load_fault_injection
+
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"exit_at_round": 3, "exit_islands": [1, 1]}))
+    assert load_fault_injection({FAULT_INJECTION_ENV: str(path)}) == {
+        "exit_at_round": 3, "exit_islands": [1]}
+    for bad in ({"exit_at_round": 0, "exit_islands": [1]}, {"exit_at_round": 2},
+                {"exit_islands": [1]}):
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            load_fault_injection({FAULT_INJECTION_ENV: str(path)})
+
+
+@pytest.mark.parametrize(("learner", "incarnation", "exits"),
+                         [(1, None, True), (1, "0", True), (1, "1", False), (0, None, False)])
+def test_fault_injection_exits_only_the_first_container(monkeypatch, learner, incarnation, exits):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import driver as module
+
+    exited = []
+    monkeypatch.setattr("os._exit", exited.append)
+    if incarnation is None:
+        monkeypatch.delenv(module.MODAL_INCARNATION_ENV, raising=False)
+    else:
+        monkeypatch.setenv(module.MODAL_INCARNATION_ENV, incarnation)
+    events = []
+    fake = SimpleNamespace(fault_injection={"exit_at_round": 2, "exit_islands": [1]},
+                           learner_id=learner, emit=lambda *a, **k: events.append(a),
+                           _rounds_in_process=0)
+    module.IslandDriver._inject_exit(fake, 1)
+    module.IslandDriver._inject_exit(fake, 2)
+    assert exited == ([137] if exits else [])
+
+
+def test_fault_injection_second_exit_and_catch_up_keys(tmp_path):
+    from yeto.rl.engine.driver import FAULT_INJECTION_ENV, MODAL_INCARNATION_ENV, catch_up_incarnation
+    from yeto.rl.engine.driver import load_fault_injection
+
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"exit_at_round": 12, "exit_islands": [1], "exit_rejoined_after_rounds": 20,
+                                "catch_up_incarnations": [2, 2]}))
+    env = {FAULT_INJECTION_ENV: str(path)}
+    assert load_fault_injection(env) == {"exit_at_round": 12, "exit_islands": [1],
+                                         "exit_rejoined_after_rounds": 20, "catch_up_incarnations": [2]}
+    assert catch_up_incarnation(env) is None  # first container
+    assert catch_up_incarnation({**env, MODAL_INCARNATION_ENV: "1"}) is None  # first re-run: peer
+    assert catch_up_incarnation({**env, MODAL_INCARNATION_ENV: "2"}) == 2
+    assert catch_up_incarnation({MODAL_INCARNATION_ENV: "2", FAULT_INJECTION_ENV: str(tmp_path / "none")}) is None
+    for bad in ({"exit_rejoined_after_rounds": 3},
+                {"exit_at_round": 2, "exit_islands": [1], "exit_rejoined_after_rounds": 0},
+                {"catch_up_incarnations": [0]}, {"catch_up_incarnations": []}):
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            load_fault_injection(env)
+
+
+@pytest.mark.parametrize(("incarnation", "rounds_run", "exit_on"),
+                         [("0", 5, 12), ("1", 25, 20), ("2", 30, None)])
+def test_fault_injection_first_rerun_exits_after_its_own_rounds(monkeypatch, incarnation, rounds_run, exit_on):
+    """Incarnation 0 exits at rollout id 12; the first re-run (incarnation 1,
+    rejoined at some rollout id) exits before its 20th round; later re-runs never."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import driver as module
+
+    exited = []
+    monkeypatch.setattr("os._exit", exited.append)
+    monkeypatch.setenv(module.MODAL_INCARNATION_ENV, incarnation)
+    events = []
+    fake = SimpleNamespace(fault_injection={"exit_at_round": 12, "exit_islands": [1],
+                                            "exit_rejoined_after_rounds": 20},
+                           learner_id=1, emit=lambda *a, **k: events.append((a, k)), _rounds_in_process=0)
+    start = 0 if incarnation == "0" else 40  # a re-run continues at the pool's rollout id
+    exit_round = None
+    for n in range(rounds_run if incarnation != "0" else 13):
+        module.IslandDriver._inject_exit(fake, start + n)
+        if exited and exit_round is None:
+            exit_round = n + 1  # rounds this process started, the exit one included
+    expected = None if exit_on is None else (13 if incarnation == "0" else exit_on)
+    assert exit_round == expected
+    if expected is not None:
+        (_, kw), = events
+        assert kw["incarnation"] == int(incarnation) and kw["rounds_in_process"] == expected

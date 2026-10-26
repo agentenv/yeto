@@ -26,7 +26,8 @@ _BRIDGE_CLASS: type | None = None
 _CLONE_ROUTER_CLASS: type | None = None
 _ENSURING_BRIDGE = False
 _MILES_HELPER_FINDER = None
-_MILES_HELPER_TARGET = "miles.backends.megatron_utils.bridge_lora_helpers"
+# The ports Miles module that builds the LoRA Bridge in each trainer worker.
+_MILES_HELPER_TARGET = "miles.backends.megatron_utils.lora.bridge"
 _LAYER_COMPRESSION = {
     "sliding_attention": 0,
     "compressed_sparse_attention": 4,

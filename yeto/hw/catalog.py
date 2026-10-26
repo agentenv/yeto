@@ -2,6 +2,12 @@
 (yeto-framework-decoupling 7.7a, design D9a-1).
 
 ``compat_group`` is ``"<vendor>-<card>"`` in lower case, e.g. ``nvidia-h100``.
+With the HBM size (S25 N2.1) it is ``"<vendor>-<card>-<N>g"``, e.g.
+``ascend-910b4-64g``: the 910B4 ships with 32 GiB and with 64 GiB (the user's
+cluster changed from one to the other on 2026-10-16), and the two must not
+merge. The vendor names the device family one to one
+(:data:`DEVICE_FAMILY_BY_VENDOR`; a PPU is ``thead``), so the group always
+carries the device family.
 Phase 1 rule: two islands may merge only when their groups are identical
 (H100 and H200 are different groups).  The value comes from this catalog,
 never from a cloud name; an unknown card is an error before launch (no
@@ -13,6 +19,7 @@ part of the group and never cause a refusal (user decision 2026-10-09).
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -27,11 +34,34 @@ CARD_VENDOR: Mapping[str, str] = {
     "T4": "nvidia",
     # Ascend NPU. 910B4 is the model the user bought (decision 2026-10-10);
     # "910B" stays as the family-level name earlier code already used.
-    "910B": "ascend", "910B4": "ascend",
+    "910B": "ascend", "910B4": "ascend", "910B2": "ascend", "910B3": "ascend",
+    "910C": "ascend",
+    # Alibaba T-Head PPU (rl-ssh-node-pool D2). torch reports device type
+    # "cuda" on these cards, so the vendor comes from the card name only
+    # (infra-drafts/SESSION24/T-PPU-gaps.md 2.1).
+    "810E": "thead", "M890": "thead",
 }
 
-# torch device type -> device family in the backend identity.
+# Nominal HBM sizes (GiB) a card ships with. Read from our machines: 910B4
+# 64 GiB (inventory, 2026-10-16) and 32 GiB (ModelArts), M890 144 GiB
+# (ppu-smi 147456 MiB, SESSION25/N0.1-ppu-survey.md). The others are public
+# product figures, not read on our nodes. 810E: not known, so any reported
+# size is used as is (rounded).
+CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
+    "910B": (32, 64), "910B4": (32, 64), "910B2": (64,), "910B3": (64,), "910C": (128,),
+    "810E": (), "M890": (144,),
+    "H100": (80,), "H200": (141,), "A100": (40, 80), "A100-80GB": (80,), "B200": (180,),
+}
+
+# torch device type -> device family in the backend identity. A PPU is absent
+# on purpose: its torch device type is "cuda", so only the card name tells it
+# apart from an NVIDIA GPU (see VENDOR_BY_DEVICE_FAMILY).
 DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend"}
+
+# Launcher device family (yeto.gpu_spec.DEVICE_FAMILIES) -> vendor.
+VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend",
+                                              "ppu": "thead"}
+DEVICE_FAMILY_BY_VENDOR: Mapping[str, str] = {v: k for k, v in VENDOR_BY_DEVICE_FAMILY.items()}
 
 
 def device_family(device_type: str | None = None) -> str:
@@ -49,6 +79,40 @@ def device_family(device_type: str | None = None) -> str:
         except Exception:  # noqa: BLE001 - torch is optional at this call site
             device_type = "cpu"
     return DEVICE_FAMILY_BY_DEVICE_TYPE.get(device_type, "nvidia")
+
+
+# Ray's accelerator resource name per identity device family (S27 G-EQ2, npu1).
+# Ray counts CUDA cards in its own built-in "GPU" resource, so a CUDA island
+# reads cluster_resources()["GPU"] and starts Ray with --num-gpus. An Ascend
+# node's cards are the custom resource "NPU" instead: cluster_resources() has
+# no "GPU" key at all, `ray start --num-gpus` does not create one that matches
+# the cards, and an actor asks for them with resources={"NPU": n}. Verified by
+# reading verl's own platform layer at fork acad9875
+# (verl/plugin/platform/platform_npu.py ray_resource_name / ray_resource_options,
+# verl/single_controller/ray/base.py _check_resource_available).
+RAY_RESOURCE_BY_DEVICE_FAMILY: Mapping[str, str] = {"nvidia": "GPU", "ascend": "NPU", "thead": "GPU"}
+
+
+def ray_accelerator_resource(device_family_name: str | None = None) -> str:
+    """Ray's resource name for this node's accelerators ("GPU" or "NPU").
+
+    ``device_family_name`` is an identity device family (:func:`device_family`);
+    None reads this node's. An unknown family reads as "GPU", the historical
+    value, so a new card never silently loses its cards to a KeyError."""
+    if device_family_name is None:
+        device_family_name = device_family()
+    return RAY_RESOURCE_BY_DEVICE_FAMILY.get(device_family_name, "GPU")
+
+
+def ray_start_accelerator_flag(count: int, device_family_name: str | None = None) -> str:
+    """``ray start`` flag that gives a restarted Ray ``count`` accelerators.
+
+    CUDA keeps ``--num-gpus=N``; an Ascend node needs ``--resources`` with the
+    custom NPU resource, because ``ray start`` has no ``--num-npus``."""
+    resource = ray_accelerator_resource(device_family_name)
+    if resource == "GPU":
+        return f"--num-gpus={int(count)}"
+    return "--resources='" + json.dumps({resource: int(count)}) + "'"
 
 
 # Phase 2 (design D9a): tolerances per (group, group) pair once calibrated.
@@ -81,10 +145,60 @@ def _canonical(card: str) -> str:
                           f"(known: {sorted(CARD_VENDOR)}); cannot derive compat_group")
 
 
-def compat_group(card: str) -> str:
-    """``"H100"`` -> ``"nvidia-h100"``; unknown card -> :class:`UnknownCardType`."""
+def nominal_hbm_gib(card: str, reported_gib: float) -> int:
+    """The nominal HBM size of ``card`` that a reported (usable) size belongs to.
+
+    Card tools report the size minus the driver reservation, so the largest
+    nominal size within ``card_tools.HBM_TOLERANCE`` below the report wins.
+    A card without known sizes returns the report rounded; a report that fits
+    no known size raises :class:`UnknownCardType`."""
+    from .card_tools import hbm_matches  # noqa: PLC0415 - card_tools imports gpu_spec
+
     name = _canonical(card)
-    return f"{CARD_VENDOR[name]}-{name.lower()}"
+    if not reported_gib or reported_gib <= 0:
+        raise UnknownCardType(f"{name}: HBM size must be positive, got {reported_gib!r}")
+    sizes = CARD_HBM_GIB.get(name, ())
+    if not sizes:
+        return int(round(reported_gib))
+    fitting = [size for size in sizes if hbm_matches(size, reported_gib) and reported_gib <= size * 1.02]
+    if not fitting:
+        raise UnknownCardType(f"{name} with {reported_gib:g} GiB HBM is not a known variant "
+                              f"(known sizes: {list(sizes)} GiB); cannot derive compat_group")
+    return max(fitting)
+
+
+def compat_group(card: str, hbm_gib: float | None = None) -> str:
+    """``"H100"`` -> ``"nvidia-h100"``; with ``hbm_gib``: ``("910B4", 61.9)`` ->
+    ``"ascend-910b4-64g"``. Unknown card or HBM variant -> :class:`UnknownCardType`."""
+    name = _canonical(card)
+    group = f"{CARD_VENDOR[name]}-{name.lower()}"
+    if hbm_gib is None:
+        return group
+    return f"{group}-{nominal_hbm_gib(name, float(hbm_gib))}g"
+
+
+def launch_compat_group(card: str, explicit: str | None = None) -> str:
+    """The group the launcher exports to an island on ``card``.
+
+    ``explicit`` (``yeto launch --rl-compat-group``) replaces the card group on
+    every island of the run: islands on different cards then declare one group
+    and the syncer admits them together.  Their numeric tolerance is not
+    calibrated (``CARD_PAIR_TOLERANCE`` is empty), so this is an operator
+    decision, recorded on the launcher log and on each island's hardware event.
+    The card must still be in the catalog: an unknown card fails here as before."""
+    derived = compat_group(card)
+    if not explicit:
+        return derived
+    return validate_compat_group(explicit)
+
+
+def compat_group_family(group: str) -> str:
+    """The launcher device family (``cuda``/``npu``/``ppu``) of a compat group."""
+    vendor = validate_compat_group(group).split("-", 1)[0]
+    try:
+        return DEVICE_FAMILY_BY_VENDOR[vendor]
+    except KeyError:
+        raise ValueError(f"compat_group {group!r}: unknown vendor {vendor!r}") from None
 
 
 def validate_compat_group(value: str) -> str:

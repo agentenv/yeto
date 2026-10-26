@@ -377,7 +377,9 @@ def test_miles_and_fake_declarations():
 
     miles = miles_capabilities(FP)
     assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
-    assert miles.declared_mechanisms() == R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    assert miles.declared_mechanisms() == (
+        R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    )
     assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
     # the fake declares every correction for CPU tests (and nothing else extra)
     fake = fake_capabilities()

@@ -8,6 +8,8 @@
 #
 # Inputs (env, defaults = this checkout's pins):
 #   MILES_SRC / SGLANG_SRC   local clones containing the commits
+#   MEGATRON_LM_SRC          clone containing the base's Megatron-LM commit
+#                            (default: shallow fetch into $OUT/megatron-lm)
 #   MILES_COMMIT / SGLANG_COMMIT  override the pinned fork commits
 #   CRANE                    crane binary (go-containerregistry >= 0.20)
 #   DEST_REPO                ghcr.io/michaellchung/yeto-miles-ports (private)
@@ -36,7 +38,8 @@ pins=$(python3 - <<'PY'
 import re
 src = open("yeto/rl/adapters/miles/pins.py").read()
 for k in ("MILES_NEXT_REPOSITORY", "MILES_NEXT_COMMIT", "MILES_NEXT_UPSTREAM_COMMIT",
-          "SGLANG_NEXT_REPOSITORY", "SGLANG_NEXT_COMMIT", "SGLANG_NEXT_UPSTREAM_COMMIT"):
+          "SGLANG_NEXT_REPOSITORY", "SGLANG_NEXT_COMMIT", "SGLANG_NEXT_UPSTREAM_COMMIT",
+          "MILES_PEFT_VERSION"):
     print(f"{k}={re.search(rf'^{k} = \"([^\"]+)\"', src, re.M).group(1)}")
 PY
 )
@@ -73,6 +76,29 @@ import json, sys; print(json.load(sys.stdin)["layers"][104]["digest"])')
   mv "$OUT/meta-x/opt/sglang/lib/python3.12/site-packages" "$META"
 fi
 
+# Megatron-LM files patched in the layer (docker/miles-ports/
+# megatron_lm_lazy_modelopt.patch) start from the base's checkout commit.
+MEGATRON_LM_REPOSITORY=https://github.com/radixark/Megatron-LM
+MEGATRON_LM_COMMIT=a84b105473eca9c9c6e49dbf1c8aa460c5cf796e   # /root/Megatron-LM
+if [ -z "${MEGATRON_LM_SRC:-}" ]; then
+  MEGATRON_LM_SRC="$OUT/megatron-lm"
+  if [ ! -d "$MEGATRON_LM_SRC" ]; then
+    git init -q "$MEGATRON_LM_SRC"
+    git -C "$MEGATRON_LM_SRC" fetch -q --depth 1 "$MEGATRON_LM_REPOSITORY" "$MEGATRON_LM_COMMIT"
+  fi
+fi
+git -C "$MEGATRON_LM_SRC" cat-file -e "$MEGATRON_LM_COMMIT^{commit}"
+
+# peft (pinned MILES_PEFT_VERSION) goes into the image, so island setup
+# neither installs nor imports it (rl-trainer-cold-start-cost L2.3/L2.4):
+# the pure-Python wheel is unpacked into the base's site-packages, no deps
+# (the island setup used to pip-install it into the same environment).
+PIP=${PIP:-python3 -m pip}
+mkdir -p "$OUT/wheels"
+$PIP download -q --no-deps --only-binary=:all: --dest "$OUT/wheels" "peft==$MILES_PEFT_VERSION"
+PEFT_WHEEL=$(ls "$OUT/wheels"/peft-"$MILES_PEFT_VERSION"-*.whl)
+PEFT_WHEEL_SHA=$(sha256sum "$PEFT_WHEEL" | cut -d' ' -f1)
+
 python3 - "$OUT/image-manifest.json" <<PY
 import json, sys
 json.dump({
@@ -89,7 +115,14 @@ json.dump({
              "upstream_commit": "$SGLANG_NEXT_UPSTREAM_COMMIT", "path": "/sgl-workspace/sglang",
              "version": "$SGLANG_VERSION",
              "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)"},
+  "peft": {"version": "$MILES_PEFT_VERSION", "wheel": "$(basename "$PEFT_WHEEL")",
+           "wheel_sha256": "$PEFT_WHEEL_SHA",
+           "install": "wheel unpacked into the base's site-packages (pip install --no-deps equivalent)"},
   "pure_python_overlay": True,
+  "megatron_bridge": {"commit": "8cd3466d14d2337c8492827b3712482c2b3e4866",
+                      "patches": ["lazy-modelopt (docker/miles-ports/megatron_bridge_init.py)"]},
+  "megatron_lm": {"repository": "$MEGATRON_LM_REPOSITORY", "commit": "$MEGATRON_LM_COMMIT", "path": "/root/Megatron-LM",
+                  "patches": ["lazy-modelopt (docker/miles-ports/megatron_lm_lazy_modelopt.patch)"]},
   "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
 }, open(sys.argv[1], "w"), indent=2, sort_keys=True)
 PY
@@ -101,7 +134,9 @@ python3 docker/miles-ports/make_layer.py \
   --sglang-src "$SGLANG_SRC" --sglang-commit "$SGLANG_NEXT_COMMIT" \
   --sglang-base-commit "$BASE_SGLANG_COMMIT" --sglang-origin "$SGLANG_NEXT_REPOSITORY" \
   --sglang-base-version "$BASE_SGLANG_VERSION" --sglang-version "$SGLANG_VERSION" \
-  --sglang-base-metadata "$META" --mtime "$MTIME" --out "$OUT/layer.tar"
+  --sglang-base-metadata "$META" --wheel "$PEFT_WHEEL" \
+  --megatron-lm-src "$MEGATRON_LM_SRC" \
+  --mtime "$MTIME" --out "$OUT/layer.tar"
 LAYER_SHA=$(sha256sum "$OUT/layer.tar" | cut -d' ' -f1)
 echo "layer.tar sha256=$LAYER_SHA"
 
@@ -125,6 +160,7 @@ import json, sys
 json.dump({"tag": "$TAG", "digest": "$DIGEST" or None, "layer_tar_sha256": "$LAYER_SHA",
            "base": "$BASE_REPO@$BASE_AMD64_DIGEST", "base_index": "$BASE_INDEX_DIGEST",
            "miles_commit": "$MILES_NEXT_COMMIT", "sglang_commit": "$SGLANG_NEXT_COMMIT",
-           "sglang_version": "$SGLANG_VERSION"}, open(sys.argv[1], "w"), indent=2)
+           "sglang_version": "$SGLANG_VERSION", "peft_version": "$MILES_PEFT_VERSION",
+           "peft_wheel_sha256": "$PEFT_WHEEL_SHA"}, open(sys.argv[1], "w"), indent=2)
 PY
 echo "out=$OUT"

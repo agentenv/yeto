@@ -33,7 +33,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
+from .trainable_state import (
+    LAYOUT_FRAGMENTS,
+    LAYOUT_LORA,
+    TrainableState,
+    UnsupportedLayoutError,
+    require_supported_layout,
+)
+
+# Layouts a trainer-resident handle can stand for.  ``fragments`` (full
+# parameters, P0-D1) never materializes: its tensors stay chunked in the trainer.
+RESIDENT_LAYOUTS = frozenset({LAYOUT_LORA, LAYOUT_FRAGMENTS})
 
 POLICY_TENSOR_PREFIX = b"yeto-rl-policy-tensors-v1\0"
 PAYLOAD_PREFIX = b"yeto-rl-publication-payload-v1\0"
@@ -74,6 +84,49 @@ class PolicyDigest:
             specs=tuple((str(n), tuple(int(d) for d in s)) for n, s in raw["specs"]),
             hash_seconds=float(raw.get("hash_seconds", 0.0)),
         )
+
+
+class DeferredDigest:
+    """A :class:`PolicyDigest` whose hashes are still being computed in the trainer
+    (E1, sync colocated mode: the trainer hashes while it offloads). The layout
+    (``specs``) is known at once; the first read of a hash calls ``resolve`` once
+    (it waits for the trainer) and the values are those of the eager digest."""
+
+    def __init__(self, specs: Sequence[tuple[str, tuple[int, ...]]], resolve: Callable[[], "PolicyDigest"]):
+        self.specs = tuple((str(n), tuple(int(d) for d in s)) for n, s in specs)
+        self._resolve = resolve
+        self._done: PolicyDigest | None = None
+
+    def resolved(self) -> "PolicyDigest":
+        if self._done is None:
+            done = self._resolve()
+            if done.specs != self.specs:
+                raise PolicyDigestError("the deferred digest's layout changed while it was hashed")
+            self._done = done
+        return self._done
+
+    @property
+    def is_resolved(self) -> bool:
+        return self._done is not None
+
+    @property
+    def policy_tensor_hash(self) -> str:
+        return self.resolved().policy_tensor_hash
+
+    @property
+    def payload_hash(self) -> str:
+        return self.resolved().payload_hash
+
+    @property
+    def payload_bytes(self) -> int:
+        return self.resolved().payload_bytes
+
+    @property
+    def hash_seconds(self) -> float:
+        return self.resolved().hash_seconds
+
+    def to_wire(self) -> dict[str, Any]:
+        return self.resolved().to_wire()
 
 
 def _raw(tensor: Any, name: str) -> memoryview:
@@ -149,6 +202,83 @@ def digest_canonical_tensors(
                         hash_seconds=round(time.monotonic() - started, 3))
 
 
+class NonFiniteTensor(ValueError):
+    """A tensor staged by :func:`stage_f32_on_host` holds NaN or Inf (``name`` says which)."""
+
+    def __init__(self, name: str):
+        super().__init__(f"{name!r} contains NaN or Inf")
+        self.name = name
+
+
+class HostStaging:
+    """One reusable pinned host buffer for :func:`stage_f32_on_host` (E1).
+
+    Allocating pinned memory costs milliseconds per call; the policy keeps the
+    same size every round, so the owner (the trainer process) keeps one of
+    these and the buffer is reallocated only when the policy grows."""
+
+    def __init__(self, *, pin: bool = True) -> None:
+        self._pin = pin
+        self._buffer = None
+
+    def flat(self, numel: int):
+        import torch
+
+        if self._buffer is None or self._buffer.numel() < numel:
+            pin = self._pin and torch.cuda.is_available()
+            self._buffer = torch.empty(numel, dtype=torch.float32, pin_memory=pin)
+        return self._buffer[:numel]
+
+
+def stage_f32_on_host(tensors: Mapping[str, Any], staging: HostStaging | None = None) -> dict[str, Any]:
+    """Canonical CPU f32 contiguous copies of ``tensors`` (sorted by name), bit for bit
+    the values of ``t.detach().to("cpu", torch.float32).contiguous()`` per tensor.
+
+    E1: with ``staging`` and every tensor on one device, the f32 conversion and the
+    finite check run on that device (the GPU) and the copies go to the pinned host
+    buffer asynchronously, with ONE synchronization for all of them (the per-tensor
+    path waits once per tensor: ~400 waits for a Qwen3-0.6B LoRA). No extra device
+    buffer is held: a tensor already f32 and contiguous is copied as it is. The
+    returned tensors are views of ``staging``'s buffer and are valid until the next
+    call with the same ``staging``: hash them, do not keep them (``torch.save`` of a
+    view would also write the whole buffer). Without ``staging`` (or with tensors on
+    several devices) each tensor is copied on its own, as before. Raises
+    :class:`NonFiniteTensor` naming the first non-finite tensor in name order, like
+    the per-tensor check."""
+
+    import torch
+
+    names = sorted(tensors)
+    values = [tensors[n].detach() for n in names]
+    devices = {v.device for v in values}
+    if staging is None or len(devices) != 1:
+        out = {}
+        for name, value in zip(names, values):
+            value = value.to(device="cpu", dtype=torch.float32).contiguous().clone()
+            if not torch.isfinite(value).all().item():
+                raise NonFiniteTensor(name)
+            out[name] = value
+        return out
+    flat = staging.flat(sum(v.numel() for v in values))
+    out, finite, offset = {}, [], 0
+    for name, value in zip(names, values):
+        source = value.to(dtype=torch.float32).contiguous()
+        finite.append(torch.isfinite(source).all())
+        view = flat[offset:offset + source.numel()].view(source.shape)
+        view.copy_(source, non_blocking=True)
+        out[name] = view
+        offset += source.numel()
+    device = next(iter(devices))
+    ok = bool(torch.stack(finite).all().item()) if finite else True
+    if device.type == "cuda":
+        torch.cuda.current_stream(device).synchronize()  # the copies to the host are complete
+    if not ok:
+        for name, check in zip(names, finite):
+            if not bool(check.item()):
+                raise NonFiniteTensor(name)
+    return out
+
+
 def layout_hash_of(specs: Sequence[tuple[str, tuple[int, ...]]]) -> str:
     """The canonical layout hash rebuilt from (name, shape) only."""
 
@@ -184,10 +314,14 @@ class TrainerResidentState:
     weights_mark: Mapping[str, Any] | None = None
     # (state) -> None, raises when the trainer no longer holds this policy
     holds_fn: Callable[[Any], None] | None = field(default=None, repr=False, compare=False)
+    # E1: False for a round whose policy content is not hashed (see unverified_identity):
+    # ``digest`` then holds an identity of the trainer weights version, not a content hash,
+    # and the publisher skips the engine read-back
+    verified: bool = True
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        require_supported_layout(self.layout, {LAYOUT_LORA})
+        require_supported_layout(self.layout, RESIDENT_LAYOUTS)
 
     # -- identities (no tensors needed) -----------------------------------
     def policy_tensor_hash(self) -> str:
@@ -214,10 +348,12 @@ class TrainerResidentState:
 
     # -- lazy full state ----------------------------------------------------
     def materialize(self) -> TrainableState:
+        if self.layout == LAYOUT_FRAGMENTS:
+            raise UnsupportedLayoutError(self.layout, frozenset({LAYOUT_LORA}))
         state = self._cache.get("state")
         if state is None:
             state = self.materialize_fn(self.policy_version)
-            if state.policy_tensor_hash() != self.digest.policy_tensor_hash:
+            if self.verified and state.policy_tensor_hash() != self.digest.policy_tensor_hash:
                 raise PolicyDigestError(
                     "trainer weights changed after the resident digest was taken")
             self._cache["state"] = state
@@ -232,6 +368,18 @@ class TrainerResidentState:
 
     def policy_hash(self) -> str:
         return self.materialize().policy_hash()
+
+
+UNVERIFIED_PREFIX = b"yeto-unverified-policy-v1\0"
+
+
+def unverified_identity(policy_version: int, weights_mark: Mapping[str, Any]) -> str:
+    """The 64-hex policy identity of a publication whose content is not hashed (E1):
+    names the trainer process and its weights version, so two different weights never
+    share it; it is never equal to a content hash of the same weights."""
+    raw = json.dumps({"policy_version": int(policy_version), "weights": dict(weights_mark)},
+                     sort_keys=True).encode("utf-8")
+    return hashlib.sha256(UNVERIFIED_PREFIX + raw).hexdigest()
 
 
 def is_resident(state: Any) -> bool:

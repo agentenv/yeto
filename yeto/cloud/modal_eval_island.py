@@ -253,7 +253,6 @@ def install_reclaim_handler(store: EvalStore, emit: Callable[..., None], island_
 # --- the Modal GPU function (5.10) -------------------------------------------------
 
 EVAL_STORE_MOUNT = "/mnt/yeto-eval-store"     # the eval store Volume inside the eval island
-CODEX_MOUNT = "/opt/yeto/codex"                 # yeto.rl.CODEX_CONTAINER_DIR (signed codex bundle)
 TB2_MOUNT = "/root/tb2-data"                    # terminal-bench-2 checkout (YETO_HARNESS_TB2_TASKS_DIR)
 WORKDIR_MOUNT = "/root/sky_workdir"             # yeto source, same place as the training islands
 IMAGE_PYTHONPATH = "/root/miles:/root/sglang/python:/root/sky_workdir"
@@ -270,13 +269,12 @@ def default_image_ref() -> str:
 @dataclass
 class EvalFunctionSpec:
     """Shape of the eval-island Modal function. ``gpu`` is a Modal GPU string
-    (``H100!`` = exactly H100); ``envs`` become one Modal secret (codex
-    contract env, Modal token for the judge sandboxes, TB2 knobs)."""
+    (``H100!`` = exactly H100); ``envs`` become one Modal secret (Modal
+    token for the judge sandboxes, TB2 knobs)."""
 
     app_name: str
     volume: str
     workdir: str
-    codex_dir: str
     tb2_dir: str
     gpu: str = "H100!"
     gpus: int = 1
@@ -315,7 +313,7 @@ def _gpu_sampler(path: Path, stop: Any, interval_s: float = 5.0) -> None:
 
 def _image_paths(environ: Any = None) -> None:
     """Miles / SGLang / yeto source on ``sys.path``; subprocesses (SGLang, session
-    server, codex worker) get exactly the training island's ``PYTHONPATH``, without
+    server) get exactly the training island's ``PYTHONPATH``, without
     Modal's runtime copies (their protobuf/grpclib would shadow the image's)."""
     import sys
 
@@ -416,7 +414,6 @@ def build_eval_app(spec: EvalFunctionSpec) -> tuple[Any, Any, Any]:
              .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
              .add_local_dir(spec.workdir, WORKDIR_MOUNT, copy=False,
                             ignore=[".git", ".venv", ".claude", "**/__pycache__", "**/*.pyc", "s1-runs"])
-             .add_local_dir(spec.codex_dir, CODEX_MOUNT, copy=False)
              .add_local_dir(spec.tb2_dir, TB2_MOUNT, copy=False, ignore=[".git"]))
     app = modal.App(spec.app_name)
     volume = modal.Volume.from_name(spec.volume, create_if_missing=True)

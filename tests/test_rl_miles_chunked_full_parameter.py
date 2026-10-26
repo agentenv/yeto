@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import socket
+import json
 import struct
-import subprocess
 import sys
 import types
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -47,10 +45,11 @@ from yeto.protocol import (
     MSG_FINAL_FRAGMENT,
     SyncerClient,
 )
-from yeto.rl.adapters.miles.models.dense_sweep_wire import _MilesRayInboundChunkSink
-from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepConfig, DenseSweepWire
+from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
+    LAYOUT_PROBE_LOG_PREFIX,
     MilesChunkedFullParameterAdapter,
+    layout_attestation_record,
 )
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
@@ -205,6 +204,60 @@ def test_initialize_rejects_probe_layout_drift_before_install_or_export():
             )
         )
     assert group.installed is False
+
+
+def test_layout_refusal_prints_the_observed_layout_as_an_attestation_record(capsys):
+    class Group:
+        async def full_parameter_shard_manifests(self):
+            return (manifest(1, (99, 1), role="critic"), manifest(0, (100, 1), role="critic"))
+
+        async def install_full_parameter_fragment_plans(self, _plans):
+            raise AssertionError("layout drift must fail before plan installation")
+
+    with pytest.raises(RuntimeError, match="differs from the frozen probe"):
+        asyncio.run(
+            MilesChunkedFullParameterAdapter.initialize(
+                Group(),
+                policy_version=0,
+                algorithm="sao",
+                stream_role="critic",
+                components=(component("critic"),),
+                minimum_fragments=2,
+                expected_fragments=2,
+                expected_layout_hash="c" * 64,
+                max_fragment_bytes=400,
+                max_chunk_bytes=64,
+            )
+        )
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(LAYOUT_PROBE_LOG_PREFIX)
+    ]
+    assert len(lines) == 1
+    record = json.loads(lines[0][len(LAYOUT_PROBE_LOG_PREFIX) :])
+    expected = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (100, 1), role="critic"), manifest(1, (99, 1), role="critic")),
+        algorithm="sao",
+        stream_role="critic",
+        components=(component("critic"),),
+        minimum_fragments=2,
+        max_fragment_bytes=400,
+        max_chunk_bytes=64,
+    )
+    assert record == layout_attestation_record(expected, (component("critic"),))
+    assert record["role"] == "critic"
+    assert record["component"] == {"model_revision": "a" * 40, "config_sha256": "b" * 64}
+    assert record["parameter_layout_sha256"] == expected.layout.layout_hash
+    assert record["expected_fragments"] == expected.layout.fragments.num_fragments
+    assert [fragment["fragment_id"] for fragment in record["fragments"]] == list(
+        range(record["expected_fragments"])
+    )
+    assert sum(f["scalar_count"] for f in record["fragments"]) == 201
+    assert record["parameter_scalar_count"] == 201
+    assert record["parameter_tensor_count"] == 4
+    assert all(f["payload_bytes"] == 4 * f["scalar_count"] for f in record["fragments"])
+    assert len(record["manifests"]) == 2
 
 
 def _cut(adapter, values, *, policy_version, generation, ray):
@@ -384,7 +437,7 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
         learner_generation=5,
         trajectories=_evidence(
             rollout_id=17,
-            behavior_policy_hash=relabeled.content_hash,
+            behavior_policy_hash=relabeled.policy_hash,
         ),
         role="actor",
         expected_local_step_generation=4,
@@ -392,7 +445,9 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
     )
     assert actor_group.calls == [(9, 17)]
     assert actor_receipt.algorithm == "sao"
-    assert actor_receipt.base_policy_hash == actor_anchor.content_hash
+    # ports publishes the cut identity (policy_tensor_hash), so the receipt
+    # binds the relabeled anchor's identity, not its content.
+    assert actor_receipt.base_policy_hash == relabeled.policy_hash
     assert actor_receipt.optimizer_steps == 3
 
     critic_adapter = MilesChunkedFullParameterAdapter.create(
@@ -434,13 +489,13 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
         # critic parameter identity.
         trajectories=_evidence(
             rollout_id=17,
-            behavior_policy_hash=actor_anchor.content_hash,
+            behavior_policy_hash=relabeled.policy_hash,
         ),
         role="critic",
         expected_local_step_generation=7,
         expected_optimizer_steps=2,
     )
-    assert critic_receipt.base_policy_hash == critic_anchor.content_hash
+    assert critic_receipt.base_policy_hash == critic_anchor.policy_hash
     assert critic_receipt.input_batch_hash == actor_receipt.input_batch_hash
     assert critic_receipt.trajectory_ids == actor_receipt.trajectory_ids
 
@@ -495,7 +550,7 @@ async def test_sao_actor_local_round_rejects_wrong_behavior_or_rank_progress():
             learner_generation=0,
             trajectories=_evidence(
                 rollout_id=8,
-                behavior_policy_hash=anchor.content_hash,
+                behavior_policy_hash=anchor.policy_hash,
             ),
             role="actor",
             expected_local_step_generation=2,
@@ -543,6 +598,50 @@ async def test_grpo_h1_wrapper_preserves_versioned_policy_binding():
     assert receipt.optimizer_steps == 1
 
 
+def test_local_init_anchor_shares_the_version_zero_refs_and_equals_a_wire_copy():
+    import hashlib
+
+    ray = FakeRay()
+    adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (32,)), manifest(1, (32,))),
+        algorithm="grpo",
+        components=(component(),),
+        minimum_fragments=2,
+        max_fragment_bytes=256,
+        max_chunk_bytes=16,
+    )
+    initial = adapter.validate_cut(
+        _cut(adapter, {0: 3, 1: 5}, policy_version=0, generation=0, ray=ray), 0, 0
+    )
+    sink = adapter.fragment_sink(initial, ray_module=ray)
+    payload = b"".join(adapter.fragment_parts(initial, 1, ray_module=ray)())
+    wire_hash = hashlib.sha256(payload).hexdigest()
+    objects_before = len(ray.objects)
+
+    adopted = sink.adopt(initial, 1, 0, wire_hash)
+    assert len(ray.objects) == objects_before  # no second model copy
+    assert sink.adopt(initial, 1, 0, wire_hash) is adopted
+    with pytest.raises(RuntimeError, match="changed bytes"):
+        sink.adopt(initial, 1, 0, "0" * 64)
+
+    # The same bytes stored from the wire give an identical anchor.
+    copied = adapter.fragment_sink(initial, ray_module=ray)(1, 0, payload)
+    assert copied.descriptor == adopted.descriptor
+    assert copied.wire_payload_hash == adopted.wire_payload_hash
+    assert [ray.get(r).tolist() for r in copied.refs] == [ray.get(r).tolist() for r in adopted.refs]
+
+    # Releasing the cut leaves the anchor's refs; releasing the anchor
+    # leaves the cut's.
+    other = sink.adopt(initial, 0, 0, "f" * 64)
+    other.release()
+    assert all(r is not None for r in adopted.refs)
+    assert all(r is not None for refs in initial.transport_cut.shards[0].chunk_refs for r in refs)
+    adapter.release(initial)
+    assert all(r is not None for r in adopted.refs)
+    with pytest.raises(ValueError, match="released"):
+        adapter.fragment_sink(initial, ray_module=ray).adopt(initial, 1, 0, wire_hash)
+
+
 def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     ray = FakeRay()
     adapter = MilesChunkedFullParameterAdapter.create(
@@ -581,7 +680,7 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
         num_streams=2,
     )
     client._gen = 7
-    client.install_inbound_chunk_sink(_MilesRayInboundChunkSink(sink))
+    client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
     expected_descriptor = next(
         descriptor
         for shard in anchor.transport_cut.shards
@@ -648,7 +747,7 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     assert 14 not in client._reasm
     assert len(ray.objects) == object_count
 
-    transactional = _MilesRayInboundChunkSink(sink)
+    transactional = MilesRayInboundChunkSink(sink)
     aborted = transactional.begin_message(15, 1)
     transactional.bind_fragment(
         aborted,
@@ -665,134 +764,6 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     transactional.release_all()
     assert sink._stored == {}
     assert len(ray.objects) == before_abort - len(expected_descriptor.chunks)
-
-
-def test_real_syncer_initial_and_terminal_cuts_stream_to_miles_refs(tmp_path):
-    root = Path(__file__).resolve().parent.parent
-    subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True)
-    binary = root / "syncer/target/debug/yeto-syncer"
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    checkpoint = tmp_path / "streamed-sweep.ckpt"
-    process = subprocess.Popen(
-        [
-            str(binary),
-            "--port",
-            str(port),
-            "--learners",
-            "1",
-            "--quorum",
-            "1",
-            "--grace-ms",
-            "0",
-            "--pipeline",
-            "1",
-            "--sync-interval-steps",
-            "0",
-            "--delta-correction",
-            "none",
-            "--total-steps",
-            "2",
-            "--policy-sweep-fragments",
-            "2",
-            "--outer-lr",
-            "1",
-            "--outer-momentum",
-            "0",
-            "--max-base-lag",
-            "0",
-            "--learner-weight",
-            "equal",
-            "--checkpoint-path",
-            str(checkpoint),
-            "--checkpoint-every",
-            "1",
-            "--resume",
-            "--quorum-timeout-s",
-            "10",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    ray = FakeRay()
-    adapter = MilesChunkedFullParameterAdapter.create(
-        (manifest(0, (32,)), manifest(1, (32,))),
-        algorithm="grpo",
-        components=(component(),),
-        minimum_fragments=2,
-        max_fragment_bytes=256,
-        max_chunk_bytes=256,
-    )
-    anchor = adapter.validate_cut(
-        _cut(adapter, {0: 0, 1: 0}, policy_version=0, generation=0, ray=ray),
-        0,
-        0,
-    )
-    local = adapter.validate_cut(
-        _cut(adapter, {0: 1, 1: 1}, policy_version=0, generation=1, ray=ray),
-        0,
-        1,
-    )
-    wire = DenseSweepWire(
-        adapter.layout.fragments,
-        DenseSweepConfig(
-            ("127.0.0.1", port),
-            0,
-            7,
-            1,
-            wan_streams=2,
-            wait_timeout=15,
-            poll_seconds=0.001,
-            max_fragment_bytes=256,
-        ),
-    )
-    initial_sink = adapter.fragment_sink(anchor, ray_module=ray)
-    update_sink = adapter.fragment_sink(anchor, ray_module=ray)
-    try:
-        initial = wire.start(
-            {
-                fragment_id: adapter.fragment_parts(
-                    anchor,
-                    fragment_id,
-                    ray_module=ray,
-                )
-                for fragment_id in range(2)
-            },
-            payload_sink=initial_sink,
-        )
-        adapter.verify_initial_fragments(anchor, initial)
-        pending = wire.exchange(
-            base_policy_version=0,
-            trained_tokens=17,
-            sweep_update_id="a" * 64,
-            delta_parts={
-                fragment_id: adapter.delta_parts(
-                    anchor,
-                    local,
-                    fragment_id,
-                    ray_module=ray,
-                )
-                for fragment_id in range(2)
-            },
-            payload_sink=update_sink,
-        )
-        assert pending.terminal
-        assert all(
-            item is update_sink._stored[(index, index + 1)]
-            for index, item in enumerate(pending.payloads)
-        )
-        assert all(value.dtype == torch.float32 for value in ray.objects.values())
-        wire.commit_applied(pending)
-        assert process.wait(timeout=10) == 0
-    finally:
-        wire.close()
-        initial_sink.release_all()
-        update_sink.release_all()
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
 
 
 @pytest.mark.asyncio

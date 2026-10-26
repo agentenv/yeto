@@ -23,10 +23,18 @@ import math
 from dataclasses import asdict, dataclass, field
 
 from .pins import VERL_COMMIT
+from .run_config_rules import AGENTIC_ADV_ESTIMATOR
 
 MODES = ("train", "diagnose")
 SUPPORTED_CORRECTIONS = ("none", "tis")
 DESIGNED_NOT_MAPPED = ("icepop",)  # in design D7, mapping to verl not verified yet
+# ``parameter_mode``: the island's trainable set. "lora" is the original
+# one-card adapter island; "full" (S27 B10) trains every parameter on
+# ``n_gpus`` cards with FSDP2 data parallelism and FP32 masters
+# (:mod:`.full_parameter`), alone (``--rl-single-island-no-sync``) or synced
+# through the unified full-parameter syncer (:mod:`.full_parameter_stream`).
+PARAMETER_MODES = ("lora", "full")
+FULL_PARAMETER_MODE = "full"
 
 
 class VerlConfigError(ValueError):
@@ -39,6 +47,7 @@ class VerlRunConfig:
     train_file: str
     val_file: str
     out_dir: str
+    parameter_mode: str = "lora"
     lora_rank: int = 32
     lora_alpha: int = 32
     target_modules: str = "all-linear"
@@ -64,22 +73,79 @@ class VerlRunConfig:
     lora_merge: bool = False
     engine_commit: str = VERL_COMMIT
     gpu_memory_utilization: float = 0.5
+    # vLLM context length; None = the model's max_position_embeddings (262144 for
+    # Qwen3-4B-Instruct-2507, whose KV cache then does not fit next to the actor)
+    max_model_len: int | None = None
     n_gpus: int = 1
     model_dtype: str = "fp32"
     reward_path: str = ""
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
+    # S27 G-EQ2 (npu1): keep the parameters and the optimizer state in host
+    # memory, the card holding only what a step computes with. Both default off,
+    # as before. param_offload is what lets a card smaller than the NVIDIA
+    # reference hold a large full-parameter island at all: without it verl puts
+    # the whole model on the card before FSDP2 shards it, and an 8x64 GiB
+    # Ascend node dies inside fully_shard for a 30B model (the sharded copy no
+    # longer fits next to the unsharded one). The parameters stay FP32, so the
+    # full-parameter boundary still reads masters (full_parameter.MASTER_DTYPE).
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    # FSDP2's own CPU offload (torch CPUOffloadPolicy). This is the key that
+    # actually offloads an fsdp2 island: verl reads param_offload /
+    # optimizer_offload only on the FSDP1 path, and forces both off when
+    # offload_policy is set (fork acad9875,
+    # workers/engine/fsdp/transformer_impl.py:459-463).
+    offload_policy: bool = False
+    # S27 G-EQ2: activation recomputation, when the model's implementation
+    # supports it (``island_entry.gradient_checkpointing_for``). The HF
+    # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
+    # FSDP2 engine dies on it right after building the model.
+    gradient_checkpointing: bool = True
+    # S27 G-EQ2: load the model and tokenizer with the checkpoint's own code
+    # (``--trust-remote-code``, the launcher's flag the Miles islands already
+    # take). Needed for an architecture whose support lives in the repository
+    # rather than in the installed transformers: the official Ascend verl
+    # image's transformers 5.3 has nemotron_h, but its NemotronHModel sets
+    # supports_gradient_checkpointing = False, while the checkpoint's own
+    # modeling_nemotron_h.py sets it True. Default off: an NVIDIA island is
+    # unchanged, and remote code is only run when the launch asks for it.
+    trust_remote_code: bool = False
+    # S27 G-FS (VERL-PARITY #33): the agentic island. The rows select yeto's
+    # Harbor agent loop (``agent_name: yeto_harbor``), so the advantage estimator
+    # must be ``yeto_grpo`` (``run_config_rules.AGENTIC_ADV_ESTIMATOR``; the loop
+    # refuses any other one, ``harbor_agent_loop.check_estimator``) and verl must
+    # read the loop's registry entry from ``agent_loop_config`` (a YAML path).
+    agentic: bool = False
+    agent_loop_config: str = ""
+    # Agent-loop worker processes. One by default on the agentic path: every
+    # worker builds its own records proxy on its own port, and only one port is
+    # tunnelled to the sandboxes (``modal_runner.harbor_relay_tunnel``).
+    agent_loop_workers: int = 1
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
+def full_parameter(cfg: VerlRunConfig) -> bool:
+    return cfg.parameter_mode == FULL_PARAMETER_MODE
+
+
 def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
     """Raise :class:`VerlConfigError` naming the first violated rule."""
-    if cfg.lora_rank <= 0:
-        raise VerlConfigError("verl 后端第一版只支持 LoRA（lora_rank 必须 > 0）")
-    if cfg.lora_alpha != cfg.lora_rank:
+    if cfg.parameter_mode not in PARAMETER_MODES:
+        raise VerlConfigError(
+            f"parameter_mode 必须是 {PARAMETER_MODES} 之一，得到 {cfg.parameter_mode!r}")
+    if full_parameter(cfg):
+        if cfg.lora_rank != 0:
+            raise VerlConfigError("全参数模式必须 lora_rank=0（全参数岛不带适配器）")
+        if cfg.model_dtype != "fp32":
+            raise VerlConfigError(
+                "全参数同步要求 FP32 主权重：model_dtype 必须是 fp32（见 full_parameter 模块说明）")
+    elif cfg.lora_rank <= 0:
+        raise VerlConfigError("LoRA 模式的 lora_rank 必须 > 0（全参数请用 parameter_mode=full）")
+    if not full_parameter(cfg) and cfg.lora_alpha != cfg.lora_rank:
         raise VerlConfigError(
             f"lora_alpha ({cfg.lora_alpha}) 必须等于 rank ({cfg.lora_rank})：yeto 规范 LoRA 不带缩放")
     if cfg.engine_commit != expected_commit:
@@ -111,8 +177,15 @@ def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
             "确需如此请显式 allow_sampling_shift")
     if cfg.groups_per_round <= 0 or cfg.samples_per_group <= 0 or cfg.total_rounds <= 0:
         raise VerlConfigError("groups_per_round / samples_per_group / total_rounds 必须为正")
-    if cfg.n_gpus != 1:
-        raise VerlConfigError("verl 后端第一版每岛只支持 1 张卡（V1/V2 范围）")
+    if cfg.n_gpus < 1:
+        raise VerlConfigError(f"n_gpus 必须 >= 1（单节点岛的卡数），得到 {cfg.n_gpus}")
+    if cfg.agentic:  # S27 G-FS
+        if not cfg.agent_loop_config:
+            raise VerlConfigError("agentic 岛要 agent_loop_config（yeto_harbor 的注册表 YAML 路径）")
+        if cfg.agent_loop_workers < 1:
+            raise VerlConfigError(f"agent_loop_workers 必须 >= 1，得到 {cfg.agent_loop_workers}")
+    elif cfg.agent_loop_config:
+        raise VerlConfigError("agent_loop_config 只在 agentic 岛上有意义")
     if cfg.model_dtype not in ("fp32", "bf16"):
         raise VerlConfigError(f"model_dtype 必须是 fp32 或 bf16，得到 {cfg.model_dtype!r}")
 
@@ -128,7 +201,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
     o = [
         "trainer.use_v1=True",
         "trainer.v1.trainer_mode=yeto_sync",
-        "algorithm.adv_estimator=grpo",
+        f"algorithm.adv_estimator={AGENTIC_ADV_ESTIMATOR if cfg.agentic else 'grpo'}",
         "algorithm.norm_adv_by_std_in_grpo=True",
         "algorithm.use_kl_in_reward=False",
         f"algorithm.rollout_correction.bypass_mode={cfg.bypass_mode}",
@@ -140,13 +213,17 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         f"data.seed={cfg.seed}",
+        f"data.trust_remote_code={cfg.trust_remote_code}",
+        f"actor_rollout_ref.model.trust_remote_code={cfg.trust_remote_code}",
         f"actor_rollout_ref.model.path={cfg.model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
-        "actor_rollout_ref.model.enable_gradient_checkpointing=True",
-        f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
-        f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
-        f"actor_rollout_ref.model.target_modules={cfg.target_modules}",
-        f"actor_rollout_ref.model.lora.merge={cfg.lora_merge}",
+        f"actor_rollout_ref.model.enable_gradient_checkpointing={cfg.gradient_checkpointing}",
+        *(["actor_rollout_ref.model.lora_rank=0"] if full_parameter(cfg) else [
+            f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
+            f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
+            f"actor_rollout_ref.model.target_modules={cfg.target_modules}",
+            f"actor_rollout_ref.model.lora.merge={cfg.lora_merge}",
+        ]),
         "actor_rollout_ref.actor.strategy=fsdp2",
         f"actor_rollout_ref.actor.fsdp_config.model_dtype={cfg.model_dtype}",
         f"actor_rollout_ref.actor.optim.lr={cfg.lr!r}",
@@ -155,12 +232,14 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384",
         "actor_rollout_ref.actor.use_kl_loss=False",
         "actor_rollout_ref.actor.entropy_coeff=0",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=False",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload={cfg.param_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={cfg.optimizer_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.offload_policy={cfg.offload_policy}",
         f"actor_rollout_ref.actor.data_loader_seed={cfg.seed}",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={cfg.gpu_memory_utilization}",
+        *([f"actor_rollout_ref.rollout.max_model_len={cfg.max_model_len}"] if cfg.max_model_len else []),
         f"actor_rollout_ref.rollout.n={cfg.samples_per_group}",
         f"actor_rollout_ref.rollout.temperature={cfg.temperature}",
         f"actor_rollout_ref.rollout.top_p={cfg.top_p}",
@@ -186,6 +265,9 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "trainer.total_epochs=1000",
         "ray_kwargs.ray_init.runtime_env.py_executable=null",
     ]
+    if cfg.agentic:  # S27 G-FS: the rows name the loop; verl needs its registry entry
+        o += [f"actor_rollout_ref.rollout.agent.agent_loop_config_path={cfg.agent_loop_config}",
+              f"actor_rollout_ref.rollout.agent.num_workers={cfg.agent_loop_workers}"]
     if cfg.correction == "tis":
         o += ["algorithm.rollout_correction.rollout_is=token",
               f"algorithm.rollout_correction.rollout_is_threshold={cfg.tis_upper}"]
@@ -209,4 +291,7 @@ ASSERTED_KEYS = (
     "algorithm.rollout_correction.bypass_mode",
     "actor_rollout_ref.rollout.full_determinism",
     "actor_rollout_ref.actor.strategy",
+    # S27 G-EZ: a silently dropped offload_policy would only show up as an
+    # out-of-memory failure deep into the first step, so assert it resolved.
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
 )

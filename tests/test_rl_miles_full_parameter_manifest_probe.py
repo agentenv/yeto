@@ -44,19 +44,20 @@ def _topology(rank: int) -> FullParameterTopology:
     )
 
 
-def _manifest(rank: int) -> FullParameterShardManifest:
+def _manifest(rank: int, names=("model.weight0", "model.weight1"),
+              numel: int = 300_000_000) -> FullParameterShardManifest:
     topology = _topology(rank)
     specs = tuple(
         sorted(
             FullParameterShardSpec(
                 role="actor",
                 shard_id=topology.shard_id,
-                name=f"model.weight{index}",
-                shape=(300_000_000,),
+                name=name,
+                shape=(numel,),
                 dtype="float32",
-                numel=300_000_000,
+                numel=numel,
             )
-            for index in range(2)
+            for name in names
         )
     )
     return FullParameterShardManifest(
@@ -68,8 +69,11 @@ def _manifest(rank: int) -> FullParameterShardManifest:
 
 
 class ManifestOnlyGroup:
+    def __init__(self, **manifest_kwargs) -> None:
+        self.manifest_kwargs = manifest_kwargs
+
     async def full_parameter_shard_manifests(self):
-        return (_manifest(1), _manifest(0))
+        return (_manifest(1, **self.manifest_kwargs), _manifest(0, **self.manifest_kwargs))
 
 
 def _args():
@@ -91,10 +95,7 @@ def _args():
     )
 
 
-def test_manifest_probe_derives_bounded_owner_plan_without_parameter_payloads(
-    monkeypatch,
-    tmp_path,
-):
+def _probe_environment(monkeypatch, tmp_path):
     evidence_path = tmp_path / "manifest-probe.json"
     monkeypatch.setenv(
         "YETO_FULL_PARAMETER_MANIFEST_PROBE_EVIDENCE",
@@ -129,6 +130,14 @@ def test_manifest_probe_derives_bounded_owner_plan_without_parameter_payloads(
             "sha256": "c" * 64,
         },
     )
+    return evidence_path
+
+
+def test_manifest_probe_derives_bounded_owner_plan_without_parameter_payloads(
+    monkeypatch,
+    tmp_path,
+):
+    evidence_path = _probe_environment(monkeypatch, tmp_path)
     args = _args()
     probe = MilesFullParameterManifestProbeSync(args)
 
@@ -163,3 +172,33 @@ def test_manifest_probe_derives_bounded_owner_plan_without_parameter_payloads(
         _topology(1).shard_id,
     }
     assert all(row["plan_hash"] for row in payload["owner_plans"])
+
+
+def _probe_payload(monkeypatch, tmp_path, matrix_merge: str) -> dict:
+    evidence_path = _probe_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("YETO_FULL_PARAMETER_MATRIX_MERGE", matrix_merge)
+    probe = MilesFullParameterManifestProbeSync(_args())
+    names = ("decoder.layers.0.mlp.linear_fc1.weight", "embedding.word_embeddings.weight",
+             "output_layer.weight")
+    asyncio.run(probe.initialize(actor_model=ManifestOnlyGroup(names=names, numel=64),
+                                 rollout_manager=object()))
+    asyncio.run(probe.finalize())
+    return json.loads(evidence_path.read_bytes())
+
+
+def test_rda_manifest_probe_derives_the_rda_minimum_and_layout(monkeypatch, tmp_path):
+    avg = _probe_payload(monkeypatch, tmp_path, "avg")
+    rda = _probe_payload(monkeypatch, tmp_path, "rda")
+    # Per owner: one rda matrix, then the two averaged vocabulary tables.
+    assert (avg["matrix_merge"], avg["minimum_fragment_count"]) == ("avg", 2)
+    assert (rda["matrix_merge"], rda["minimum_fragment_count"]) == ("rda", 4)
+    assert rda["derived_fragment_count"] >= rda["minimum_fragment_count"]
+    assert avg["derived_fragment_count"] >= avg["minimum_fragment_count"]
+    assert rda["parameter_layout_hash"] != avg["parameter_layout_hash"]
+
+
+def test_manifest_probe_refuses_an_unknown_matrix_merge(monkeypatch, tmp_path):
+    _probe_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("YETO_FULL_PARAMETER_MATRIX_MERGE", "svd")
+    with pytest.raises(RuntimeError, match="MATRIX_MERGE must be one of"):
+        MilesFullParameterManifestProbeSync(_args())

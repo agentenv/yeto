@@ -12,8 +12,13 @@ import math
 import struct
 from dataclasses import dataclass
 
+# The input schema and the hash domain are versioned separately: the mapping
+# (field set, including ``resume``) is unchanged at v1, while the canonical
+# encoding that is hashed moved to v2 when ``resume`` left it.
 SYNCER_SEMANTIC_PROFILE_SCHEMA = "yeto.syncer-semantic-profile.v1"
-_DOMAIN = b"yeto-syncer-semantic-profile-v1\0"
+# v2 drops ``resume`` (how a run starts, not its semantics): a restarted
+# syncer keeps the hash every island carries in HELLO (P0-1.7b.1-Q7).
+_DOMAIN = b"yeto-syncer-semantic-profile-v2\0"
 _FIELDS = {
     "schema",
     "learners",
@@ -40,18 +45,42 @@ _FIELDS = {
     "learner_weight",
     "require_profile_binding",
 }
-# rl-inter-island-scheduling: optional. Absent or "legacy" = the old encoding
-# (byte-identical hash); "elastic" appends the island-scheduling block that the
-# syncer's elastic.rs::encode_contract appends.
-_ISLAND_SCHEDULING_FIELDS = {
-    "island_scheduling_mode",
-    "quorum_theta",
-    "carry_gamma",
-    "soft_deadline_s",
-    "q_min",
-    "max_carry_lag",
+# Optional. Absent = plain Nesterov (byte-identical hash); a period N >= 2
+# appends the block that the syncer's server.rs::semantic_profile_hash appends.
+_DELAYED_NESTEROV_FIELD = "outer_delayed_nesterov_period"
+_DELAYED_NESTEROV_DOMAIN = b"yeto-syncer-delayed-nesterov-v1\0"
+# Optional. Absent or false = no expert token weights (byte-identical hash);
+# true appends the domain that server.rs::semantic_profile_hash appends.
+_EXPERT_TOKEN_WEIGHTS_FIELD = "expert_token_weights"
+_EXPERT_TOKEN_WEIGHTS_DOMAIN = b"yeto-syncer-expert-token-weights-v1\0"
+# Optional. Absent or false = the final cut carries every f32 fragment
+# (byte-identical hash); true (syncer --final-cut-payload manifest) appends
+# the domain that server.rs::semantic_profile_hash appends.
+_FINAL_CUT_MANIFEST_ONLY_FIELD = "final_cut_manifest_only"
+_FINAL_CUT_MANIFEST_ONLY_DOMAIN = b"yeto-syncer-final-cut-manifest-only-v1\0"
+# Optional. Absent or zero = the adaptive grace window alone (byte-identical
+# hash); a floor (syncer --grace-min-ms / --grace-arrival-quantile) appends
+# the block that server.rs::semantic_profile_hash appends.
+_GRACE_MIN_MS_FIELD = "grace_min_ms"
+_GRACE_ARRIVAL_QUANTILE_FIELD = "grace_arrival_quantile"
+_GRACE_FLOOR_DOMAIN = b"yeto-syncer-grace-floor-v1\0"
+# Optional. Absent or zero = no terminal grace (byte-identical hash); a
+# positive value (syncer --terminal-grace-ms) appends its block.
+_TERMINAL_GRACE_MS_FIELD = "terminal_grace_ms"
+_TERMINAL_GRACE_DOMAIN = b"yeto-syncer-terminal-grace-v1\0"
+# Optional. Absent or empty = no evaluation checkpoints (byte-identical hash);
+# the listed global steps (syncer --checkpoint-at-steps) append their block.
+_CHECKPOINT_AT_STEPS_FIELD = "checkpoint_at_steps"
+_EVAL_CHECKPOINTS_DOMAIN = b"yeto-syncer-eval-checkpoints-v1\0"
+_OPTIONAL_FIELDS = {
+    _DELAYED_NESTEROV_FIELD,
+    _EXPERT_TOKEN_WEIGHTS_FIELD,
+    _FINAL_CUT_MANIFEST_ONLY_FIELD,
+    _GRACE_MIN_MS_FIELD,
+    _GRACE_ARRIVAL_QUANTILE_FIELD,
+    _TERMINAL_GRACE_MS_FIELD,
+    _CHECKPOINT_AT_STEPS_FIELD,
 }
-_ISLAND_SCHEDULING_DOMAIN = b"yeto-syncer-island-scheduling-v1\0"
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -71,6 +100,12 @@ def _optional_integer(
     if value is None:
         return None
     return _integer(name, value, bits=bits, minimum=minimum)
+
+
+def _steps(name: str, value: object) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"syncer profile {name} must be a list of steps")
+    return tuple(_integer(name, step, bits=64, minimum=1) for step in value)
 
 
 def _number(name: str, value: object) -> float:
@@ -132,45 +167,22 @@ class SyncerSemanticProfile:
     max_base_lag: int | None
     learner_weight: str
     require_profile_binding: bool
-    island_scheduling_mode: str = "legacy"
-    quorum_theta: float | None = None
-    carry_gamma: float | None = None
-    soft_deadline_s: int | None = None
-    q_min: int | None = None
-    max_carry_lag: int | None = None
+    outer_delayed_nesterov_period: int | None = None
+    expert_token_weights: bool = False
+    final_cut_manifest_only: bool = False
+    grace_min_ms: int = 0
+    grace_arrival_quantile: float = 0.0
+    terminal_grace_ms: int = 0
+    checkpoint_at_steps: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
-            _FIELDS <= set(raw) <= _FIELDS | _ISLAND_SCHEDULING_FIELDS
+            _FIELDS <= set(raw) <= _FIELDS | _OPTIONAL_FIELDS
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
             )
-        mode = raw.get("island_scheduling_mode", "legacy")
-        params = _ISLAND_SCHEDULING_FIELDS - {"island_scheduling_mode"}
-        if mode == "legacy":
-            if params & set(raw):
-                raise ValueError("island scheduling parameters need island_scheduling_mode=elastic")
-            scheduling: dict = {}
-        elif mode == "elastic":
-            if not params <= set(raw):
-                raise ValueError("elastic island scheduling needs " + ", ".join(sorted(params)))
-            theta = _number("quorum_theta", raw["quorum_theta"])
-            gamma = _number("carry_gamma", raw["carry_gamma"])
-            if not 0.0 < theta <= 1.0 or not 0.0 <= gamma <= 1.0:
-                raise ValueError("quorum_theta must be in (0,1] and carry_gamma in [0,1]")
-            scheduling = {
-                "island_scheduling_mode": "elastic",
-                "quorum_theta": theta,
-                "carry_gamma": gamma,
-                "soft_deadline_s": _integer("soft_deadline_s", raw["soft_deadline_s"],
-                                            bits=64, minimum=1),
-                "q_min": _integer("q_min", raw["q_min"], bits=32, minimum=1),
-                "max_carry_lag": _integer("max_carry_lag", raw["max_carry_lag"], bits=32),
-            }
-        else:
-            raise ValueError("syncer profile island_scheduling_mode must be legacy|elastic")
         if raw["schema"] != SYNCER_SEMANTIC_PROFILE_SCHEMA:
             raise ValueError("unsupported syncer semantic profile schema")
         delta_correction = raw["delta_correction"]
@@ -234,7 +246,25 @@ class SyncerSemanticProfile:
             require_profile_binding=_boolean(
                 "require_profile_binding", raw["require_profile_binding"]
             ),
-            **scheduling,
+            outer_delayed_nesterov_period=_optional_integer(
+                _DELAYED_NESTEROV_FIELD, raw.get(_DELAYED_NESTEROV_FIELD), bits=32, minimum=2
+            ),
+            expert_token_weights=_boolean(
+                _EXPERT_TOKEN_WEIGHTS_FIELD, raw.get(_EXPERT_TOKEN_WEIGHTS_FIELD, False)
+            ),
+            final_cut_manifest_only=_boolean(
+                _FINAL_CUT_MANIFEST_ONLY_FIELD, raw.get(_FINAL_CUT_MANIFEST_ONLY_FIELD, False)
+            ),
+            grace_min_ms=_integer(_GRACE_MIN_MS_FIELD, raw.get(_GRACE_MIN_MS_FIELD, 0), bits=64),
+            grace_arrival_quantile=_number(
+                _GRACE_ARRIVAL_QUANTILE_FIELD, raw.get(_GRACE_ARRIVAL_QUANTILE_FIELD, 0.0)
+            ),
+            terminal_grace_ms=_integer(
+                _TERMINAL_GRACE_MS_FIELD, raw.get(_TERMINAL_GRACE_MS_FIELD, 0), bits=64
+            ),
+            checkpoint_at_steps=_steps(
+                _CHECKPOINT_AT_STEPS_FIELD, raw.get(_CHECKPOINT_AT_STEPS_FIELD, ())
+            ),
         )
         profile._validate_general()
         return profile
@@ -244,6 +274,8 @@ class SyncerSemanticProfile:
             raise ValueError("syncer profile quorum exceeds learners")
         if not 0.0 <= self.grace_gamma < 1.0 or self.grace_tau < 0.0:
             raise ValueError("syncer profile adaptive grace values are invalid")
+        if not 0.0 <= self.grace_arrival_quantile <= 1.0:
+            raise ValueError("syncer profile grace_arrival_quantile must be in [0, 1]")
         if self.sync_interval_steps < 0.0:
             raise ValueError("syncer profile sync_interval_steps is negative")
         if self.outer_lr <= 0.0 or not 0.0 <= self.outer_momentum < 1.0:
@@ -254,8 +286,23 @@ class SyncerSemanticProfile:
             raise ValueError("syncer profile resume requires checkpointing")
         if self.policy_sweep_fragments is not None:
             fragments = self.policy_sweep_fragments
-            if self.pipeline != 1 or self.total_steps % fragments:
+            if not 1 <= self.pipeline <= fragments or self.total_steps % fragments:
                 raise ValueError("syncer profile policy sweep schedule is invalid")
+            if self.checkpoint_every != 1 and (
+                    self.checkpoint_every < 1 or self.checkpoint_every % fragments):
+                raise ValueError("syncer profile policy sweep checkpoint interval must be "
+                                 "1 or a multiple of the fragment count")
+        steps = self.checkpoint_at_steps
+        if steps:
+            # Mirrors the syncer's validate_eval_checkpoints.
+            if not self.checkpoint_enabled:
+                raise ValueError("syncer profile checkpoint_at_steps requires checkpointing")
+            if any(a >= b for a, b in zip(steps, steps[1:])) or steps[-1] >= self.total_steps:
+                raise ValueError("syncer profile checkpoint_at_steps must be strictly increasing "
+                                 "and below total_steps")
+            if self.policy_sweep_fragments is not None or self.checkpoint_every == 1:
+                raise ValueError("syncer profile checkpoint_at_steps needs fragment rounds "
+                                 "with checkpoint_every != 1")
 
     def validate_sao(self) -> None:
         """Enforce the paired actor/critic fail-closed server profile."""
@@ -270,6 +317,8 @@ class SyncerSemanticProfile:
             raise ValueError("SAO syncer profile requires quorum equal to learners")
         if self.grace_ms != 0:
             raise ValueError("SAO syncer profile requires grace_ms=0")
+        # ``resume`` is only a launch-mode check here (SAO always restarts from
+        # its per-round checkpoint); it is not part of the hashed profile.
         if not self.checkpoint_enabled or self.checkpoint_every != 1 or not self.resume:
             raise ValueError(
                 "SAO syncer profile requires checkpointing every round with resume"
@@ -302,20 +351,28 @@ class SyncerSemanticProfile:
         encoded.extend(struct.pack("<ff", self.outer_lr, self.outer_momentum))
         encoded.append(self.checkpoint_enabled)
         encoded.extend(struct.pack("<Q", self.checkpoint_every))
-        encoded.append(self.resume)
         encoded.append(self.mark_final_checkpoint)
         _encode_optional(encoded, self.learner_budget_steps, "<Q")
         _encode_optional(encoded, self.max_base_lag, "<Q")
         encoded.append(0 if self.learner_weight == "tokens2-over-steps" else 1)
         encoded.append(self.require_profile_binding)
-        if self.island_scheduling_mode == "elastic":
-            encoded.extend(_ISLAND_SCHEDULING_DOMAIN)
-            for text in (b"island_scheduling_mode", b"elastic"):
-                encoded.append(len(text))
-                encoded.extend(text)
-            encoded.extend(struct.pack("<dd", self.quorum_theta, self.carry_gamma))
-            encoded.extend(struct.pack("<QII", self.soft_deadline_s, self.q_min,
-                                       self.max_carry_lag))
+        if self.outer_delayed_nesterov_period is not None:
+            encoded.extend(_DELAYED_NESTEROV_DOMAIN)
+            encoded.extend(struct.pack("<I", self.outer_delayed_nesterov_period))
+        if self.expert_token_weights:
+            encoded.extend(_EXPERT_TOKEN_WEIGHTS_DOMAIN)
+        if self.final_cut_manifest_only:
+            encoded.extend(_FINAL_CUT_MANIFEST_ONLY_DOMAIN)
+        if self.grace_min_ms or self.grace_arrival_quantile:
+            encoded.extend(_GRACE_FLOOR_DOMAIN)
+            encoded.extend(struct.pack("<Qd", self.grace_min_ms, self.grace_arrival_quantile))
+        if self.terminal_grace_ms:
+            encoded.extend(_TERMINAL_GRACE_DOMAIN)
+            encoded.extend(struct.pack("<Q", self.terminal_grace_ms))
+        if self.checkpoint_at_steps:
+            encoded.extend(_EVAL_CHECKPOINTS_DOMAIN)
+            encoded.extend(struct.pack("<Q", len(self.checkpoint_at_steps)))
+            encoded.extend(struct.pack(f"<{len(self.checkpoint_at_steps)}Q", *self.checkpoint_at_steps))
         return bytes(encoded)
 
     @property

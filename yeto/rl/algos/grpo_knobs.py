@@ -258,16 +258,14 @@ def _reject_plugins(s) -> str | None:
     required = required_plugins(s)
     listed = {p.path: p.sha256 for p in s.plugins}
     missing = [r.path for r in required if r.path not in listed]
-    stale = [r.path for r in required if r.path in listed and listed[r.path] != r.sha256]
-    problems = []
+    # rl-identity-tiering L9.2: a stale source hash is a startup warning
+    # (AlgorithmSpec.verify_plugins), not a rejection.
     if missing:
-        problems.append(
+        return (
             f"plugins must list the code of every reward-pipeline / sample-filter module "
             f"{missing} (grpo_knobs.with_pipeline_plugins adds them)"
         )
-    if stale:
-        problems.append(f"plugins {stale}: source hash differs from the current module source")
-    return "; ".join(problems) or None
+    return None
 
 
 register_rejection("grpo_knobs_reward_pipeline", _reject_pipeline)
@@ -292,13 +290,11 @@ def plugins_config(spec) -> dict[str, Any] | None:
             "reward_shapers": _shapers_json(spec.advantage.reward_shapers),
             "advantage_transform": spec.advantage.transform,
             "advantage_params": dict(spec.advantage.transform_params),
-            "pipeline_sha256": rp.pipeline_sha256(),
         }
     if spec.loss.aggregation == "constant":
         config["reducer"] = {"denominator": spec.loss.constant_denominator}
     if spec.sampling.overlong_filter:
         config["overlong_filter"] = True
-        config["sample_filters_sha256"] = rp.plugin_sha(rp.SAMPLE_FILTERS_PATH)
     if not config:
         return None
     config["algorithm_spec_sha256"] = spec.sha256()

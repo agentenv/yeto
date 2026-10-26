@@ -255,14 +255,13 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
     if not colocated:
         driver.publisher.publish(driver.published_state)
     pre_a = _summaries(ctx)
-    # Compare the TRAINING state (a re-publication advances only weight_version);
-    # the counter itself is checked explicitly: cut + number of re-publications.
-    republished = 0 if colocated else 1
+    # Compare the TRAINING state; the publication counter is checked explicitly:
+    # a re-publication stamps the same policy version again (P0-S), so it equals the cut.
     rec.criterion("G-4.3 arm A pre-step state == cut",
                   {k: (v["train_state_digest"], v["rng_digest"]) for k, v in pre_a.items()}
                   == {k: (v.get("train_state_digest"), v["rng_digest"]) for k, v in saved.items()})
-    rec.criterion("G-4.3 arm A weight_version == cut + re-publications",
-                  all(_advanced(saved[k].get("weight_version"), v.get("weight_version"), republished)
+    rec.criterion("G-4.3 arm A weight_version == cut",
+                  all(_same_version(saved[k].get("weight_version"), v.get("weight_version"))
                       for k, v in pre_a.items()),
                   cut={k: v.get("weight_version") for k, v in saved.items()},
                   now={k: v.get("weight_version") for k, v in pre_a.items()})
@@ -289,6 +288,8 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                     trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
                     actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
                     rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
+                    # arm B replays the frozen batch B3, drawn at the cut's data position
+                    resumed_cursor=dict(manifest.data),
                 )
 
             if colocated:
@@ -308,8 +309,8 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
             rec.criterion("G-4.3(1) restored state/RNG == cut before step 3",
                           {k: (v["train_state_digest"], v["rng_digest"]) for k, v in pre_b.items()}
                           == {k: (v.get("train_state_digest"), v["rng_digest"]) for k, v in saved.items()})
-            rec.criterion("G-4.3 arm B weight_version == cut + re-publications",
-                          all(_advanced(saved[k].get("weight_version"), v.get("weight_version"), republished)
+            rec.criterion("G-4.3 arm B weight_version == cut",
+                          all(_same_version(saved[k].get("weight_version"), v.get("weight_version"))
                               for k, v in pre_b.items()),
                           cut={k: v.get("weight_version") for k, v in saved.items()},
                           now={k: v.get("weight_version") for k, v in pre_b.items()})
@@ -328,11 +329,9 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
     _compare_arms(rec, post_a, post_b, grad_a, grad_b, manifest.progress.scheduler_samples + gbs)
 
 
-def _advanced(cut: int | None, now: int | None, publications: int) -> bool:
-    """weight_version after ``publications`` re-publications of the cut (None = no counter)."""
-    if cut is None or now is None:
-        return cut is None and now is None
-    return now == cut + publications
+def _same_version(cut: int | None, now: int | None) -> bool:
+    """The publication counter after re-publishing the cut's policy (None = no counter)."""
+    return cut == now
 
 
 def _compare_arms(rec: _Recorder, post_a, post_b, grad_a, grad_b, samples: int) -> None:
@@ -380,13 +379,16 @@ def _rejection_matrix(ctx: HarnessContext, rec: _Recorder, *, source: Any, cut_i
         return lambda: path.write_bytes(data)
 
     ident = expect.algorithm
+    # (d) another algorithm, (e) another runtime attrs hash. A cut with a semantic
+    # hash (rl-identity-tiering L9.8) is compared by it, not by the plugin source hashes.
+    other_algorithm = (replace(ident, semantic_sha256="0" * 64) if ident.semantic_sha256
+                       else replace(ident, algorithm_spec_sha256="0" * 64))
     cases: list[tuple[str, Callable[[], Callable[[], None] | None], Any]] = [
         ("a", lambda: flip_last(directory / own.path), expect),
         ("b", lambda: truncate(directory / own.path), expect),
         ("c", lambda: None, replace(expect, local_step=expect.local_step + 1)),
-        ("d", lambda: None, replace(expect, algorithm=replace(ident, algorithm_spec_sha256="0" * 64))),
-        ("e", lambda: None, replace(expect, algorithm=replace(
-            ident, plugin_sha256=tuple(sorted((*ident.plugin_sha256, "yeto.rl.algos.e2_probe@" + "0" * 64)))))),
+        ("d", lambda: None, replace(expect, algorithm=other_algorithm)),
+        ("e", lambda: None, replace(expect, algorithm=replace(ident, runtime_attrs_sha256="0" * 64))),
     ]
     if layout["dp"] > 1:
         if peer is None:

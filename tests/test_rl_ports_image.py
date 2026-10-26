@@ -2,7 +2,6 @@
 wiring for SkyPilot and Modal, and the image-aware ports source setup.
 Legacy must be unchanged."""
 
-import hashlib
 import json
 import os
 import re
@@ -43,7 +42,7 @@ def login(monkeypatch):
 
 
 def test_ports_image_is_the_private_digest_pinned_fork_image():
-    assert rl.default_rl_image("ports") == rl.MILES_NEXT_IMAGE
+    assert rl.default_rl_image() == rl.MILES_NEXT_IMAGE
     assert re.fullmatch(
         r"docker:ghcr\.io/(michaellchung|agentenv)/yeto-miles-ports@sha256:[0-9a-f]{64}",
         rl.MILES_NEXT_IMAGE,
@@ -53,13 +52,6 @@ def test_ports_image_is_the_private_digest_pinned_fork_image():
     # The tag the build script pushes names the pinned commits.
     tag = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
     assert f"Tag {tag};" in (REPO / "yeto/rl/adapters/miles/pins.py").read_text()
-
-
-def test_legacy_image_default_is_unchanged():
-    assert rl.default_rl_image("legacy") == rl.MILES_IMAGE == (
-        "docker:ghcr.io/agentenv/miles@sha256:"
-        "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
-    )
 
 
 def test_build_inputs_match_the_pins():
@@ -78,7 +70,7 @@ def test_build_inputs_match_the_pins():
 def test_commits_and_digest_are_pinned_together_with_the_build_record():
     """Commit pins, tag, Dockerfile ARGs and the image digest move together:
     the latest build record must name exactly the pinned commits and digest."""
-    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-64b591a-2fa8801"
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-28bc6cc-2fa8801"
     record = json.loads((record_dir / "build-record.json").read_text())
     assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
@@ -97,14 +89,8 @@ def test_commits_and_digest_are_pinned_together_with_the_build_record():
 LEGACY_SETUP_SHA256 = "1166134dbe978365d349f5e8f1851be7ccf7599c62dd28b01e88a64901425985"
 
 
-def test_legacy_source_setup_is_byte_identical():
-    miles, sglang = launcher._miles_source_setup("legacy")
-    digest = hashlib.sha256((miles + "\0" + sglang).encode()).hexdigest()
-    assert digest == LEGACY_SETUP_SHA256
-
-
 def test_ports_setup_reuses_the_image_forks_and_still_verifies():
-    miles, sglang = launcher._miles_source_setup("ports")
+    miles, sglang = launcher._miles_source_setup()
     subprocess.run(["bash", "-n"], input=miles + "\n" + sglang, text=True, check=True)
     c = rl.MILES_NEXT_COMMIT
     # Miles: the image's /root/miles (= ~/miles) is already at the pin, so
@@ -127,28 +113,32 @@ def test_ports_setup_reuses_the_image_forks_and_still_verifies():
     assert f'm["commit"] == "{c}"' in miles
     reuse, fallback = miles[decision:].split("\nelse\n", 1)
     assert f"[yeto-setup] image provides miles {c}" in reuse
-    assert f'peft.__version__ == "{rl.MILES_PEFT_VERSION}"' in reuse
+    assert f"{rl.MILES_NEXT_IMAGE_MANIFEST} peft version {rl.MILES_PEFT_VERSION}" in reuse
+    assert f'peft.__version__ == "{rl.MILES_PEFT_VERSION}"' in reuse  # fallback only
     assert f"pip install -q 'peft=={rl.MILES_PEFT_VERSION}'" in reuse
     assert "pip install -q --no-deps -e ~/miles" not in reuse
     assert fallback == (
         f"python3 -m pip install -q --no-deps -e ~/miles 'peft=={rl.MILES_PEFT_VERSION}'\nfi"
     )
     # SGLang: reuse /sgl-workspace/sglang only if it is exactly the pinned,
-    # clean fork checkout that `import sglang` resolves to; else clone.
+    # clean fork checkout and the image manifest names it there (no import:
+    # L2.3); without a manifest entry the import check is the fallback.
     s = rl.SGLANG_NEXT_COMMIT
+    assert sglang.startswith("SGLANG_IN_IMAGE=0\nif ")
     guard, rest = sglang.split("; then\n", 1)
-    assert guard.startswith("if ")
     for needle in (
         f'[ "$(git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null)" = {s} ]',
         f'= {rl.SGLANG_NEXT_REPOSITORY} ]',
         "git -C /sgl-workspace/sglang status --porcelain --untracked-files=all",
-        "import os, sys, sglang",
         "[ ! -e ~/sglang ]",
     ):
         assert needle in guard
+    check, rest = rest.split('\nfi\nif [ "$SGLANG_IN_IMAGE" = 1 ]; then\n', 1)
+    assert f"{rl.MILES_NEXT_IMAGE_MANIFEST} sglang commit {s} /sgl-workspace/sglang" in check
+    match, absent = check.split("\n0) ", 1)[1].split("\n3)\n", 1)
+    assert "import sglang" not in match and "SGLANG_IN_IMAGE=1" in match
+    assert "import os, sys, sglang" in absent and "image_manifest_fallback" in absent
     reuse, fallback = rest.split("\nelse\n", 1)
-    assert "ln -sfn /sgl-workspace/sglang ~/sglang" in reuse
-    assert f"git -C ~/sglang fetch --depth 1 origin {s}" in fallback
     assert fallback.endswith("pip install -q --no-deps -e ~/sglang/python\nfi")
 
 
@@ -174,7 +164,7 @@ def test_registry_credentials_match_the_image_registry():
 
 
 def _fake_login_config(monkeypatch):
-    monkeypatch.setattr(launcher, "_sky_docker_login_config", lambda login: ("login", dict(login)))
+    monkeypatch.setattr("yeto.launch.credentials._sky_docker_login_config", lambda login: ("login", dict(login)))
 
 
 def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
@@ -194,33 +184,12 @@ def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
     assert task.resources.image_id == rl.MILES_NEXT_IMAGE
 
 
-@pytest.mark.parametrize("engine", ["ports", "legacy"])
-def test_no_login_means_no_docker_login(monkeypatch, no_login, engine):
-    args = _cli(("--rl-engine", engine))
+def test_no_login_means_no_docker_login(monkeypatch, no_login):
+    args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
     assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
     assert not hasattr(task.resources, "_docker_login_config")
-
-
-def _legacy_task_blob(monkeypatch):
-    args = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(args)
-    task = _island_task(args, monkeypatch)
-    d = {k: v for k, v in vars(task).items() if k not in ("calls", "storage_mounts")}
-    d["resources"] = vars(d["resources"])
-    return json.dumps(d, sort_keys=True, default=str)
-
-
-@pytest.mark.parametrize(
-    "env",
-    [LOGIN, {"SKYPILOT_DOCKER_SERVER": "ghcr.io"}, {**LOGIN, "SKYPILOT_DOCKER_SERVER": "docker.io"}],
-)
-def test_legacy_task_ignores_any_registry_login(monkeypatch, no_login, env):
-    before = _legacy_task_blob(monkeypatch)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    assert _legacy_task_blob(monkeypatch) == before  # even for its ghcr.io image
 
 
 def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
@@ -242,20 +211,6 @@ def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
         (cfg.image_ref,),
         {"secret": ("secret", {"REGISTRY_USERNAME": "user", "REGISTRY_PASSWORD": "not-a-real-token"})},
     )
-
-
-def test_modal_legacy_pull_ignores_the_login(monkeypatch, login):
-    args = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(args)
-    task = _island_task(args, monkeypatch)
-    from yeto.gpu_spec import parse_gpu_spec
-
-    args.cluster_prefix = "img-test"
-    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
-    assert cfg.registry_login is False
-    state = fake_modal(monkeypatch)
-    mr.ModalOps("img-test").define(cfg)
-    assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})
 
 
 def test_modal_public_image_pull_is_unchanged(monkeypatch, no_login):
@@ -308,6 +263,74 @@ def test_pure_python_check_rejects_build_inputs(tmp_path):
         else:
             with pytest.raises(SystemExit, match="pure-Python"):
                 ml.check_pure_python(repo, base, head, pkgs)
+
+
+def test_layer_drops_megatron_bridges_eager_modelopt_import():
+    """L2.2: the trainer imports megatron.bridge without paying for modelopt (21-30 s)."""
+    import ast
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("make_layer", REPO / "docker/miles-ports/make_layer.py")
+    ml = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    tree = ast.parse(ml.MEGATRON_BRIDGE_INIT.read_text())
+    imported = set()
+    for node in ast.walk(tree):  # module level and inside try/if: all run at import time
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+    assert not any(name.split(".")[0] == "modelopt" for name in imported)
+    # the rest of the package init is untouched: bridges still register
+    assert {"megatron.bridge.models", "megatron.bridge.models.conversion.auto_bridge"} <= imported
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    assert ml.MEGATRON_BRIDGE_COMMIT in script and "lazy-modelopt" in script
+
+
+def _make_layer_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("make_layer", REPO / "docker/miles-ports/make_layer.py")
+    ml = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    return ml
+
+
+def test_patched_files_applies_a_patch_to_the_commits_files(tmp_path):
+    ml = _make_layer_module()
+    repo = tmp_path / "repo"
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True)
+    (repo / "pkg").mkdir(parents=True)
+    run("init", "-q")
+    (repo / "pkg/a.py").write_text("import heavy\n\n\ndef f():\n    return heavy.x\n")
+    (repo / "pkg/b.py").write_text("untouched\n")
+    run("add", "-A")
+    run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    head = run("rev-parse", "HEAD").stdout.strip()
+    (repo / "pkg/a.py").write_text("def f():\n    import heavy\n\n    return heavy.x\n")
+    patch = tmp_path / "lazy.patch"
+    patch.write_text(run("diff").stdout)
+    (repo / "pkg/a.py").write_text("worktree edits are ignored\n")
+
+    assert ml.patched_files(repo, head, patch) == {"pkg/a.py": b"def f():\n    import heavy\n\n    return heavy.x\n"}
+
+
+def test_megatron_lm_patch_drops_the_module_level_modelopt_imports():
+    """L2.2: the three Megatron-LM imports a trainer process ran (traced in the image) become lazy."""
+    ml = _make_layer_module()
+    patch = ml.MEGATRON_LM_PATCH.read_text()
+    files = [line[len("--- a/"):] for line in patch.splitlines() if line.startswith("--- a/")]
+    assert files == ["megatron/post_training/checkpointing.py", "megatron/training/checkpointing.py",
+                     "megatron/training/training.py"]
+    removed = {line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")}
+    assert {"import modelopt", "    from modelopt.torch.opt.plugins import save_modelopt_state, save_sharded_modelopt_state",
+            "    from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation",
+            } <= removed
+    added = [line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")]
+    # every modelopt import the patch adds sits in a function body (indented)
+    assert all(line.startswith("    ") for line in added if re.match(r"\s*(import|from) modelopt", line))
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    assert ml.MEGATRON_LM_COMMIT in script and "megatron_lm_lazy_modelopt.patch" in script
 
 
 def test_gpu_exact_needs_modal_islands():
@@ -474,7 +497,7 @@ def _run_ports_miles_setup(tmp_path, *, manifest: bool, peft_version: str):
         f'exec {sys.executable} "$@"\n'
     )
     (shim / "python3").chmod(0o755)
-    miles, _ = launcher._miles_source_setup("ports")
+    miles, _ = launcher._miles_source_setup()
     script = miles.replace(rl.MILES_NEXT_COMMIT, sha).replace(
         rl.MILES_NEXT_IMAGE_MANIFEST, str(manifest_path)
     )
@@ -524,23 +547,19 @@ def _docker_config(tmp_path, host="ghcr.io", auth="user:not-a-real-token"):
 
 
 def test_registry_login_for_defaults_to_none_for_public_image(monkeypatch, no_login):
-    for engine in ("ports", "legacy"):
-        args = _cli(("--rl-engine", engine))
-        _prepare_rl_args(args)
-        assert args.rl_image_private is False
-        assert launcher.registry_login_for(args, {}) is None
-        task = _island_task(args, monkeypatch)
-        assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
-        assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
+    args = _cli()
+    _prepare_rl_args(args)
+    assert args.rl_image_private is False
+    assert launcher.registry_login_for(args, {}) is None
+    task = _island_task(args, monkeypatch)
+    assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
+    assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
 
 
 def test_registry_login_for_uses_environment_login(no_login):
     args = _cli()
     _prepare_rl_args(args)
     assert launcher.registry_login_for(args, LOGIN) == LOGIN
-    legacy = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(legacy)
-    assert launcher.registry_login_for(legacy, LOGIN) is None  # legacy: env ignored as before
 
 
 def test_rl_image_private_prefers_env_then_docker_config(monkeypatch, no_login, tmp_path):
@@ -551,10 +570,6 @@ def test_rl_image_private_prefers_env_then_docker_config(monkeypatch, no_login, 
     (tmp_path / ".docker").mkdir()
     _docker_config(tmp_path / ".docker")
     assert launcher.registry_login_for(args, {}) == LOGIN
-    # explicit private pull of a legacy-engine image also injects
-    legacy = _cli(("--rl-engine", "legacy", "--rl-image", rl.MILES_NEXT_IMAGE, "--rl-image-private"))
-    _prepare_rl_args(legacy)
-    assert launcher.registry_login_for(legacy, {}) == LOGIN
 
 
 def test_rl_image_private_without_any_login_is_an_error(monkeypatch, no_login, tmp_path):
@@ -616,3 +631,33 @@ def test_modal_public_image_config_has_no_login(monkeypatch, no_login):
     state = fake_modal(monkeypatch)
     mr.ModalOps("img-test").define(cfg)
     assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})
+
+
+def test_gpu_model_pin_refuses_an_a10g_for_an_a10():
+    """E1: Modal "A10G" containers are an NVIDIA A10 or an A10G; --modal-gpu-name pins one."""
+    from yeto.gpu_spec import parse_gpu_spec
+
+    mr.check_gpu_model("NVIDIA A10", ["NVIDIA A10"] * 2, 2)
+    for names, count in ((["NVIDIA A10G"], 1), (["NVIDIA A10", "NVIDIA A10G"], 2), (["NVIDIA A10"], 2)):
+        with pytest.raises(RuntimeError, match="--modal-gpu-name"):
+            mr.check_gpu_model("NVIDIA A10", names, count)
+    cfg = _cfg(gpu="A10G", gpus_per_node=1, gpu_name="NVIDIA A10")
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).gpu_name == "NVIDIA A10"
+    old = json.loads(_cfg().to_json())
+    old.pop("gpu_name")
+    assert mr.ModalIslandConfig.from_json(json.dumps(old)).gpu_name is None
+    args = _cli(("--modal-gpu-name", "NVIDIA A10"))
+    assert args.modal_gpu_name == "NVIDIA A10"
+    with pytest.raises(ValueError, match="--modal-gpu-name applies only to Modal"):
+        launcher.require_modal_for_gpu_exact(args, parse_gpu_spec("modal:1xa10g,aws:1xa100@us-east-1"))
+
+
+def test_the_island_config_carries_the_gpu_model_pin(monkeypatch, login):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _cli(("--modal-gpu-name", "NVIDIA A10"))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xa10g")[0], 0, task, "1.2.3.4:5")
+    assert cfg.gpu_name == "NVIDIA A10"

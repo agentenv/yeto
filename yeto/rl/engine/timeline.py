@@ -197,11 +197,42 @@ TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
 }
 
 
+# S27 task assignment (observe only): the --data rows one round trained, all of
+# them (``rl_trajectory_reward`` stops at TRAJECTORY_REWARD_MAX_PER_ROUND samples).
+# ``rows``: distinct row numbers as arithmetic runs [first, last, step]
+# (``data_split.row_runs``); ``samples``: trained samples that carried a row.
+ROUND_DATA_ROWS_EVENT = "rl_round_data_rows"
+ROUND_DATA_ROWS_SCHEMA: dict[str, tuple[type, ...]] = {
+    "rollout_id": (int,),
+    "policy_version": (int,),
+    "samples": (int,),
+    "row_count": (int,),
+    "rows": (list,),
+}
+
+
+def validate_round_data_rows(record: Mapping[str, object]) -> list[str]:
+    """Schema check of one ``rl_round_data_rows`` payload (labels excluded)."""
+    problems = []
+    for key, types in ROUND_DATA_ROWS_SCHEMA.items():
+        value = record.get(key)
+        if key not in record or (int in types and isinstance(value, bool)) or not isinstance(value, types):
+            problems.append(f"round data rows key {key!r} is missing or {type(value).__name__}")
+    runs = record.get("rows")
+    if isinstance(runs, list) and not all(
+            isinstance(run, list) and len(run) == 3 and all(type(v) is int for v in run) for run in runs):
+        problems.append("round data rows 'rows' is not a list of [first, last, step] runs")
+    return problems
+
+
 # S15 stage-2 follow-up (observe only): why a trajectory scored what it did.
 # Present only when the harness reported them (old key set kept otherwise):
 # Codex exit status (completed / max_turns / max_seq_len / timeout), agent
 # counters and the signed test.sh exit code.
 TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
+    # S27 task assignment: the sample's row number in the unsplit --data, on an
+    # island that reads a row slot (``data_split.DATA_ROW_KEY``)
+    "data_row": (int,),
     "exit_status": (str,),
     "turns": (int,),
     "terminal_calls": (int,),

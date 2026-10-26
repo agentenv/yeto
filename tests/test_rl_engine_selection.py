@@ -27,7 +27,28 @@ from yeto.rl.engine.selection import (
 
 def test_supported_r0_combinations_pass():
     for preset in ("strict-avg", "decoupled"):
-        assert ports_rejections(sync_preset=preset, lora_targets="attention") == []
+        assert ports_rejections(sync_preset=preset) == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(sync_preset="sao-streaming-full", parameter_mode="full"),
+        dict(extra_argv=("--sao-dis-eps-low", "0.8", "--sao-dis-eps-high", "3.0")),
+    ],
+)
+def test_sao_runs_on_ports(kwargs):
+    # P0-1.7b.3: SAO streaming is the two-role full-parameter sync; the SAO
+    # flags are algorithm-spec flags the Miles translation absorbs.
+    assert ports_rejections(**kwargs) == []
+
+
+def test_deepseek_v4_expert_full_runs_on_the_full_parameter_sync():
+    # P0 1.7b.2: attention LoRA + clone experts as one full-parameter LoRA hybrid.
+    assert ports_rejections(
+        sync_preset="full-parameter",
+        expert_full_count=4,
+    ) == []
 
 
 def test_ppo_is_not_routed_to_legacy():
@@ -40,13 +61,9 @@ def test_ppo_is_not_routed_to_legacy():
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
-        (dict(sync_preset="sao-streaming-full"), "SAO"),
-        (dict(extra_argv=("--sao-compaction",)), "SAO"),
-        (dict(sync_preset="dense-full", parameter_mode="full"), "dense-full"),
-        (dict(tuning="full"), "full-parameter"),
-        (dict(model_recipe="deepseek-v4-flash"), "DeepSeek V4"),
-        (dict(lora_targets="attention-routed-experts"), "DeepSeek V4"),
-        (dict(expert_full_count=4), "DeepSeek V4"),
+        (dict(sync_preset="sao-streaming-full", parameter_mode="full",
+              island_scheduling="elastic"), "island pool"),
+        (dict(expert_full_count=4), "expert-full"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
         (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),
@@ -55,11 +72,11 @@ def test_ppo_is_not_routed_to_legacy():
         (dict(model_kind="diffusion"), "causal"),
     ],
 )
-def test_unsupported_combinations_are_rejected_with_legacy_hint(kwargs, reason):
+def test_unsupported_combinations_are_rejected_with_their_reason(kwargs, reason):
     with pytest.raises(UnsupportedPortsCombination) as error:
         require_ports_supported(**kwargs)
     assert reason in str(error.value)
-    assert "--rl-engine legacy" in str(error.value)
+    assert "unsupported RL run" in str(error.value)
 
 
 # ---------------------------------------------------------------- CLI + launcher
@@ -104,42 +121,33 @@ def test_cli_default_is_ports(monkeypatch):
     assert args.rl_engine == "ports"
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert "--rl-engine ports" in task.run
-    assert launcher._miles_source_setup("ports")[0] in task.setup
+    assert "--rl-engine" not in task.run  # one engine: nothing to forward
+    assert launcher._miles_source_setup()[0] in task.setup
 
 
-def test_explicit_legacy_is_forwarded_to_learner_and_source_setup(monkeypatch):
-    args = _cli(("--rl-engine", "legacy"))
-    assert args.rl_engine == "legacy"
-    _prepare_rl_args(args)
-    task = _island_task(args, monkeypatch)
-    # The learner's own default is ports, so legacy is always explicit.
-    assert "--rl-engine legacy" in task.run
-    assert launcher._miles_source_setup("legacy")[0] in task.setup
-
-
-def test_default_ports_rejects_legacy_only_runs_with_a_legacy_hint():
-    args = _cli(("--rl-model-recipe", "deepseek-v4-flash"))
+def test_unsupported_runs_are_refused_before_startup():
+    args = _cli(("--expert-full-count", "2"))
     with pytest.raises(UnsupportedPortsCombination) as error:
         _prepare_rl_args(args)
-    assert "--rl-engine legacy" in str(error.value)
-    assert "default" in str(error.value)
+    assert "expert-full" in str(error.value)
+
+
+def test_rl_engine_legacy_is_no_longer_accepted():
+    with pytest.raises(SystemExit):
+        _cli(("--rl-engine", "legacy"))
+    with pytest.raises(SystemExit):
+        rl_learner.parse_args(_learner_argv(("--rl-engine", "legacy")))
 
 
 def test_ports_is_forwarded_to_learner_and_source_setup(monkeypatch):
     args = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run and "--rl-engine ports" in task.run
-    assert launcher._miles_source_setup("ports")[0] in task.setup
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run
+    assert launcher._miles_source_setup()[0] in task.setup
 
 
-def test_ports_provenance_is_recorded_only_for_ports():
-    legacy = _cli(("--rl-engine", "legacy"))
-    legacy._provenance = {"model": {}, "dataset": {}}
-    with pytest.raises(ValueError):  # provenance fixture is not HF-pinned
-        _prepare_rl_args(legacy)
-    assert "rl_engine" not in legacy._provenance
+def test_ports_provenance_is_recorded():
     ports = _cli(("--rl-engine", "ports"))
     ports._provenance = {"model": {}, "dataset": {}}
     with pytest.raises(ValueError):
@@ -152,13 +160,9 @@ def test_ports_provenance_is_recorded_only_for_ports():
     assert default._provenance["rl_engine"] == "ports"  # default is recorded
 
 
-def test_rl_image_default_follows_the_engine(monkeypatch):
-    from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
+def test_rl_image_default_is_the_ports_image(monkeypatch):
+    from yeto.rl import MILES_NEXT_IMAGE
 
-    legacy = _cli(("--rl-engine", "legacy"))
-    assert legacy.rl_image is None
-    _prepare_rl_args(legacy)
-    assert legacy.rl_image == MILES_IMAGE  # legacy default unchanged
     default = _cli()
     _prepare_rl_args(default)
     assert default.rl_image == MILES_NEXT_IMAGE
@@ -174,10 +178,6 @@ def test_rl_image_default_follows_the_engine(monkeypatch):
 
 
 def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
-    legacy = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(legacy)
-    legacy_run = _island_task(legacy, monkeypatch).run
-    assert "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} " in legacy_run
     ports = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(ports)
     ports_run = _island_task(ports, monkeypatch).run
@@ -189,65 +189,32 @@ def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in ports_run
 
 
-def test_legacy_island_in_the_ports_image_gets_the_megatron_checkout(monkeypatch):
-    from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
-
-    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): legacy in MILES_NEXT_IMAGE
-    # needs the image's editable Megatron-LM checkout on PYTHONPATH too (the
-    # run still fails there: that Megatron dropped megatron.training.tokenizer,
-    # which agentenv/miles imports; legacy belongs in MILES_IMAGE).
-    legacy = _cli(("--rl-engine", "legacy", "--rl-image", MILES_NEXT_IMAGE))
-    _prepare_rl_args(legacy)
-    assert launcher.island_uses_ports_megatron(legacy)
-    run = _island_task(legacy, monkeypatch).run
-    assert (
-        "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM"
-        "${PYTHONPATH:+:$PYTHONPATH} " in run
-    )
-    assert "PYTHONPATH=$HOME/miles:" not in run  # legacy pip -e installs ~/miles
-    own = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(own)
-    assert own.rl_image == MILES_IMAGE
-    assert not launcher.island_uses_ports_megatron(own)
-    assert "/root/Megatron-LM" not in _island_task(own, monkeypatch).run
-    other = _cli(("--rl-engine", "legacy", "--rl-image", "docker:example/miles@sha256:" + "e" * 64))
-    _prepare_rl_args(other)
-    assert not launcher.island_uses_ports_megatron(other)
-
-
 def test_modal_ports_island_does_not_request_the_external_router():
     from yeto.gpu_spec import parse_gpu_spec
 
     task = SimpleNamespace(run="true", envs={}, setup="true")
-    legacy = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run", "--rl-engine", "legacy"))
-    _prepare_rl_args(legacy)
-    (spec,) = parse_gpu_spec(legacy.gpu)
-    cfg = launcher.build_modal_island_config(legacy, spec, 0, task, "1.2.3.4:5000")
-    assert cfg.envs["YETO_RL_EXTERNAL_ROUTER"] == "1"
     ports = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run", "--rl-engine", "ports"))
     _prepare_rl_args(ports)
+    (spec,) = parse_gpu_spec(ports.gpu)
     cfg = launcher.build_modal_island_config(ports, spec, 0, task, "1.2.3.4:5000")
     assert "YETO_RL_EXTERNAL_ROUTER" not in cfg.envs
     assert cfg.image_ref == ports.rl_image.removeprefix("docker:")
 
 
-def test_ports_router_mode_ignores_external_router_and_refuses_preset_address(capsys):
+def test_ports_router_mode_refuses_a_preset_router_address():
     args = SimpleNamespace(sglang_router_ip=None, sglang_router_port=None)
-    rl_learner.require_ports_router_mode(args, environ={rl_learner.EXTERNAL_ROUTER_ENV: "1"})
+    rl_learner.require_ports_router_mode(args)
     assert args.sglang_router_ip is None  # upstream resolves its own router
-    assert "ignored on --rl-engine ports" in capsys.readouterr().out
     with pytest.raises(ValueError, match="external SGLang router"):
         rl_learner.require_ports_router_mode(
-            SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000), environ={}
+            SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000)
         )
 
 
 @pytest.mark.parametrize(
     "extra, reason",
     [
-        (("--rl-model-recipe", "deepseek-v4-flash"), "DeepSeek V4"),
-        (("--expert-full-count", "2"), "DeepSeek V4"),
-        (("--lora-targets", "attention-routed-experts"), "DeepSeek V4"),
+        (("--expert-full-count", "2"), "expert-full"),
     ],
 )
 def test_launcher_rejects_ports_before_startup(extra, reason):
@@ -277,32 +244,25 @@ def _learner_argv(extra=()):
 
 def test_learner_default_is_ports():
     assert rl_learner.parse_args(_learner_argv()).rl_engine == "ports"
-    assert rl_learner.parse_args(_learner_argv(("--rl-engine", "legacy"))).rl_engine == "legacy"
 
 
 @pytest.mark.parametrize(
     "extra",
     [
-        ("--parameter-mode", "full", "--sync-preset", "dense-full"),
-        ("--rl-model-recipe", "deepseek-v4-flash"),
         ("--expert-full-count", "2"),
         ("--rollout-num-gpus", "2"),
     ],
 )
 def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     argv = _learner_argv(("--rl-engine", "ports", *extra))
-    if "--parameter-mode" in extra:
-        argv = [a for a in argv if a not in ("--lora-r", "8", "--lora-targets", "attention")]
     with pytest.raises(SystemExit):
         rl_learner.parse_args(argv)
-    assert "only supported by the legacy path" in capsys.readouterr().err
+    assert "unsupported RL run" in capsys.readouterr().err
     # the default (ports) rejects it too
     default = [a for a in argv if a not in ("--rl-engine", "ports")]
     with pytest.raises(SystemExit):
         rl_learner.parse_args(default)
-    assert "--rl-engine legacy" in capsys.readouterr().err
-    # explicit legacy accepts the same combination at parse time
-    rl_learner.parse_args([*default, "--rl-engine", "legacy"])
+    assert "unsupported RL run" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -310,7 +270,6 @@ def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     [
         (("--use-critic",), "critic"),
         (("--advantage-estimator", "gspo"), "non-GRPO"),
-        (("--sao-compaction",), "SAO"),
         (("--rollout-num-gpus", "4"), "fixed partition"),
     ],
 )
@@ -343,8 +302,6 @@ def test_run_miles_ports_refuses_a_miles_pin_without_run_plugin(monkeypatch):
 
 
 def test_learner_main_verifies_the_ports_pin_group(monkeypatch):
-    from yeto.rl import MILES_NEXT_PINS
-
     calls = []
 
     class Stop(Exception):
@@ -360,44 +317,34 @@ def test_learner_main_verifies_the_ports_pin_group(monkeypatch):
     monkeypatch.setattr(provenance, "verify_source_tree_sha256", lambda value: value)
     monkeypatch.setattr(provenance, "python_spec_sha256", lambda spec: "e" * 64)
     with pytest.raises(Stop):
-        rl_learner.main(_learner_argv(("--rl-engine", "ports", "--data-revision", "f" * 40)))
-    assert calls == [{"expected": MILES_NEXT_PINS}]
-    calls.clear()
-    with pytest.raises(Stop):
         rl_learner.main(_learner_argv(("--data-revision", "f" * 40)))
-    assert calls == [{"expected": MILES_NEXT_PINS}]  # ports is the default
-    calls.clear()
-    with pytest.raises(Stop):
-        rl_learner.main(
-            _learner_argv(("--rl-engine", "legacy", "--data-revision", "f" * 40))
-        )
-    assert calls == [{"expected_source_sha256": None}]  # legacy call unchanged
+    assert calls == [{}]  # verify_miles_revision defaults to MILES_NEXT_PINS
 
 
 # ---------------------------------------------------------------- SSH harness
 
 
-def test_harness_plan_key_only_for_ports():
+def test_harness_plan_names_the_ports_engine():
     from tests.test_rl_ssh_harness import _plan  # noqa: PLC0415
     from yeto.rl import ssh_harness
     from yeto.rl.ssh_harness import HarnessError, _learner_argv
 
-    plan = _plan()  # no rl_engine key = legacy plan (digest unchanged)
-    ssh_harness._validate_plan(plan)
-    argv = _learner_argv(plan, 0)
-    # The learner defaults to ports, so a legacy plan passes legacy explicitly.
-    assert argv[argv.index("--rl-engine") + 1] == "legacy"
-    assert rl_learner.parse_args(argv[3:]).rl_engine == "legacy"
-    ports = {**_plan(), "rl_engine": "ports"}
+    ports = _plan()
     ssh_harness._validate_plan(ports)
     argv = _learner_argv(ports, 0)
-    assert argv[argv.index("--rl-engine") + 1] == "ports"
+    assert "--rl-engine" not in argv  # one engine: nothing to pass
     assert rl_learner.parse_args(argv[3:]).rl_engine == "ports"
-    with pytest.raises(HarnessError, match="absent"):
-        ssh_harness._validate_plan({**_plan(), "rl_engine": "legacy"})
-    dsv4 = {**_plan(), "rl_engine": "ports"}
-    dsv4["learner"] = {**dsv4["learner"], "rl_model_recipe": "deepseek-v4-flash"}
-    with pytest.raises(HarnessError, match="legacy"):
+    for engine in (None, "legacy"):
+        plan = {**_plan(), "rl_engine": engine}
+        with pytest.raises(HarnessError, match="must be 'ports'"):
+            ssh_harness._validate_plan(plan)
+    dsv4 = _plan()
+    dsv4["learner"] = {
+        **dsv4["learner"],
+        "rl_model_recipe": "deepseek-v4-flash",
+        "expert_full_count": 2,
+    }
+    with pytest.raises(HarnessError, match="expert-full"):
         ssh_harness._validate_plan(dsv4)
 
 
@@ -635,35 +582,12 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
     publications = [e for e in events if e["event"] == "rl_publication"]
     tokens = [e["rl/policy_token"] for e in publications]
     assert [t.split(":")[1] for t in tokens] == ["0", "1", "2"]
-    # publisher token == driver token == what the rollout process filtered on
-    assert controller.engine.version == tokens[-1]
+    # P0-S: the engine carries the plain version of the driver's token
+    assert controller.engine.version == tokens[-1].split(":")[1]
     assert hook.current_policy_token() == tokens[-2]
     assert all(e["sync/publication_members"] == ["engine:c0"] for e in publications)
     local = [e for e in events if e["event"] == "rl_local_round"]
     assert [e["grad_norm"] for e in local] == [2.0, 2.0]
-
-
-def test_run_miles_ports_never_starts_the_legacy_external_router(monkeypatch):
-    from yeto.rl.adapters.miles.state import PolicyStateError
-
-    group = types.ModuleType("miles.ray.train.group")
-    group.TrainerController = type("TrainerController", (), {})
-    # Upstream Miles: no get_host_info in http_utils.
-    http_utils = types.ModuleType("miles.utils.http_utils")
-    for name in ("miles", "miles.ray", "miles.ray.train", "miles.utils"):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "miles.ray.train.group", group)
-    monkeypatch.setitem(sys.modules, "miles.utils.http_utils", http_utils)
-    monkeypatch.setitem(sys.modules, "megatron", None)
-    monkeypatch.setenv(rl_learner.EXTERNAL_ROUTER_ENV, "1")
-
-    def legacy_router(*_args, **_kwargs):
-        raise AssertionError("ports must not start the legacy external router")
-
-    monkeypatch.setattr(rl_learner, "start_external_sglang_router", legacy_router)
-    args = rl_learner.parse_args(_learner_argv(("--rl-engine", "ports")))
-    with pytest.raises(PolicyStateError, match="run_plugin"):  # got past the router
-        rl_learner.run_miles(args, model_path="/x", prompt_path="/x")
 
 
 def test_explicit_fixed_partition_is_a_ports_combination():
@@ -685,3 +609,13 @@ def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypa
     after = run.split(learner, 1)[1]
     assert '( set +e; nvidia-smi -L; echo done ) > "$HOME/yeto-output/post-cmd.txt" 2>&1' in after
     assert "exit ${LRC:-0}" in after.split("else", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [dict(sync_preset="full-parameter", parameter_mode="full"), dict(tuning="full", parameter_mode="full")],
+)
+def test_full_parameter_training_runs_on_ports(kwargs):
+    """P0-D8: full-parameter training has one ports sync (FullParameterSync)."""
+
+    assert ports_rejections(**kwargs) == []

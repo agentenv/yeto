@@ -8,7 +8,9 @@ and never sets ``--save``/``--load``; a cut is written and read only here.
 
 One shard per rank holds (4.1 audit, ``cut-audit.md``):
 
-* LoRA adapter model copies (bf16 or fp32), keyed by parameter name;
+* the model copies (bf16 or fp32) of the trainable parameters, keyed by
+  parameter name: the LoRA adapters of a LoRA trainer, every trainable
+  parameter of a full-parameter trainer (key ``adapter`` in both cases);
 * the optimizer state keyed by parameter name, including the FP32 main copy
   (``param``), the moments and the step/hyper-parameters -- produced by the
   fork-M5 helpers ``miles.backends.megatron_utils.lora.dp_invariant_state``
@@ -24,9 +26,11 @@ ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
 (DistributedOptimizer) shard is written back only onto identical per-parameter
 ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
 included). Refused like fork-M5: fp16 (loss-scaler state not saved),
-precision-aware optimizer, partial DistOpt instances, CP>1, and a trainer
-without LoRA adapters; the DP-resharding restore also refuses EP>1 and
-TP/PP>1 with DistOpt. torch / miles are imported lazily.
+precision-aware optimizer (except as the FP32 CPU-offload path), partial DistOpt instances, CP>1, and a trainer
+whose trainable parameters mix LoRA adapters with others; the DP-resharding
+restore also refuses EP>1 and TP/PP>1 with DistOpt. A full-parameter shard
+holds the whole model copy on every DP rank plus this rank's optimizer range
+(Qwen3-0.6B at DP=1, estimated: 1.2 GB bf16 model + 7.2 GB FP32 master and moments). torch / miles are imported lazily.
 """
 
 from __future__ import annotations
@@ -44,11 +48,14 @@ from .state_plugin import (
     _STEP_LOSSES,
     StatePluginError,
     install_grad_norm_recorder,
+    refresh_actor_backup,
     trainer_resident,
 )
 
 _MODULE = "yeto.rl.adapters.miles.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
+FINISH_CUT_SHARD = f"{_MODULE}.finish_cut_shard"
+POLL_CUT_SHARD = f"{_MODULE}.poll_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
 # Opt-in: read the optimizer back right after the load and report where a mismatch arises.
@@ -94,11 +101,17 @@ class MilesCutBackend:
 
         return dp_invariant_state
 
-    def export_optimizer(self, optimizer: Any, named: list) -> Any:
+    def export_optimizer(self, optimizer: Any, named: list, *, on_device: bool = False) -> Any:
+        """The fork-M5 named optimizer export. ``on_device`` (E1): the tensors are
+        device copies (same layout, not yet on the host); :func:`to_host` turns the
+        result into exactly the host export."""
+        export = self._dps().export_named_optimizer_state
+        if on_device:
+            export = _device_export(self._dps())
         if _UNSAFE_STATE_READS[0]:  # diagnostic only: verify the fork fix without the yeto guard
-            return self._dps().export_named_optimizer_state(optimizer, named)
+            return export(optimizer, named)
         with side_effect_free_state(optimizer):
-            return self._dps().export_named_optimizer_state(optimizer, named)
+            return export(optimizer, named)
 
     def check_optimizer(self, optimizer: Any, named: list, states: list) -> Any:
         """Merge the DP shards of one (tp, pp) (DistOpt ranges) and validate against ``optimizer``."""
@@ -125,6 +138,41 @@ class MilesCutBackend:
         return {k: int(getattr(margs, k)) for k in ("iteration", "consumed_train_samples")
                 if getattr(margs, k, None) is not None}
 
+    def param_layout(self, actor: Any, named: list) -> dict[str, Any]:
+        """Where each local parameter sits in the whole model (offline cut -> HF merge).
+
+        Uses the trainer's own weight-sync rules: Miles global naming (pipeline-layer
+        and expert offsets) and its TP partition checks for GLU and grouped experts."""
+        from miles.backends.megatron_utils.named_weights import named_params_and_buffers
+        from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import (
+            _check_and_fix_partition,
+            _is_unmarked_grouped_expert_weight,
+            is_routed_expert_param,
+        )
+        from miles.backends.training_utils.parallel import get_parallel_state
+
+        from yeto.rl.engine.param_layout import build_param_layout
+
+        args = actor.args
+        global_of = {id(p): n for n, p in named_params_and_buffers(args, actor.model)}
+        global_names = {local: global_of[id(p)] for local, p in named if id(p) in global_of}
+
+        def partition_of(global_name: str, param: Any) -> tuple[bool, int, int]:
+            tp = bool(getattr(param, "tensor_model_parallel", False)) or _is_unmarked_grouped_expert_weight(
+                global_name, param)
+            if not tp:
+                return False, -1, 1
+            stride, dim = _check_and_fix_partition(args, global_name, int(getattr(param, "partition_stride", 1)),
+                                                   int(getattr(param, "partition_dim", -1)))
+            return True, dim, stride
+
+        ps = get_parallel_state()
+        ranks = {"tp_rank": ps.tp.rank, "tp_size": ps.tp.size, "pp_rank": ps.pp.rank, "pp_size": ps.pp.size,
+                 "ep_rank": ps.ep.rank, "ep_size": ps.ep.size, "etp_rank": ps.etp.rank, "etp_size": ps.etp.size}
+        return build_param_layout(named, global_names=global_names, partition_of=partition_of,
+                                  is_expert=is_routed_expert_param, ranks=ranks,
+                                  num_experts=getattr(args, "num_experts", None))
+
     def set_megatron_counters(self, counters: Mapping[str, int]) -> None:
         if not counters:
             return
@@ -133,6 +181,51 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _device_export(dps: Any) -> Any:
+    """``export_named_optimizer_state`` keeping each tensor on its device (E1).
+
+    The Miles fork takes ``device=None`` for this (yeto/s26-e1-device-export); the
+    pinned image's fork does not yet, and then this module builds the same
+    entries from the fork's own ``optimizer_slots`` -- the fork function's body
+    without its ``.cpu()`` (tests pin the equality with the fork's host export)."""
+    import inspect
+
+    export = dps.export_named_optimizer_state
+    if "device" in inspect.signature(export).parameters:
+        return lambda optimizer, named: export(optimizer, named, device=None)
+
+    def export_on_device(optimizer: Any, named: list) -> dict[str, Any]:
+        import copy
+
+        entries = {}
+        for slot in dps.optimizer_slots(optimizer, named):
+            tensors, scalars = {}, {}
+            for key, value in slot.get().items():
+                value = value.detach()
+                if value.dim() == 0:
+                    scalars[key] = value.clone()
+                    continue
+                flat = value.reshape(-1).clone()
+                if flat.numel() != slot.end - slot.start:
+                    raise dps.DpInvariantStateError(
+                        f"{slot.name!r}: state {key!r} has {flat.numel()} elements but the owned range is "
+                        f"[{slot.start}, {slot.end})"
+                    )
+                tensors[key] = flat
+            entries[slot.name] = {
+                "numel": slot.model_param.numel(),
+                "shape": tuple(slot.model_param.shape),
+                "start": slot.start,
+                "end": slot.end,
+                "tensors": tensors,
+                "scalars": scalars,
+                "hyper": {k: copy.deepcopy(v) for k, v in slot.group.items() if k != "params"},
+            }
+        return {"format": dps.NAMED_STATE_FORMAT, "entries": entries}
+
+    return export_on_device
 
 
 def _expert_coord(ps: Any) -> dict[str, int]:
@@ -160,8 +253,13 @@ def _state_dicts(optimizer: Any) -> list[Any]:
         if obj is None or id(obj) in seen:
             continue
         seen.add(id(obj))
-        stack.extend(getattr(obj, "chained_optimizers", None) or ())
-        stack.append(getattr(obj, "optimizer", None))
+        chained = getattr(obj, "chained_optimizers", None)
+        if chained:
+            # Megatron's ChainedOptimizer.optimizer asserts a single member (an MoE model
+            # chains the dense and the expert optimizer; Modal run-14 failed the cut here)
+            stack.extend(chained)
+        else:
+            stack.append(getattr(obj, "optimizer", None))
         state = getattr(obj, "state", None)
         if isinstance(state, Mapping):
             out.append(state)
@@ -227,7 +325,7 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if getattr(args, "fp16", False):
         out.append("--fp16 keeps a dynamic loss-scaler state that the cut does not carry")
     if getattr(args, "use_precision_aware_optimizer", False):
-        out.append("--use-precision-aware-optimizer stores scaled/low-precision state (not supported)")
+        out += _precision_aware_problems(args)
     if int(getattr(args, "num_distributed_optimizer_instances", 1) or 1) > 1:
         out.append("--num-distributed-optimizer-instances > 1 (partial DP optimizer groups)")
     cp = int((coord or {}).get("cp_size") or getattr(args, "context_parallel_size", 1) or 1)
@@ -242,6 +340,26 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if reshard and ep > 1:
         out.append("DP resharding with EP>1 is not supported (same-shape cuts are)")
     return out
+
+
+_FP32_NAMES = ("fp32", "float32", "torch.float32")
+
+
+def _precision_aware_problems(args: Any) -> list[str]:
+    """The precision-aware optimizer is carried only as Megatron's CPU-offload path with FP32 state.
+
+    ``--optimizer-cpu-offload`` requires ``--use-precision-aware-optimizer``;
+    its HybridDeviceOptimizer keeps standalone FP32 masters and moments, which
+    the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``,
+    s25-distopt). On the device the precision-aware path keeps scaled or
+    low-precision state, which a cut does not represent.
+    """
+    if not getattr(args, "optimizer_cpu_offload", False):
+        return ["--use-precision-aware-optimizer without --optimizer-cpu-offload stores scaled/low-precision "
+                "state (not supported)"]
+    low = [name for name in ("main_params_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
+           if str(getattr(args, name, "fp32")) not in _FP32_NAMES]
+    return [f"--optimizer-cpu-offload with non-FP32 {low} (not supported)"] if low else []
 
 
 def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, int]:
@@ -262,13 +380,25 @@ def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, in
 
 
 def _adapters(actor: Any, backend: Any) -> list[tuple[str, Any]]:
-    named = [(n, p) for n, p in backend.named_parameters(actor.model) if backend.is_adapter(n)]
-    if not named:
-        raise CutPluginError("no LoRA adapter parameters: only LoRA trainers are covered by the cut (4.1)")
-    trainable = {id(p) for _, p in backend.named_parameters(actor.model) if p.requires_grad}
-    if {id(p) for _, p in named} != trainable:
+    """The parameters a cut carries: the LoRA adapters of a LoRA trainer, else every
+    trainable parameter of a full-parameter trainer (the shard's ``adapter`` entry
+    then holds the full model copy). A mix -- LoRA adapters plus other trainable
+    parameters -- is refused: neither set alone is the trainer's state."""
+    every = backend.named_parameters(actor.model)
+    trainable = [(n, p) for n, p in every if p.requires_grad]
+    adapters = [(n, p) for n, p in every if backend.is_adapter(n)]
+    if not adapters:
+        if not trainable:
+            raise CutPluginError("the trainer has no trainable parameters: nothing to cut")
+        return trainable
+    if {id(p) for _, p in adapters} != {id(p) for _, p in trainable}:
         raise CutPluginError("trainable parameters other than LoRA adapters exist; the cut would miss them")
-    return named
+    return adapters
+
+
+def _tuning(backend: Any, named: list) -> str:
+    """``lora`` or ``full`` (what :func:`_adapters` selected)."""
+    return "lora" if any(backend.is_adapter(n) for n, _ in named) else "full"
 
 
 # --------------------------------------------------------------------------
@@ -290,10 +420,12 @@ def _feed(digest: Any, value: Any) -> None:
         shape = tuple(value.shape)
         t = value.detach().to("cpu").contiguous().reshape(-1)
         digest.update(f"T{t.dtype}{shape}".encode())
-        digest.update(t.view(torch.uint8).numpy().tobytes() if t.numel() else b"")
+        # a buffer, not a bytes copy: same digest, and hashlib releases the GIL while it
+        # hashes (a background cut writer must not stall the training thread, E1)
+        digest.update(t.view(torch.uint8).numpy() if t.numel() else b"")
     elif isinstance(value, np.ndarray):
         digest.update(f"N{value.dtype}{value.shape}".encode())
-        digest.update(np.ascontiguousarray(value).tobytes())
+        digest.update(np.ascontiguousarray(value).view(np.uint8) if value.size else b"")
     elif isinstance(value, Mapping):
         digest.update(b"{")
         for key in sorted(value, key=repr):
@@ -482,14 +614,151 @@ def train_state_digest(snap: Mapping[str, Any]) -> str:
     return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
 
 
-def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
+def _entry_moments(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Moment tensors of one named-export entry (fork-M5 ``tensors`` or a plain ``state``)."""
+    return entry.get("tensors") or entry.get("state") or {}
+
+
+def _entry_step(entry: Mapping[str, Any]) -> Any:
+    """Adam step of one named-export entry: per-parameter state (torch Adam) or the
+    group hyper-parameters (TE/apex fused Adam); None before the first step."""
+    for source in (entry.get("scalars"), entry.get("state"), entry.get("hyper")):
+        if isinstance(source, Mapping) and source.get("step") is not None:
+            return source["step"]
+    return None
+
+
+def resume_inputs(actor: Any) -> dict[str, Any]:
+    """What :func:`resume_rank_state` reads from the live trainer: the optimizer
+    group lrs and the Megatron LR scheduler progress."""
+    from yeto.rl.engine.resume_manifest import scheduler_progress_of
+
+    return {"lrs": [float(g["lr"]) for g in getattr(actor.optimizer, "param_groups", ()) if "lr" in g],
+            "scheduler_progress": scheduler_progress_of(actor.opt_param_scheduler)}
+
+
+def resume_rank_state(actor: Any, optimizer_named: Any, *, lrs: list[float] | None = None,
+                      scheduler_progress: int | None = None) -> dict[str, Any]:
+    """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
+    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6).
+    ``lrs`` / ``scheduler_progress`` (from :func:`resume_inputs`, taken at the step
+    boundary) replace the reads of ``actor`` (then ``None`` is allowed)."""
+    from yeto.rl.engine.resume_manifest import build_rank_state
+
+    if lrs is None or scheduler_progress is None:
+        live = resume_inputs(actor)
+        lrs = live["lrs"] if lrs is None else lrs
+        scheduler_progress = live["scheduler_progress"] if scheduler_progress is None else scheduler_progress
+    entries = (optimizer_named or {}).get("entries") or {}
+    steps = [s for s in (_entry_step(e) for e in entries.values()) if s is not None]
+    return build_rank_state(
+        steps_by_group={"named": steps},
+        scheduler_progress=int(scheduler_progress),
+        lrs=list(lrs),
+        moments_by_name={n: _entry_moments(e) for n, e in entries.items()},
+    ).to_dict()
+
+
+def resume_state(actor: Any) -> dict[str, Any]:
+    """Plugin: ``{"path": shard name, "resume": rank state}`` of the live trainer (first-step check)."""
+    import torch
+
+    try:
+        backend = _backend(actor)
+        coord = _require(actor, backend)
+        with trainer_resident(actor):
+            named = _adapters(actor, backend)
+            with torch.no_grad():
+                exported = backend.export_optimizer(actor.optimizer, named)
+            return {"path": shard_name(coord), "resume": resume_rank_state(actor, exported)}
+    except Exception as error:  # noqa: BLE001 -- returned, not raised (see save_cut_shard)
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: "failed_before_write"}
+
+
+RESUME_STATE = f"{_MODULE}.resume_state"
+
+
+def _add_param_layout(snap: dict[str, Any], actor: Any, backend: Any, named: list) -> None:
+    """R-5: a full-parameter shard records its ``param_layout`` for the offline TP/PP/EP
+    merge. Save and restore both call this, so the restored state digest covers the same
+    keys as the saved one."""
+    layout = getattr(backend, "param_layout", None)
+    if _tuning(backend, named) != "full" or not callable(layout):
+        return
+    try:
+        snap["param_layout"] = layout(actor, named)
+    except Exception as error:  # the cut stays valid for resume; only the offline merge refuses it
+        snap["param_layout"] = {"error": f"{type(error).__name__}: {error}"}
+
+
+def _snapshot(actor: Any, backend: Any, named: list, *, on_device: bool = False) -> dict[str, Any]:
+    """The shard state at this step boundary. ``on_device`` (E1): the adapter and
+    optimizer tensors are device copies (device-to-device, no wait for the host);
+    :func:`to_host` later makes them exactly the host snapshot."""
+    if on_device:
+        adapter = {n: p.detach().clone() for n, p in named}
+        optimizer_named = backend.export_optimizer(actor.optimizer, named, on_device=True)
+    else:
+        adapter = {n: p.detach().to("cpu").clone() for n, p in named}
+        optimizer_named = backend.export_optimizer(actor.optimizer, named)
     return {
-        "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
-        "optimizer_named": backend.export_optimizer(actor.optimizer, named),
+        "adapter": adapter,
+        "optimizer_named": optimizer_named,
         "scheduler": actor.opt_param_scheduler.state_dict(),
         "megatron_counters": backend.megatron_counters(),
         "miles_counters": miles_counters(actor),
     }
+
+
+def to_host(value: Any) -> Any:
+    """``value`` with every non-CPU tensor copied to the host (containers rebuilt,
+    everything else as it is). A CPU tensor is returned as it is."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value if value.device.type == "cpu" else value.to("cpu")
+    if isinstance(value, dict):
+        return {k: to_host(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_host(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(to_host(v) for v in value)
+    return value
+
+
+# E1: device copies of a background cut need this much free device memory besides
+# their own size (twice the copies: the allocator's rounding and what training
+# allocates next); below it the capture stays on the host path
+DEVICE_COPY_ENV = "YETO_RL_CUT_DEVICE_COPY"
+DEVICE_COPY_HEADROOM_BYTES = 1 << 30
+
+
+def _device_copy_plan(actor: Any, named: list) -> tuple[bool, str]:
+    """(copy on the device?, why): the device path needs CUDA parameters, a trainer
+    that stays resident, and free memory for the copies (adapter + FP32 master +
+    two Adam moments, estimated)."""
+    import torch
+
+    if os.environ.get(DEVICE_COPY_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False, "disabled"
+    devices = {p.device for _, p in named}
+    if len(devices) != 1 or next(iter(devices)).type != "cuda":
+        return False, "not_cuda"
+    need = sum(p.numel() * (p.element_size() + 3 * 4) for _, p in named)
+    free, _total = torch.cuda.mem_get_info(next(iter(devices)))
+    if free < 2 * need + DEVICE_COPY_HEADROOM_BYTES:
+        return False, f"low_device_memory(free={free},need={need})"
+    if _sleeps_after_cut(actor):
+        # --offload-train: the trainer sleeps right after the cut (colocated), so nothing
+        # may read the device copies later (they failed with "CUDA error: invalid
+        # argument" in GPU run e1g-yeto-miles-sync-1): they are staged on the host
+        # before the capture returns (_stage)
+        return True, "ok_staged"
+    return True, "ok"
+
+
+def _sleeps_after_cut(actor: Any) -> bool:
+    return bool(getattr(getattr(actor, "args", None), "offload_train", False))
 
 
 # --------------------------------------------------------------------------
@@ -505,32 +774,482 @@ REFUSED = "refused"  # key of a "nothing written" result (reason text)
 REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
 
 
-def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+# E1: shards being written by a background thread of this rank, by cut id
+_PENDING_SHARDS: dict[str, Any] = {}
+
+
+# S27 G-EL: ``save_cut_shard(background=HOST_BACKGROUND)``: a host copy written by a
+# thread of this rank, no other copy (peer snapshots of a 30B trainer: 8 ranks x
+# about 59 GB of host memory next to a training container at about 289 GiB of 768)
+HOST_BACKGROUND = "host"
+
+
+def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool | str = False) -> dict[str, Any]:
     """Write this rank's shard (tmp + fsync + rename) and return its summary.
 
     A refusal (unsupported configuration, not at a step boundary, ...) is
     RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
     errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
     would turn a clean "no cut" into a dead trainer.
+
+    ``background`` (E1): take the state now (at this step boundary) and write, hash
+    and summarize it off the training thread (:func:`_write_background`), so
+    training goes on; returns ``{"pending": cut_id}``. :func:`finish_cut_shard`
+    returns the summary, :func:`poll_cut_shard` says whether it is ready.
+
+    ``background="host"`` (:data:`HOST_BACKGROUND`, S27 G-EL peer snapshots): the
+    state is copied to host memory here (the host path of :func:`_capture`) and a
+    thread of this rank writes the shard from that copy (:func:`_write_refusing`,
+    the inline write's code), without the device copies, the shared-memory buffer
+    and the writer process of the E1 path: those hold up to three copies of the
+    shard at once, about 1.4 TB on an 8-rank 30B trainer.
     """
+    host = background == HOST_BACKGROUND
     try:
         with trainer_resident(actor):
-            return _save(actor, directory=directory, cut_id=cut_id)
+            captured = _capture(actor, cut_id=cut_id, device_copy=bool(background) and not host)
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+    if host:
+        captured["capture"] = {**captured["capture"], "reason": "host_background"}
+    if not background:
+        try:
+            return _write_refusing(captured, directory=directory, cut_id=cut_id)
+        finally:
+            _release_capture(captured, cut_id)
+    from concurrent.futures import ThreadPoolExecutor
+
+    if cut_id in _PENDING_SHARDS:
+        return {REFUSED: f"cut {cut_id} is already being written", REFUSAL_KIND: "refused"}
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
+    write = _write_host_background if host else _write_background
+    _PENDING_SHARDS[cut_id] = (pool, pool.submit(write, captured, directory=directory, cut_id=cut_id))
+    pool.shutdown(wait=False)
+    return {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
+
+
+def poll_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
+    """Whether this rank's background write of ``cut_id`` finished (never waits):
+    ``{"done": bool}``; ``done`` with ``"missing"`` when nothing is pending."""
+    pending = _PENDING_SHARDS.get(cut_id)
+    if pending is None:
+        return {"done": True, "missing": True}
+    return {"done": bool(pending[1].done())}
+
+
+def _write_host_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Thread of the trainer process: :func:`_write_refusing` of a host capture,
+    then the host copy is released (:func:`_release_capture`) before the
+    summary is ready."""
+    try:
+        result = _write_refusing(captured, directory=directory, cut_id=cut_id)
+    except BaseException:
+        _remove_partial(directory, captured["coord"])
+        raise
+    finally:
+        _release_capture(captured, cut_id)
+    return {**result, "writer": {"mode": "host_thread"}}
+
+
+def _release_capture(captured: dict[str, Any], cut_id: str) -> None:
+    """Drop the host copy of a written (or refused) host capture and give its
+    memory back to the OS (S27 G-EY, :mod:`yeto.rl.engine.host_memory`). The
+    caller holds the last reference: the capture is emptied in place."""
+    from yeto.rl.engine.host_memory import anonymous_rss_mib
+
+    held = anonymous_rss_mib()
+    captured.clear()
+    _release_host_memory(f"released {cut_id}", rss_anon_mib_with_copy=held)
+
+
+def _release_host_memory(what: str, **fields: Any) -> None:
+    """:func:`yeto.rl.engine.host_memory.release_host_memory`, logged for the driver."""
+    import json
+
+    from yeto.rl.engine.host_memory import release_host_memory
+
+    print(f"yeto cut host memory {what} " + json.dumps({**fields, **release_host_memory()}), flush=True)
+
+
+def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
+    """The summary of a background :func:`save_cut_shard` (waits for its thread).
+    Its ``writer`` key says where the shard was serialized and hashed."""
+    pending = _PENDING_SHARDS.pop(cut_id, None)
+    if pending is None:
+        return {REFUSED: f"no background write of cut {cut_id} on this rank", REFUSAL_KIND: "failed_before_write"}
+    try:
+        return pending[1].result()
+    except Exception as error:  # noqa: BLE001 - reported like a refusal: the cut is not committed
+        return {REFUSED: f"background write of cut {cut_id} failed: {error!r}", REFUSAL_KIND: "failed"}
+
+
+def _write_refusing(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    try:
+        return _write(_with_resume(_on_host(captured)), directory=directory, cut_id=cut_id)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
-def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+# E1 phase 5: a background cut is serialized (torch.save), hashed and committed in a
+# writer process of this rank, not in a thread of the trainer process: the writer
+# thread competed with training (each trained token about 8 % slower while it ran,
+# GPU runs e1g/e1h). The trainer copies the state into shared memory and hands it
+# over; the writer process writes the same file and summary. "0" keeps the thread.
+WRITER_PROCESS_ENV = "YETO_RL_CUT_WRITER_PROCESS"
+_WRITER: list[Any] = []  # this rank's writer process pool (one worker), started lazily
+
+
+def _writer_enabled() -> bool:
+    return os.environ.get(WRITER_PROCESS_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _writer_init() -> None:
+    """Writer process start: below training in CPU priority, one intra-op thread."""
+    import torch
+
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    torch.set_num_threads(1)
+
+
+def _writer_pool() -> Any:
+    if not _WRITER:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        import torch.multiprocessing  # noqa: F401 - registers the shared-memory tensor pickling
+
+        # spawn: the trainer has CUDA initialized (fork would copy it); the child never touches CUDA
+        _WRITER.append(ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                                           initializer=_writer_init))
+        import atexit
+
+        atexit.register(_drop_writer_pool)  # stop it before interpreter teardown
+    return _WRITER[0]
+
+
+def _drop_writer_pool() -> None:
+    if _WRITER:
+        _WRITER.pop().shutdown(wait=False, cancel_futures=True)
+
+
+def _remove_partial(directory: str, coord: Mapping[str, int]) -> None:
+    """Remove what a dead writer process left of this rank's shard (no summary was
+    returned, so no manifest names it)."""
+    final = os.path.join(directory, shard_name(coord))
+    for path in (final + ".tmp", final):
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Thread of the trainer process: the state to the host and into one shared buffer
+    (:func:`_pack`), then the writer process serializes, hashes and summarizes it.
+    When the writer process fails (it died, the state did not pickle, ...) this thread
+    writes the same shard itself and the summary's ``writer`` says so (``mode=thread``,
+    ``fallback``)."""
+    try:
+        try:
+            skeleton, layout, flat = _pack(_on_host(captured))
+        finally:
+            _STAGING.free.set()  # a staged snapshot (sync cuts) is copied out or dropped
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+    fallback = "disabled"
+    if _writer_enabled():
+        try:
+            result = _writer_pool().submit(_write_packed, skeleton, layout, flat,
+                                           directory=directory, cut_id=cut_id).result()
+            return {**result, "writer": {"mode": "process"}}
+        except Exception as error:  # noqa: BLE001 - fall back to this thread, say why
+            _drop_writer_pool()
+            fallback = f"writer process failed: {error!r}"[:500]
+            print("yeto cut writer fallback " + repr({"cut_id": cut_id, "reason": fallback}), flush=True)
+            _remove_partial(directory, captured["coord"])
+    return {**_write_refusing(_unpack(skeleton, layout, flat), directory=directory, cut_id=cut_id),
+            "writer": {"mode": "thread", "fallback": fallback}}
+
+
+class _Staging:
+    """The reused host buffer of :func:`_stage` (pinned when CUDA is available) and
+    whether a staged snapshot still lives in it (set again once :func:`_pack` copied
+    it out). One per trainer process."""
+
+    ALIGN = 64
+
+    def __init__(self) -> None:
+        import threading
+
+        self.buffer = None
+        self.free = threading.Event()
+        self.free.set()
+
+    def flat(self, nbytes: int):
+        import torch
+
+        if self.buffer is None or self.buffer.numel() < nbytes:
+            self.buffer = None
+            self.buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=torch.cuda.is_available())
+        return self.buffer
+
+
+_STAGING = _Staging()
+STAGING_WAIT_S = 600.0
+
+
+def _tensors(value: Any, out: list) -> list:
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        out.append(value)
+    elif isinstance(value, Mapping):
+        for v in value.values():
+            _tensors(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _tensors(v, out)
+    return out
+
+
+def _stage(snap: Any, *, include_cpu: bool = False) -> Any:
+    """``snap`` with every contiguous non-CPU tensor replaced by a view of the
+    process's staging buffer holding its exact bytes (copied asynchronously, ONE
+    synchronization at the end); other tensors (CPU unless ``include_cpu``, a test
+    hook; non-contiguous) are copied to the host on their own as :func:`to_host` does. The views are valid until
+    :func:`_pack` copies them out (the writer thread then marks the buffer free)."""
+    import torch
+
+    if not _STAGING.free.wait(STAGING_WAIT_S):
+        raise CutPluginError("the previous cut's staged state was never handed to its writer")
+    stageable = [t for t in _tensors(snap, [])
+                 if (include_cpu or t.device.type != "cpu") and t.is_contiguous()]
+    if not stageable:
+        return to_host(snap)
+    _STAGING.free.clear()
+    align = _Staging.ALIGN
+    offsets, total = {}, 0
+    for t in stageable:
+        if id(t) not in offsets:
+            offsets[id(t)] = total
+            total += -(-t.numel() * t.element_size() // align) * align
+    flat = _STAGING.flat(total)
+    views: dict[int, Any] = {}
+
+    def staged(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            if id(value) in offsets:
+                if id(value) not in views:
+                    start = offsets[id(value)]
+                    view = flat[start:start + value.numel() * value.element_size()].view(value.dtype)
+                    view = view.view(value.shape)
+                    view.copy_(value, non_blocking=True)
+                    views[id(value)] = view
+                return views[id(value)]
+            return value if value.device.type == "cpu" else value.to("cpu")
+        if isinstance(value, dict):
+            return {k: staged(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [staged(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(staged(v) for v in value)
+        return value
+
+    try:
+        out = staged(snap)
+        devices = {t.device for t in stageable if t.device.type == "cuda"}
+        for device in devices:
+            torch.cuda.synchronize(device)  # every staged copy is complete
+    except BaseException:
+        _STAGING.free.set()
+        raise
+    return out
+
+
+
+_PACKED = "__yeto_packed__"
+
+
+def _pack(value: Any) -> tuple[Any, list, Any]:
+    """(skeleton, layout, flat): ``value`` with every packable CPU tensor replaced by
+    ``{_PACKED: index}`` and its bytes copied into ONE shared-memory buffer ``flat``
+    (``layout[index]`` = offset, dtype, shape). Packable: contiguous and the sole
+    owner of its whole storage, so :func:`_unpack` rebuilds a tensor that saves to
+    the same bytes. Other tensors stay in the skeleton, moved to shared memory one by
+    one. One buffer is one file descriptor to hand over: per-tensor sharing passed
+    about 400 descriptors per cut through the trainer process's resource sharer
+    while the next round trained (E1 profile run e1j-yeto-miles-async-a)."""
+    import torch
+
+    tensors: list = []
+    _collect(value, tensors)
+    owners: dict[int, int] = {}
+    for t in tensors:
+        key = t.untyped_storage().data_ptr()
+        owners[key] = owners.get(key, 0) + 1
+
+    staging = _STAGING.buffer
+    staged_ptr = None if staging is None else staging.untyped_storage().data_ptr()
+
+    def packable(t: Any) -> bool:
+        storage = t.untyped_storage()
+        if staged_ptr is not None and storage.data_ptr() == staged_ptr and t.device.type == "cpu":
+            return t.is_contiguous() and t.numel() > 0  # a view of the staging buffer: copied out
+        return (t.device.type == "cpu" and t.is_contiguous() and t.storage_offset() == 0
+                and storage.nbytes() == t.numel() * t.element_size() and owners[storage.data_ptr()] == 1
+                and t.numel() > 0)
+
+    chosen = [t for t in tensors if packable(t)]
+    offsets, total = {}, 0
+    for t in chosen:
+        offsets[id(t)] = total
+        total += -(-t.numel() * t.element_size() // 64) * 64
+    flat = torch.empty(max(total, 1), dtype=torch.uint8).share_memory_()
+    layout: list = []
+
+    def walk(v: Any) -> Any:
+        if isinstance(v, torch.Tensor):
+            if id(v) not in offsets:
+                return v.share_memory_() if v.device.type == "cpu" else v
+            start, nbytes = offsets[id(v)], v.numel() * v.element_size()
+            flat[start:start + nbytes].copy_(v.reshape(-1).view(torch.uint8))
+            layout.append((start, v.dtype, tuple(v.shape)))
+            return {_PACKED: len(layout) - 1}
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, tuple):
+            return tuple(walk(x) for x in v)
+        return v
+
+    return walk(value), layout, flat
+
+
+def _collect(value: Any, out: list) -> None:
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        out.append(value)
+    elif isinstance(value, Mapping):
+        for v in value.values():
+            _collect(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _collect(v, out)
+
+
+def _unpack(skeleton: Any, layout: list, flat: Any) -> Any:
+    """The value :func:`_pack` packed: every packed tensor is a fresh tensor holding
+    its own copy of the bytes."""
+    import torch
+
+    def walk(v: Any) -> Any:
+        if isinstance(v, dict) and _PACKED in v and len(v) == 1:
+            start, dtype, shape = layout[v[_PACKED]]
+            numel = 1
+            for d in shape:
+                numel *= int(d)
+            nbytes = numel * torch.empty((), dtype=dtype).element_size()
+            return flat[start:start + nbytes].clone().view(dtype).view(shape)
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, tuple):
+            return tuple(walk(x) for x in v)
+        return v
+
+    return walk(skeleton)
+
+
+def _write_packed(skeleton: Any, layout: list, flat: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Writer process: :func:`_write_refusing` of the unpacked state."""
+    return _write_refusing(_unpack(skeleton, layout, flat), directory=directory, cut_id=cut_id)
+
+
+def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str, Any]:
+    """Everything the shard and its summary need, read at the step boundary.
+
+    Host path: CPU copies, taken here. ``device_copy`` (E1, background cuts): the
+    adapter and optimizer tensors are copied device-to-device here and reach the
+    host in the writer thread (:func:`_on_host`), so the trainer waits only for
+    the device copies. The device path is skipped (host path, reason in
+    ``capture``) without CUDA parameters, with too little free device memory, or
+    when a device copy runs out of memory; the shard is the same either way."""
     import torch
 
     backend = _backend(actor)
     coord = _require(actor, backend)
     if _STEP_GRAD_NORMS or _STEP_APPLIED_LRS or _STEP_LOSSES:
         raise CutPluginError("per-step records not drained: the cut is not at an optimizer-step boundary")
+    import json
+    import time
+
+    marks = [time.monotonic()]
     named = _adapters(actor, backend)
+    on_device, reason = _device_copy_plan(actor, named) if device_copy else (False, "inline")
     with torch.no_grad():
-        snap = _snapshot(actor, backend, named)
+        snap = None
+        if on_device:
+            try:
+                snap = _snapshot(actor, backend, named, on_device=True)
+            except torch.cuda.OutOfMemoryError:
+                snap, on_device, reason = None, False, "device_oom"
+                torch.cuda.empty_cache()
+        if snap is None:
+            snap = _snapshot(actor, backend, named)
+        _add_param_layout(snap, actor, backend, named)
+        ready = None
+        if on_device and _sleeps_after_cut(actor):
+            snap = _stage(snap)  # host views; the device copies are dropped here
+        elif on_device and any(p.is_cuda for _, p in named):
+            ready = torch.cuda.Event()
+            ready.record()
+        marks.append(time.monotonic())
         rng = backend.capture_rng()
+    capture = {"mode": "device" if on_device else "host", "reason": reason}
+    captured = {"coord": coord, "snap": snap, "rng": rng, "capture": capture, "ready": ready,
+                "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+                "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named),
+                # what resume_rank_state reads from the live trainer, as it is now
+                "resume_inputs": resume_inputs(actor)}
+    marks.append(time.monotonic())
+    if not on_device:
+        captured["resume"] = resume_rank_state(actor, snap["optimizer_named"], **captured["resume_inputs"])
+    marks.append(time.monotonic())
+    # E1 diagnosis: where the step-boundary capture of a cut goes (driver log only)
+    print("yeto cut capture timing " + json.dumps({**dict(zip(
+        ("snapshot_s", "rng_tuning_s", "resume_state_s"),
+        (round(b - a, 3) for a, b in zip(marks, marks[1:])))), "capture": capture}), flush=True)
+    return captured
+
+
+def _on_host(captured: dict[str, Any]) -> dict[str, Any]:
+    """``captured`` with its device copies on the host (runs off the training
+    thread). Host captures are returned as they are."""
+    ready = captured.get("ready")
+    if ready is None and "resume" in captured:
+        return captured
+    if ready is not None:
+        ready.synchronize()  # the device copies are complete (whatever stream training uses)
+    return {**captured, "snap": to_host(captured["snap"]), "ready": None}
+
+
+def _with_resume(captured: dict[str, Any]) -> dict[str, Any]:
+    """``captured`` with the N7.6 resume state a device capture defers (computed from
+    the host snapshot and the step-boundary resume inputs)."""
+    if "resume" in captured:
+        return captured
+    return {**captured, "resume": resume_rank_state(None, captured["snap"]["optimizer_named"],
+                                                    **captured["resume_inputs"])}
+
+
+def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    import torch
+
+    coord, snap, rng = captured["coord"], captured["snap"], captured["rng"]
     shard = {"schema": SHARD_SCHEMA, "cut_id": cut_id, "coord": dict(coord), **snap, "rng": rng}
     os.makedirs(directory, exist_ok=True)
     name = shard_name(coord)
@@ -546,13 +1265,13 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
             import io
 
             buffer = io.BytesIO()
-            torch.save(to_safe(shard), buffer)
+            torch.save(_interned(to_safe(shard)), buffer)
             data = buffer.getvalue()
             fh.write(data[: len(data) // 2])
             fh.flush()
             os.fsync(fh.fileno())
             cut_injection.kill_now(f"save_cut shard {name} half written")
-        torch.save(to_safe(shard), fh)
+        torch.save(_interned(to_safe(shard)), fh)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, final)
@@ -561,7 +1280,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "sha256": _sha256(final),
         "bytes": os.path.getsize(final),
         "coord": dict(coord),
-        "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+        "scheduler_samples": captured["scheduler_samples"],
         "has_optimizer_state": snap["optimizer_named"] is not None,
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
@@ -569,10 +1288,31 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
         "components": component_digests({"state": snap, "rng": rng}),
-        "adapter_tensors": len(named),
-        "adapter_names": sorted(n for n, _ in named),
+        "tuning": captured["tuning"],
+        "adapter_tensors": len(captured["adapter_names"]),
+        "adapter_names": captured["adapter_names"],
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
+        "resume": captured["resume"],
     }
+
+
+def _interned(value: Any) -> Any:
+    """``value`` with every string interned. Pickle writes a string once per object
+    and back-references repeats of the same object; interning makes that depend on
+    the values only, so a shard serialized in the writer process (whose strings
+    arrived unpickled, as separate objects) has the same bytes as one serialized in
+    the trainer (E1 phase 5)."""
+    import sys
+
+    if isinstance(value, str):
+        return sys.intern(value)
+    if isinstance(value, dict):
+        return {_interned(k): _interned(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interned(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_interned(v) for v in value)
+    return value
 
 
 def _load_verified(directory: str, entry: Mapping[str, Any], cut_id: str) -> dict[str, Any]:
@@ -645,6 +1385,22 @@ def _peer_entries(files: list[Mapping[str, Any]], coord: Mapping[str, int]) -> l
     ]
 
 
+REWIND_SCHEDULER = f"{_MODULE}.rewind_scheduler"
+
+
+def rewind_scheduler(actor: Any) -> dict[str, Any]:
+    """Set the LR scheduler progress back to 0 before a cut restore into a trainer
+    that trained before in this process: a convertible node that converts again
+    (its earlier stint stepped the scheduler; :func:`check_scheduler` refuses a
+    scheduler past 0 because the load adds the saved progress). Everything else
+    the restore overwrites, and its digest check still compares the restored
+    adapter, optimizer, scheduler and counters with the cut."""
+    scheduler = actor.opt_param_scheduler
+    before = int(scheduler.num_steps)
+    scheduler.num_steps = 0
+    return {"rewound_from": before}
+
+
 def _scheduler_steps(state: Mapping[str, Any]) -> int:
     return int(state["num_iters"] if "num_iters" in state else state["num_steps"])
 
@@ -678,10 +1434,39 @@ def rank_coords(actor: Any) -> dict[str, int]:
 RANK_COORDS = f"{_MODULE}.rank_coords"
 
 
+def rebase_full_parameter_tracking(actor: Any) -> None:
+    """After a restore loads the donor's LR scheduler, move Miles' full-parameter
+    scheduler anchor to it. Without this the island's first global apply fails
+    with "scheduler progress has no local-step receipt" (G-D2 rec-c): the
+    restored progress has no local step behind it on this trainer. A trainer
+    without full-parameter tracking (LoRA cut path) is left alone."""
+    if getattr(actor, "_external_full_policy_version", None) is None:
+        return
+    try:
+        from miles.backends.megatron_utils.full_parameter_state import rebase_full_parameter_scheduler_anchor
+    except ImportError as exc:
+        raise CutPluginError("this Miles cannot rebase full-parameter scheduler tracking after a restore") from exc
+    rebase_full_parameter_scheduler_anchor(actor, reason="peer snapshot restore")
+
+
+def forget_full_parameter_resident(actor: Any) -> None:
+    """A restore writes the optimizer masters: Miles must not treat any
+    fragment as already held by them (the resident-fragment apply skip).
+    A Miles without that skip has nothing to forget."""
+    try:
+        from miles.backends.megatron_utils import full_parameter_state
+    except ImportError:
+        return
+    forget = getattr(full_parameter_state, "forget_full_parameter_resident_fragments", None)
+    if forget is not None:
+        forget(actor)
+
+
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
     bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
+    forget_full_parameter_resident(actor)
     _inject_restore_sleep(actor)
     progress = {"written": False}
     try:
@@ -696,6 +1481,10 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
         # are told apart by REFUSAL_KIND; the trainer side raises CutError for both.
         kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
         return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
+    finally:
+        # S27 G-EY: the loaded shard's host tensors are garbage once the trainer
+        # holds their values (or the restore was refused).
+        _release_host_memory(f"after restoring {cut_id}")
 
 
 def _inject_restore_sleep(actor: Any) -> None:
@@ -778,17 +1567,17 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
+    rebase_full_parameter_tracking(actor)
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
     set_miles_counters(actor, shard.get("miles_counters") or {})
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:  # colocated update_weights reads the CPU backup
-        backuper.backup("actor")
+    refresh_actor_backup(actor)  # colocated update_weights may read the CPU backup
     for n, p in named:
         if not p.requires_grad:
             raise CutPluginError(f"adapter parameter {n!r} no longer requires grad")
     backend.restore_rng(shard["rng"])  # last: nothing below may consume randomness
     with torch.no_grad():
         snap = _snapshot(actor, backend, named)
+        _add_param_layout(snap, actor, backend, named)  # the save digests include it
     rng_now = backend.capture_rng()
     summary = {
         "path": name,
@@ -797,6 +1586,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
         "components": component_digests({"state": snap, "rng": rng_now}),
+        "resume": resume_rank_state(actor, snap["optimizer_named"]),
     }
     saved_snap = {k: shard.get(k) for k in snap}
     if state_digest(saved_snap) != summary["state_digest"]:
@@ -871,6 +1661,7 @@ def restore_resharded_shard(
     """
     install_grad_norm_recorder()
     bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
+    forget_full_parameter_resident(actor)
     with trainer_resident(actor):
         return _restore_resharded(actor, directory=directory, files=files, cut_id=cut_id,
                                   source_dp=int(source_dp), rng_policy=rng_policy)
@@ -928,11 +1719,10 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
     actor.opt_param_scheduler.load_state_dict(first["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(first["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
+    rebase_full_parameter_tracking(actor)
     backend.set_megatron_counters(first.get("megatron_counters") or {})
     set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:
-        backuper.backup("actor")
+    refresh_actor_backup(actor)
     if own_rng is not None:
         backend.restore_rng(own_rng)
     with torch.no_grad():
@@ -954,6 +1744,9 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         "rng_digest": state_digest(backend.capture_rng()),
         "optimizer_names": sorted(export.get("entries", {})),
         "adapter_names": sorted(names),
+        # S25 N7.6: run-wide resume assertions (Adam step, scheduler, LRs) at the new DP
+        "path": shard_name(coord),
+        "resume": resume_rank_state(actor, export),
     }
 
 

@@ -15,8 +15,8 @@ from test_rl_algorithm_provenance import _fake_sky, _launcher_args  # noqa: F401
 @pytest.fixture(autouse=True)
 def _no_modal_listing(monkeypatch):
     # provider listing after teardown: nothing listed (= stopped) unless a test says so
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])
-    monkeypatch.setattr(launcher, "MODAL_STOP_VERIFY_DELAY_S", 0.0)
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: [])
+    monkeypatch.setattr("yeto.launch.modal_islands.MODAL_STOP_VERIFY_DELAY_S", 0.0)
 
 
 class Status:
@@ -57,7 +57,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     monkeypatch.setattr(launcher, "_tail_modal", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "FAILED_RUN_DRAIN_S", 0.0, raising=False)
     monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
-    monkeypatch.setattr(launcher, "terminate_and_verify",
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify",
                         lambda sky, name, **k: record.append(("terminate", name)) or True)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
 
@@ -135,7 +135,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     sky.launch = lambda task, **kw: f"rid-{kw.get('cluster_name')}"
     sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
     # the launcher probes every syncer port before starting islands (s13-g3b)
-    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
+    monkeypatch.setattr("yeto.launch.syncer.tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
 
 
 @pytest.mark.parametrize("provider", ["modal", "sky"])
@@ -221,7 +221,7 @@ def _run_one_modal(monkeypatch, tmp_path, listing):
                           gpu="modal:1xa100")
     args.keep, args.recover_timeout = False, 0.0
     app = modal_runner.modal_app_name(args.cluster_prefix)
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: listing(app))
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: listing(app))
     code = launcher.run(args)
     from yeto import runs
 
@@ -236,6 +236,29 @@ def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_p
     assert "not confirmed stopped" in capsys.readouterr().err
     assert rec["confirmed_stopped"] is False and rec["this_run_app_ids"] == ["ap-new"]
     assert len(rec["checks"]) == launcher.MODAL_STOP_VERIFY_ATTEMPTS
+
+
+def test_modal_app_stopping_for_a_minute_is_confirmed(monkeypatch, tmp_path):
+    """S27 (8 runs, EXTRA-CONTAINER.md): Modal took 17-60 s from the app stop to
+    "stopped, 0 tasks" (30 s cancellation grace + 30 s runner shutdown grace); 5 checks
+    about 5 s apart reported a stopping app as not stopped and the run exited 5."""
+    calls = []
+
+    def listing(app):  # 12 checks (~60 s at 5 s) still stopping, then stopped
+        calls.append(1)
+        if len(calls) <= 12:
+            return _rows(app, ("ap-new", "stopping...", 1, "2999-01-01T00:00:00+00:00"))
+        return _rows(app, ("ap-new", "stopped", 0, "2999-01-01T00:00:00+00:00"))
+
+    code, rec = _run_one_modal(monkeypatch, tmp_path, listing)
+    assert code == 4 and rec["confirmed_stopped"] is True  # 4: the island failed, not 5
+    assert len(rec["checks"]) == 13
+
+
+def test_modal_stop_check_waits_about_two_minutes():
+    # launcher's own bindings: the autouse fixture patches only the module's delay
+    wait = (launcher.MODAL_STOP_VERIFY_ATTEMPTS - 1) * launcher.MODAL_STOP_VERIFY_DELAY_S
+    assert wait >= 120.0  # twice the slowest observed stop (60 s)
 
 
 def test_same_name_old_stopped_new_running_is_not_confirmed(monkeypatch, tmp_path):
@@ -276,6 +299,13 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
     assert manifest["rl_image"] == rl.MILES_NEXT_IMAGE  # the ports default, no override
     assert manifest["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert manifest["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
+    # rl-identity-tiering L9.1 dual write (transition: digest = source tree hash)
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    assert manifest["code_pack_digest"] == manifest["source_sha256"] == args.source_sha256
+    assert manifest["code_pack_mode"] == "source-tree"
+    assert manifest["semantic_sha256"] == AlgorithmSpec.from_dict(
+        _json.loads(args.rl_algorithm_spec_json)).semantic_sha256()
     out = capsys.readouterr().out
     assert f"image {rl.MILES_NEXT_IMAGE}" in out and rl.MILES_NEXT_COMMIT in out
 

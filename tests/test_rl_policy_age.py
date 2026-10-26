@@ -17,7 +17,7 @@ from yeto.rl.engine.policy_age import (
     token_version,
 )
 
-MILES = backend_identity("ports").sha256()
+MILES = backend_identity().sha256()
 
 
 # ---------------------------------------------------------------- 2.1 contract
@@ -44,20 +44,19 @@ def test_strict_handshake_refuses_an_island_with_another_limit():
     assert session_contract_hash(fp, bind_policy_age(MILES, 1)) != syncer  # limit 1: refused
 
 
-def test_elastic_join_carries_the_bound_identity(monkeypatch):
-    """Elastic JOIN: the island identity bytes differ, so only that connection is refused."""
+def test_pool_hello_carries_the_bound_identity(monkeypatch):
+    """Island pool HELLO: the session contracts differ, so only that connection is refused."""
     from yeto.rl.adapters.miles import island_entry
-    from yeto.rl.elastic_client import ElasticClientConfig
+    from yeto.rl.engine.backend_identity import session_contract_hash
 
     zero = island_entry._backend_identity_sha256(SimpleNamespace(rl_engine="ports"))
     one = island_entry._backend_identity_sha256(SimpleNamespace(rl_engine="ports", rl_max_policy_age=1))
     assert zero == MILES and one == bind_policy_age(MILES, 1)
-    a = ElasticClientConfig(("x", 0), 1, backend_identity_sha256=zero).backend_identity_bytes()
-    b = ElasticClientConfig(("x", 0), 2, backend_identity_sha256=one).backend_identity_bytes()
-    assert a != b
+    fingerprint = bytes(32)
+    assert session_contract_hash(fingerprint, zero) != session_contract_hash(fingerprint, one)
 
 
-@pytest.mark.parametrize("backend,limit,stage", [("miles", 2, 3), ("verl", 2, 2)])
+@pytest.mark.parametrize("backend,limit,stage", [("miles", 5, 3), ("verl", 5, 2)])
 def test_launcher_refuses_an_unsupported_limit_before_launch(backend, limit, stage):
     from tests.test_rl_launcher import _args
     from yeto.launcher import _prepare_rl_args
@@ -184,6 +183,21 @@ def test_driver_limit_one_accepts_version_segments_within_the_window(tmp_path):
     _driver(tmp_path, 1, versions=lambda rid: (max(0, rid - 1), rid)).run()
     events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
     assert len([e for e in events if e["event"] == "rl_round_trained"]) == 3
+    # P0-S evidence: each accepted group's generating policy, labelled with the
+    # published hash of its version
+    labels = {e["policy_version"]: e["rl/policy_token"] for e in events if e["event"] == "rl_publication"}
+    policies = [e for e in events if e["event"] == "rl_group_policies"]
+    assert [e["rollout_id"] for e in policies] == [0, 1, 2]
+    for e in policies:
+        first = e["groups"][0]
+        assert first[1] == labels[e["rollout_id"]]
+        assert first[2] == sorted({max(0, e["rollout_id"] - 1), e["rollout_id"]})
+        assert all(g[1] == labels[e["rollout_id"]] and g[2] is None for g in e["groups"][1:])
+
+
+def test_driver_limit_zero_tapes_no_group_policies(tmp_path):
+    _driver(tmp_path, 0).run()
+    assert '"rl_group_policies"' not in (tmp_path / "e.jsonl").read_text()
 
 
 def test_driver_limit_one_refuses_a_group_two_versions_old(tmp_path):
@@ -212,3 +226,27 @@ def test_miles_switches_are_derived_from_the_limit():
     assert row.translate(AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1))) == []
     with pytest.raises((AlgorithmSpecError, ValueError), match="rl-max-policy-age"):
         af.absorb_extra_argv(AlgorithmSpec(), ["--partial-rollout"])
+
+
+def test_driver_tapes_the_buffer_readers_stale_groups_per_round(tmp_path):
+    """T-EVAL E4: groups a sample-buffer reader passed over as too old reach the
+    tape as rl_buffer_stale_skipped (one per round, 0 included); an engine that
+    does not report them tapes nothing."""
+    import dataclasses
+
+    stale = {0: 0, 1: 3, 2: 1}
+    driver = _driver(tmp_path, 1)
+    original = driver.rollout.generate
+
+    def gen(rid, **kw):
+        return dataclasses.replace(original(rid, **kw), buffer_stale_groups=stale[rid])
+
+    driver.rollout.generate = gen
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    skipped = [e for e in events if e["event"] == "rl_buffer_stale_skipped"]
+    assert [(e["rollout_id"], e["stale_groups"], e["max_policy_age"]) for e in skipped] == [
+        (0, 0, 1), (1, 3, 1), (2, 1, 1)]
+    (tmp_path / "x").mkdir()
+    _driver(tmp_path / "x", 1).run()
+    assert '"rl_buffer_stale_skipped"' not in (tmp_path / "x" / "e.jsonl").read_text()

@@ -9,8 +9,9 @@ Miles rollout process:
 
 * :func:`response_token_versions` -- the version segments of one sample: the
   yeto policy version of every response token, read from the per-call
-  ``weight_versions`` spans SGLang reports (the span version is the yeto policy
-  token ``yeto:<version>:<hash>`` the publisher stamps on the engines);
+  ``weight_versions`` spans SGLang reports (the span version is the plain policy
+  version the publisher stamps on the engines, P0-S; older engines carry the
+  full ``yeto:<version>:<hash>`` label);
 * :func:`carry_over_buffer_filter` -- Miles' ``--buffer-filter-path`` under a
   limit > 0: groups whose oldest token is at most N versions behind the round
   being generated continue; older ones (and groups whose token versions are
@@ -38,7 +39,15 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from yeto.rl.engine.policy_age import token_version
+from yeto.rl.agentic.suspend import TIMEOUT_AFTER_SUSPENSION_REASON
+from yeto.rl.agentic.types import OUTCOME_KEY
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_GROUP_DROPPED,
+    GATE_DROPPED_LENGTHS,
+    GATE_UNKNOWN_VERSION_DROPPED,
+    TRUNCATED_BY_TURN,
+)
+from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.version_segments import (
     ProvenanceError,
     TokenProvenance,
@@ -47,6 +56,7 @@ from yeto.rl.engine.version_segments import (
 )
 
 CARRY_STATS_ATTR = "_yeto_carry_over_stats"
+DROPPED_LENGTHS = "dropped_lengths"
 CARRY_FIELDS = (
     "carried_in_groups",
     "carried_in_trajectories",
@@ -64,9 +74,12 @@ CARRY_FIELDS = (
 
 def max_policy_age(args: Any) -> int:
     """The rollout's effective limit: the configured one, lowered to 0 once the
-    driver's 3.5 governor fell back (``MilesRolloutPool.set_max_policy_age``)."""
+    driver's 3.5 governor fell back (``MilesRolloutPool.set_max_policy_age``).
+    Rollout ahead (``yeto_rl_rollout_ahead``): 0. Each batch comes from one
+    publication and nothing is carried over; the lag of a whole batch is the
+    driver's (the configured limit still bounds the trajectory evidence)."""
     limit = int(getattr(args, "yeto_rl_max_policy_age", 0) or 0)
-    if limit == 0:
+    if limit == 0 or getattr(args, "yeto_rl_rollout_ahead", 0):
         return 0
     from .rollout_meta_hook import max_policy_age_override
 
@@ -95,7 +108,7 @@ def response_token_versions(sample: Any) -> list[int | None]:
     start = len(getattr(sample, "tokens", None) or ()) - n
     out: list[int | None] = [None] * n
     for span in _spans(sample):
-        version = token_version(str(getattr(span, "version", "")))
+        version = engine_version_number(getattr(span, "version", ""))
         lo, hi = max(int(span.abs_start), start), min(int(span.abs_end), start + n)
         for pos in range(lo, hi):
             out[pos - start] = version
@@ -128,12 +141,17 @@ def _trajectories(group: Sequence[Any]) -> int:
     return sum(1 for s in _flat(group) if int(getattr(s, "response_length", 0) or 0) > 0)
 
 
-def _stats_for(args: Any, current_version: int) -> dict[str, int]:
+def _stats_for(args: Any, current_version: int) -> dict[str, Any]:
     stats = getattr(args, CARRY_STATS_ATTR, None)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
-        stats = {"version": current_version, **{k: 0 for k in CARRY_FIELDS}}
+        stats = {"version": current_version, **{k: 0 for k in CARRY_FIELDS},
+                 DROPPED_LENGTHS: {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []}}
         setattr(args, CARRY_STATS_ATTR, stats)
     return stats
+
+
+def _trajectory_lengths(group: Sequence[Any]) -> list[int]:
+    return [n for n in (int(getattr(s, "response_length", 0) or 0) for s in _flat(group)) if n]
 
 
 def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
@@ -149,8 +167,10 @@ def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
         known, unknown = group_versions(group)
         if unknown:
             stats["unknown_version_discarded_groups"] += 1
+            stats[DROPPED_LENGTHS][GATE_UNKNOWN_VERSION_DROPPED] += _trajectory_lengths(group)
             continue
         if known and current_version - min(known) > limit:
+            stats[DROPPED_LENGTHS][GATE_GROUP_DROPPED] += _trajectory_lengths(group)
             stats["over_age_discarded_groups"] += 1
             stats["over_age_discarded_trajectories"] += _trajectories(group)
             stats["over_age_discarded_tokens"] += _response_tokens(group)
@@ -166,14 +186,30 @@ def carry_over_buffer_filter(args: Any, buffer: list, num_samples: int, *,
     return selected
 
 
-def take_carry_stats(args: Any, current_version: int | None) -> dict[str, int]:
-    """This round's carry-over counts (zeros when nothing was buffered); consumed."""
+def take_carry_round(args: Any, current_version: int | None
+                     ) -> tuple[dict[str, int], dict[str, list[int]]]:
+    """This round's carry-over counts and the response lengths of the
+    trajectories discarded per ``offpolicy_gate`` reason; consumed."""
     stats = getattr(args, CARRY_STATS_ATTR, None)
     if hasattr(args, CARRY_STATS_ATTR):
         setattr(args, CARRY_STATS_ATTR, None)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
-        return {k: 0 for k in CARRY_FIELDS}
-    return {k: int(stats[k]) for k in CARRY_FIELDS}
+        return ({k: 0 for k in CARRY_FIELDS},
+                {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []})
+    lengths = stats.get(DROPPED_LENGTHS) or {}
+    return ({k: int(stats[k]) for k in CARRY_FIELDS},
+            {reason: list(lengths.get(reason, ()))
+             for reason in (GATE_GROUP_DROPPED, GATE_UNKNOWN_VERSION_DROPPED)})
+
+
+def take_carry_stats(args: Any, current_version: int | None) -> dict[str, Any]:
+    """This round's carry-over counts (zeros when nothing was buffered); consumed.
+
+    Also carries the dropped response lengths under :data:`GATE_DROPPED_LENGTHS`
+    (rl-offpolicy-correction-passthrough D6); the driver turns them into
+    ``offpolicy_gate`` and removes the key from ``rl_rollout_carry_over``."""
+    counts, lengths = take_carry_round(args, current_version)
+    return {**counts, GATE_DROPPED_LENGTHS: lengths}
 
 
 def group_versions_record(group: Sequence[Any]) -> dict[str, Any]:
@@ -292,6 +328,7 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
     unknown_tokens = 0
     near_zero = 0
     near_zero_examples: list[dict[str, Any]] = []
+    by_turn: dict[int, list[int]] = {}  # turn index -> [truncated, cross-version tokens]
 
     def fail(why: str) -> None:
         nonlocal failed
@@ -324,11 +361,16 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
                                          tuple(min(float(p), 0.0) for p in generated))
             corrections.append(cross_version_is(provenance, current, current_version,
                                                 clip_low=clip_low, clip_high=clip_high))
+            turns = turn_indices(sample, len(versions))
             for i, (v, g, c) in enumerate(zip(provenance.versions, provenance.logprobs, current, strict=True)):
                 if v == current_version:
                     continue
                 r = math.exp(float(c) - g)
                 ratios.append(r)
+                if turns[i] is not None:
+                    counts = by_turn.setdefault(turns[i], [0, 0])
+                    counts[0] += not clip_low <= r <= clip_high
+                    counts[1] += 1
                 if r < NEAR_ZERO_RATIO:  # 5.5 follow-up: where do zero ratios come from
                     near_zero += 1
                     if len(near_zero_examples) < NEAR_ZERO_EXAMPLES:
@@ -341,6 +383,8 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
     if unknown_tokens:
         extra["cross_version_unknown_version_tokens"] = unknown_tokens
+    if by_turn:  # rl-offpolicy-correction D6 (absent when none: old key set kept)
+        extra[TRUNCATED_BY_TURN] = {turn: tuple(c) for turn, c in sorted(by_turn.items())}
     if near_zero:  # absent when none (old key set kept)
         extra["cross_version_ratio_near_zero"] = near_zero
         extra["cross_version_ratio_near_zero_examples"] = near_zero_examples
@@ -352,6 +396,22 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         "cross_version_unscored_samples": failed,
         **ratio_quantiles(ratios),
     }
+
+
+def turn_indices(sample: Any, n: int) -> list[int | None]:
+    """Per response token: its model turn (0, 1, ...; runs of ``loss_mask`` 1),
+    None for a token outside the loss (tool output). No mask: one turn."""
+    mask = list(getattr(sample, "loss_mask", None) or ())
+    if len(mask) != n:
+        return [0] * n
+    out: list[int | None] = []
+    turn, inside = -1, False
+    for m in mask:
+        if m and not inside:
+            turn += 1
+        inside = bool(m)
+        out.append(turn if inside else None)
+    return out
 
 
 NEAR_ZERO_RATIO = 1e-6
@@ -407,13 +467,18 @@ SUSPEND_STATS_ATTR = "rollout_suspend_stats"  # Miles fork, set at the cut-off
 RESUME_STATS_ATTR = "rollout_resume_stats"  # Miles fork, set at rollout start
 SUSPEND_EXPIRED_PREFIX = "CodexSuspendExpired"
 POLICY_AGE_EXCEEDED_PREFIX = "policy_age_exceeded"
+# Sample metadata key of an infrastructure failure reason (set by the agent function).
+INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
 
 
 def _infrastructure_reason(sample: Any) -> str:
-    from yeto.rl.harness.codex.tbench_reward import INFRASTRUCTURE_KEY
-
+    """The legacy key, else the reason of a Harbor-path ABORTED outcome (S26 E9.5)."""
     meta = getattr(sample, "metadata", None)
-    reason = meta.get(INFRASTRUCTURE_KEY) if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        return ""
+    reason = meta.get(INFRASTRUCTURE_KEY)
+    if not reason and meta.get(OUTCOME_KEY) == "aborted":
+        reason = meta.get("outcome_reason")
     return str(reason) if reason else ""
 
 
@@ -452,7 +517,7 @@ def suspend_fields(args: Any, all_samples: Sequence[Sequence[Any]]) -> dict[str,
     retried = 0
     for sample in _flat(list(all_samples)):
         reason = _infrastructure_reason(sample)
-        expired += reason.startswith(SUSPEND_EXPIRED_PREFIX)
+        expired += reason.startswith((SUSPEND_EXPIRED_PREFIX, TIMEOUT_AFTER_SUSPENSION_REASON))
         over_age += reason.startswith(POLICY_AGE_EXCEEDED_PREFIX)
         if _agent_metric(sample, "suspensions") > 0:
             parked += 1

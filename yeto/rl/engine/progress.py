@@ -1,8 +1,7 @@
 """Island progress files in the legacy formats (yeto-framework-decoupling 2.4). Import-light.
 
-Strict progress (schema 3) and decoupled progress (schema 4), moved unchanged
-from ``yeto.rl.adapters.miles.legacy.engine`` (which re-exports the same objects) so the engine
-core's bridges no longer import the legacy Miles engine. Neither file ever
+Strict progress (schema 3) and decoupled progress (schema 4), the formats the
+removed legacy Miles engine wrote; the engine core's bridges keep them. Neither file ever
 contains LoRA tensors or optimizer state. Serialization is byte-for-byte the
 old code (``torch.save`` of the same dicts in the same key order).
 """
@@ -55,11 +54,9 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "dynamic_sampling_max_replacements": getattr(
             args, "yeto_rl_dynamic_sampling_max_replacements", None
         ),
-        "secrlenv_max_infrastructure_replacements": getattr(
-            args,
-            "yeto_rl_secrlenv_max_infrastructure_replacements",
-            None,
-        ),
+        # The SecRLEnv and Codex agents left in S26 E0.5; the keys stay (None)
+        # so island checkpoints written before that still resume.
+        "secrlenv_max_infrastructure_replacements": None,
         "rl_offload_train": bool(getattr(args, "offload_train", False)),
         "rl_distributed_timeout_minutes": getattr(
             args, "distributed_timeout_minutes", 10
@@ -70,17 +67,8 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "custom_generate_function_path": args.custom_generate_function_path,
         "use_session_server": args.use_session_server,
         "tito_model": args.tito_model,
-        "codex_backend_profile": getattr(
-            args, "yeto_rl_codex_backend_profile", None
-        ),
+        "codex_backend_profile": None,
     }
-    codex_harness_contract = getattr(
-        args,
-        "yeto_rl_codex_harness_contract",
-        None,
-    )
-    if codex_harness_contract is not None:
-        config["codex_harness_contract"] = codex_harness_contract
     initial_adapter_sha256 = getattr(
         args,
         "yeto_rl_initial_adapter_sha256",

@@ -59,11 +59,11 @@ def test_verl_declares_stage_two_and_limit_zero_overrides_are_empty():
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.policy_age import SUPPORT, policy_age_overrides
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)  # 6.4b: fully_async path
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 4)  # 6.4b; L6.9 raised the cap
     assert verl_capabilities("sha256:" + "0" * 64).execution.max_policy_staleness == 0
     assert policy_age_overrides(0) == ()
     with pytest.raises(PolicyAgeError, match="backend 'verl' supports up to stage 2"):
-        policy_age_overrides(2, groups_per_round=4)
+        policy_age_overrides(5, groups_per_round=4)
 
 
 def test_launcher_accepts_verl_limit_one():

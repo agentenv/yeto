@@ -11,9 +11,20 @@ import pytest
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
 from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
 from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, policy_token
-from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
+from yeto.rl.adapters.miles.state_plugin import (
+    ACTOR_RECORDERS,
+    APPLIED_LRS,
+    GRAD_NORM,
+    STEP_LOSSES,
+)
 from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError, batch_hash
-from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
+from yeto.rl.engine.ports import (
+    GroupMetadata,
+    PublicationCause,
+    Publisher,
+    RolloutBatchHandle,
+    TrainerGroup,
+)
 
 H = "a" * 64
 L = "b" * 64
@@ -84,6 +95,55 @@ def test_train_step_receipt_and_release():
     assert receipt.base_policy_version == 3 and receipt.base_policy_hash == H
     assert receipt.input_batch_hash == batch_hash(handle()) and receipt.parameter_layout_hash == L
     assert t.last_grad_norm == 0.3
+
+
+def test_full_parameter_trainer_installs_actor_recorders_once_before_training():
+    """A full-parameter actor calls no LoRA state plugin, so nothing else
+    installs the per-step recorders; without them no applied LR is recorded."""
+
+    actor = FakeActorGroup()
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=actor, learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L,
+        release_refs=lambda args, pack: None,
+        install_actor_recorders=True,
+    )
+    t.train_step(handle())
+    t.train_step(handle())
+    trains = [i for i, call in enumerate(actor.calls) if call[0] == "train"]
+    assert actor.calls[: trains[0]] == [("plugin", ACTOR_RECORDERS)]
+    assert actor.calls.count(("plugin", ACTOR_RECORDERS)) == 1
+
+
+def test_full_parameter_trainer_refuses_to_train_without_recorders():
+    class NoRecorderActor(FakeActorGroup):
+        async def run_plugin(self, fn_path, kwargs=None):
+            if fn_path == ACTOR_RECORDERS:
+                self.calls.append(("plugin", fn_path))
+                return [False]
+            return await super().run_plugin(fn_path, kwargs)
+
+    actor, released = NoRecorderActor(), []
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=actor, learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L,
+        release_refs=lambda args, pack: released.append(pack),
+        install_actor_recorders=True,
+    )
+    with pytest.raises(TrainStepError, match="recorders could not be installed"):
+        t.train_step(handle())
+    assert actor.calls == [("plugin", ACTOR_RECORDERS)] and released == ["PACK"]
+
+
+def test_only_a_full_parameter_sync_installs_actor_recorders():
+    from yeto.rl.adapters.miles.entry import _is_full_parameter_sync
+    from yeto.rl.engine.full_parameter_sync import FullParameterSync
+
+    assert _is_full_parameter_sync(object.__new__(FullParameterSync))
+    assert not _is_full_parameter_sync(object())
+    assert not _is_full_parameter_sync(None)
 
 
 def test_token_mismatch_rejected_before_training_and_refs_released():
@@ -183,6 +243,84 @@ def flatten(raw):  # mirrors upstream flatten_inference_engine_checksums
     return out
 
 
+class PluginActor:
+    """Records the weight-version alignment the publisher runs before an update."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def run_plugin(self, fn_path, kwargs):
+        self.calls.append((fn_path.rsplit(".", 1)[-1], dict(kwargs)))
+        return []
+
+
+def test_miles_update_is_aligned_to_stamp_the_policy_version(monkeypatch):
+    """P0-S: Miles' update_weights stamps its counter; the counter is aligned first."""
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    calls = []
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    pub = MilesPublisher(
+        args=SimpleNamespace(), actor_model=PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+    pub.publish(state())
+    assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
+
+
+def _aligned_publisher(monkeypatch, calls, *, fail_updates=0, actor=None):
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    failures = [fail_updates]
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+        if failures[0]:
+            failures[0] -= 1
+            raise RuntimeError("broadcast failed")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    return MilesPublisher(
+        args=SimpleNamespace(), actor_model=actor or PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+
+
+def test_a_failed_update_is_retried_with_the_same_version(monkeypatch):
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, fail_updates=1)
+    with pytest.raises(PublicationError) as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED
+    pub.publish(state())
+    align = ("align_weight_version", {"next_version": 4})
+    assert calls == [align, "update_weights", align, "update_weights"]
+
+
+def test_an_alignment_failure_is_a_publication_error(monkeypatch):
+    class BrokenActor:
+        async def run_plugin(self, fn_path, kwargs):
+            raise RuntimeError("the trainer has no weight_updater")
+
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, actor=BrokenActor())
+    with pytest.raises(PublicationError, match="weight_updater") as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED and calls == []
+
+
+def test_an_injected_update_is_not_aligned():
+    calls = []
+    pub, update_calls = publisher(Controller([Engine("http://e0")]))
+    pub._actor = PluginActor(calls)
+    pub.publish(state())
+    assert update_calls == ["update_weights"] and calls == []
+
+
 def publisher(controller, *, update_fails=False, export=None):
     calls = []
 
@@ -212,8 +350,8 @@ def test_publish_full_manifest_with_members():
     assert m.target_policy_version == 4 and m.target_policy_hash == s.policy_tensor_hash()
     assert m.payload_bytes == (8 + 12) * 4
     assert result.members == frozenset({"engine:c0", "engine:c1"})
-    token = policy_token(4, s.policy_tensor_hash())
-    assert all(e.version == token for e in engines)
+    # P0-S: the engines carry the plain policy version; the label stays with yeto
+    assert all(e.version == "4" for e in engines)
     assert calls == ["update_weights"] and ctl.log == ["start", "end"]
     assert set(pub.last_engine_checksums) == {"http://e0", "http://e1"}
     # payload hash is content-addressed
@@ -436,3 +574,40 @@ def test_gspo_and_gmpo_clip_fraction_unchanged_by_unconditional_drain(variant, m
     t.train_step(handle())
     assert t.step_metrics().clip_fraction == 0.25
     assert state_plugin._STEP_LOSSES == []
+
+
+def test_trainer_only_island_publishes_without_engines(monkeypatch):
+    """--debug-train-only: no engine update, no stamp; the release is the publication."""
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    calls = []
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    pub = MilesPublisher(
+        args=SimpleNamespace(debug_train_only=True), actor_model=PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([]), flatten_checksums=flatten,
+    )
+    result = pub.publish(state())
+    assert calls == [] and result.members == frozenset() and pub.last_engine_checksums is None
+
+
+# E1: publication checks at the round-cut interval
+def test_an_unverified_publication_skips_only_the_engine_read_back():
+    from dataclasses import replace as dc_replace
+
+    class Unverified:  # a verified state's identity, marked unverified
+        def __init__(self, s):
+            self._s, self.verified, self.policy_version = s, False, s.policy_version
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    ctl = Controller([Engine("http://e0")], checksum_ok=False)  # a read-back would fail
+    pub, calls = publisher(ctl, export=lambda: state())
+    pub.publish(Unverified(state()))  # no read-back on an unverified round
+    assert pub.last_engine_checksums is None and calls == ["update_weights"]
+    with pytest.raises(PublicationError, match="checksum"):
+        pub.publish(state())  # a verified (spot-check) round still fails on a bad read-back

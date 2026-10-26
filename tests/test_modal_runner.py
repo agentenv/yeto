@@ -235,6 +235,7 @@ def test_define_builds_the_function_from_the_config(monkeypatch):
     # step after it (this order failed the first live Modal deploy).
     assert names == ["debian_slim", "pip_install", "env", "add_local_dir"]
     assert img.calls[names.index("add_local_dir")][1][1] == mr.CONTAINER_WORKDIR
+    assert "ephemeral_disk" not in kwargs  # Modal's default disk
     # Unpinned single-container island: no region kwarg, no clustered.
     state2 = fake_modal(monkeypatch)
     mr.ModalOps("yeto-run").define(_cfg(learner_id=2))
@@ -395,6 +396,61 @@ def test_preempted_island_is_relaunched_with_the_same_learner_id_then_abandoned(
     assert "ABANDONED" in capsys.readouterr().err
 
 
+def test_a_relaunch_into_a_stopped_app_abandons_the_island_at_once(monkeypatch, capsys):
+    """S27 G-AO: after a teardown stopped the app, the launcher kept relaunching the
+    trainer island for the whole recovery timeout ("App ... not found"). A relaunch
+    that fails because the app is stopped (or no longer listed) is not retried."""
+    from yeto.launcher import ABANDONED, FleetController
+
+    state = fake_modal(monkeypatch)
+    ops = mr.ModalOps("yeto-run")
+    cfg = _cfg(learner_id=2)
+    ops.define(cfg)
+    island_ops = mr.ModalIslandOps(ops)
+    name = mr.modal_island_name("run", 2)
+    first = island_ops.relaunch(cfg, name)
+    clock = types.SimpleNamespace(t=0.0)
+    routing = mr.RoutingOps(types.SimpleNamespace(now=lambda: clock.t, sleep=lambda s: None), island_ops)
+    controller = FleetController(
+        learners={name: (cfg, first)}, syncer=None, sky_ops=routing, poll_interval=1,
+        recover_timeout=600, thread_cls=_ImmediateThread,
+        syncer_probe=lambda: None, syncer_restart=lambda: None,
+    )
+    rec = controller.learners[name]
+    state["calls"][first].outcome = "failed"
+    lookups = []
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError(
+        "Lookup failed for Function 'island-2' from the 'yeto-run' app: App 'yeto-run' not found")))
+    monkeypatch.setattr(ops, "app_status", lambda: lookups.append(1) or ("stopped", 0))
+    controller._poll(rec, is_syncer=False)  # -> recovering, the relaunch is refused
+    controller._poll(rec, is_syncer=False)
+    assert rec["state"] == ABANDONED and clock.t == 0.0 and lookups == [1]
+    assert "NOT relaunching" in capsys.readouterr().err
+    # a transient refusal while the app runs is retried, and the app list is not asked
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError("no capacity")))
+    assert island_ops.relaunch(cfg, name) is None and lookups == [1]
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError("App not found")))
+    monkeypatch.setattr(ops, "app_status", lambda: ("deployed", 3))
+    assert island_ops.relaunch(cfg, name) is None
+
+
+def test_the_island_container_moves_ephemeral_ports_off_the_miles_port_range(tmp_path):
+    """gVisor starts with ephemeral ports 16000-65535 (Modal CPU probe, S27 G-AT);
+    the island narrows them to Linux's default before Ray and Miles start."""
+    proc = tmp_path / "ip_local_port_range"
+    proc.write_text("16000\t65535\n")
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 16000-65535 -> 32768-60999"
+    assert proc.read_text().split() == ["32768", "60999"]
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 32768-60999: kept"
+    assert "unreadable" in mr.narrow_ephemeral_ports(str(tmp_path / "missing"))
+    proc.write_text("1024 65535")
+    proc.chmod(0o444)
+    try:
+        assert "not narrowed" in mr.narrow_ephemeral_ports(str(proc))
+    finally:
+        proc.chmod(0o644)
+
+
 def test_manual_cli_builds_a_config(tmp_path, monkeypatch):
     script = tmp_path / "run.sh"
     script.write_text("torchrun -m yeto.learner\n")
@@ -486,6 +542,38 @@ def test_tape_sync_copies_changed_files_and_commits(tmp_path):
     sync.stop()  # final sync on stop
     assert (dst / "rl-island-0.jsonl").read_text().count("\n") == 2
     assert len(commits) == sync.syncs >= 3 and not sync.errors
+
+
+def test_tape_sync_mirrors_trajectory_evidence_outside_the_tape_dir(tmp_path):
+    # P0-1.11 run 20261014b: the full-parameter evidence stayed in a private
+    # directory of a stopped container and could not be read back.
+    src, dst = tmp_path / "out", tmp_path / "vol" / "rank0"
+    src.mkdir()
+    evidence = tmp_path / "rl" / "trajectory-evidence-0-abc"
+    evidence.mkdir(parents=True)
+    (evidence / "rollout-00000000.json").write_text('{"schema": 4}')
+    (evidence / "scratch.bin").write_text("x")
+    pattern = str(tmp_path / "rl" / "trajectory-evidence-*" / "rollout-*.json")
+    sync = mr.TapeSync(str(src), str(dst), lambda: None, interval_s=3600,
+                       mirror_globs=(pattern,))
+    assert sync.sync_once() == 1
+    copied = dst / "trajectory-evidence-0-abc.rollout-00000000.json"
+    assert copied.read_text() == '{"schema": 4}'
+    assert sync.sync_once() == 0
+    assert mr.TAPE_MIRROR_GLOBS[0] == "/root/yeto-rl/trajectory-evidence-*/rollout-*.json"
+
+
+def test_tape_sync_mirrors_harbor_trials_by_their_path_below_the_glob(tmp_path):
+    src, dst = tmp_path / "out", tmp_path / "vol" / "rank0"
+    trial = src / "harbor-trials" / "fix-git__20261025__AbC"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "result.json").write_text('{"reward": 1}')
+    (trial / "agent" / "codex.txt").write_text("{}")
+    globs = tuple(g.replace(mr.TAPE_SOURCE_DIR, str(src)) for g in mr.TAPE_MIRROR_GLOBS[1:])
+    sync = mr.TapeSync(str(src), str(dst), lambda: None, interval_s=3600, mirror_globs=globs)
+    assert sync.sync_once() == 2
+    assert (dst / "fix-git__20261025__AbC.result.json").read_text() == '{"reward": 1}'
+    assert (dst / "fix-git__20261025__AbC.agent.codex.txt").read_text() == "{}"
 
 
 def test_tape_sync_errors_never_raise(tmp_path):
@@ -616,3 +704,20 @@ def test_container_change_exit_code_is_registered_and_unique():
     codes = [launcher.ISLAND_FAILED_EXIT, launcher.TEARDOWN_UNVERIFIED_EXIT,
              launcher.RUN_STALLED_EXIT, launcher.NO_SYNC_INCOMPLETE_EXIT]
     assert launcher.CONTAINER_CHANGED_EXIT == 7 and 7 not in codes
+
+
+def test_resolve_syncer_for_modal_sharded_head_list():
+    from yeto.modal_runner import resolve_syncer_for_modal
+
+    assert resolve_syncer_for_modal("3.231.26.103:29400,3.231.26.103:29401", None) == \
+        "3.231.26.103:29400,3.231.26.103:29401"
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_syncer_for_modal("3.231.26.103:29400,10.0.0.1:29401", None)
+
+
+def test_define_sizes_the_container_disk_in_mib(monkeypatch):
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("yeto-run").define(_cfg(ephemeral_disk_gib=634))
+    _fn, kwargs = state["functions"]["island-1"]
+    assert kwargs["ephemeral_disk"] == 634 * 1024

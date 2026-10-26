@@ -1,10 +1,24 @@
-mod elastic;
-mod elastic_server;
+mod fold;
+mod hmac;
+mod shard;
+#[cfg(test)]
+mod head_memory;
+mod local_init;
 mod iso_worker;
+mod membership;
+mod recovery;
+mod resend;
 mod merge;
+mod dispense;
+mod dispense_service;
+mod members;
+mod downlink;
+mod eval_checkpoint;
 mod protocol;
+mod sample_relay;
 mod server;
 mod state;
+mod subscriber;
 
 use clap::Parser;
 
@@ -16,7 +30,8 @@ struct Args {
     /// TCP port to listen on.
     #[arg(long, default_value_t = 29400)]
     port: u16,
-    /// Number of learners expected before training starts (M).
+    /// Number of learners (M). Training starts when all M are connected; with
+    /// membership options it starts once the launch quorum is connected.
     #[arg(long)]
     learners: u32,
     /// Minimum quorum of learners per outer step (K).
@@ -32,8 +47,24 @@ struct Args {
     /// Compute-overlap budget for the grace window, in learner inner steps (τ).
     #[arg(long, default_value_t = 2.0)]
     grace_tau: f64,
-    /// Fragment rounds in flight at once ("two fragments in flight" at the
-    /// paper's τ=2); 1 = serial rounds. Clamped to the fragment count.
+    /// Lower bound on the grace window, in milliseconds (still capped by
+    /// --grace-ms). 0 = off.
+    #[arg(long, default_value_t = 0)]
+    grace_min_ms: u64,
+    /// Grace floor from measured arrival gaps: the window is at least this
+    /// quantile (0..1] of the recent gaps between a round's first push and
+    /// each later push of it, late pushes included. Still capped by
+    /// --grace-ms. 0 = off.
+    #[arg(long, default_value_t = 0.0)]
+    grace_arrival_quantile: f64,
+    /// Terminal grace, in milliseconds: the last round of each fragment
+    /// waits up to this long for every expected island (not capped by
+    /// --grace-ms), so a late delta of a last round still reaches the final
+    /// parameters. 0 = off.
+    #[arg(long, default_value_t = 0)]
+    terminal_grace_ms: u64,
+    /// Fragment rounds in flight at once (two by default, matching the
+    /// default --grace-tau 2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
     pipeline: u32,
     /// Lower bound on time between consecutive round launches, in ms. WAN
@@ -44,7 +75,7 @@ struct Args {
     /// Target sync interval H (inner steps per fragment between merges):
     /// the launch floor adapts to the measured learner step time
     /// (H·ξ_step/P). Never binds where WAN round latency already exceeds
-    /// it. 0 disables. Default 24 — the paper's design point; measured to
+    /// it. 0 disables. Default 24; measured to
     /// match synchronous training where H≈2 costs ~+9%.
     #[arg(long, default_value_t = 24.0)]
     sync_interval_steps: f64,
@@ -72,6 +103,12 @@ struct Args {
     /// Outer Nesterov momentum.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
+    /// Delayed Nesterov outer optimizer: apply the outer gradient every
+    /// step, but update the
+    /// momentum only every N steps with the mean of the N gradients.
+    /// Unset or 1 = plain Nesterov.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    outer_delayed_nesterov_period: Option<u32>,
     /// Iso spectrum-flattening implementation: the scalar reference kernel,
     /// or a persistent exact f32 Torch SVD worker.
     #[arg(long, default_value = "scalar")]
@@ -98,12 +135,32 @@ struct Args {
     /// Write the snapshot every N outer steps (0 disables).
     #[arg(long, default_value_t = 8)]
     checkpoint_every: u64,
+    /// Also write the cut at these global steps (the `step=` of the "outer
+    /// step" log; comma-separated, strictly increasing, below --total-steps)
+    /// to `<checkpoint-path>.step-<t>`, on a background thread while rounds
+    /// keep merging. --resume never reads these files.
+    #[arg(long, value_delimiter = ',')]
+    checkpoint_at_steps: Vec<u64>,
+    /// Policy sweep: write per-round checkpoints off the scheduler; each
+    /// round is broadcast only after its checkpoint is durable.
+    #[arg(long, default_value_t = false)]
+    async_checkpoint: bool,
+    /// Learners whose session asks for bf16 downlink deltas get a full f32
+    /// BCAST every N-th version of a fragment (N >= 2). Unset: such
+    /// sessions are refused.
+    #[arg(long)]
+    bcast_delta_full_every: Option<u64>,
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
     /// Mark the terminal checkpoint as publishable after all merges finish.
     #[arg(long, default_value_t = false)]
     mark_final_checkpoint: bool,
+    /// Resume only a checkpoint whose recorded semantic profile (the
+    /// `<checkpoint>.profile` file written at every start) matches this
+    /// syncer's; a checkpoint without the record is refused too.
+    #[arg(long, default_value_t = false)]
+    require_profile_record: bool,
     /// Exact local optimizer-step budget per learner (benchmark-only).
     #[arg(long)]
     learner_budget_steps: Option<u64>,
@@ -122,55 +179,190 @@ struct Args {
     /// this is explicitly enabled.
     #[arg(long, default_value_t = false)]
     require_profile_binding: bool,
-    /// Inter-island scheduling mode: legacy (default, unchanged behavior)
-    /// or elastic (change rl-inter-island-scheduling).
-    #[arg(long, default_value = "legacy")]
-    island_scheduling_mode: String,
-    /// elastic: capacity fraction that must arrive before an outer step (θ).
-    #[arg(long, default_value_t = elastic::DEFAULT_QUORUM_THETA)]
-    quorum_theta: f64,
-    /// elastic: per-step discount of a late (carried-over) delta (γ).
-    #[arg(long, default_value_t = elastic::DEFAULT_CARRY_GAMMA)]
-    carry_gamma: f64,
-    /// elastic: soft deadline in seconds; defaults to --quorum-timeout-s.
+    /// Capacity fraction that must arrive before a merge (θ). Fragment
+    /// rounds: unset keeps the count quorum K (--quorum); set replaces it.
+    #[arg(long)]
+    quorum_theta: Option<f64>,
+    /// Weight discount γ^lag of a late delta. Fragment rounds: lag in
+    /// fragment versions, unset = 1 (no discount).
+    #[arg(long)]
+    carry_gamma: Option<f64>,
+    /// Soft deadline in seconds: merge what arrived even below quorum.
+    /// Unset = off (also caps the grace window).
     #[arg(long)]
     soft_deadline_s: Option<u64>,
-    /// elastic: minimum arrived islands for a step.
-    #[arg(long, default_value_t = elastic::DEFAULT_Q_MIN)]
+    /// Minimum arrived islands for a capacity-quorum or soft-deadline merge.
+    #[arg(long, default_value_t = 1)]
     q_min: u32,
-    /// elastic: largest base lag still carried over; larger is rejected.
-    #[arg(long, default_value_t = elastic::DEFAULT_MAX_CARRY_LAG)]
-    max_carry_lag: u32,
+    /// Fragment rounds: relative island capacity for --quorum-theta, as
+    /// comma-separated id=capacity (unlisted islands have capacity 1).
+    #[arg(long, value_delimiter = ',')]
+    island_capacity: Vec<String>,
+    /// Fragment rounds: admit island ids 0..N (islands may join after the
+    /// first --learners). Unset = 0..--learners.
+    #[arg(long)]
+    max_learners: Option<u32>,
     /// HMAC-SHA256 island key; falls back to the YETO_ISLAND_HMAC_KEY
-    /// environment variable. elastic: signs the elastic message types.
-    /// legacy: every HELLO must carry an HMAC under this key.
+    /// environment variable. Every HELLO must carry an HMAC under this key.
     #[arg(long)]
     island_hmac_key: Option<String>,
-    /// legacy only: run without island authentication (no HMAC key). Only
+    /// Run without island authentication (no HMAC key). Only
     /// for local tests and benchmarks; also enabled by
     /// YETO_SYNCER_ALLOW_UNAUTHENTICATED=1. Never set by the launcher's RL path.
     #[arg(long, default_value_t = false)]
     allow_unauthenticated_islands: bool,
     /// Island contract (64 lowercase hex chars) pinned by the head's config:
-    /// legacy HELLO session contracts and elastic JOIN identities must match
-    /// it, so the first island to connect no longer decides the contract.
+    /// HELLO session contracts must match it, so the first island to
+    /// connect no longer decides the contract.
     #[arg(long)]
     expected_island_contract: Option<String>,
-    /// elastic: membership lease in seconds (no heartbeat -> removed). Same
-    /// default as the launcher and `yeto --rl-island-lease-s` (300 s).
-    #[arg(long, default_value_t = 300.0)]
-    island_lease_s: f64,
-    /// elastic: fencing token of this syncer incarnation; bump on every
-    /// restart (D-S6 will persist it in the checkpoint).
+    /// Membership lease in seconds (no heartbeat -> removed; the island
+    /// must re-JOIN). Unset = no lease.
+    #[arg(long)]
+    island_lease_s: Option<f64>,
+    /// Fencing token of this syncer incarnation; bump on every restart.
+    /// A HELLO with a lower epoch is refused (a HELLO
+    /// without one is admitted); persisted next to the checkpoint.
     #[arg(long, default_value_t = 0)]
     syncer_epoch: u64,
-    /// elastic: after total_steps keep answering FINISHED for this many
-    /// seconds (or until every member left); defaults to the soft deadline.
+    /// Fragment rounds: bound H on one peer recovery, in syncer steps. Unset:
+    /// recovery steps are measured and recorded but not checked.
+    #[arg(long)]
+    recovery_bound_steps: Option<u64>,
+    /// Fragment rounds: donors asked before the degraded recovery path.
+    #[arg(long, default_value_t = 3)]
+    recovery_max_donor_tries: u32,
+    /// Fragment rounds: wait for one donor snapshot before asking the next.
+    #[arg(long, default_value_t = 600)]
+    recovery_donor_timeout_s: u64,
+    /// Send a rejoin catch-up and a recovery replay from the scheduler
+    /// itself, waiting for each fragment on the learner's link (the behavior
+    /// before S27 G-EL; before S27 G-FH bf16-downlink sessions always did).
+    /// Default: a forwarder task per learner sends them while rounds,
+    /// heartbeats and leases are served.
+    #[arg(long, default_value_t = false)]
+    inline_resend: bool,
+    /// Send every broadcast (the initial cut, each merged fragment, the
+    /// final cut) to each learner from the scheduler itself, in turn,
+    /// waiting on a slow learner's link (the behavior before S27 G-FD and
+    /// G-FH). Default: a learner whose send queues cannot take a broadcast
+    /// now gets it, and later versions, from a forwarder task, and each
+    /// learner's final cut goes out on its own task, while the other
+    /// learners' rounds, PULLs and acknowledgements go on.
+    #[arg(long, default_value_t = false)]
+    inline_broadcast: bool,
+    /// Dynamic membership: after total_steps wait this many seconds for the
+    /// islands still connected to acknowledge the final cut, then finish
+    /// without the missing ones. Unset = every island at the final cut must
+    /// acknowledge within --final-ack-timeout-s.
     #[arg(long)]
     final_grace_s: Option<u64>,
+    /// Rounds the exact fold cannot reproduce (quorum below the roster or
+    /// token weights): buffered keeps every push until the round closes
+    /// (historical bits); streaming folds each push on arrival (S27 P4b).
+    #[arg(long, default_value = "buffered")]
+    weighted_fold: String,
+    /// MoE: weight each expert tensor of a push by the tokens the island
+    /// routed to that expert during the outer interval, relative to an even
+    /// split over the layer's experts (an expert the island never routed to
+    /// gets weight 0). Islands must send the counts. Off by default.
+    #[arg(long)]
+    expert_token_weights: bool,
+    /// What the final cut carries to every island: `full` (every f32
+    /// fragment, then the version manifest) or `manifest` (the version
+    /// manifest only; islands acknowledge without downloading the final
+    /// parameters, which stay in --checkpoint-path / --final-state).
+    #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
+    final_cut_payload: String,
+    /// S27 P2 task dispenser: islands claim the rows of --data they train
+    /// from this syncer (TASK_* connections, docs/PROTOCOL.md "Task
+    /// dispenser"). Off by default.
+    #[arg(long)]
+    dispense: bool,
+    /// Lease of the island member table (dispenser, spot subscribers, sample
+    /// relay producers): an island process silent this long on all of them
+    /// is retired and loses its unreported rows to the other islands.
+    #[arg(long, default_value_t = 300.0)]
+    dispense_lease_s: f64,
+    /// Passes over the rows before the data ends; unset = unlimited (every
+    /// pass after the first is reshuffled on the islands).
+    #[arg(long)]
+    dispense_passes: Option<u64>,
+    /// How often one row may be requeued after its group was too stale to train.
+    #[arg(long, default_value_t = 1)]
+    dispense_max_redo: u32,
+    /// Largest block one claim may ask for.
+    #[arg(long, default_value_t = 65536)]
+    dispense_max_block: u32,
+    /// JSONL log of every dispenser event.
+    #[arg(long)]
+    dispense_log: Option<std::path::PathBuf>,
+    /// Fragment-sharded head (S27 P4b): this process owns the fragment
+    /// range of shard --shard-index out of --shard-count and runs only the
+    /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
+    #[arg(long, default_value_t = 0)]
+    shard_index: u32,
+    #[arg(long, default_value_t = 1)]
+    shard_count: u32,
+    /// S27 G-EA: admit up to N receive-only subscribers at once (sampler
+    /// islands on any cloud that follow the global weights as bf16
+    /// broadcasts; never in quorum, roster or final cut; their ids are
+    /// 2^31 + 31 bits of their sampler id's SHA-256, as the task dispenser's
+    /// sampler holders). 0 = off: SUBSCRIBE is refused.
+    #[arg(long, default_value_t = 0)]
+    max_subscribers: u32,
+    /// S27 G-EA: serve the sample relay (sampler islands PUT rollout
+    /// samples, a training island TAKEs them) on this port. Off by default.
+    #[arg(long)]
+    sample_relay: bool,
+    /// Sample relay: most items held per channel.
+    #[arg(long, default_value_t = 4096)]
+    sample_relay_max_items: usize,
+    /// Sample relay: most bytes held per channel, in MiB.
+    #[arg(long, default_value_t = 2048)]
+    sample_relay_max_mib: u64,
+    /// Sample relay: largest item, in MiB.
+    #[arg(long, default_value_t = 64)]
+    sample_relay_max_item_mib: u64,
+}
+
+/// Membership options of the fragment-round server; every unset flag keeps
+/// the fixed-membership behavior.
+fn parse_membership(args: &Args) -> anyhow::Result<membership::MembershipConfig> {
+    let mut capacities = std::collections::BTreeMap::new();
+    for entry in &args.island_capacity {
+        let (id, cap) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--island-capacity entry {entry:?} is not id=capacity"))?;
+        let id: u32 = id.trim().parse()?;
+        let cap: f64 = cap.trim().parse()?;
+        if capacities.insert(id, cap).is_some() {
+            anyhow::bail!("--island-capacity lists island {id} twice");
+        }
+    }
+    let seconds = |s: f64, flag: &str| {
+        std::time::Duration::try_from_secs_f64(s)
+            .map_err(|e| anyhow::anyhow!("{flag} must be a non-negative number of seconds: {e}"))
+    };
+    Ok(membership::MembershipConfig {
+        quorum_rule: match args.quorum_theta {
+            None => membership::QuorumRule::Count,
+            Some(theta) => membership::QuorumRule::Capacity { theta, q_min: args.q_min },
+        },
+        lease: args.island_lease_s.map(|s| seconds(s, "--island-lease-s")).transpose()?,
+        soft_deadline: args.soft_deadline_s.map(std::time::Duration::from_secs),
+        carry_gamma: args.carry_gamma.unwrap_or(1.0),
+        capacities,
+        max_learners: args.max_learners,
+        final_grace: args.final_grace_s.map(std::time::Duration::from_secs),
+    })
 }
 
 impl Args {
+    fn shard_plan(&self) -> anyhow::Result<shard::ShardPlan> {
+        shard::ShardPlan::new(self.shard_index, self.shard_count)
+    }
+
     fn resolved_final_ack_timeout_s(&self) -> u64 {
         self.final_ack_timeout_s.unwrap_or(self.quorum_timeout_s)
     }
@@ -187,6 +379,9 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let dispense = dispense_config(&args)?;
+    let member_lease = member_lease(&args)?;
+    let shard = args.shard_plan()?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,
@@ -200,6 +395,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let final_ack_timeout_s = args.resolved_final_ack_timeout_s();
+    let membership = parse_membership(&args)?;
+    let recovery = recovery::RecoveryConfig {
+        bound_steps: args.recovery_bound_steps,
+        max_donor_tries: args.recovery_max_donor_tries,
+        donor_timeout: std::time::Duration::from_secs(args.recovery_donor_timeout_s),
+    };
+    recovery.validate()?;
     let devices = if args.iso_worker_devices.is_empty() {
         vec![args.iso_worker_device.clone()]
     } else {
@@ -218,34 +420,24 @@ fn main() -> anyhow::Result<()> {
         device: args.iso_worker_device,
     }
     .with_pool(devices, args.iso_worker_queue_capacity)?;
-    let island_scheduling = elastic::IslandSchedulingMode::parse(
-        &args.island_scheduling_mode,
-        args.quorum_theta,
-        args.carry_gamma,
-        args.soft_deadline_s.unwrap_or(args.quorum_timeout_s),
-        args.q_min,
-        args.max_carry_lag,
-    )?;
     let island_hmac_key = args
         .island_hmac_key
         .clone()
         .or_else(|| std::env::var("YETO_ISLAND_HMAC_KEY").ok())
         .filter(|k| !k.is_empty())
         .map(String::into_bytes);
-    if matches!(island_scheduling, elastic::IslandSchedulingMode::Elastic(_))
-        && island_hmac_key.is_none()
-    {
-        anyhow::bail!("elastic mode requires --island-hmac-key or YETO_ISLAND_HMAC_KEY");
-    }
     if island_hmac_key.is_none() {
         let allowed = args.allow_unauthenticated_islands
             || std::env::var("YETO_SYNCER_ALLOW_UNAUTHENTICATED").as_deref() == Ok("1");
         if !allowed {
             anyhow::bail!(
-                "legacy mode requires an island HMAC key (--island-hmac-key or \
+                "the syncer requires an island HMAC key (--island-hmac-key or \
                  YETO_ISLAND_HMAC_KEY); pass --allow-unauthenticated-islands only for local tests"
             );
         }
+    }
+    if !(0.0..=1.0).contains(&args.grace_arrival_quantile) {
+        anyhow::bail!("--grace-arrival-quantile must be in [0, 1] (0 = off)");
     }
     let expected_island_contract = args
         .expected_island_contract
@@ -259,6 +451,9 @@ fn main() -> anyhow::Result<()> {
         grace_ms: args.grace_ms,
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
+        grace_min_ms: args.grace_min_ms,
+        grace_arrival_quantile: args.grace_arrival_quantile,
+        terminal_grace_ms: args.terminal_grace_ms,
         pipeline: args.pipeline,
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
@@ -269,28 +464,81 @@ fn main() -> anyhow::Result<()> {
         policy_sweep_fragments: args.policy_sweep_fragments,
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
+        // N = 1 is exactly plain Nesterov; keep its code path and hashes.
+        outer_delayed_nesterov_period: args.outer_delayed_nesterov_period.filter(|&n| n > 1),
         iso_backend,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
+        checkpoint_at_steps: args.checkpoint_at_steps,
+        async_checkpoint: args.async_checkpoint,
+        bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
+        require_profile_record: args.require_profile_record,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
         max_base_lag: args.max_base_lag,
         learner_weight,
         require_profile_binding: args.require_profile_binding,
-        island_scheduling,
         island_hmac_key,
         expected_island_contract,
-        island_lease_s: args.island_lease_s,
         syncer_epoch: args.syncer_epoch,
-        elastic_final_grace_s: args.final_grace_s,
+        membership,
+        recovery,
+        inline_resend: args.inline_resend,
+        inline_broadcast: args.inline_broadcast,
+        weighted_fold: args.weighted_fold.parse()?,
+        shard,
+        expert_token_weights: args.expert_token_weights,
+        final_cut_manifest_only: args.final_cut_payload == "manifest",
+        dispense,
+        dispense_log: args.dispense_log.clone(),
+        member_lease,
+        max_subscribers: args.max_subscribers,
+        sample_relay: args.sample_relay.then_some(sample_relay::RelayConfig {
+            max_items: args.sample_relay_max_items,
+            max_bytes: args.sample_relay_max_mib << 20,
+            max_item_bytes: args.sample_relay_max_item_mib << 20,
+        }),
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+/// The island member table's lease (`--dispense-lease-s`), checked when a
+/// service that uses the table is on.
+fn member_lease(args: &Args) -> anyhow::Result<std::time::Duration> {
+    if args.dispense_lease_s.is_finite() && args.dispense_lease_s > 0.0 {
+        return Ok(std::time::Duration::from_secs_f64(args.dispense_lease_s));
+    }
+    if args.dispense || args.max_subscribers > 0 || args.sample_relay {
+        anyhow::bail!("--dispense-lease-s must be positive");
+    }
+    Ok(std::time::Duration::from_secs(300))
+}
+
+fn dispense_config(args: &Args) -> anyhow::Result<Option<dispense::DispenseConfig>> {
+    let named = args.dispense_passes.is_some() || args.dispense_log.is_some();
+    if !args.dispense {
+        if named {
+            anyhow::bail!("--dispense-passes / --dispense-log need --dispense");
+        }
+        return Ok(None);
+    }
+    if !(args.dispense_lease_s.is_finite() && args.dispense_lease_s > 0.0) {
+        anyhow::bail!("--dispense-lease-s must be positive");
+    }
+    let cfg = dispense::DispenseConfig {
+        lease: std::time::Duration::from_secs_f64(args.dispense_lease_s),
+        passes: args.dispense_passes,
+        max_redo: args.dispense_max_redo,
+        max_block: args.dispense_max_block,
+    };
+    cfg.validate()?;
+    Ok(Some(cfg))
 }
 
 fn parse_hex32(text: &str) -> anyhow::Result<[u8; 32]> {
@@ -360,29 +608,53 @@ mod tests {
     }
 
     #[test]
-    fn island_scheduling_defaults_to_legacy_and_soft_deadline_inherits() {
+    fn checkpoint_at_steps_is_a_comma_separated_step_list() {
+        let base = ["yeto-syncer", "--learners", "1", "--total-steps", "200"];
+        assert!(Args::try_parse_from(base).unwrap().checkpoint_at_steps.is_empty());
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,149,190"]);
+        assert_eq!(Args::try_parse_from(argv).unwrap().checkpoint_at_steps, vec![75, 149, 190]);
+        let mut argv = base.to_vec();
+        argv.extend(["--checkpoint-at-steps", "75,x"]);
+        assert!(Args::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn membership_is_static_by_default_and_the_retired_mode_flag_is_refused() {
         let a = Args::try_parse_from(["yeto-syncer", "--learners", "2", "--total-steps", "8"])
             .unwrap();
-        assert_eq!(a.island_scheduling_mode, "legacy");
-        assert_eq!((a.quorum_theta, a.carry_gamma, a.q_min, a.max_carry_lag), (0.75, 0.5, 1, 2));
-        assert_eq!(a.soft_deadline_s, None);
-        let e = Args::try_parse_from([
+        assert_eq!((a.quorum_theta, a.carry_gamma, a.q_min), (None, None, 1));
+        assert!(parse_membership(&a).unwrap().is_static(), "fragment rounds stay fixed by default");
+        assert_eq!((a.soft_deadline_s, a.final_grace_s), (None, None));
+        for retired in [["--island-scheduling-mode", "elastic"], ["--max-carry-lag", "2"]] {
+            let mut argv = vec!["yeto-syncer", "--learners", "2", "--total-steps", "8"];
+            argv.extend(retired);
+            assert!(Args::try_parse_from(argv).is_err(), "{retired:?} is no longer a flag");
+        }
+    }
+
+    #[test]
+    fn fragment_round_membership_flags_parse() {
+        let a = Args::try_parse_from([
             "yeto-syncer", "--learners", "2", "--total-steps", "8",
-            "--island-scheduling-mode", "elastic", "--quorum-theta", "0.6",
-            "--carry-gamma", "0.25", "--soft-deadline-s", "30", "--q-min", "2",
-            "--max-carry-lag", "3",
+            "--quorum-theta", "0.5", "--q-min", "1", "--island-capacity", "0=8,1=4",
+            "--island-lease-s", "30", "--soft-deadline-s", "120", "--carry-gamma", "0.5",
+            "--max-learners", "4", "--final-grace-s", "45",
         ])
         .unwrap();
-        let mode = elastic::IslandSchedulingMode::parse(
-            &e.island_scheduling_mode, e.quorum_theta, e.carry_gamma,
-            e.soft_deadline_s.unwrap_or(e.quorum_timeout_s), e.q_min, e.max_carry_lag,
-        )
+        let m = parse_membership(&a).unwrap();
+        assert_eq!(m.quorum_rule, membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 });
+        assert_eq!(m.capacity(0), 8.0);
+        assert_eq!(m.capacity(3), 1.0);
+        assert_eq!(m.lease, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(m.soft_deadline, Some(std::time::Duration::from_secs(120)));
+        assert_eq!(m.carry_gamma, 0.5);
+        assert_eq!(m.id_limit(2), 4);
+        assert_eq!(m.final_grace, Some(std::time::Duration::from_secs(45)));
+        let dup = Args::try_parse_from([
+            "yeto-syncer", "--learners", "2", "--total-steps", "8", "--island-capacity", "0=1,0=2",
+        ])
         .unwrap();
-        assert_eq!(
-            mode,
-            elastic::IslandSchedulingMode::Elastic(elastic::ElasticParams {
-                quorum_theta: 0.6, carry_gamma: 0.25, soft_deadline_s: 30, q_min: 2, max_carry_lag: 3,
-            })
-        );
+        assert!(parse_membership(&dup).is_err());
     }
 }

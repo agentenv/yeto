@@ -118,21 +118,11 @@ def _ports_policy_token() -> str | None:
         from yeto.rl.engine.rollout_meta import current_policy_token
 
         return current_policy_token()
-    except Exception:  # noqa: BLE001 - legacy env has no sink
+    except Exception:  # noqa: BLE001 - no rollout sink in this process
         return None
 
 
-def _legacy_policy_token(args: Any) -> str | None:
-    version = getattr(args, "yeto_rl_policy_version", None)
-    if version is None:
-        return None
-    from yeto.rl.adapters.miles.legacy.engine import _policy_token_for_rollout
-
-    return _policy_token_for_rollout(args, version)
-
-
-def apply_record(sample: Any, rec: dict[str, Any], *, ports_token: str | None,
-                 legacy_token: str | None) -> Any:
+def apply_record(sample: Any, rec: dict[str, Any], *, ports_token: str | None) -> Any:
     if prompt_key(rec.get("prompt", "")) != prompt_key(getattr(sample, "prompt", "")):
         raise ReplayMiss("teacher forcing: recorded prompt does not match the running sample")
     for name in REPLAY_FIELDS:
@@ -147,8 +137,6 @@ def apply_record(sample: Any, rec: dict[str, Any], *, ports_token: str | None,
     if ports_token is not None:
         sample.weight_versions = []
         sample.metadata["weight_version"] = ports_token
-    elif legacy_token is not None:
-        sample.weight_versions = [legacy_token]
     elif "weight_versions" in rec:
         sample.weight_versions = rec["weight_versions"]
     return sample
@@ -158,6 +146,4 @@ async def replay_generate(args: Any, sample: Any, sampling_params: Any, evaluati
     if evaluation:
         raise RuntimeError("teacher forcing replays training rollouts only; disable eval")
     rec = _index().take(getattr(sample, "prompt", ""), getattr(sample, "index", None))
-    ports_token = _ports_policy_token()
-    legacy_token = None if ports_token is not None else _legacy_policy_token(args)
-    return apply_record(sample, rec, ports_token=ports_token, legacy_token=legacy_token)
+    return apply_record(sample, rec, ports_token=_ports_policy_token())

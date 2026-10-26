@@ -6,3 +6,8 @@ repos:
         entry: python3 scripts/precommit_check.py
         language: system
         pass_filenames: true
+      - id: yeto-commit-message-english
+        name: commit message must be English (no CJK)
+        entry: python3 scripts/check_commit_message.py
+        language: system
+        stages: [commit-msg]

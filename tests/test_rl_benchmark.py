@@ -38,11 +38,10 @@ def _args(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_four_arms_have_equal_hardware_and_trajectory_budgets():
+def test_three_arms_have_equal_hardware_and_trajectory_budgets():
     arms = benchmark.select_arms("2", gpus_per_island=2, groups_per_island=4)
 
     assert [arm.name for arm in arms] == [
-        "native-miles-m2",
         "yeto-single-m2",
         "yeto-federated-m2",
         "yeto-decoupled-m2",
@@ -50,7 +49,6 @@ def test_four_arms_have_equal_hardware_and_trajectory_budgets():
     assert [
         (arm.islands, arm.gpus_per_island, arm.groups_per_round) for arm in arms
     ] == [
-        (1, 4, 8),
         (1, 4, 8),
         (2, 2, 4),
         (2, 2, 4),
@@ -72,22 +70,11 @@ def test_arm_selection_rejects_duplicates_and_nonpositive_values():
         benchmark.select_arms("0", 1, 1)
 
 
-def test_native_only_selection_keeps_the_direct_miles_arm():
-    arms = benchmark.select_arms(
-        "2",
-        gpus_per_island=2,
-        groups_per_island=4,
-        kinds=benchmark.parse_arm_kinds("native"),
-    )
-
-    assert [arm.name for arm in arms] == ["native-miles-m2"]
-
-
 def test_arm_kind_selection_rejects_unknown_or_duplicate_values():
     with pytest.raises(ValueError, match="unknown"):
-        benchmark.parse_arm_kinds("native,old-direct")
+        benchmark.parse_arm_kinds("single,native")
     with pytest.raises(ValueError, match="duplicates"):
-        benchmark.parse_arm_kinds("native,native")
+        benchmark.parse_arm_kinds("single,single")
 
 
 def test_decoupled_arm_requires_the_fixed_fragment_contract():
@@ -233,12 +220,12 @@ def test_chat_template_kwargs_are_forwarded_to_training_workers(tmp_path):
     args._active_seed = 17
     prompt = tmp_path / "prompts.jsonl"
     prompt.write_text("{}\n", encoding="utf-8")
-    worker = benchmark.WorkerSpec(0, 1, 1, prompt, False)
+    worker = benchmark.WorkerSpec(0, 1, 1, prompt)
 
     payload = benchmark.worker_payload(
         args,
         worker,
-        arm=benchmark.select_arms("1", 1, 1, kinds=("native",))[0],
+        arm=benchmark.select_arms("1", 1, 1, kinds=("single",))[0],
         run_dir=tmp_path,
         model_path=tmp_path / "model",
         syncer=None,
@@ -281,90 +268,25 @@ def test_prompt_streams_cycle_deterministically_without_touching_eval_rows():
     assert streams.combined_ids == (0, 1, 2, 0, 1, 2, 0, 1)
 
 
-def test_worker_specs_keep_native_outside_yeto_and_partition_federated_prompts(
-    tmp_path,
-):
-    native, single, federated, decoupled = benchmark.select_arms("2", 2, 4)
+def test_worker_specs_partition_federated_prompts(tmp_path):
+    single, federated, decoupled = benchmark.select_arms("2", 2, 4)
     combined = tmp_path / "combined.jsonl"
     islands = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
 
-    native_specs = benchmark.worker_specs(native, combined, islands)
     single_specs = benchmark.worker_specs(single, combined, islands)
     federated_specs = benchmark.worker_specs(federated, combined, islands)
     decoupled_specs = benchmark.worker_specs(decoupled, combined, islands)
 
-    assert len(native_specs) == len(single_specs) == 1
-    assert native_specs[0].policy_sync is False
-    assert single_specs[0].policy_sync is True
-    assert native_specs[0].gpus == single_specs[0].gpus == 4
-    assert native_specs[0].groups_per_round == single_specs[0].groups_per_round == 8
+    assert len(single_specs) == 1
+    assert single_specs[0].prompt_path == combined
+    assert single_specs[0].gpus == 4
+    assert single_specs[0].groups_per_round == 8
     assert [spec.prompt_path for spec in federated_specs] == list(islands)
     assert [spec.learner_id for spec in federated_specs] == [0, 1]
-    assert all(spec.policy_sync for spec in federated_specs)
     assert all(
         spec.gpus == 2 and spec.groups_per_round == 4 for spec in federated_specs
     )
     assert decoupled_specs == federated_specs
-
-
-def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
-    args = benchmark.build_parser().parse_args(
-        [
-            "--model",
-            "org/model",
-            "--model-revision",
-            "a" * 40,
-            "--data",
-            "org/data",
-            "--data-revision",
-            "b" * 40,
-            "--reward-function",
-            "pkg.reward:score",
-            "--pipeline-parallel",
-            "2",
-            "--rl-engine",
-            "legacy",
-        ]
-    )
-    args._active_seed = 17
-    arm = benchmark.select_arms("2", 2, 4)[2]
-    combined = tmp_path / "combined.jsonl"
-    island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
-    for path in island_paths:
-        path.write_text("{}\n", encoding="utf-8")
-    workers = benchmark.worker_specs(arm, combined, island_paths)
-
-    payloads = [
-        benchmark.worker_payload(
-            args,
-            worker,
-            arm=arm,
-            run_dir=tmp_path,
-            model_path=tmp_path / "model",
-            syncer="127.0.0.1:30000",
-            reward_sha256="c" * 64,
-        )
-        for worker in workers
-    ]
-
-    assert [
-        payload["arguments"]["rollout_engine_base_port"] for payload in payloads
-    ] == [21100, 22100]
-    assert [payload["arguments"]["sglang_router_port"] for payload in payloads] == [
-        21000,
-        22000,
-    ]
-    assert [
-        payload["arguments"]["sglang_router_prometheus_port"] for payload in payloads
-    ] == [21001, 22001]
-    assert [payload["arguments"]["train_master_base_port"] for payload in payloads] == [
-        21002,
-        22002,
-    ]
-    assert {payload["arguments"]["expert_parallel"] for payload in payloads} == {1}
-    assert {payload["arguments"]["pipeline_parallel"] for payload in payloads} == {
-        2
-    }
 
 
 def test_reward_summary_uses_standard_pass_at_k_estimator():
@@ -384,8 +306,8 @@ def test_resume_keys_cover_every_seed_m_and_arm():
     arms = benchmark.select_arms("2,4", 1, 2)
     keys = benchmark.expected_record_keys((17, 29), arms)
 
-    assert len(keys) == 16
-    assert ("native-miles-m2", 2, 17) in keys
+    assert len(keys) == 12
+    assert ("yeto-single-m2", 2, 17) in keys
     assert ("yeto-federated-m4", 4, 29) in keys
     assert ("yeto-decoupled-m4", 4, 29) in keys
     benchmark.validate_result_records(
@@ -398,8 +320,8 @@ def test_resume_keys_cover_every_seed_m_and_arm():
     with pytest.raises(ValueError, match="duplicate"):
         benchmark.validate_result_records(
             [
-                {"arm": "native-miles-m2", "m": 2, "seed": 17},
-                {"arm": "native-miles-m2", "m": 2, "seed": 17},
+                {"arm": "yeto-single-m2", "m": 2, "seed": 17},
+                {"arm": "yeto-single-m2", "m": 2, "seed": 17},
             ],
             keys,
         )
@@ -483,7 +405,6 @@ def test_resume_identity_fingerprints_all_yeto_sources_and_syncer_binary(
 
 def test_report_deltas_distinguish_yeto_contract_from_federation():
     records = [
-        {"arm": "native-miles-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.5}},
         {"arm": "yeto-single-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.4}},
         {"arm": "yeto-federated-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.3}},
         {"arm": "yeto-decoupled-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.35}},
@@ -491,18 +412,14 @@ def test_report_deltas_distinguish_yeto_contract_from_federation():
 
     annotated = {row["arm"]: row for row in benchmark.annotate_deltas(records)}
 
-    assert annotated["native-miles-m2"]["delta_vs_native"] is None
-    assert annotated["yeto-single-m2"]["delta_vs_native"] == pytest.approx(-0.1)
-    assert annotated["yeto-federated-m2"]["delta_vs_native"] == pytest.approx(-0.2)
+    assert annotated["yeto-single-m2"]["delta_vs_single"] is None
     assert annotated["yeto-federated-m2"]["delta_vs_single"] == pytest.approx(-0.1)
-    assert annotated["yeto-decoupled-m2"]["delta_vs_native"] == pytest.approx(-0.15)
     assert annotated["yeto-decoupled-m2"]["delta_vs_strict"] == pytest.approx(0.05)
 
 
-def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
+def test_aggregate_report_keeps_the_arms_in_order(tmp_path):
     records = []
     for arm, kind, reward, sync in (
-        ("native-miles-m2", "native", 0.5, None),
         (
             "yeto-single-m2",
             "single",
@@ -530,8 +447,8 @@ def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
                 "seed": 17,
                 "total_gpus": 4,
                 "train_wall_s": 10.0,
-                "artifact_s": None if kind == "native" else 2.0,
-                "artifact_ready_s": 10.0 if kind == "native" else 12.0,
+                "artifact_s": 2.0,
+                "artifact_ready_s": 12.0,
                 "gpu_hours": 1.0,
                 "estimated_cost": None,
                 "training": {"trajectories": 8, "action_tokens": 32},
@@ -547,15 +464,12 @@ def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
     aggregates = benchmark.aggregate_records(records)
 
     assert [row["arm"] for row in aggregates] == [
-        "native-miles-m2",
         "yeto-single-m2",
         "yeto-federated-m2",
     ]
-    assert aggregates[1]["delta_vs_native"] == pytest.approx(-0.1)
-    assert aggregates[2]["delta_vs_single"] == pytest.approx(-0.1)
-    assert aggregates[0]["artifact_ready_s"] == 10.0
-    assert aggregates[1]["artifact_ready_s"] == 12.0
-    assert aggregates[2]["mean_pull_to_push_s"] == pytest.approx(0.5)
+    assert aggregates[1]["delta_vs_single"] == pytest.approx(-0.1)
+    assert aggregates[0]["artifact_ready_s"] == 12.0
+    assert aggregates[1]["mean_pull_to_push_s"] == pytest.approx(0.5)
 
     args = SimpleNamespace(
         model="org/model",
@@ -567,7 +481,7 @@ def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
     )
     benchmark.write_report(args, records)
     report = (tmp_path / "report.md").read_text()
-    assert "native-miles-m2" in report
+    assert "yeto-federated-m2" in report
     assert "artifact-ready s" in report
 
 
@@ -591,52 +505,20 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
             "2",
             "--pipeline-parallel",
             "2",
-            "--rl-engine",
-            "legacy",
             "--dry-run",
         ]
     )
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "native-miles-m2" in output
     assert "yeto-single-m2" in output
     assert "yeto-federated-m2" in output
-    plan = json.loads(output.split("PLAN_JSON ", 1)[1])
+    plan = json.loads(output.split("PLAN_JSON ", 1)[1].splitlines()[0])
     assert plan["fairness"]["same_total_gpus"]
     assert plan["fairness"]["same_expert_parallel"]
     assert plan["fairness"]["same_pipeline_parallel"]
     assert plan["expert_parallel"] == 1
     assert plan["pipeline_parallel"] == 2
-
-
-def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
-    assert benchmark.main(
-        [
-            "--model",
-            "org/model",
-            "--model-revision",
-            "a" * 40,
-            "--data",
-            "org/data",
-            "--data-revision",
-            "b" * 40,
-            "--reward-function",
-            "yeto_miles_cybergym.reward:score",
-            "--arms",
-            "native",
-            "--islands",
-            "2",
-            "--rl-engine",
-            "legacy",
-            "--dry-run",
-        ]
-    ) == 0
-
-    output = capsys.readouterr().out
-    assert "native-miles-m2" in output
-    assert "yeto-single-m2" not in output
-    assert "yeto-federated-m2" not in output
 
 
 def test_dry_run_works_when_script_is_invoked_outside_repo(tmp_path):
@@ -760,7 +642,7 @@ def test_materialized_prompt_files_preserve_holdout_and_prompt_identity(tmp_path
 
 
 def test_strict_syncer_command_is_one_fragment_exact_base_avg(tmp_path):
-    arm = benchmark.select_arms("2", 2, 4)[2]
+    arm = benchmark.select_arms("2", 2, 4)[1]
     command = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
 
     def value(flag):
@@ -780,7 +662,7 @@ def test_strict_syncer_command_is_one_fragment_exact_base_avg(tmp_path):
 
 
 def test_strict_syncer_resumes_only_an_existing_checkpoint(tmp_path):
-    arm = benchmark.select_arms("2", 2, 4)[2]
+    arm = benchmark.select_arms("2", 2, 4)[1]
     fresh = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
     assert "--resume" not in fresh
     (tmp_path / "state.ckpt").write_bytes(b"ckpt")
@@ -973,19 +855,14 @@ def test_decoupled_training_restarts_syncer_for_terminal_consolidation(
     }
 
 
-def test_worker_miles_extras_capture_real_rollouts_and_only_native_saves(tmp_path):
-    native, single, _, _ = benchmark.select_arms("2", 2, 4)
-    native_worker = benchmark.worker_specs(native, tmp_path / "all", ())[0]
+def test_worker_miles_extras_capture_real_rollouts_without_miles_saves(tmp_path):
+    single, _, _ = benchmark.select_arms("2", 2, 4)
     single_worker = benchmark.worker_specs(single, tmp_path / "all", ())[0]
 
-    native_extra = benchmark.miles_extra_argv(native_worker, tmp_path / "native", 3)
-    single_extra = benchmark.miles_extra_argv(single_worker, tmp_path / "single", 3)
+    single_extra = benchmark.miles_extra_argv(single_worker, tmp_path / "single")
 
-    assert "--save-debug-rollout-data" in native_extra
     assert "--save-debug-rollout-data" in single_extra
-    assert "--save" in native_extra
-    assert native_extra[native_extra.index("--save-interval") + 1] == "3"
-    assert "--save-hf" not in native_extra
+    assert "--save" not in single_extra
     assert "--save-hf" not in single_extra
 
 
@@ -993,110 +870,18 @@ def test_ports_islands_do_not_share_the_dashboard_column_directory(tmp_path):
     # Upstream Miles writes dashboard columns to <dump dir>/../dashboard_columns
     # through a fixed .tmp name; two islands sharing that grandparent race on
     # the rename (teacher-forcing replay finished both islands together).
-    _, single, _, _ = benchmark.select_arms("2", 2, 4)
+    single, _, _ = benchmark.select_arms("2", 2, 4)
     workers = benchmark.worker_specs(single, tmp_path / "all", ())
     run_dir = tmp_path / "run"
 
-    def dump(worker, engine):
-        extra = benchmark.miles_extra_argv(worker, run_dir, 3, engine)
+    def dump(worker):
+        extra = benchmark.miles_extra_argv(worker, run_dir)
         return Path(extra[extra.index("--save-debug-rollout-data") + 1])
 
-    legacy = [dump(w, "legacy") for w in workers]
-    ports = [dump(w, "ports") for w in workers]
-    assert legacy[0] == run_dir / "rollouts" / "island-0" / "{rollout_id}.pt"
+    ports = [dump(w) for w in workers]
     assert len({p.parent.parent for p in ports}) == len(workers)
     for worker, path in zip(workers, ports):
-        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id, "ports")
-
-
-def test_native_miles_adapter_names_are_mapped_to_the_exact_peft_contract():
-    specs = (
-        SimpleNamespace(
-            name="base_model.model.model.layers.0.q_proj.lora_A.weight",
-            shape=(2, 4),
-        ),
-        SimpleNamespace(
-            name="base_model.model.model.layers.0.q_proj.lora_B.weight",
-            shape=(4, 2),
-        ),
-    )
-    raw = {
-        "model.layers.0.q_proj.lora_A.weight": torch.ones(2, 4),
-        "model.layers.0.q_proj.lora_B.weight": torch.ones(4, 2),
-    }
-
-    mapped = benchmark.canonical_native_adapter_tensors(raw, specs)
-
-    assert tuple(mapped) == tuple(spec.name for spec in specs)
-    assert all(
-        torch.equal(tensor, torch.ones(spec.shape))
-        for tensor, spec in zip(mapped.values(), specs)
-    )
-
-    raw.pop("model.layers.0.q_proj.lora_B.weight")
-    with pytest.raises(RuntimeError, match="does not match the PEFT contract"):
-        benchmark.canonical_native_adapter_tensors(raw, specs)
-
-
-def test_native_miles_adapter_is_rewritten_as_standard_peft(tmp_path, monkeypatch):
-    from yeto.rl import export as rl_export
-    from yeto.rl.core import CanonicalTensorSpec
-
-    specs = (
-        CanonicalTensorSpec(
-            "base_model.model.model.layers.0.q_proj.lora_A.weight",
-            (2, 4),
-            "float32",
-            8,
-        ),
-        CanonicalTensorSpec(
-            "base_model.model.model.layers.0.q_proj.lora_B.weight",
-            (4, 2),
-            "float32",
-            8,
-        ),
-    )
-    source = tmp_path / "miles"
-    source.mkdir()
-    torch.save(
-        {
-            "model.layers.0.q_proj.lora_A.weight": torch.ones(2, 4),
-            "model.layers.0.q_proj.lora_B.weight": torch.ones(4, 2),
-        },
-        source / "adapter_model.bin",
-    )
-    written = {}
-    monkeypatch.setattr(
-        rl_export, "derive_peft_lora_specs", lambda *args, **kwargs: specs
-    )
-    monkeypatch.setattr(
-        rl_export,
-        "write_peft_adapter",
-        lambda state, output, **kwargs: written.update(
-            state=state,
-            output=output,
-            kwargs=kwargs,
-        ),
-    )
-    args = SimpleNamespace(
-        model="org/model",
-        model_revision="a" * 40,
-        lora_r=2,
-        lora_targets="attention",
-        global_rounds=3,
-        trust_remote_code=True,
-    )
-
-    output = benchmark.standardize_native_adapter(args, source, tmp_path / "adapter")
-
-    assert output == tmp_path / "adapter"
-    assert written["state"].policy_version == 3
-    assert written["state"].specs == specs
-    assert written["kwargs"] == {
-        "base_model": "org/model",
-        "model_revision": "a" * 40,
-        "rank": 2,
-    }
+        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id)
 
 
 def test_rollout_summary_verifies_prompt_pairing_and_counts_real_work(tmp_path):
@@ -1487,23 +1272,15 @@ def _benchmark_argv(*extra):
     ]
 
 
-def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatch):
+def test_resume_identity_names_the_ports_engine(monkeypatch):
     import yeto.benchmark_resume
 
     monkeypatch.setattr(
         yeto.benchmark_resume, "implementation_fingerprint", lambda *a, **k: "0" * 64
     )
-    assert benchmark.build_parser().parse_args(_benchmark_argv()).rl_engine == "ports"
-    # An explicit legacy run keeps the pre-ports identity (no rl_engine field),
-    # so existing legacy work dirs still resume with --rl-engine legacy.
-    legacy = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "legacy"))
     ports = benchmark.build_parser().parse_args(_benchmark_argv())
-    for args in (legacy, ports):
-        args.eval_samples_per_prompt = args.samples_per_group
-    arms = benchmark.select_arms(legacy.islands, legacy.gpus_per_island, legacy.groups_per_island)
-    legacy_identity = benchmark._resume_identity(legacy, arms)
-    assert "rl_engine" not in legacy_identity
-    assert "rl_engine" not in legacy_identity["arguments"]
+    ports.eval_samples_per_prompt = ports.samples_per_group
+    arms = benchmark.select_arms(ports.islands, ports.gpus_per_island, ports.groups_per_island)
     ports_identity = benchmark._resume_identity(ports, arms)
     from yeto.rl import MILES_NEXT_COMMIT
 
@@ -1511,37 +1288,18 @@ def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatc
     assert ports_identity["miles_commit"] == MILES_NEXT_COMMIT
 
 
-def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
+def test_rl_engine_ports_dry_run_records_selection_and_rejects_unknown_arms(capsys):
     assert benchmark.main(
-        _benchmark_argv("--arms", "single,federated", "--rl-engine", "ports", "--dry-run")
+        _benchmark_argv("--arms", "single,federated", "--dry-run")
     ) == 0
     assert "RL_ENGINE ports" in capsys.readouterr().out
-    with pytest.raises(SystemExit, match="native arm"):
+    with pytest.raises(SystemExit, match="unknown"):
         benchmark.main(_benchmark_argv("--arms", "native,single", "--dry-run"))
-    # Without --arms, the default ports engine plans only the Yeto arms.
+    # Without --arms, every Yeto arm is planned.
     assert benchmark.main(_benchmark_argv("--dry-run")) == 0
     output = capsys.readouterr().out
     assert "RL_ENGINE ports" in output
-    assert "native-miles" not in output and "yeto-decoupled" in output
-    assert benchmark.main(_benchmark_argv("--rl-engine", "legacy", "--dry-run")) == 0
-    output = capsys.readouterr().out
-    assert "native-miles" in output and "RL_ENGINE" not in output
-
-
-def test_legacy_worker_payload_passes_the_engine_explicitly(tmp_path):
-    for engine in ("legacy", "ports"):
-        args = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", engine))
-        args._active_seed = 17
-        arm = benchmark.select_arms("2", 2, 4)[2]
-        island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
-        for path in island_paths:
-            path.write_text("{}\n", encoding="utf-8")
-        worker = benchmark.worker_specs(arm, tmp_path / "combined.jsonl", island_paths)[0]
-        payload = benchmark.worker_payload(
-            args, worker, arm=arm, run_dir=tmp_path, model_path=tmp_path / "model",
-            syncer="127.0.0.1:30000", reward_sha256="c" * 64,
-        )
-        assert payload["arguments"]["rl_engine"] == engine
+    assert "yeto-decoupled" in output
 
 
 def test_learner_budget_override_is_decoupled_only_and_not_below_global_rounds():

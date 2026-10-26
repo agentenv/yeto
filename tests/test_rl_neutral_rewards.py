@@ -64,7 +64,7 @@ def test_rewards_package_imports_no_framework():
                 names = [node.module]
             for name in names:
                 assert name.split(".")[0] not in {"miles", "verl", "megatron", "sglang", "torch"}, path
-                assert not name.startswith(("yeto.rl.adapters.miles", "yeto.rl.adapters.miles.legacy.engine")), path
+                assert not name.startswith("yeto.rl.adapters.miles"), path
 
 
 # -- 3.2 equivalence with the pre-refactor entry points --------------------------
@@ -139,71 +139,6 @@ def test_generic_miles_wrapper_equals_original_entry_point(name, entry):
             assert a.snapshot() == b.snapshot(), (name, i)
 
 
-# -- 3.3 codex: abort as a reward result --------------------------------------------
-
-def _signed(status: str, reward: float, monkeypatch) -> dict:
-    from yeto.rl.harness.codex import reward as codex_reward
-
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "k" * 48)
-    outcome = {"schema": 1, "status": status, "episode_id": "ep", "task_id": "t", "reward": reward,
-               "passed": reward == 1.0, "class": None,
-               codex_reward.INFRASTRUCTURE_503_RETRIES_KEY: 0}
-    return {codex_reward.OUTCOME_KEY: outcome, codex_reward.MAC_KEY: codex_reward.sign_outcome(outcome)}
-
-
-@pytest.fixture
-def fake_miles_sample(monkeypatch):
-    names = ("miles", "miles.utils", "miles.utils.types")
-    for n in names[:-1]:
-        monkeypatch.setitem(sys.modules, n, types.ModuleType(n))
-    mod = types.ModuleType(names[-1])
-    mod.Sample = cases.FakeSample
-    monkeypatch.setitem(sys.modules, names[-1], mod)
-
-
-def test_codex_infrastructure_outcome_aborts_in_neutral_and_miles(monkeypatch, fake_miles_sample):
-    from yeto.rl.harness.codex import reward as codex_reward
-
-    metadata = _signed("infrastructure_error", 0.0, monkeypatch)
-    result = codex_reward.secrlenv_reward(Trajectory(metadata=metadata))
-    assert (result.value, result.aborted, result.reason) == (0.0, True, "secrlenv_infrastructure_failure")
-    sample = cases.FakeSample(metadata=dict(metadata))
-    assert _run(codex_reward.reward_func(None, sample)) == 0.0
-    assert sample.status is cases.Status.ABORTED
-    generic = cases.FakeSample(metadata=dict(metadata))
-    assert _run(miles_rewards.miles_reward(codex_reward.secrlenv_reward)(None, generic)) == 0.0
-    assert generic.status is cases.Status.ABORTED
-
-
-def test_codex_verdict_and_failed_signature(monkeypatch, fake_miles_sample):
-    from yeto.rl.harness.codex import reward as codex_reward
-
-    metadata = _signed("completed", 1.0, monkeypatch)
-    result = codex_reward.secrlenv_reward(Trajectory(metadata=metadata))
-    assert (result.value, result.aborted) == (1.0, False)
-    sample = cases.FakeSample(metadata=dict(metadata))
-    assert _run(codex_reward.reward_func(None, [sample])) == [1.0]
-    assert sample.status is cases.Status.COMPLETED
-    tampered = dict(metadata)
-    tampered[codex_reward.MAC_KEY] = "0" * 64
-    with pytest.raises(codex_reward.UntrustedOutcome):
-        codex_reward.secrlenv_reward(Trajectory(metadata=tampered))
-    with pytest.raises(codex_reward.UntrustedOutcome):
-        _run(codex_reward.reward_func(None, cases.FakeSample(metadata=tampered)))
-
-
-def test_tbench_infrastructure_marker_aborts(monkeypatch):
-    from yeto.rl.harness.codex import tbench_reward
-
-    metadata = {tbench_reward.INFRASTRUCTURE_KEY: "x", "success": True}
-    result = tbench_reward.tbench_reward(Trajectory(metadata=metadata))
-    assert result.aborted and result.value == 0.0 and "success" not in metadata
-    sample = SimpleNamespace(metadata={tbench_reward.INFRASTRUCTURE_KEY: "x", "success": True},
-                             status=None)
-    assert _run(tbench_reward.reward_func(None, sample)) == 0.0
-    assert sample.status == "ABORTED" and "success" not in sample.metadata
-
-
 # -- 3.10 registry and user rewards ------------------------------------------------
 
 def test_custom_reward_via_miles_equals_direct_call():
@@ -266,6 +201,9 @@ def test_register_conflict_rejected():
 # -- 3.9 math graders: test-only copy -------------------------------------------------
 
 MILES_PIN_CHECKOUT = Path("/home/michael/work/miles-fr1")
+# The Miles commit tests/vendor/miles_math_utils.py was copied from (the pin of
+# the removed legacy engine); the copy stays byte-identical to that file.
+VENDOR_SOURCE_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"
 
 
 def test_runtime_code_never_imports_the_vendor_copy():
@@ -285,13 +223,11 @@ def test_vendor_copy_is_marked_and_matches_the_pinned_source():
 
     text = (REPO / "tests/vendor/miles_math_utils.py").read_text()
     assert "许可证待核实、不进 main" in text.splitlines()[0]
-    from yeto.rl import MILES_COMMIT
-
     if not (MILES_PIN_CHECKOUT / ".git").exists():
         pytest.skip("no local Miles checkout to compare the copy with")
     pinned = subprocess.run(
         ["git", "-C", str(MILES_PIN_CHECKOUT), "show",
-         f"{MILES_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
+         f"{VENDOR_SOURCE_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
         capture_output=True, text=True)
     if pinned.returncode != 0:
         pytest.skip("pinned Miles commit not in the local checkout")
@@ -307,11 +243,11 @@ def test_math_reward_with_vendor_copy_matches_pinned_miles_graders(tmp_path):
     """
     import subprocess
 
-    from yeto.rl import MILES_COMMIT, math_reward
+    from yeto.rl import math_reward
 
     pinned = subprocess.run(
         ["git", "-C", str(MILES_PIN_CHECKOUT), "show",
-         f"{MILES_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
+         f"{VENDOR_SOURCE_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
         capture_output=True, text=True)
     if pinned.returncode != 0:
         pytest.skip("pinned Miles commit not available locally")

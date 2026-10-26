@@ -17,7 +17,7 @@ import struct
 import torch
 
 from .fragments import Fragment
-from .protocol import DTYPE_BF16, DTYPE_F32
+from .protocol import DTYPE_BF16, DTYPE_F32, f32_bytes_to_q4
 
 _WIRE_TORCH = {DTYPE_F32: torch.float32, DTYPE_BF16: torch.bfloat16}
 
@@ -75,35 +75,7 @@ def quantize_q4(flat: torch.Tensor) -> bytes:
     # The wire format is always one row-major vector. Canonical one-tensor
     # fragments may preserve their matrix shape while constructing a delta.
     flat = flat.detach().float().reshape(-1).cpu().contiguous()
-    numel = flat.numel()
-    blocks = -(-numel // Q4_BLOCK)
-    padded = torch.zeros(blocks * Q4_BLOCK, dtype=torch.float32)
-    padded[:numel] = flat
-    padded = padded.view(blocks, Q4_BLOCK)
-
-    scale = padded.abs().amax(dim=1)
-    safe = torch.where(scale > 0, scale, torch.ones_like(scale))
-    normalized = padded.abs() / safe.unsqueeze(1)
-    # Nearest level in log space; below 2^-6.5 rounds to exact zero.
-    level = torch.where(
-        normalized > 0,
-        (normalized.log2().round() + 7).clamp(0, 7),
-        torch.zeros_like(normalized),
-    ).to(torch.uint8)
-    sign = ((padded < 0) & (level > 0)).to(torch.uint8)
-    nibbles = sign * 8 + level
-    packed = (nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)).contiguous()
-
-    out = bytearray()
-    scale_bytes = (
-        scale.numpy().tobytes()
-    )  # little-endian f32 on all supported platforms
-    packed_bytes = packed.numpy().tobytes()
-    row = Q4_BLOCK // 2
-    for b in range(blocks):
-        out += scale_bytes[b * 4 : b * 4 + 4]
-        out += packed_bytes[b * row : (b + 1) * row]
-    return bytes(out)
+    return f32_bytes_to_q4(flat.numpy().tobytes())
 
 
 _Q4_LUT = torch.tensor(

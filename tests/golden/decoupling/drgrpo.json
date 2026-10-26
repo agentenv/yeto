@@ -1,4 +1,5 @@
 {
+ "algorithm_semantic_sha256": "3e99d9127bae8b0c233551e4ef56909d7220fd338d671874de2b8656cb6e8ced",
  "algorithm_sha256": "0b000b1c9cc850271ee20120fc2b3b8fbf624545d0f8a73cc21aa3389aaf6e85",
  "algorithm_sha256_launcher_expected": "0b000b1c9cc850271ee20120fc2b3b8fbf624545d0f8a73cc21aa3389aaf6e85",
  "algorithm_sha256_learner_ports_spec": "0b000b1c9cc850271ee20120fc2b3b8fbf624545d0f8a73cc21aa3389aaf6e85",
@@ -12,13 +13,17 @@
    "whiten": false
   },
   "correction": {
+   "batch_normalize": false,
    "function": null,
+   "level": "token",
+   "lower": null,
    "method": "none",
    "mismatch_metrics": false,
    "opsm_delta": null,
-   "tis_clip": null,
-   "tis_clip_low": null,
-   "use_rollout_logprobs": false
+   "ratio_mask": "none",
+   "upper": null,
+   "use_rollout_logprobs": false,
+   "veto": null
   },
   "entropy_coef": 0.0,
   "execution": {
@@ -59,10 +64,8 @@
   "compat_group": "nvidia-h100",
   "device_family": "nvidia",
   "engine": "miles",
-  "engine_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
-  "schema": "yeto-backend-identity-v2",
-  "sha256": "efd577ac20fbefc81bde11c6bdcf230768ccbea3600d1673af8942dc1c1c48cd"
+  "schema": "yeto-backend-identity-v2"
  },
  "execution_profile": {
   "contract_hash": "sha256:bf82d9e79e11047714673c97a0c60a9c80ac6673763a0052ed90d86a3cd2cf93",
@@ -107,6 +110,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -242,7 +249,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "7ee222703a50f20c2c18b817596ddbca10140fe94645ca28acdcba05c871cc2b",
+ "miles_argv_sha256": "8545800520cd18d7ee951fbb8a06d012cbb6bbd39d70968e85f35c1b05d2c6e7",
  "name": "drgrpo",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -262,27 +269,22 @@
  "plugins": [
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups"
   },
   {
    "module_file": "yeto/rl/algos/reducers.py",
    "path": "yeto.rl.algos.reducers.constant_denominator_reducer",
-   "source_sha256": "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed",
    "spec_sha256": "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
   }
  ],
- "ports_runtime_fingerprint": "sha256:09ac1c0b6040d76fcba64d4376125d5a45a399987131cd3f6f1b406cff5138b9",
  "runtime_attrs": {
   "yeto_algo_plugins": {
    "config": {
@@ -297,6 +299,6 @@
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定（yeto.rl.engine.backend_identity），离线不可得",
  "title": "Dr.GRPO 常数分母归约（G1 drgrpo 证据里的 spec 原文件）"
 }

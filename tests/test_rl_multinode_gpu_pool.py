@@ -248,14 +248,14 @@ def test_accept_rebind_flag_flows_from_cli_to_the_learner(tmp_path, monkeypatch)
     args = _elastic_cli(res, "--rl-elastic-initial-config", "c0", "--rl-placement", "fixed-partition",
                         "--rl-elastic-accept-rebind", *gpu)
     assert args.rl_elastic_accept_rebind is True
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     _prepare_rl_args(args)
     assert " --rl-elastic-accept-rebind" in _island_task(args, monkeypatch).run
     plain = _elastic_cli(res, "--rl-elastic-initial-config", "c0", "--rl-placement", "fixed-partition", *gpu)
     _prepare_rl_args(plain)
     assert "--rl-elastic-accept-rebind" not in _island_task(plain, monkeypatch).run
     with pytest.raises(ValueError, match="--rl-elastic-accept-rebind need --rl-elastic"):
-        launcher._check_ports_infra_switches(_cli(("--rl-elastic-accept-rebind",)), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-accept-rebind",)))
     # learner side: parsed into yeto_rl_elastic["accept_rebind"], refused without --rl-elastic
     parsed = learner.parse_args(_learner_argv(ELASTIC_LEARNER + ("--rl-elastic-accept-rebind",)))
     miles_args = SimpleNamespace()

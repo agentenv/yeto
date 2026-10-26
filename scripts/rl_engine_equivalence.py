@@ -56,10 +56,11 @@ filled from the Miles ``log_utils ... step k: {...}`` lines in
 ``island-<i>/miles.log`` (the n-th local round <-> the n-th Miles step; one
 optimizer step per round), and the source of every filled value is recorded.
 
+The legacy engine was removed in 1543c319, so new legacy runs cannot be
+launched; the harness only re-analyzes recorded legacy/ports work dirs.
+
 Subcommands:
-  plan      print the commands of a ``run`` (nothing executed)
-  run       launch legacy/ports x seeds (+ teacher forcing) and analyze
-  analyze   analyze existing benchmark_rl work dirs (the usual GPU hand-off)
+  analyze   analyze existing benchmark_rl work dirs (recorded evidence)
   fake      CPU-only harness proof (real IslandDriver on the fake engine +
             SYNTHETIC legacy tapes; labeled FAKE, never equivalence evidence)
 """
@@ -71,11 +72,8 @@ import ast
 import glob
 import json
 import math
-import os
 import random
 import re
-import shlex
-import subprocess
 import sys
 import threading
 import time
@@ -104,12 +102,6 @@ COUNT_METRICS = ("completed_groups", "action_tokens")
 HASH_METRIC = "post_sync_hash"
 ALL_METRICS = FLOAT_METRICS + COUNT_METRICS
 
-DEFAULT_LAUNCH_CMD = (
-    "python scripts/benchmark_rl.py {launch_args} --seeds {seed} --rl-engine {engine} "
-    "--work-dir {run_dir}/work --report-dir {run_dir}/report"
-)
-TF_GENERATE = "yeto.rl.teacher_forcing.replay_generate"
-REPLAY_ENV = "YETO_RL_REPLAY_ROLLOUTS"
 GRAD_AUDIT_ENV = "YETO_RL_AUDIT_GRADS"  # == yeto.rl.grad_audit.GRAD_AUDIT_ENV
 
 Key = tuple[int, int]  # (island_id, round)
@@ -1024,64 +1016,6 @@ def _one_arm(path: str) -> Path:
     return next(iter(arms.values()))
 
 
-# ---------------------------------------------------------------------------
-# plan / run (real launches; never invoked by tests)
-# ---------------------------------------------------------------------------
-def build_plan(args) -> dict[str, Any]:
-    out = Path(args.out_dir)
-    steps = []
-    for engine in ("legacy", "ports"):
-        for seed in args.seeds:
-            run_dir = out / f"{engine}-s{seed}"
-            steps.append({"name": run_dir.name, "engine": engine, "seed": seed,
-                          "run_dir": str(run_dir), "env": {},
-                          "command": shlex.split(args.launch_cmd.format(
-                              engine=engine, seed=seed, run_dir=run_dir,
-                              launch_args=args.launch_args))})
-    if args.teacher_forcing:
-        ref = out / f"legacy-s{args.primary_seed}"
-        replay = str(ref / "work" / f"seed-{args.primary_seed}" / "*" / "rollouts" / "island-*"
-                     / f"{args.tf_rollout_id}.pt")
-        tf_args = (f"{args.tf_launch_args or args.launch_args} --global-rounds 1 "
-                   f"--custom-generate-function-path {TF_GENERATE}")
-        for engine in ("legacy", "ports"):
-            run_dir = out / f"tf-{engine}"
-            steps.append({"name": run_dir.name, "engine": engine, "seed": args.primary_seed,
-                          "run_dir": str(run_dir),
-                          "env": {REPLAY_ENV: replay, GRAD_AUDIT_ENV: "1"},
-                          "command": shlex.split(args.launch_cmd.format(
-                              engine=engine, seed=args.primary_seed, run_dir=run_dir,
-                              launch_args=tf_args))})
-    return {"preset": args.preset, "steps": steps, "thresholds": thresholds(),
-            "report": str(out / "report.md")}
-
-
-def run(args) -> int:
-    the_plan = build_plan(args)
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "plan.json").write_text(json.dumps(the_plan, indent=2), encoding="utf-8")
-    for step in the_plan["steps"]:
-        Path(step["run_dir"]).mkdir(parents=True, exist_ok=True)
-        with open(Path(step["run_dir"]) / "launch.log", "wb") as log:
-            rc = subprocess.run(step["command"], env={**os.environ, **step["env"]},
-                                stdout=log, stderr=subprocess.STDOUT).returncode
-        (Path(step["run_dir"]) / "rc").write_text(f"{rc}\n")
-        if rc != 0:
-            print(f"step {step['name']} failed rc={rc}; see {step['run_dir']}/launch.log")
-            return rc
-    ns = argparse.Namespace(
-        legacy=[str(out / f"legacy-s{s}") for s in args.seeds],
-        ports=[str(out / f"ports-s{s}") for s in args.seeds],
-        tf_reference=str(out / f"legacy-s{args.primary_seed}") if args.teacher_forcing else None,
-        tf_legacy=str(out / "tf-legacy") if args.teacher_forcing else None,
-        tf_ports=str(out / "tf-ports") if args.teacher_forcing else None,
-        preset=args.preset, primary_seed=args.primary_seed, out_dir=args.out_dir,
-        config=args.launch_args, peft_base_model=args.peft_base_model,
-        tf_replay=None, tf_rollout_id=args.tf_rollout_id, fp32_model=None, fp32_revision=None,
-        fp32_model_path=None, fp32_cache_dir=None, fp32_threads=None, fp32_save_dir=None,
-        no_fp32=False)
-    return analyze(ns)
 
 
 # ---------------------------------------------------------------------------
@@ -1219,19 +1153,6 @@ def parse_args(argv=None):
         sp.add_argument("--peft-base-model", default=None,
                         help="decoupled: also load each adapter onto this base model")
 
-    for name in ("plan", "run"):
-        sp = sub.add_parser(name)
-        common(sp)
-        sp.add_argument("--launch-cmd", default=DEFAULT_LAUNCH_CMD,
-                        help="template; placeholders {engine} {seed} {run_dir} {launch_args}")
-        sp.add_argument("--launch-args", required=True,
-                        help="shared benchmark_rl arguments (no --seeds/--rl-engine/--work-dir)")
-        sp.add_argument("--seeds", type=_seeds, default=list(DEFAULT_SEEDS))
-        sp.add_argument("--teacher-forcing", action="store_true")
-        sp.add_argument("--tf-launch-args", default=None,
-                        help="launch args for the TF runs (default: --launch-args)")
-        sp.add_argument("--tf-rollout-id", type=int, default=0)
-
     sp = sub.add_parser("analyze")
     common(sp)
     sp.add_argument("--legacy", nargs="+", required=True, help="legacy run/work/arm dirs")
@@ -1262,20 +1183,11 @@ def parse_args(argv=None):
     sp.add_argument("--seeds", type=_seeds, default=list(DEFAULT_SEEDS))
     sp.add_argument("--rounds", type=int, default=3)
     sp.add_argument("--fake-noise", type=float, default=1e-3)
-    args = p.parse_args(argv)
-    if getattr(args, "seeds", None) is not None and getattr(args, "primary_seed", None) is not None:
-        if args.primary_seed not in args.seeds:
-            p.error("--primary-seed must be one of --seeds")
-    return args
+    return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    if args.cmd == "plan":
-        print(json.dumps(build_plan(args), indent=2))
-        return 0
-    if args.cmd == "run":
-        return run(args)
     if args.cmd == "analyze":
         return analyze(args)
     return fake(args)

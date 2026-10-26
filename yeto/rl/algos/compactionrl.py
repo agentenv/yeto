@@ -92,8 +92,9 @@ def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:
 # --- Rollout-side switch (progress.md "S13 Codex 压缩接线") ------------------------
 # The trainer-side gae variant decides whether rollouts must be compacted:
 # ``cross_segment_per_sample`` (this spec) needs one sample per compaction
-# segment, which only the Codex bridge (``harness.codex.compaction_bridge``,
-# switched on by ``YETO_CODEX_COMPACTIONRL``) produces.  The control arm
+# segment.  The Codex bridge that produced them (switched on by
+# ``YETO_CODEX_COMPACTIONRL``) was removed in S26 E0.5; only the TEST synthetic
+# reward (``yeto.rl.synthetic_segments``) labels segments now.  The control arm
 # ``cross_segment_whole_rollout`` needs the whole rollout as ONE sample with
 # per-token segment ids; the bridge runs every segment in its own session-server
 # session with a rebuilt context, so its segments cannot be concatenated into
@@ -102,9 +103,6 @@ def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:
 COMPACTION_SWITCH_ENV = "YETO_CODEX_COMPACTIONRL"
 COMPACTION_T_COMP_ENV = "YETO_CODEX_COMPACTIONRL_T_COMP"
 COMPACTED_GAE_VARIANT = "cross_segment_per_sample"
-# yeto's Codex generate wrapper (segment collection); the launcher checks it
-# without importing the adapter layer (import boundary, yeto/rl/engine/README.md).
-CODEX_OPENENV_GENERATE = "yeto.rl.harness.codex.codex_openenv_generate.generate"
 WHOLE_ROLLOUT_CONTROL_GAE_VARIANT = "cross_segment_whole_rollout"
 _SWITCH_FALSE = frozenset({"", "0", "false", "no", "off"})
 _SWITCH_TRUE = frozenset({"1", "true", "yes", "on"})
@@ -138,7 +136,7 @@ def check_rollout_compaction(
     """Fail closed unless spec, harness and switch agree.
 
     ``gae_variant``: the spec's ``advantage.gae_variant`` (= Miles ``--gae-variant``);
-    ``harness_compacts``: the run's agent can compact (the Codex OpenEnv agent).
+    ``harness_compacts``: the run produces compaction segments.
     """
     if gae_variant == WHOLE_ROLLOUT_CONTROL_GAE_VARIANT and harness_compacts:
         raise ValueError(
@@ -151,7 +149,7 @@ def check_rollout_compaction(
         if not harness_compacts:
             raise ValueError(
                 f"gae_variant {COMPACTED_GAE_VARIANT} (CompactionRL) needs compacted rollouts; "
-                "only the Codex OpenEnv harness can compact"
+                "no agent harness compacts (only the TEST synthetic segments reward)"
             )
         if not switch_on:
             raise ValueError(

@@ -27,10 +27,12 @@ module imports (and is unit-tested) without the SDK or credentials.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import socket
 import subprocess
@@ -94,7 +96,24 @@ MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB":
 # and commits them; the launcher pulls them back into the local run dir.
 TAPE_MOUNT = "/yeto-tape"
 TAPE_SOURCE_DIR = "/root/yeto-output"
+# The Miles ports image's interpreter (the one Ray and Miles run), as the S26
+# E0.4 Miles Harbor layer used it.
+HARBOR_LAYER_PYTHON = "$(command -v python)"
+# S27 G-FS: engine images Modal builds itself can carry the Harbor layer too; the
+# backend's ``image`` module names its own interpreter (``HARBOR_LAYER_PYTHON``).
+HARBOR_LAYER_BACKENDS = ("verl",)
+HARBOR_RELAY_SECRET_PATH = "/root/.yeto-harbor-relay-secret"
 TAPE_SYNC_INTERVAL_S = 30.0
+# Files outside the tape directory that the tape also mirrors (flattened to
+# "<parent dir>.<file>"): a full-parameter island's trajectory evidence lives
+# in a private mkdtemp directory under ~/yeto-rl that ends with the container.
+TAPE_MIRROR_GLOBS = (
+    "/root/yeto-rl/trajectory-evidence-*/rollout-*.json",
+    # Harbor agent trials (HARBOR_TRIALS_DIR under the tape directory, S27 G-DA):
+    # the trial result (verifier reward, timings, exception) and Codex's output.
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/result.json",
+    f"{TAPE_SOURCE_DIR}/harbor-trials/*/agent/codex.txt",
+)
 TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")  # .pt: verl raw log-prob dumps
 TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
@@ -164,8 +183,9 @@ def resolve_syncer_for_modal(syncer_addr: str, public_override: str | None) -> s
     reachable from Modal and no `--syncer-public-addr` was given."""
     if public_override:
         return public_override
-    host = syncer_addr.rsplit(":", 1)[0].strip("[]")
-    if is_public_address(host):
+    # a sharded head (--syncer-shards N) is a comma-separated list, one address per shard
+    hosts = [addr.rsplit(":", 1)[0].strip("[]") for addr in syncer_addr.split(",")]
+    if all(is_public_address(host) for host in hosts):
         return syncer_addr
     raise ValueError(
         f"syncer at {syncer_addr} is not reachable from Modal (private or unresolvable "
@@ -200,6 +220,10 @@ class ModalIslandConfig:
     # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
     # container at start-up unless nvidia-smi reports that type.
     gpu_exact: bool = False
+    # E1: fail the container at start-up unless every GPU nvidia-smi reports is this
+    # model ("NVIDIA A10" refuses "NVIDIA A10G": Modal "A10G" containers are either,
+    # and the A10G trains about 12 % slower); None: any card of type `gpu`.
+    gpu_name: str | None = None
     # Pull image_ref with a private-registry login: ``registry_creds`` (the
     # SKYPILOT_DOCKER_* triple launcher.registry_login_for resolved) when
     # given, else -- with ``registry_login`` -- the launching process's
@@ -208,14 +232,10 @@ class ModalIslandConfig:
     registry_creds: dict[str, str] | None = None
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
-    workdir: str = str(REPO_ROOT)
+    # None: ship no local tree (release mode, L9.12: the image holds the code and
+    # links CONTAINER_WORKDIR to it).
+    workdir: str | None = str(REPO_ROOT)
     python_version: str = "3.12"
-    # Stock Codex run bundle (ports engine, signed Codex agent): a local dir
-    # holding the attested binary / package manifest / app-server schema,
-    # mounted read-only at ``codex_mount`` (= ``/opt/yeto/codex``, the
-    # CODEX_CONTAINER_BINARY_PATH parent) the same way sky file_mounts does.
-    codex_dir: str | None = None
-    codex_mount: str | None = None
     # Other sky file_mounts (container path -> local file or dir), mounted
     # read-only at start-up like the workdir.
     extra_mounts: dict[str, str] = field(default_factory=dict)
@@ -238,6 +258,21 @@ class ModalIslandConfig:
     # Host resource overrides (None = per-GPU defaults below).
     cpu_override: int | None = None
     memory_gib_override: int | None = None
+    # Container disk in GiB (None = Modal's default). Ray spills its object
+    # store here (see yeto.launch.modal_islands.modal_ephemeral_disk_gib).
+    ephemeral_disk_gib: int | None = None
+    # Harbor agent islands (yeto.launch.harness_env): the image gets the
+    # Harbor layer (harbor + boat-sdk, image_layer.modal_harbor_layer), and
+    # rank 0 forwards the gate relay port through a Modal tunnel so sandboxes
+    # outside Modal (boat) reach the Miles session server.
+    harbor_layer: bool = False
+    harbor_relay_port: int | None = None
+    # S27 G-FS: which environment names the tunnel writes back. Miles' gate relay
+    # (the default when unset) or verl's records proxy; ``harness_env``'s
+    # ``harbor_callback_*_env`` chooses them from the run's flags.
+    harbor_port_env: str | None = None
+    harbor_base_env: str | None = None
+    harbor_secret_env: str | None = None
 
     @property
     def function_name(self) -> str:
@@ -262,6 +297,8 @@ class ModalIslandConfig:
 
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
+        if self.ephemeral_disk_gib is not None and self.ephemeral_disk_gib < 1:
+            raise ValueError("ephemeral_disk_gib must be >= 1")
         if self.training_mode == "rl":
             if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
                                           or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
@@ -269,6 +306,23 @@ class ModalIslandConfig:
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
                 )
+        # S27 G-FS: the layer goes on a Miles registry image or on an engine image
+        # Modal builds itself whose backend has a Harbor layer recipe
+        # (``harbor.image_layer.BACKENDS``; ``docker/harbor-layer/versions.json``
+        # carries the per-backend constraint decisions). Before G-FS this refused
+        # every engine-built image, which is exactly the verl one.
+        if self.harbor_layer:
+            if self.training_mode != "rl":
+                raise ValueError("the Harbor layer goes on an island image (RL islands only)")
+            built = ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref or "")
+            if built and built["backend"] not in HARBOR_LAYER_BACKENDS:
+                raise ValueError(
+                    f"no Harbor layer recipe for the {built['backend']!r} engine image "
+                    f"(known: {sorted(HARBOR_LAYER_BACKENDS)})")
+        if self.harbor_relay_port is not None and not self.harbor_layer:
+            raise ValueError("harbor_relay_port is for Harbor agent islands (harbor_layer)")
+        if self.harbor_relay_port is not None and not 0 < int(self.harbor_relay_port) <= 65535:
+            raise ValueError(f"harbor_relay_port {self.harbor_relay_port} is not a TCP port")
         if (self.volume_name is None) != (self.volume_mount is None):
             raise ValueError("volume_name and volume_mount go together")
         if (self.tape_volume_name is None) != (self.tape_subdir is None):
@@ -288,10 +342,6 @@ class ModalIslandConfig:
             raise ValueError("model_volume_name and model_volume_mount go together")
         if self.model_volume_name and self.model_volume_name in (self.volume_name, self.tape_volume_name):
             raise ValueError("the model volume must differ from the checkpoint/tape volumes")
-        if (self.codex_dir is None) != (self.codex_mount is None):
-            raise ValueError("codex_dir and codex_mount go together")
-        if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
-            raise ValueError(f"codex_dir {self.codex_dir} is not a directory")
         for target, source in self.extra_mounts.items():
             if not target.startswith("/"):
                 raise ValueError(f"extra_mounts target {target} must be absolute")
@@ -317,7 +367,10 @@ class ModalIslandConfig:
 # ``<backend>-build:<40-hex commit>``: an engine image Modal builds from the
 # backend's own recipe (``yeto.rl.engine.backends`` role ``image``), pinned by the
 # engine commit and the engine's lock file; there is no registry digest.
-ENGINE_BUILT_IMAGE_RE = re.compile(r"(?P<backend>[a-z][a-z0-9]*)-build:(?P<commit>[0-9a-f]{40})")
+# ``<backend>-build:<commit>`` or ``<backend>-<variant>-build:<commit>`` (S27 G-DC:
+# ``verl-megatron-build``, the verl image with the Megatron engine layers)
+ENGINE_BUILT_IMAGE_RE = re.compile(
+    r"(?P<backend>[a-z][a-z0-9]*)(?:-(?P<variant>[a-z][a-z0-9]*))?-build:(?P<commit>[0-9a-f]{40})")
 
 
 def image_ref_from_rl_image(rl_image: str) -> str:
@@ -388,6 +441,19 @@ def check_gpu_names(gpu: str, names: list[str], count: int) -> None:
         )
 
 
+def gpu_model_matches(want: str, name: str) -> bool:
+    """``name`` is the GPU model ``want`` names, not a longer model name that starts
+    with it ("NVIDIA A10" matches "NVIDIA A10", not "NVIDIA A10G")."""
+    return re.search(re.escape(want) + r"(?![\w-])", name) is not None
+
+
+def check_gpu_model(want: str, names: list[str], count: int) -> None:
+    """Raise unless exactly ``count`` GPUs of the model ``want`` are visible."""
+    wrong = [n for n in names if not gpu_model_matches(want, n)]
+    if wrong or len(names) != count:
+        raise RuntimeError(f"requested {count}x {want!r} (--modal-gpu-name) but the container sees {names!r}")
+
+
 def visible_gpu_names() -> list[str]:
     out = subprocess.run(
         ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -404,14 +470,24 @@ def cluster_rank_and_ips(info) -> tuple[int, list[str]]:
     return int(info.rank), ipv4 or list(info.container_ips)
 
 
+def mirror_base(pattern: str) -> Path:
+    """The directory above a mirror glob's first wildcard: a mirrored file is named
+    by its path below it, ``/`` -> ``.`` (``<dir>-*/x.json`` -> ``<dir>-abc.x.json``)."""
+    wild = min((i for i, ch in enumerate(pattern) if ch in "*?["), default=len(pattern))
+    prefix = pattern[:wild]
+    return Path(prefix) if prefix.endswith("/") else Path(prefix).parent
+
+
 class TapeSync:
     """Mirror tape files of ``src`` into ``dst`` and commit the Volume,
     every ``interval_s`` in a daemon thread and once more on ``stop()``.
     Copies whole files that changed (size or mtime); never deletes."""
 
     def __init__(self, src: str, dst: str, commit, interval_s: float = TAPE_SYNC_INTERVAL_S,
-                 extra: dict[str, str] | None = None) -> None:
+                 extra: dict[str, str] | None = None,
+                 mirror_globs: tuple[str, ...] = ()) -> None:
         self.src, self.dst, self.commit, self.interval_s = Path(src), Path(dst), commit, interval_s
+        self.mirror_globs = tuple(mirror_globs)  # absolute globs, flattened into dst
         self.extra = dict(extra or {})  # file name -> text written once
         self._seen: dict[str, tuple[int, int]] = {}
         self._stop = threading.Event()
@@ -424,7 +500,7 @@ class TapeSync:
         # names its copies "<stem>.inc<k><suffix>" (k = 0 keeps the old names).
         self.incarnation: int | None = None
 
-    def _claim_incarnation(self) -> int:
+    def claim_incarnation(self) -> int:
         if self.incarnation is None:
             self.dst.mkdir(parents=True, exist_ok=True)
             taken = sorted(self.dst.glob("INCARNATION-*.txt"))
@@ -437,7 +513,7 @@ class TapeSync:
         return self.incarnation
 
     def _target_name(self, name: str) -> str:
-        k = self._claim_incarnation()
+        k = self.claim_incarnation()
         if k == 0:
             return name
         for suffix in TAPE_SUFFIXES:
@@ -447,30 +523,38 @@ class TapeSync:
 
     def sync_once(self) -> int:
         self.dst.mkdir(parents=True, exist_ok=True)
-        self._claim_incarnation()
+        self.claim_incarnation()
         for name, text in list(self.extra.items()):
             (self.dst / self._target_name(name)).write_text(text, encoding="utf-8")
             del self.extra[name]
         copied = 0
         if self.src.is_dir():
             for f in sorted(self.src.iterdir()):
-                if not f.is_file() or not f.name.endswith(TAPE_SUFFIXES):
-                    continue
-                st = f.stat()
-                if st.st_size > TAPE_MAX_FILE_BYTES:
-                    continue
-                key = (st.st_size, st.st_mtime_ns)
-                if self._seen.get(f.name) == key:
-                    continue
-                target = self._target_name(f.name)
-                tmp = self.dst / f".{target}.tmp"
-                tmp.write_bytes(f.read_bytes())
-                os.replace(tmp, self.dst / target)
-                self._seen[f.name] = key
-                copied += 1
+                if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
+                    copied += self._copy_if_changed(f, f.name)
+        for pattern in self.mirror_globs:
+            root = Path(pattern).anchor or "."
+            base = mirror_base(pattern)
+            for f in sorted(Path(root).glob(str(Path(pattern).relative_to(root)))):
+                if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
+                    copied += self._copy_if_changed(f, ".".join(f.relative_to(base).parts))
         self.commit()
         self.syncs += 1
         return copied
+
+    def _copy_if_changed(self, f: Path, name: str) -> int:
+        st = f.stat()
+        if st.st_size > TAPE_MAX_FILE_BYTES:
+            return 0
+        key = (st.st_size, st.st_mtime_ns)
+        if self._seen.get(name) == key:
+            return 0
+        target = self._target_name(name)
+        tmp = self.dst / f".{target}.tmp"
+        tmp.write_bytes(f.read_bytes())
+        os.replace(tmp, self.dst / target)
+        self._seen[name] = key
+        return 1
 
     def _safe_sync(self) -> None:
         try:
@@ -707,6 +791,315 @@ class HostMemSampler:
               f"peak gpu used MiB {self.peak_gpu}", flush=True)
 
 
+NCCL_TRACE_PREFIX_DEFAULT = "/tmp/nccl_trace_rank_"
+PY_SPY_CANDIDATES = ("py-spy", "/opt/sglang/bin/py-spy")
+
+
+def python_pids(proc: str = "/proc", limit: int | None = 200) -> list[tuple[int, str]]:
+    """(pid, command line cut to ``limit`` chars) of every Python or Ray worker process except this one."""
+    out = []
+    for name in os.listdir(proc):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open(os.path.join(proc, name, "cmdline"), "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        if cmd.startswith("ray::") or "python" in cmd.split(" ", 1)[0]:
+            out.append((int(name), cmd if limit is None else cmd[:limit]))
+    return sorted(out)
+
+
+class HangStackDumper:
+    """Capture every Python process's stack when a collective times out.
+
+    Opt-in via env ``YETO_HANG_STACK_DUMP=1``.  PyTorch's NCCL watchdog
+    writes a flight-recorder file (``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` +
+    rank) on a collective timeout when ``TORCH_NCCL_DUMP_ON_TIMEOUT=1``.
+    The rank that timed out then aborts, but a peer stuck on the host side
+    (S24 L1.1: TP rank 1 never enqueued the reduce-scatter) prints nothing.
+    This thread polls for the flight-recorder file and, on its first
+    appearance, runs ``py-spy dump`` on every Python process in the
+    container, twice (``repeat_s`` apart, to tell a hang from slow
+    progress).  Output goes to the tape dir so the tape Volume carries it
+    home."""
+
+    def __init__(self, out_dir: str, rank: int, *, trace_prefix: str = NCCL_TRACE_PREFIX_DEFAULT,
+                 poll_s: float = 5.0, repeat_s: float = 20.0, py_spy: str | None = None,
+                 proc: str = "/proc"):
+        self.out_dir, self.rank, self.trace_prefix = out_dir, rank, trace_prefix
+        self.poll_s, self.repeat_s, self.proc = poll_s, repeat_s, proc
+        self.py_spy = py_spy or next((p for p in (_which(c) for c in PY_SPY_CANDIDATES) if p), None)
+        self.dumps = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_env(cls, env: dict, out_dir: str, rank: int) -> "HangStackDumper | None":
+        if str(env.get("YETO_HANG_STACK_DUMP", "")).strip() not in {"1", "true", "yes"}:
+            return None
+        prefix = env.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE") or NCCL_TRACE_PREFIX_DEFAULT
+        return cls(out_dir, rank, trace_prefix=prefix)
+
+    def triggered(self) -> list[str]:
+        folder, stem = os.path.split(self.trace_prefix)
+        try:
+            return sorted(os.path.join(folder, n) for n in os.listdir(folder or ".") if n.startswith(stem))
+        except OSError:
+            return []
+
+    def python_pids(self) -> list[tuple[int, str]]:
+        return python_pids(self.proc)
+
+    def dump(self, reason: str) -> str:
+        self.dumps += 1
+        path = os.path.join(self.out_dir, f"hang-stacks-rank{self.rank}-{self.dumps}.txt")
+        os.makedirs(self.out_dir, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"# {reason} at {time.time():.3f} (py-spy={self.py_spy})\n")
+            for pid, cmd in self.python_pids():
+                f.write(f"\n===== pid {pid}: {cmd}\n")
+                f.flush()
+                if self.py_spy is None:
+                    f.write("py-spy not found\n")
+                    continue
+                try:
+                    res = subprocess.run([self.py_spy, "dump", "--pid", str(pid)],
+                                         capture_output=True, text=True, timeout=60)
+                    f.write(res.stdout + res.stderr)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    f.write(f"py-spy failed: {exc}\n")
+        print(f"[modal-hang-stacks] rank {self.rank}: {reason}; wrote {path}", flush=True)
+        return path
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.poll_s):
+            files = self.triggered()
+            if files:
+                self.dump(f"NCCL flight-recorder file(s) {files}")
+                if not self._stop.wait(self.repeat_s):
+                    self.dump("repeat")
+                return
+
+    def start(self) -> None:
+        print(f"[modal-hang-stacks] rank {self.rank}: watching {self.trace_prefix}* "
+              f"(py-spy={self.py_spy})", flush=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="modal-hang-stacks")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+STACK_SAMPLE_MATCH_DEFAULT = "island_entry"  # yeto.rl.adapters.<backend>.island_entry
+STACK_SAMPLE_KEEP_DEFAULT = 20
+PR_SET_PTRACER = 0x59616D61
+PR_SET_PTRACER_ANY = (1 << 64) - 1  # (unsigned long)-1
+
+
+def stack_sample_interval_s(env) -> float | None:
+    """Env YETO_STACK_SAMPLE_S: seconds between periodic stack samples; unset, "" or <= 0 = off."""
+    raw = str((env or {}).get("YETO_STACK_SAMPLE_S", "")).strip()
+    if not raw:
+        return None
+    value = float(raw)
+    return value if value > 0 else None
+
+
+def allow_any_ptracer(env=None) -> bool | None:
+    """Let any process in the container ptrace this one, when periodic stack sampling is on.
+
+    A Modal (gVisor) container runs with Yama ptrace_scope=1 and without
+    CAP_SYS_PTRACE.  py-spy started by the runner is a sibling of the island
+    driver, not its ancestor, so it gets EACCES ("Failed to copy Py_Version
+    symbol"; S27 G-CQ on CPU, T4 and 1xH200 containers).  After the target calls
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY), py-spy dumps it (G-CQ: a
+    400-thread process in 0.1-0.3 s).  The island entry calls this at start.
+    Returns None when sampling is off, else whether the prctl succeeded."""
+    if stack_sample_interval_s(os.environ if env is None else env) is None:
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        ok = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        ok = False
+    print(f"[yeto-stack-sample] pid {os.getpid()}: PR_SET_PTRACER_ANY {'set' if ok else 'failed'}", flush=True)
+    return ok
+
+
+class PeriodicStackSampler:
+    """Every ``interval_s``, ``py-spy dump`` each Python process whose command
+    line contains ``match`` (default: the island driver) into a ring of
+    ``keep`` files in the tape dir, and append one index line per round.
+
+    S27 RAY-SEGV: the 120B island driver died of SIGSEGV in many threads at
+    once; neither Ray's Abseil handler nor faulthandler finished printing, so
+    the only stacks left are those sampled before the crash.  Opt-in via env
+    ``YETO_STACK_SAMPLE_S`` (seconds; unset or 0 = off).  Other env:
+    ``YETO_STACK_SAMPLE_MATCH`` (substring, default ``island_entry``),
+    ``YETO_STACK_SAMPLE_KEEP`` (ring size, default 20),
+    ``YETO_STACK_SAMPLE_NATIVE=1`` (add ``--native``),
+    ``YETO_STACK_SAMPLE_NONBLOCKING=1`` (add ``--nonblocking``: the target is
+    not paused; default py-spy pauses it, G-CQ: 0.1-0.3 s for 400 threads).
+    The target must allow the ptrace first (``allow_any_ptracer``).  Files:
+    ``stack-samples-rank<R>-<slot>.txt`` and ``stack-samples-rank<R>.jsonl``
+    (round, slot, time, pids, return codes, seconds: the newest round is the
+    last line)."""
+
+    def __init__(self, out_dir: str, rank: int, *, interval_s: float,
+                 match: str = STACK_SAMPLE_MATCH_DEFAULT, keep: int = STACK_SAMPLE_KEEP_DEFAULT,
+                 native: bool = False, nonblocking: bool = False, timeout_s: float = 60.0,
+                 py_spy: str | None = None, proc: str = "/proc"):
+        if interval_s <= 0 or keep < 1:
+            raise ValueError("stack sampler needs interval_s > 0 and keep >= 1")
+        self.out_dir, self.rank, self.interval_s, self.match = out_dir, rank, interval_s, match
+        self.keep, self.native, self.nonblocking, self.timeout_s = keep, native, nonblocking, timeout_s
+        self.py_spy = py_spy or next((p for p in (_which(c) for c in PY_SPY_CANDIDATES) if p), None)
+        self.proc = proc
+        self.rounds = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_env(cls, env: dict, out_dir: str, rank: int) -> "PeriodicStackSampler | None":
+        interval = stack_sample_interval_s(env)
+        if interval is None:
+            return None
+        flag = lambda name: str(env.get(name, "")).strip() in {"1", "true", "yes"}  # noqa: E731
+        return cls(out_dir, rank, interval_s=interval,
+                   match=str(env.get("YETO_STACK_SAMPLE_MATCH") or STACK_SAMPLE_MATCH_DEFAULT),
+                   keep=int(env.get("YETO_STACK_SAMPLE_KEEP") or STACK_SAMPLE_KEEP_DEFAULT),
+                   native=flag("YETO_STACK_SAMPLE_NATIVE"), nonblocking=flag("YETO_STACK_SAMPLE_NONBLOCKING"))
+
+    def command(self, pid: int) -> list[str]:
+        return [self.py_spy or "py-spy", "dump", "--pid", str(pid),
+                *(["--native"] if self.native else []), *(["--nonblocking"] if self.nonblocking else [])]
+
+    def targets(self) -> list[tuple[int, str]]:
+        return [(pid, cmd[:200]) for pid, cmd in python_pids(self.proc, limit=None) if self.match in cmd]
+
+    def sample(self) -> dict:
+        """One round: dump every target into the next ring slot."""
+        slot = self.rounds % self.keep
+        self.rounds += 1
+        os.makedirs(self.out_dir, exist_ok=True)
+        path = os.path.join(self.out_dir, f"stack-samples-rank{self.rank}-{slot:02d}.txt")
+        rec: dict = {"round": self.rounds, "slot": slot, "t": round(time.time(), 3), "pids": [], "rc": [],
+                     "secs": []}
+        with open(path, "w") as f:
+            f.write(f"# round {self.rounds} at {rec['t']} (py-spy={self.py_spy}, match={self.match!r})\n")
+            for pid, cmd in self.targets():
+                f.write(f"\n===== pid {pid}: {cmd}\n")
+                f.flush()
+                t0 = time.monotonic()
+                if self.py_spy is None:
+                    rc: int | str = "no py-spy"
+                    f.write("py-spy not found\n")
+                else:
+                    try:
+                        res = subprocess.run(self.command(pid), capture_output=True, text=True,
+                                             timeout=self.timeout_s)
+                        rc = res.returncode
+                        f.write(res.stdout + res.stderr)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        rc = type(exc).__name__
+                        f.write(f"py-spy failed: {exc}\n")
+                rec["pids"].append(pid)
+                rec["rc"].append(rc)
+                rec["secs"].append(round(time.monotonic() - t0, 3))
+        with open(os.path.join(self.out_dir, f"stack-samples-rank{self.rank}.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return rec
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self.sample()
+            except Exception as exc:  # noqa: BLE001 - sampling must never take the island down
+                print(f"[yeto-stack-sample] rank {self.rank}: round failed: {exc!r}", flush=True)
+
+    def start(self) -> None:
+        print(f"[yeto-stack-sample] rank {self.rank}: every {self.interval_s:g} s, match {self.match!r}, "
+              f"keep {self.keep} (py-spy={self.py_spy})", flush=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="yeto-stack-sample")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+# S27 RAY-SEGV: a gVisor process that touches more than about 2**22 non-adjacent
+# pages gets SIGSEGV (host mapping limit; G-CM/G-CQ: 4,063,232-4,194,304 pages on
+# Modal CPU, T4 and 1xH200 containers, all "4.19.0-gvisor").  Multi-container
+# islands report "5.15.0-gvisor" and could not be probed without a 16-GPU run.
+# This child touches every other page of a PROT_NONE reservation (each touched
+# page is its own mapping) and prints progress, so its last line brackets the
+# limit; it uses ~4 KiB of memory per page and only kills itself.
+HOST_MAP_PROBE_SCRIPT = r"""
+import ctypes, faulthandler, mmap, sys, time
+faulthandler.enable()
+n, report = int(sys.argv[1]), int(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+page = 4096
+base = libc.mmap(None, 2 * n * page, 0, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, -1, 0)
+if base in (None, ctypes.c_void_p(-1).value):
+    print("MAPPROBE mmap_failed errno=%d" % ctypes.get_errno(), flush=True)
+    sys.exit(2)
+print("MAPPROBE start pages=%d" % n, flush=True)
+t0 = time.time()
+for i in range(n):
+    addr = base + 2 * i * page
+    if libc.mprotect(addr, page, mmap.PROT_READ | mmap.PROT_WRITE) != 0:
+        print("MAPPROBE mprotect_failed touched=%d errno=%d" % (i, ctypes.get_errno()), flush=True)
+        sys.exit(3)
+    ctypes.memset(addr, 1, 1)
+    if (i + 1) % report == 0:
+        print("MAPPROBE touched=%d secs=%.1f" % (i + 1, time.time() - t0), flush=True)
+print("MAPPROBE ok touched=%d secs=%.1f" % (n, time.time() - t0), flush=True)
+"""
+
+
+def start_host_map_probe(env: dict, rank: int, out_dir: str, *, python: str | None = None):
+    """Opt-in via env YETO_HOST_MAP_PROBE_PAGES=<pages> (unset or 0 = off): on
+    rank 0 only, run HOST_MAP_PROBE_SCRIPT in the background and log to
+    ``host-map-probe-rank0.log`` in the tape dir (last line: the exit code).
+    Returns the watcher thread, or None when off."""
+    raw = str((env or {}).get("YETO_HOST_MAP_PROBE_PAGES", "")).strip()
+    pages = int(raw) if raw else 0
+    if pages <= 0 or rank != 0:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"host-map-probe-rank{rank}.log")
+    report = max(1, min(131072, pages // 8))
+    log = open(path, "w")
+    proc = subprocess.Popen([python or sys.executable, "-c", HOST_MAP_PROBE_SCRIPT, str(pages), str(report)],
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def wait() -> None:
+        rc = proc.wait()
+        log.write(f"MAPPROBE exit rc={rc}\n")
+        log.close()
+        print(f"[yeto-host-map-probe] rank {rank}: exit rc={rc} ({path})", flush=True)
+
+    print(f"[yeto-host-map-probe] rank {rank}: {pages} pages, pid {proc.pid} -> {path}", flush=True)
+    thread = threading.Thread(target=wait, daemon=True, name="yeto-host-map-probe")
+    thread.start()
+    return thread
+
+
+def _which(cmd: str) -> str | None:
+    import shutil
+
+    return cmd if os.path.isabs(cmd) and os.access(cmd, os.X_OK) else shutil.which(cmd)
+
+
 def island_main(cfg_json: str) -> int:
     """Body of the Modal function: runs in the container. Returns the run
     script's exit code (nonzero raises so Modal records the failure)."""
@@ -736,17 +1129,32 @@ def island_main(cfg_json: str) -> int:
         os.makedirs(TAPE_SOURCE_DIR, exist_ok=True)
         tape = TapeSync(
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
-            _volume_commit(cfg.tape_volume_name),
+            _volume_commit(cfg.tape_volume_name), mirror_globs=TAPE_MIRROR_GLOBS,
         )
+        # 0 for the island's first container, k for its k-th re-run (test-only
+        # fault injection exits only in the first one).
+        env["YETO_MODAL_INCARNATION"] = str(tape.claim_incarnation())
     hostmem = None
     interval = hostmem_interval_s(cfg)
     if interval is not None:
         hostmem = HostMemSampler(interval, f"{TAPE_SOURCE_DIR}/modal-hostmem-rank{rank}.jsonl",
                                  node_rank=rank)
         hostmem.start()
+    stacks = HangStackDumper.from_env(env, TAPE_SOURCE_DIR, rank)
+    if stacks is not None:
+        stacks.start()
+    sampler = PeriodicStackSampler.from_env(env, TAPE_SOURCE_DIR, rank)
+    if sampler is not None:
+        sampler.start()
+    start_host_map_probe(env, rank, TAPE_SOURCE_DIR)
     try:
-        return _island_body(cfg, rank, ips, all_ips, env, tape)
+        with harbor_relay_tunnel(cfg, rank, env):
+            return _island_body(cfg, rank, ips, all_ips, env, tape)
     finally:
+        if sampler is not None:
+            sampler.stop()
+        if stacks is not None:
+            stacks.stop()
         if hostmem is not None:
             hostmem.stop()
         if tape is not None:
@@ -756,12 +1164,77 @@ def island_main(cfg_json: str) -> int:
                   flush=True)
 
 
+@contextlib.contextmanager
+def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=None):
+    """Rank 0 of a Harbor agent island: forward the gate relay port through a
+    Modal tunnel for the island's lifetime and give the relay its public base
+    and a fresh path secret (``harbor_agent.relay_settings``). The secret is
+    made here, in the container, and only its file path is in ``env``. Other
+    ranks and other islands: no tunnel, ``env`` unchanged."""
+    if cfg.harbor_relay_port is None or rank != 0:
+        yield
+        return
+    from yeto.rl.harness.gateway.relay_env import (
+        RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_SECRET_FILE_ENV)
+
+    # S27 G-FS: the verl islands tunnel the records proxy instead of the gate
+    # relay; the config names which environment the tunnel writes back.
+    port_env = cfg.harbor_port_env or RELAY_PORT_ENV
+    base_env = cfg.harbor_base_env or RELAY_PUBLIC_BASE_ENV
+    secret_env = cfg.harbor_secret_env or RELAY_SECRET_FILE_ENV
+    if forward is None:
+        import modal
+
+        forward = modal.forward
+    with forward(int(cfg.harbor_relay_port)) as tunnel:
+        fd = os.open(HARBOR_RELAY_SECRET_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(secrets.token_urlsafe(24))
+        env[port_env] = str(int(cfg.harbor_relay_port))
+        env[base_env] = tunnel.url
+        env[secret_env] = HARBOR_RELAY_SECRET_PATH
+        print(f"[modal-island {cfg.learner_id}] harbor relay port {cfg.harbor_relay_port} "
+              f"tunnelled at {tunnel.url}", flush=True)
+        yield
+
+
+EPHEMERAL_PORT_RANGE = "/proc/sys/net/ipv4/ip_local_port_range"
+# Linux's default ephemeral range. A Modal (gVisor) container starts with 16000-65535,
+# which covers the ports Miles hands to engines, routers and the trainer master
+# (20000+) after probing them free: a connection opened in between (NCCL, torch
+# c10d, a health check) can take one, and the engine's later bind fails with
+# "[Errno 98] address already in use" (S27 G-AT s27-at-a: 3 of 3 sampler island
+# starts; CPU probe: about 1.5% of outgoing connections got a port in 20000-20999).
+LINUX_EPHEMERAL_PORTS = (32768, 60999)
+
+
+def narrow_ephemeral_ports(path: str = EPHEMERAL_PORT_RANGE,
+                           target: tuple[int, int] = LINUX_EPHEMERAL_PORTS) -> str:
+    """Move the container's ephemeral port range to ``target`` when it starts below
+    it (the container is the island's own; Ray's worker ports 10002-19999 and
+    Miles' ports stay outside). Returns a line for the island log; a range that
+    cannot be read or written is reported, not fatal."""
+    try:
+        before = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports: unreadable ({exc})"
+    if before[0] >= target[0]:
+        return f"ephemeral ports {before[0]}-{before[1]}: kept"
+    try:
+        with open(path, "w") as handle:
+            handle.write(f"{target[0]} {target[1]}")
+        after = tuple(int(v) for v in open(path).read().split()[:2])
+    except (OSError, ValueError) as exc:
+        return f"ephemeral ports {before[0]}-{before[1]}: not narrowed ({exc})"
+    return f"ephemeral ports {before[0]}-{before[1]} -> {after[0]}-{after[1]}"
+
+
 def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dict,
                  env: dict, tape: "TapeSync | None") -> int:
     try:
         names = visible_gpu_names()
     except (OSError, subprocess.SubprocessError) as exc:
-        if cfg.gpu_exact:
+        if cfg.gpu_exact or cfg.gpu_name:
             raise RuntimeError(f"island {cfg.learner_id}: cannot read GPU names: {exc}") from exc
         names = []
     print(f"[modal-island {cfg.learner_id}] requested {cfg.gpu_request}, got {names}", flush=True)
@@ -774,6 +1247,9 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         tape.start()
     if cfg.gpu_exact:
         check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
+    if cfg.gpu_name:
+        check_gpu_model(cfg.gpu_name, names, cfg.gpus_per_node)
+    print(f"[modal-island {cfg.learner_id}] {narrow_ephemeral_ports()}", flush=True)
     if cfg.setup_script:
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:
@@ -803,7 +1279,9 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
 
     sig = signal_mod or _signal
     if not _is_droppable(env):
-        if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR"):
+        # in-flight save (4.1) and sampler islands (S25 C1, the launcher sets the marker
+        # path) both turn the reclaim signal into the marker file
+        if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR") or env.get("YETO_SPOT_RECLAIM_MARKER"):
             return _run_forwarding_to_learner(cmd, env, popen=popen, sig=sig)
         return subprocess.call(cmd, env=env) if popen is subprocess.Popen else popen(cmd, env=env).wait()
     killpg = killpg or os.killpg
@@ -827,22 +1305,124 @@ def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=t
     marker file the learner's watcher thread picks up. Nothing is signalled: the
     learner and the Ray processes keep running until the platform kills the
     container, so the rollout executor can answer the in-flight export."""
-    proc = popen(cmd, env=env)
     path = env.get("YETO_SPOT_RECLAIM_MARKER") or "/tmp/yeto-reclaim-requested"
+    rank, node_ips = _node_rank_and_ips(env)
+    relay = None
+    if rank == 0 and len(node_ips) > 1:
+        # S26 E9.1: the driver runs on rank 0; a reclaim of a rank>0 container reaches
+        # it only through this relay (the peer runner sends its signal over the cluster net)
+        relay = ReclaimRelay(lambda num, peer: _write_reclaim_marker(path, num, clock, from_rank=peer),
+                             port=reclaim_relay_port(env)).start()
+    proc = popen(cmd, env=env)
 
     def forward(num, _frame):
-        try:
-            tmp = f"{path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"signal": int(num), "time": clock()}) + "\n")
-            os.replace(tmp, path)
-            print(f"[modal-island] signal {num}: reclaim marker {path} written for the learner", flush=True)
-        except OSError as exc:
-            print(f"[modal-island] signal {num}: reclaim marker not written ({exc})", flush=True)
+        _write_reclaim_marker(path, num, clock, from_rank=rank)
+        if rank > 0 and node_ips:
+            send_reclaim_to_rank0(node_ips[0], reclaim_relay_port(env), num, rank)
 
     for name in ("SIGINT", "SIGTERM"):
         sig.signal(getattr(sig, name), forward)
-    return proc.wait()
+    try:
+        return proc.wait()
+    finally:
+        if relay is not None:
+            relay.stop()
+
+
+RECLAIM_RELAY_PORT_ENV = "YETO_RECLAIM_RELAY_PORT"
+RECLAIM_RELAY_PORT_DEFAULT = 29417
+
+
+def reclaim_relay_port(env: dict) -> int:
+    return int(env.get(RECLAIM_RELAY_PORT_ENV) or RECLAIM_RELAY_PORT_DEFAULT)
+
+
+def _node_rank_and_ips(env: dict) -> tuple[int, list[str]]:
+    """This container's rank and the cluster's node ips (from :func:`skypilot_env`)."""
+    ips = [ip for ip in (env.get("SKYPILOT_NODE_IPS") or "").splitlines() if ip.strip()]
+    return int(env.get("SKYPILOT_NODE_RANK") or 0), ips
+
+
+def _write_reclaim_marker(path: str, num: int, clock, *, from_rank: int) -> None:
+    """Write the reclaim marker the learner's watcher polls; report, never raise
+    (it runs in a signal handler or the relay thread)."""
+    try:
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            record = {"signal": int(num), "time": clock()}
+            if from_rank:  # relayed from a rank>0 container (the driver names it)
+                record["rank"] = int(from_rank)
+            fh.write(json.dumps(record) + "\n")
+        os.replace(tmp, path)
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker {path} written for the learner",
+              flush=True)
+    except OSError as exc:
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker not written ({exc})", flush=True)
+
+
+def send_reclaim_to_rank0(host: str, port: int, num: int, rank: int, *, timeout_s: float = 2.0,
+                          attempts: int = 3) -> bool:
+    """A rank>0 runner tells rank 0's relay that this container is being reclaimed.
+    Short timeouts: it runs inside Modal's grace window. Returns True once acked."""
+    msg = (json.dumps({"signal": int(num), "rank": int(rank)}) + "\n").encode()
+    for attempt in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s) as conn:
+                conn.sendall(msg)
+                conn.settimeout(timeout_s)
+                if conn.recv(16).startswith(b"ok"):
+                    print(f"[modal-island] signal {num}: relayed to rank 0 at {host}:{port}", flush=True)
+                    return True
+        except OSError as exc:
+            print(f"[modal-island] signal {num}: relay to rank 0 failed (attempt {attempt + 1}: {exc})",
+                  flush=True)
+            time.sleep(0.2)
+    return False
+
+
+class ReclaimRelay:
+    """On rank 0 of a multi-node island: accept reclaim messages from peer runners
+    and hand each to ``on_reclaim(signal, rank)`` (which writes the local marker)."""
+
+    def __init__(self, on_reclaim, *, port: int, host: str = "0.0.0.0") -> None:
+        self.on_reclaim, self.host, self.port = on_reclaim, host, port
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self) -> "ReclaimRelay":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(8)
+        sock.settimeout(0.5)
+        self._sock, self.port = sock, sock.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, name="reclaim-relay", daemon=True)
+        self._thread.start()
+        print(f"[modal-island] reclaim relay listening on port {self.port}", flush=True)
+        return self
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            with conn:
+                try:
+                    conn.settimeout(2.0)
+                    doc = json.loads(conn.makefile("r", encoding="utf-8").readline())
+                    self.on_reclaim(int(doc["signal"]), int(doc["rank"]))
+                    conn.sendall(b"ok\n")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    print(f"[modal-island] reclaim relay: bad message ({exc})", flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            self._sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 class ModalOps:
@@ -867,7 +1447,13 @@ class ModalOps:
         if built:
             from yeto.rl.engine import backends
 
-            image = backends.module("image", built["backend"]).modal_image(modal, built["commit"])
+            variant = {"variant": built["variant"]} if built["variant"] else {}
+            image_module = backends.module("image", built["backend"])
+            image = image_module.modal_image(modal, built["commit"], **variant)
+            if cfg.harbor_layer:  # S27 G-FS: the same layer as on the Miles image
+                from yeto.rl.harness.harbor.image_layer import modal_harbor_layer
+
+                image = modal_harbor_layer(image, built["backend"], image_module.HARBOR_LAYER_PYTHON)
         elif cfg.training_mode == "rl":
             creds = cfg.registry_creds or (
                 registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
@@ -884,6 +1470,10 @@ class ModalOps:
                 )
             else:
                 image = modal.Image.from_registry(cfg.image_ref)
+            if cfg.harbor_layer:
+                from yeto.rl.harness.harbor.image_layer import modal_harbor_layer
+
+                image = modal_harbor_layer(image, "miles", HARBOR_LAYER_PYTHON)
         else:
             image = modal.Image.debian_slim(python_version=cfg.python_version)
             if cfg.pip_requirements:
@@ -891,15 +1481,13 @@ class ModalOps:
         image = image.env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
         # add_local_* with copy=False must be the last steps: Modal rejects
         # any build step after one (the files are mounted at start-up).
-        image = image.add_local_dir(
-            cfg.workdir,
-            CONTAINER_WORKDIR,
-            copy=False,
-            ignore=MODAL_WORKDIR_IGNORE,
-        )
-        if cfg.codex_dir and cfg.codex_mount:
-            # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
-            image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)
+        if cfg.workdir is not None:
+            image = image.add_local_dir(
+                cfg.workdir,
+                CONTAINER_WORKDIR,
+                copy=False,
+                ignore=MODAL_WORKDIR_IGNORE,
+            )
         for target, source in sorted(cfg.extra_mounts.items()):
             source = os.path.expanduser(source)
             if os.path.isdir(source):
@@ -935,6 +1523,8 @@ class ModalOps:
         )
         if cfg.region:
             kwargs["region"] = cfg.region
+        if cfg.ephemeral_disk_gib is not None:
+            kwargs["ephemeral_disk"] = cfg.ephemeral_disk_gib * 1024  # MiB
         volumes = {}
         if cfg.volume_name and cfg.volume_mount:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
@@ -1018,15 +1608,19 @@ class ModalOps:
         return None
 
     def list_container_ids(self) -> set[str] | None:
-        """Running container ids of this run's app (``modal container list --json``);
-        None when the list cannot be read."""
+        """Started container ids of this run's app (``modal container list --json``);
+        None when the list cannot be read.
+
+        A row whose start time is "Pending" (a task queued for a GPU, no code runs and
+        nothing is billed yet) is left out; a row without a start-time field counts."""
         proc = subprocess.run([sys.executable, "-m", "modal", "container", "list", "--json"],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             return None
         rows = json.loads(proc.stdout or "[]")
         return {str(r.get("Container ID") or r.get("container_id")) for r in rows
-                if (r.get("App Name") or r.get("app_name")) == self.app_name}
+                if (r.get("App Name") or r.get("app_name")) == self.app_name
+                and not _pending_start(r)}
 
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
@@ -1069,6 +1663,29 @@ class ModalOps:
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
 
+    def stream_container_logs(self, container_id: str):
+        """The log lines of one container (``modal container logs``; follows while it
+        runs). The function-call stream of :meth:`stream_logs` does not deliver the
+        lines of a container that Modal started after a reschedule (S25 C1)."""
+        proc = subprocess.Popen([sys.executable, "-m", "modal", "container", "logs", str(container_id)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            assert proc.stdout is not None
+            yield from proc.stdout
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+
+
+def _pending_start(row: dict) -> bool:
+    """True when a ``modal container list --json`` row has a start-time field that is
+    empty or "Pending" (the task was not started)."""
+    for key in ("Start Time", "start_time"):
+        if key in row:
+            value = row[key]
+            return value is None or str(value).strip().lower() in ("", "pending")
+    return False
+
 
 CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
 
@@ -1105,6 +1722,15 @@ class ContainerIdGuard:
                     self.on_change(msg)
 
 
+# S27 s27-ch-d0a: two extra containers of the island function appeared beside the two
+# claimed ones, which kept training; they printed no island line. How long such extra
+# containers may stay listed while every claimed container is still listed.
+# (S27 G-EO, EXTRA-CONTAINER.md: in 10 runs of 10-21..10-25 each extra container was a
+# container of a running island's own function that got no input -- its Modal log has
+# no function call id, only the image banner -- while the island's input kept running.)
+EXTRA_CONTAINER_GRACE_S = 600.0
+
+
 class ContainerSetPoller:
     """Second container guard, independent of the log stream (S19 run
     s19-agentic5-b-20261010b: after ``modal container stop`` Modal rescheduled the
@@ -1112,23 +1738,59 @@ class ContainerSetPoller:
     and the function-call log stream never delivered the new container's lines, so
     :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
 
-    Every ``interval_s`` it lists the app's running containers. Once ``expected``
-    distinct ids were seen (all islands up), that set is the baseline; any later id
-    outside it trips the guard and calls ``on_change(message)`` once. A failed list
-    is skipped (never trips)."""
+    ``modal container list`` does not say which function (island) a container runs.
+    The island itself says so: its first log line ``[modal-island N] rank R container
+    ta-...`` (``attributed()`` returns those first ids, container id -> (island, rank)).
 
-    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0) -> None:
+    Every ``interval_s`` it lists the app's started containers. ``expected`` is the
+    number of (island, rank) slots. A slot is taken once a container printed its line
+    for it. A listed container that no island claimed yet may be the late first
+    container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
+    that is not a change. When the listed unclaimed containers outnumber the free
+    slots, at least one of them is an extra container:
+
+    * a claimed container is no longer listed: a replacement of a taken slot (the
+      S19 case, s27-gr-h). The guard trips (``on_change(message)`` once) at once;
+    * every claimed container is still listed (s27-ch-d0a: two extra containers
+      that never ran island code beside two training ones): a warning names the
+      extra containers, and the guard trips only when extra containers stay
+      listed for more than ``grace_s``. A replacement that does run island code
+      prints a second container id for its slot, which trips
+      :class:`ContainerIdGuard` at once.
+
+    ``finished()`` returns the claimed container ids whose island already logged
+    ``rl_learner_finalized``. Such a container leaves the list at the island's normal
+    end; it is not "no longer listed" (s27-ek-b: island 1 finished, its container
+    left while an idle extra container of island 1's function was listed, and the
+    guard failed a completed run with exit 7).
+
+    An unclaimed container that left the list never ran island code (as far as the
+    logs show) and is not counted. A failed list is skipped (never trips)."""
+
+    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
+                 attributed=None, finished=None, grace_s: float = EXTRA_CONTAINER_GRACE_S,
+                 clock=time.monotonic) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
-        self.baseline: set[str] | None = None
+        self.attributed = attributed if attributed is not None else dict
+        self.finished = finished if finished is not None else set
+        self.grace_s = float(grace_s)
+        self.clock = clock
         self.seen: set[str] = set()
         self.changes: list[str] = []
+        self.extra_since: float | None = None  # clock() when the present extra containers appeared
+        self.warned: set[str] = set()  # extra container ids already named in a warning
         self.expected = False  # launcher.container_changed(): a change here is never expected
         self._stop = threading.Event()
 
     @property
     def tripped(self) -> bool:
         return bool(self.changes)
+
+    def _trip(self, msg: str) -> None:
+        self.changes.append(msg)
+        if self.on_change is not None:
+            self.on_change(msg)
 
     def poll_once(self) -> None:
         try:
@@ -1139,18 +1801,45 @@ class ContainerSetPoller:
         if ids is None:
             return
         ids = set(ids)
-        if self.baseline is None:
-            self.seen |= ids
-            if len(self.seen) >= self.expected_count:
-                self.baseline = set(self.seen)
+        self.seen |= ids
+        try:
+            claimed = dict(self.attributed() or {})
+        except Exception as exc:  # noqa: BLE001 - no attribution: every slot stays free
+            print(f"[launcher] container attribution failed: {exc}", flush=True)
+            claimed = {}
+        taken = set(claimed.values())
+        free = max(0, self.expected_count - len(taken))
+        unclaimed = sorted(ids - set(claimed))
+        if len(unclaimed) <= free or self.changes:
+            self.extra_since = None
             return
-        new = sorted(ids - self.baseline)
-        if new and not self.changes:
-            msg = (f"Modal app has a new container {', '.join(new)} besides "
-                   f"{', '.join(sorted(self.baseline))} (an island was rescheduled)")
-            self.changes.append(msg)
-            if self.on_change is not None:
-                self.on_change(msg)
+        owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
+                           for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
+        msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
+               f"claimed, with {free} of {self.expected_count} island slot(s) still free "
+               f"(claimed: {owners})")
+        try:
+            ended = set(self.finished() or ())
+        except Exception as exc:  # noqa: BLE001 - no end record: every claimed container counts
+            print(f"[launcher] finished-island check failed: {exc}", flush=True)
+            ended = set()
+        lost = sorted(cid for cid in claimed if cid not in ids and cid not in ended)
+        if lost:
+            self._trip(f"{msg}; claimed container(s) {', '.join(lost)} no longer listed "
+                       "(an island was rescheduled)")
+            return
+        now = self.clock()
+        if self.extra_since is None:
+            self.extra_since = now
+        if set(unclaimed) - self.warned:
+            self.warned |= set(unclaimed)
+            print(f"[launcher] WARNING: {msg}; every claimed container is still listed or its "
+                  f"island finished, so the run continues while the extra container(s) stay "
+                  f"at most {self.grace_s:.0f} s",
+                  flush=True)
+        if now - self.extra_since > self.grace_s:
+            self._trip(f"{msg}; extra container(s) listed for {now - self.extra_since:.0f} s "
+                       f"(limit {self.grace_s:.0f} s; an island was rescheduled)")
 
     def run(self) -> None:
         while not self._stop.wait(self.interval_s):
@@ -1160,6 +1849,94 @@ class ContainerSetPoller:
 
     def start(self) -> "ContainerSetPoller":
         threading.Thread(target=self.run, daemon=True, name="modal-container-set").start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class ContainerLogFollower:
+    """Follows the logs of the Modal containers the call log streams miss (S26 E9.3).
+
+    After ``modal container stop`` (or a real reclaim) Modal runs the island's
+    input again in a new container, and the function-call log stream never
+    delivers that container's lines (S19, S25 C1), so the launcher showed only
+    the first container. Every ``interval_s`` this lists the app's running
+    containers; the first ``expected`` ids are the baseline (the call streams
+    show them); for every later id it prints one launcher warning and streams
+    that container's own log (``stream_container(id)``) on a daemon thread.
+
+    Each line is printed with a ``[<label>]`` prefix. The label is
+    ``container <id>`` until the container prints its island line
+    (``[modal-island N] rank R container ID``); then ``route(N)`` may name the
+    island and give its event collector (``(label, collector)`` or None), and
+    later lines go to that collector as well."""
+
+    def __init__(self, list_ids, stream_container, expected: int, *, route=None,
+                 interval_s: float = 30.0, out=None) -> None:
+        self.list_ids, self.stream_container = list_ids, stream_container
+        self.expected_count = max(1, int(expected))
+        self.route = route or (lambda _learner: None)
+        self.interval_s = float(interval_s)
+        self.out = out
+        self.baseline: set[str] | None = None
+        self.seen: set[str] = set()
+        self.followed: list[str] = []
+        self.threads: list[threading.Thread] = []
+        self._stop = threading.Event()
+
+    def _print(self, text: str) -> None:
+        print(text, file=self.out if self.out is not None else sys.stdout, flush=True)
+
+    def poll_once(self) -> list[str]:
+        """List once; returns the container ids it started to follow."""
+        try:
+            ids = self.list_ids()
+        except Exception as exc:  # noqa: BLE001 - a failed list is skipped
+            self._print(f"[launcher] container list failed: {exc}")
+            return []
+        if ids is None:
+            return []
+        ids = set(ids)
+        if self.baseline is None:
+            self.seen |= ids
+            if len(self.seen) >= self.expected_count:
+                self.baseline = set(self.seen)
+            return []
+        new = sorted(ids - self.baseline - set(self.followed))
+        for cid in new:
+            self.followed.append(cid)
+            self._print(f"[launcher] WARNING: new Modal container {cid} (an island was rescheduled); "
+                        "following its log")
+            thread = threading.Thread(target=self.follow, args=(cid,), daemon=True,
+                                      name=f"modal-container-log-{cid}")
+            thread.start()
+            self.threads.append(thread)
+        return new
+
+    def follow(self, cid: str) -> None:
+        label, collector = f"container {cid}", None
+        try:
+            for line in self.stream_container(cid):
+                text = str(line).rstrip("\n")
+                m = CONTAINER_LINE_RE.search(text)
+                if m and m.group(3) == cid and collector is None:
+                    routed = self.route(int(m.group(1)))
+                    if routed is not None:
+                        label, collector = routed
+                for part in text.split("\n"):
+                    self._print(f"[{label}] {part.rstrip()}")
+                if collector is not None:
+                    collector.feed(text)
+        except Exception as exc:  # noqa: BLE001 - the run goes on without this log
+            self._print(f"[launcher] log of container {cid} ended: {exc}")
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self.poll_once()
+
+    def start(self) -> "ContainerLogFollower":
+        threading.Thread(target=self.run, daemon=True, name="modal-container-logs").start()
         return self
 
     def stop(self) -> None:
@@ -1202,17 +1979,37 @@ class ModalIslandOps:
 
     def relaunch(self, task: ModalIslandConfig, name: str):
         """Re-spawn with the SAME learner id (the config carries it);
-        returns the new call id, or None when Modal refused."""
+        returns the new call id, or None when Modal refused (the controller
+        retries). Raises ``RelaunchBlocked`` when the run's app no longer runs (a
+        teardown stopped it): no later attempt can succeed."""
         try:
             call_id = self.ops.spawn(task)
         except Exception as exc:  # noqa: BLE001 - controller retries next poll
             print(f"[modal] relaunch of {name} failed: {exc}", file=sys.stderr)
+            # Modal: "App '<name>' not found" once the app is stopped; ask the app list
+            stopped = self._app_stopped() if "not found" in str(exc).lower() else None
+            if stopped is not None:
+                from .launch.fleet import RelaunchBlocked
+
+                raise RelaunchBlocked(f"{stopped}; a relaunch cannot succeed") from exc
             return None
         self.calls[name] = call_id
         # The call id is the handle for `modal.FunctionCall.from_id(..).cancel()`
         # (kill/resume tests) and for reading one island's logs.
         print(f"[modal] {name}: function call {call_id}", flush=True)
         return call_id
+
+    def _app_stopped(self) -> str | None:
+        """Why the run's app cannot take a relaunch (stopped, or no longer listed);
+        None when it runs or its state cannot be read (then a retry may succeed)."""
+        try:
+            status = self.ops.app_status()
+        except Exception:  # noqa: BLE001 - unverified: not a reason to give up
+            return None
+        if status is None:
+            return f"Modal app {self.ops.app_name} is not listed"
+        state, _tasks = status
+        return f"Modal app {self.ops.app_name} is {state}" if state == "stopped" else None
 
     def down(self, name: str) -> None:
         call_id = self.calls.get(name)

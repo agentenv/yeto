@@ -3,7 +3,8 @@
 CPU protocol test, NOT GPU evidence. Every rank is simulated in one process
 with duck-typed Megatron DistOpt leaves (``gbuf_ranges``, main-param shards,
 Adam moments) and the REAL fork-M5 helpers (``dp_invariant_state`` at the
-Miles image pin, read from a local Miles checkout; skipped when absent).
+Miles image pin and at the stage-1 branch s25-distopt, read from a local Miles
+checkout; skipped when absent).
 save -> fresh rebuild -> restore -> re-export must be element-wise equal, and
 the full FP32 masters gathered for the republish (state_plugin.full_masters)
 must equal the pre-cut ones. A different DP/EP layout is refused.
@@ -11,6 +12,7 @@ must equal the pre-cut ones. A different DP/EP layout is refused.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import os
 import subprocess
@@ -23,26 +25,47 @@ import torch
 from yeto.rl.adapters.miles import cut_plugin as cp
 from yeto.rl.adapters.miles import state_plugin as sp
 
-MILES_CHECKOUT = os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3")
-MILES_PIN = "c35702e"
 DPS_PATH = "miles/backends/megatron_utils/lora/dp_invariant_state.py"
+# The fork-M5 helpers at the Miles image pin, and at the stage-1 fork branch that
+# carries the CPU-offload (HybridDeviceOptimizer) state (S25 N7.1d, not pushed).
+DPS_SOURCES = {
+    "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3"), "c35702e"),
+    "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"), "s25-distopt"),
+    # E1: + export_named_optimizer_state(device=None) on the image pin 44d41efd (not pushed)
+    "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"),
+                         "yeto/s26-e1-device-export"),
+    # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
+    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", "/home/michael/work/miles-s26-e6-fp8"), "ed5f64fd7"),
+}
 
 
-def _load_dps():
+def _load_dps(checkout, ref):
     try:
-        src = subprocess.run(["git", "-C", MILES_CHECKOUT, "show", f"{MILES_PIN}:{DPS_PATH}"],
+        src = subprocess.run(["git", "-C", checkout, "show", f"{ref}:{DPS_PATH}"],
                              capture_output=True, check=True, text=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    spec = importlib.util.spec_from_loader("_yeto_test_dps", loader=None)
+    spec = importlib.util.spec_from_loader(f"_yeto_test_dps_{ref.replace('-', '_')}", loader=None)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     exec(compile(src, DPS_PATH, "exec"), module.__dict__)  # noqa: S102 - pinned local source
     return module
 
 
-DPS = _load_dps()
-needs_dps = pytest.mark.skipif(DPS is None, reason="Miles checkout with the fork-M5 helpers not available")
+_LOADED = {label: _load_dps(*source) for label, source in DPS_SOURCES.items()}
+DPS = None  # set per test by the ``dps`` fixture
+
+
+@pytest.fixture(params=sorted(DPS_SOURCES))
+def dps(request, monkeypatch):
+    module = _LOADED[request.param]
+    if module is None:
+        pytest.skip(f"Miles checkout with the fork-M5 helpers at {DPS_SOURCES[request.param]} not available")
+    monkeypatch.setattr(sys.modules[__name__], "DPS", module)
+    return module
+
+
+needs_dps = pytest.mark.usefixtures("dps")
 
 
 class _Range:
@@ -256,6 +279,38 @@ def test_save_restore_reexport_is_elementwise_equal(tmp_path, layout):
 
 
 @needs_dps
+@pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
+def test_resume_manifest_samples_each_rank_own_ranges_and_survives_the_cut(tmp_path, layout):
+    # N7.6 under the sharded optimizer (N7.1d): every rank records the moments of the
+    # parameters it owns a range of, and the restored rank reproduces them exactly.
+    from yeto.rl.engine.resume_manifest import OptimizerResumeState, restore_problems, ResumeManifest
+
+    ranks = _world(layout)
+    _train(ranks)
+    files = _save(ranks, tmp_path)
+    saved = {f["path"]: OptimizerResumeState.from_dict(f["resume"]) for f in files}
+    for rank, f in zip(ranks, files, strict=True):
+        owned = set(_export(rank)["entries"])
+        assert saved[f["path"]].moments and set(saved[f["path"]].moments) <= owned
+    fresh = _world(layout)
+    restored = {}
+    for rank in fresh:
+        out = cp.restore_cut_shard(rank, directory=str(tmp_path), files=files, cut_id="c1")
+        assert "refused" not in out, out
+        restored[out["path"]] = OptimizerResumeState.from_dict(out["resume"])
+
+    def manifest(states):
+        return ResumeManifest(global_step=1, data_watermark=8, scheduler_increment=8, ranks=states)
+
+    assert restore_problems(manifest(saved), manifest(restored)) == []
+    # a rank that records another rank's moments (here: none of its own) is caught
+    first, last = sorted(saved)[0], sorted(saved)[-1]
+    swapped = {**restored, first: dataclasses.replace(restored[first], moments=restored[last].moments)}
+    assert saved[first].moments != saved[last].moments
+    assert any(first in p for p in restore_problems(manifest(saved), manifest(swapped)))
+
+
+@needs_dps
 def test_ep_layout_change_is_refused(tmp_path):
     ranks = _world("ep2")
     _train(ranks)
@@ -305,3 +360,268 @@ def test_local_states_cover_with_fillers():
     assert cp.range_problems(state, state) == []
     other = {"entries": {"a": {**state["entries"]["a"], "start": 5}}}
     assert len(cp.range_problems(state, other)) == 2
+
+
+# --------------------------------------------------------------------------
+# E1: background cuts copy their state device-to-device first
+# --------------------------------------------------------------------------
+
+
+@needs_dps
+@pytest.mark.parametrize("layout", ["pp2dp1", "pp2dp2", "ep2"])
+def test_device_export_is_the_fork_host_export_once_on_the_host(layout):
+    ranks = _world(layout)
+    _train(ranks)
+    for rank in ranks:
+        named = list(rank.model[0].named_parameters())
+        host = DPS.export_named_optimizer_state(rank.optimizer, named)
+        device = cp.to_host(cp._device_export(DPS)(rank.optimizer, named))
+        assert cp.state_digest(device) == cp.state_digest(host)
+        assert device["format"] == host["format"] and list(device["entries"]) == list(host["entries"])
+        for name, e in host["entries"].items():
+            got = device["entries"][name]
+            assert {k: v for k, v in got.items() if k not in ("tensors", "scalars")} == \
+                {k: v for k, v in e.items() if k not in ("tensors", "scalars")}
+            for part in ("tensors", "scalars"):
+                assert list(got[part]) == list(e[part])
+                for key, t in e[part].items():
+                    assert got[part][key].dtype == t.dtype and torch.equal(got[part][key], t), (name, key)
+
+
+def test_device_export_uses_the_fork_device_argument_when_it_has_one():
+    calls = []
+
+    def export(optimizer, named, *, device="cpu"):
+        calls.append(device)
+        return {"entries": {}}
+
+    cp._device_export(SimpleNamespace(export_named_optimizer_state=export))("opt", [])
+    assert calls == [None]
+
+
+@needs_dps
+@pytest.mark.parametrize("staged", [False, True], ids=["resident", "sleeps_after_cut"])
+@pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
+def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, staged, monkeypatch):
+    """Same shard (file bytes, digests, N7.6 resume state) from the device path as from the
+    inline host path, although the trainer trains on before the writer copies to the host."""
+    ranks = _world(layout)
+    _train(ranks)
+    inline = [cp.save_cut_shard(r, directory=str(tmp_path / "inline"), cut_id="c1") for r in ranks]
+    monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (True, "ok"))
+    if staged:  # a sleeping trainer's copies go through the staging buffer (CPU stand-ins too)
+        real_stage = cp._stage
+        monkeypatch.setattr(cp, "_sleeps_after_cut", lambda actor: True)
+        monkeypatch.setattr(cp, "_stage", lambda snap: real_stage(snap, include_cpu=True))
+    device = []
+    for r, rank in enumerate(ranks):  # one pending write per cut id per process: rank by rank
+        started = cp.save_cut_shard(rank, directory=str(tmp_path / "device"), cut_id="c1", background=True)
+        assert started["capture"] == {"mode": "device", "reason": "ok"}, started
+        for k, leaf in enumerate(_leaves(rank)):  # the next step changes the live state first
+            leaf.train(2000 + 10 * r + k)
+        rank.opt_param_scheduler.num_steps = 16
+        device.append(cp.finish_cut_shard(rank, cut_id="c1"))
+    assert [d.pop("writer") for d in device] == [{"mode": "process"}] * len(ranks)
+    assert cp._STAGING.free.is_set() and (cp._STAGING.buffer is not None or not staged)
+    assert device == inline
+    for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
+        assert (tmp_path / "device" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
+
+
+def test_background_capture_falls_back_to_the_host_and_says_why(tmp_path, monkeypatch):
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    inline = cp.save_cut_shard(rank, directory=str(tmp_path / "inline"), cut_id="c1")
+    monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (False, "low_device_memory(free=1,need=2)"))
+    started = cp.save_cut_shard(rank, directory=str(tmp_path / "low"), cut_id="c1", background=True)
+    assert started["capture"] == {"mode": "host", "reason": "low_device_memory(free=1,need=2)"}
+    assert _without_writer(cp.finish_cut_shard(rank, cut_id="c1")) == inline
+
+    real = cp._snapshot
+
+    def oom(actor, backend, named, *, on_device=False):
+        if on_device:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return real(actor, backend, named)
+
+    monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (True, "ok"))
+    monkeypatch.setattr(cp, "_snapshot", oom)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    started = cp.save_cut_shard(rank, directory=str(tmp_path / "oom"), cut_id="c1", background=True)
+    assert started["capture"] == {"mode": "host", "reason": "device_oom"}
+    assert _without_writer(cp.finish_cut_shard(rank, cut_id="c1")) == inline
+
+
+def _without_writer(summary):
+    assert summary.pop("writer")["mode"] == "process", summary
+    return summary
+
+
+def _one_rank_cut(tmp_path, name, *, background):
+    import random
+
+    import numpy as np
+
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    random.seed(5), np.random.seed(5), torch.manual_seed(5)  # the shard holds the global RNG state
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    if not background:
+        return cp.save_cut_shard(rank, directory=str(tmp_path / name), cut_id="c1")
+    cp.save_cut_shard(rank, directory=str(tmp_path / name), cut_id="c1", background=True)
+    return cp.finish_cut_shard(rank, cut_id="c1")
+
+
+def test_a_dead_writer_process_falls_back_to_the_thread_and_says_why(tmp_path, monkeypatch):
+    """The writer process dies before it writes (its start fails): this rank's thread
+    writes the same shard and the summary records the fallback."""
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    dead = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                               initializer=os._exit, initargs=(3,))
+    monkeypatch.setattr(cp, "_WRITER", [dead])
+    got = _one_rank_cut(tmp_path, "dead", background=True)
+    writer = got.pop("writer")
+    assert writer["mode"] == "thread" and "writer process failed" in writer["fallback"], writer
+    assert got == inline
+    assert cp._WRITER == []  # the broken pool is dropped; the next cut starts a new one
+    assert (tmp_path / "dead" / got["path"]).read_bytes() == (tmp_path / "inline" / got["path"]).read_bytes()
+
+
+def test_a_partial_file_of_a_dead_writer_is_removed_before_the_fallback(tmp_path, monkeypatch):
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    target = tmp_path / "partial"
+    target.mkdir()
+    (target / (inline["path"] + ".tmp")).write_bytes(b"half")
+    (target / inline["path"]).write_bytes(b"whole but unreported")
+
+    class Broken:
+        def submit(self, *a, **k):
+            raise RuntimeError("writer died")
+
+        def shutdown(self, **k):
+            pass
+
+    monkeypatch.setattr(cp, "_WRITER", [Broken()])
+    got = _one_rank_cut(tmp_path, "partial", background=True)
+    assert got.pop("writer") == {"mode": "thread", "fallback": "writer process failed: RuntimeError('writer died')"}
+    assert got == inline and not (target / (inline["path"] + ".tmp")).exists()
+
+
+def test_the_writer_process_can_be_turned_off(tmp_path, monkeypatch):
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    monkeypatch.setenv(cp.WRITER_PROCESS_ENV, "0")
+    got = _one_rank_cut(tmp_path, "thread", background=True)
+    assert got.pop("writer") == {"mode": "thread", "fallback": "disabled"}
+    assert got == inline
+
+
+def test_device_copy_plan_needs_cuda_and_can_be_turned_off(monkeypatch):
+    named = [("lora_a", torch.nn.Parameter(torch.zeros(2)))]
+    assert cp._device_copy_plan(None, named) == (False, "not_cuda")
+    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))  # staged, below
+    assert cp._device_copy_plan(sleeper, named) == (False, "not_cuda")
+    monkeypatch.setenv(cp.DEVICE_COPY_ENV, "0")
+    assert cp._device_copy_plan(None, named) == (False, "disabled")
+
+
+def test_pack_hands_the_state_over_in_one_buffer_and_unpacks_it_exactly():
+    shared = torch.arange(6.0)
+    state = {"a": torch.randn(3, 4), "b": [torch.ones(2, dtype=torch.bfloat16), torch.tensor(7)],
+             "view": torch.arange(10.0)[2:5], "twice": (shared, shared), "empty": torch.zeros(0), "n": 3}
+    skeleton, layout, flat = cp._pack(state)
+    assert len(layout) == 3  # a, b[0], b[1]; the view, the shared storage and the empty one are not packed
+    assert flat.is_shared() and skeleton["n"] == 3
+    back = cp._unpack(skeleton, layout, flat)
+    assert cp.state_digest(back) == cp.state_digest(state)
+    for key in ("a", "view", "empty"):
+        assert back[key].dtype == state[key].dtype and torch.equal(back[key], state[key])
+    assert back["b"][0].untyped_storage().data_ptr() != flat.untyped_storage().data_ptr()  # own copies
+
+
+class _ManyParams(torch.nn.Module):
+    """A full-parameter rank of many 1 MiB FP32 parameters (heap-sized tensors)."""
+
+    def __init__(self, count: int, numel: int) -> None:
+        super().__init__()
+        self.weights = torch.nn.ParameterList(torch.nn.Parameter(torch.full((numel,), 0.01)) for _ in range(count))
+
+    def forward(self, x):
+        return sum((w[: x.numel()] * x).sum() for w in self.weights)
+
+
+def test_host_background_write_gives_the_host_copy_back(tmp_path, capsys):
+    """S27 G-EY: once a host background write is finished, its host copy is no
+    longer resident (s27-elastic-c: the donor container stayed at 692 of its
+    736 GiB peak after the snapshot). Heap-sized tensors need ``malloc_trim``,
+    and ``torch.save`` before 2.13 holds the saved storages in a reference
+    cycle; ``_release_capture`` handles both before the summary is ready."""
+    import time
+    from types import SimpleNamespace
+
+    from tests.rl_cut_fakes import GBS, Scheduler, TorchCutBackend
+    from yeto.rl.engine import host_memory
+
+    if host_memory.anonymous_rss_mib() is None or host_memory._malloc_trim() is None:
+        pytest.skip("needs /proc and glibc malloc_trim")
+    # Freeing a 30 MiB mmapped chunk raises glibc's mmap threshold to 30 MiB, as a
+    # trainer's own large temporaries do: the 1 MiB tensors below come from the heap.
+    scratch = torch.empty(30 << 20, dtype=torch.uint8)
+    del scratch
+    module = _ManyParams(160, 1 << 18)
+    optimizer = torch.optim.Adam(module.parameters(), lr=1e-3)
+    rank = SimpleNamespace(args=SimpleNamespace(fp16=False, bf16=False, global_batch_size=GBS), model=[module],
+                           optimizer=optimizer, opt_param_scheduler=Scheduler(optimizer),
+                           _yeto_cut_backend=TorchCutBackend())
+    module(torch.ones(4)).backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    host_memory.release_host_memory()
+    before = host_memory.anonymous_rss_mib()
+    copy_mib = 4 * 160  # the parameters, the FP32 masters and two Adam moments, 1 MiB each
+    started = cp.save_cut_shard(rank, directory=str(tmp_path), cut_id="c1", background=cp.HOST_BACKGROUND)
+    assert started["pending"] == "c1"
+    assert host_memory.anonymous_rss_mib() - before > copy_mib * 3 // 4, "the host copy was taken"
+    deadline = time.monotonic() + 60
+    while not cp.poll_cut_shard(rank, cut_id="c1")["done"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    summary = cp.finish_cut_shard(rank, cut_id="c1")
+    assert "refused" not in summary, summary
+    after = host_memory.anonymous_rss_mib()
+    print(f"anonymous RSS {before} MiB before the capture, {after} MiB after the write")
+    assert after - before < copy_mib // 4
+    released = [line for line in capsys.readouterr().out.splitlines() if "host memory released c1" in line]
+    assert len(released) == 1 and '"malloc_trim": true' in released[0]
+
+
+def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
+    """S27 G-EL peer snapshots (``background="host"``): the state is copied to the
+    host at the step boundary and a thread of the rank writes it; the shard, its
+    summary and its bytes equal the inline save's. ``poll_cut_shard`` never waits."""
+    import time
+
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    assert cp.poll_cut_shard(rank, cut_id="c1") == {"done": True, "missing": True}
+    inline = cp.save_cut_shard(rank, directory=str(tmp_path / "inline"), cut_id="c1")
+    started = cp.save_cut_shard(rank, directory=str(tmp_path / "host"), cut_id="c1", background=cp.HOST_BACKGROUND)
+    assert started["pending"] == "c1"
+    assert started["capture"] == {"mode": "host", "reason": "host_background"}
+    deadline = time.monotonic() + 30
+    while not cp.poll_cut_shard(rank, cut_id="c1")["done"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    summary = cp.finish_cut_shard(rank, cut_id="c1")
+    assert summary.pop("writer") == {"mode": "host_thread"}
+    assert summary == inline
+    for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
+        assert (tmp_path / "host" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()

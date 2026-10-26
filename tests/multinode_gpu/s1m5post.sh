@@ -14,7 +14,7 @@ USE=$(awk '{print $2}' $R/gpus_per_node.txt 2>/dev/null); CVD=
 MODEL=${M5_MODEL:-Qwen/Qwen3-0.6B}; REV=${M5_REV:-c1899de289a04d12100db370d81485cdf75e47ca}
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a $R/m5post.log; }
 ship() { for n in $CL $W; do for f in s1m5nccl.py s1m5gen.py s1m5ranks.py; do b=$(base64 -w0 $D/$f); timeout 60 $S $n "mkdir -p ~/yeto-rl && echo $b | base64 -d > ~/yeto-rl/$f"; done; done; }
-# remote prelude: python with torch+sglang, the island NIC (same rule as yeto.launcher._DETECT_IFACE), NCCL over sockets
+# remote prelude: python with torch+sglang, the island NIC (same rule as yeto.launch.topology._DETECT_IFACE), NCCL over sockets
 PRE='PY=; for p in /opt/sglang/bin/python python3; do $p -c "import torch, sglang" 2>/dev/null && { PY=$p; break; }; done
 YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename "$d"); case "$n" in lo|docker*|veth*|br-*|virbr*) continue;; esac; [ "$(cat "$d/operstate" 2>/dev/null)" = up ] && { echo "$n"; break; }; done)}
 export NCCL_IB_DISABLE=1 NCCL_DEBUG=${NCCL_DEBUG:-INFO} NCCL_SOCKET_IFNAME=$YETO_IFACE GLOO_SOCKET_IFNAME=$YETO_IFACE; cd ~/yeto-rl'"$CVD"

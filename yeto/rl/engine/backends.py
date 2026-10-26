@@ -49,13 +49,16 @@ class BackendEntry:
     #   publish       publisher (test-only fault injection env names)
     #   algorithm_flags  AlgorithmSpec -> backend argv (critic warmup)
     #   selection_argv   facts read from pass-through backend argv (--rl-engine matrix)
-    #   harness_glue  codex OpenEnv generate: upstream generate, aborted status, session collect
     #   launch_flags  island-entry flag spellings of the neutral layout (launcher)
     #   run_config_rules  backend-only checks of resolve_rl_run_config (ref-load format, divisibility)
+    #   nemotron_h_recipe  check_provider / model_flags of a Nemotron-H (hybrid Mamba) provider
     #   binding       neutral name -> backend binding check (4.4a)
     #   identity      BackendIdentity of this adapter (phase 5)
     #   image         Modal-built engine image recipe (verl: ``verl-build:<commit>``)
     #   policy_age    SUPPORT: PolicyAgeSupport (agentic-rollout-utilization 2.1/6.3)
+    #   offpolicy_correction  correction_mapping(spec) + FORBIDDEN (rl-offpolicy-correction
+    #                 -passthrough; neutral side: yeto.rl.engine.offpolicy_correction)
+    #   overlay       source patch applied to the engine checkout (launcher setup, run manifest)
     roles: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -71,16 +74,19 @@ _REGISTRY: dict[str, BackendEntry] = {
         "publish": f"{_MILES}.publish",
         "algorithm_flags": f"{_MILES}.algorithm_flags",
         "selection_argv": f"{_MILES}.selection_argv",
-        "harness_glue": f"{_MILES}.harness_glue.codex_openenv",
         "launch_flags": f"{_MILES}.launch_flags",
+        "run_flags": f"{_MILES}.run_flags",
         "run_config_rules": f"{_MILES}.run_config_rules",
+        "nemotron_h_recipe": f"{_MILES}.models.nemotron_h",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",
         "policy_age": f"{_MILES}.policy_age",
+        "offpolicy_correction": f"{_MILES}.offpolicy_correction",
+        "overlay": f"{_MILES}.overlay",
     }),
-    # rl-verl-backend: first step FSDP2 + vLLM, one GPU per island (roles the
-    # neutral code needs; codex/elastic-pool roles are not provided yet and
-    # fail with "没有提供" when asked for).
+    # rl-verl-backend: FSDP2 + vLLM islands, and (S27 G-DC) the Megatron engine
+    # island (EP/TP/PP); codex/elastic-pool roles are not provided yet and
+    # fail with "没有提供" when asked for.
     "verl": BackendEntry("verl", _VERL, {
         "rollout_meta": f"{_VERL}.rollout_meta_hook",
         "entry": f"{_VERL}.entry",
@@ -91,6 +97,12 @@ _REGISTRY: dict[str, BackendEntry] = {
         "identity": f"{_VERL}.identity",
         "image": f"{_VERL}.image",
         "policy_age": f"{_VERL}.policy_age",
+        "offpolicy_correction": f"{_VERL}.offpolicy_correction",
+        # S27 G-DC (V10): the Megatron engine island's roles
+        "nemotron_h_recipe": f"{_VERL}.nemotron_h",
+        "placement": f"{_VERL}.placement",
+        "rollout": f"{_VERL}.rollout",
+        "publish": f"{_VERL}.publish_role",
     }),
 }
 

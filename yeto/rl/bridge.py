@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -14,8 +13,13 @@ from typing import Protocol
 
 import torch
 
-from .engine.backend_identity import island_contract_sha256
-from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
+from ..protocol import (
+    DTYPE_F32,
+    DTYPE_FLAG_BCAST_DELTA,
+    FinalManifest,
+    PullRequest,
+    SyncerClient,
+)
 from ..tensor_io import pack_tensor, unpack_fragment
 from .core import (
     CanonicalLoraState,
@@ -30,27 +34,22 @@ from .core import (
     policy_delta,
     tensors_from_flat_owned,
 )
+from .engine.backend_identity import config_island_contract_sha256
 
 
 class IslandRuntime(Protocol):
+    """What :class:`StrictRlBridge` calls on its island.
+
+    The island loop itself (rollout, training, round boundaries) belongs to
+    ``yeto.rl.engine.driver.IslandDriver``; ``engine.bridges.StrictAvgSync``
+    drives this bridge at each boundary (rl-code-quality-cleanup 2.3).
+    """
+
     def initialize(self) -> CanonicalLoraState: ...
 
     def apply_global_policy(self, state: CanonicalLoraState) -> None: ...
 
-    def run_local_round(
-        self,
-        *,
-        expected_policy_version: int,
-        groups: int,
-        samples_per_group: int,
-        optimizer_steps: int,
-    ) -> LocalRoundStats: ...
-
-    def export_local_policy(self) -> CanonicalLoraState: ...
-
     def record_local_round(self, stats: LocalRoundStats) -> None: ...
-
-    def shutdown(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -76,9 +75,20 @@ class BridgeConfig:
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
+    # rl-identity-tiering L9.7 (island contract v3): AlgorithmSpec.semantic_sha256()
+    # of the island and the run code pack digest, the third and fourth parts of
+    # that identity.  None = not declared.
+    algorithm_semantic_sha256: str | None = None
+    code_pack_digest: str | None = None
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
+    # S26 E3: receive BCAST as bf16 deltas against the shared f32 anchor
+    # (session flag; the syncer runs --bcast-delta-full-every). The client
+    # hands this bridge the reconstructed f32 anchor, so nothing else changes.
+    # An anchor mismatch drops the connection; with max_reconnects=0 the
+    # island exits and its restart re-reads the committed cut as f32.
+    bcast_delta: bool = False
 
 
 def _write_round_audit(
@@ -280,11 +290,10 @@ class StrictRlBridge:
             config.syncer_addr,
             config.learner_id,
             self.layout,
-            dtype=DTYPE_F32,
+            dtype=DTYPE_F32 | (DTYPE_FLAG_BCAST_DELTA if config.bcast_delta else 0),
             num_streams=config.wan_streams,
-            session_contract_hash=_session_contract(self.layout, island_contract_sha256(
-                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None),
-                test_salt=_identity_test_salt())),
+            session_contract_hash=_session_contract(
+                self.layout, config_island_contract_sha256(config)),
             compat_group=getattr(config, "compat_group", None),
             # A dead syncer connection makes this island exit. The launcher
             # restarts the same logical ID, which reapplies the committed cut
@@ -301,41 +310,6 @@ class StrictRlBridge:
         self.permits: dict[int, PullRequest] = {}
         self._pulls_seen: dict[int, int] = {}  # global step -> PULLs received
         self.pushed_step: int | None = None
-
-    def run(self) -> CanonicalLoraState:
-        try:
-            self.start()
-            while True:
-                self.client.check_health()
-                if self.client.finalizing.is_set():
-                    return self._finalize()
-                progressed = self._drain_messages()
-                permit = self._ready_permit()
-                if permit is not None:
-                    self._run_round(permit)
-                    progressed = True
-                if not progressed:
-                    time.sleep(0.05)
-        except StrictRlInvariantError as error:
-            self._append_event(
-                {
-                    "event": "rl_strict_failure",
-                    "metric": error.metric,
-                    "value": 1,
-                    "error": f"{type(error).__name__}: {error}",
-                }
-            )
-            print(
-                f"[yeto-rl-strict-failure] {error.metric}: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
-            raise
-        finally:
-            try:
-                self.runtime.shutdown()
-            finally:
-                self.client.close()
 
     def start(self) -> None:
         self.client.start()
@@ -521,30 +495,6 @@ class StrictRlBridge:
             self.permits.pop(target, None)
             return None
         return self.permits.pop(target, None)
-
-    def _run_round(self, permit: PullRequest) -> None:
-        base = self.current
-        if base is None or permit.global_step != base.policy_version + 1:
-            raise RuntimeError("RL attempted a local round without its exact base")
-        stats = self.runtime.run_local_round(
-            expected_policy_version=base.policy_version,
-            groups=self.config.groups_per_round,
-            samples_per_group=self.config.samples_per_group,
-            optimizer_steps=self.config.local_optimizer_steps,
-        )
-        if (
-            stats.island_id != self.config.learner_id
-            or stats.base_policy_version != base.policy_version
-            or stats.local_round_id != permit.global_step
-        ):
-            raise RuntimeError("Miles returned LocalRoundStats for a different round")
-
-        self.submit_local_state(
-            permit,
-            base,
-            self.runtime.export_local_policy(),
-            stats,
-        )
 
     def export_tensor_groups(
         self,
@@ -858,26 +808,6 @@ class StrictRlBridge:
 
 
 # ----------------------------------------------------------------------------- elastic
-def flatten_state(state: CanonicalLoraState, specs) -> list[float]:
-    """Flat f32 vector in canonical spec order (elastic wire format)."""
-    parts = [state.tensors[spec.name].detach().to(torch.float32).reshape(-1) for spec in specs]
-    return torch.cat(parts).tolist() if parts else []
-
-
-def unflatten_state(values, version: int, template: CanonicalLoraState, specs) -> CanonicalLoraState:
-    flat = torch.tensor(values, dtype=torch.float32)
-    tensors, off = {}, 0
-    for spec in specs:
-        tensors[spec.name] = flat[off:off + spec.numel].reshape(spec.shape).clone()
-        off += spec.numel
-    if off != flat.numel():
-        raise StrictRlInvariantError("layout_hash_mismatch",
-                                     f"elastic base has {flat.numel()} values, layout needs {off}")
-    return canonical_state(version, tensors, base_model_revision=template.base_model_revision,
-                           lora_config_hash=template.lora_config_hash,
-                           layout_hash=template.layout_hash, expected_specs=specs)
-
-
 def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     """HELLO session contract (decoupling 6.2): layout fingerprint bound to the backend identity."""
     if identity_sha256 is None:
@@ -886,10 +816,3 @@ def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     return session_contract_hash(layout_fingerprint(layout), identity_sha256)
-
-
-def _identity_test_salt():
-    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
-    from yeto.island_overrides import identity_test_salt
-
-    return identity_test_salt()

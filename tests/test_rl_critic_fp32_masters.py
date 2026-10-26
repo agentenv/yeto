@@ -19,6 +19,7 @@ import torch
 from yeto.rl import critic_state as cs
 from yeto.rl.engine.algorithm import AlgorithmSpecError, check_unverified_allowance
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
+from yeto.rl import megatron_masters
 from yeto.rl.adapters.miles import state_plugin as sp
 
 
@@ -184,7 +185,7 @@ def test_dp2_sharded_masters_gather_and_write_back(monkeypatch):
         barrier.wait()
         flat.copy_(total)
 
-    monkeypatch.setattr(sp, "_dp_all_reduce_sum", all_reduce)
+    monkeypatch.setattr(megatron_masters, "_dp_all_reduce_sum", all_reduce)
     monkeypatch.setattr(sp, "_rank", lambda: local.rank)
     out = {}
 
@@ -250,7 +251,7 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
 
     names = ["execution:critic", "features:gae_length_adaptive"]
     assert check_unverified_allowance(names, islands=2, outer_sync=True, sync_preset="strict-avg") == tuple(sorted(names))
-    for preset in ("decoupled", None, "dense-full"):
+    for preset in ("decoupled", None, "full-parameter"):
         with pytest.raises(AlgorithmSpecError, match="single-island"):
             check_unverified_allowance(names, islands=2, outer_sync=True, sync_preset=preset)
     # a non-critic unverified mechanism keeps D11, even with the critic under strict-avg
@@ -268,6 +269,24 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
     assert ppo.execution.needs_critic
     assert any("decoupled" in p for p in critic_run_problems(ppo, {"sync_preset": "decoupled"}))
     assert critic_run_problems(ppo, {"sync_preset": "strict-avg"}) == []
+
+
+def test_allowance_sao_streaming_full_has_a_critic_channel():
+    """sao-streaming-full requires the SAO critic, which has its own role
+    syncer (P0-D8); without the allowance no multi-island SAO run could start
+    (P0-1.11 GPU check, 2026-10-14)."""
+
+    names = [
+        "advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
+        "features:gae_decoupled", "features:gae_length_adaptive", "features:sao_dis",
+        "features:value_hl_gauss",
+    ]
+    assert check_unverified_allowance(
+        names, islands=2, outer_sync=True, sync_preset="sao-streaming-full"
+    ) == tuple(sorted(names))
+    with pytest.raises(AlgorithmSpecError, match="single-island"):
+        check_unverified_allowance(["execution:critic", "losses:cispo"], islands=2,
+                                   outer_sync=True, sync_preset="sao-streaming-full")
 
 
 def test_launcher_two_island_critic_strict_avg_passes_decoupled_refused(tmp_path, _fake_sky, _no_modal_listing):  # noqa: F811
@@ -343,7 +362,7 @@ def test_single_rank_dp_gathers_on_cpu_in_one_buffer(monkeypatch):
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: 1)
-    monkeypatch.setattr(sp, "_dp_all_reduce_sum", lambda leaf, flat: calls.append(flat))
+    monkeypatch.setattr(megatron_masters, "_dp_all_reduce_sum", lambda leaf, flat: calls.append(flat))
     monkeypatch.setattr(sp, "_rank", lambda: 0)
     params = sp._critic_parameters(actor)
     keys = sorted(params)

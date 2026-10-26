@@ -42,23 +42,11 @@ def test_learner_spec_file_v1_v2_absent(tmp_path):
     for spec in (v1, V2):
         args = rl_learner.parse_args(_learner_argv(
             ("--rl-algorithm-spec", _spec_file(tmp_path, json.loads(spec.canonical_json())))))
-        assert resolve_ports_algorithm(args, rl_engine="ports") == spec
+        assert resolve_ports_algorithm(args) == spec
     args = rl_learner.parse_args(_learner_argv())
     # absent: identical to R0 (from_legacy_args)
-    assert resolve_ports_algorithm(args, rl_engine="ports") == AlgorithmSpec.from_legacy_args(args)
-    assert resolve_ports_algorithm(args, rl_engine="ports").sha256() == AlgorithmSpec().sha256()
-
-
-@pytest.mark.parametrize("extra", [
-    ("--rl-algorithm-spec", "x.json"),
-    ("--rl-allow-unverified-mechanism", "clip_higher"),
-    ("--rl-expected-algorithm-sha256", "a" * 64),
-    ("--rl-placement", "fixed-partition"),
-])
-def test_legacy_with_ports_only_options_refused(extra, capsys):
-    with pytest.raises(SystemExit):
-        rl_learner.parse_args(_learner_argv(("--rl-engine", "legacy", *extra)))
-    assert "only appl" in capsys.readouterr().err
+    assert resolve_ports_algorithm(args) == AlgorithmSpec.from_legacy_args(args)
+    assert resolve_ports_algorithm(args).sha256() == AlgorithmSpec().sha256()
 
 
 def test_legacy_cli_disagreeing_with_spec_file(tmp_path):
@@ -67,7 +55,7 @@ def test_legacy_cli_disagreeing_with_spec_file(tmp_path):
                            dynamic_sampling_filter_path=BOUNDED_NONZERO_STD_FILTER,
                            dynamic_sampling_max_replacements=2)
     with pytest.raises(AlgorithmSpecError, match="disagrees with --rl-algorithm-spec"):
-        resolve_ports_algorithm(args, rl_engine="ports")
+        resolve_ports_algorithm(args)
 
 
 def test_learner_unverified_allowance_refused_with_outer_sync(capsys):
@@ -165,7 +153,7 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 def _no_modal_listing(monkeypatch):
     import yeto.launcher as launcher
 
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])  # nothing listed = stopped
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: [])  # nothing listed = stopped
 
 
 @pytest.fixture(autouse=True)
@@ -187,13 +175,10 @@ def _island_run(args):
     return make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:1").run
 
 
-def test_launcher_sends_expected_hash_only_on_ports(tmp_path):
+def test_launcher_sends_the_expected_hash(tmp_path):
     run = _island_run(_launcher_args("ports"))
     assert f"--rl-expected-algorithm-sha256 {AlgorithmSpec().sha256()}" in run
     assert "--rl-algorithm-spec" not in run
-    legacy = _island_run(_launcher_args("legacy"))
-    assert "--rl-expected-algorithm-sha256" not in legacy
-    assert "algorithm_spec.json" not in legacy
 
 
 def test_launcher_ships_spec_file_and_hash(tmp_path):
@@ -215,8 +200,6 @@ def test_launcher_refusals(tmp_path):
     rejected = _spec_file(tmp_path, {"advantage_estimator": "grpo", "kl_coef": 0.1})
     with pytest.raises(ValueError, match="placement='loss'"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", rejected)))
-    with pytest.raises(ValueError, match="only apply to --rl-engine ports"):
-        _prepare_rl_args(_launcher_args("legacy", ("--rl-algorithm-spec", rejected)))
     # F7: undeclared mechanisms and registered launch checks fail before any cloud work
     # no_rewards_normalization: not declared (rl-algo-supplement 4.7 evidence incomplete);
     # dual_clip was used here until it was declared on 64b591a4b (4.4)
@@ -242,7 +225,7 @@ def test_launcher_hash_equals_learner_hash_without_absorption(tmp_path):
 
     _prepare_rl_args(args)
     learner_args = rl_learner.parse_args(_learner_argv(("--rl-algorithm-spec", path)))
-    base = resolve_ports_algorithm(learner_args, rl_engine="ports")
+    base = resolve_ports_algorithm(learner_args)
     launch = mc.translate_run_config(make_config(), base)
     assert launch.algorithm_sha256 == args.rl_expected_algorithm_sha256
     _check(tmp_path, args.rl_expected_algorithm_sha256, launch=launch)
@@ -284,11 +267,6 @@ def test_export_records_algorithm_like_the_event(tmp_path):
     assert prov["algorithm_spec_sha256"] == event["rl/algorithm_spec_sha256"] == V2.sha256()
     assert prov["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert prov["contains_unverified_mechanisms"] is True
-    with pytest.raises(ValueError, match="only for rl_engine='ports'"):
-        export_rl_checkpoint(checkpoint, tmp_path / "legacy", model=str(model_path),
-                             model_revision=MODEL_REVISION, rank=2,
-                             lora_targets="all-linear", rl_engine="legacy",
-                             algorithm_spec=V2)
 
 
 def test_export_cli_reads_spec_file(tmp_path, monkeypatch):
@@ -309,11 +287,11 @@ def test_export_cli_reads_spec_file(tmp_path, monkeypatch):
 
 
 def test_selection_event_records_absorbed_flags_and_allowance():
-    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--use-rollout-logprobs"))
+    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--normalize-advantages"))
     event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
                             unverified_mechanisms=("features:clip_higher",))
     assert event["rl/algorithm_absorbed_flags"] == {"--eps-clip-high": "0.28",
-                                                    "--use-rollout-logprobs": True}
+                                                    "--normalize-advantages": True}
     assert event["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert event["rl/algorithm_spec_sha256"] == launch.algorithm.sha256()
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
@@ -375,7 +353,7 @@ def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
     assert args.rl_placement == "fixed-partition"
     with pytest.raises(SystemExit):  # without --rl-placement it is still refused
         rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
-    assert 'placement=getattr(args, "rl_placement", "colocated")' in inspect.getsource(
+    assert 'placement=getattr(iargs, "rl_placement", "colocated")' in inspect.getsource(
         launcher._prepare_rl_args)
 
 
@@ -394,7 +372,7 @@ def test_no_sync_entry_admits_allowance_and_refuses_sync_combinations(capsys):
                                                 "features:clip_higher")))
     assert args.rl_single_island_no_sync and args.syncer is None
     for extra in (("--syncer", "127.0.0.1:1"), ("--num-learners", "2"),
-                  ("--sync-preset", "decoupled"), ("--rl-engine", "legacy")):
+                  ("--sync-preset", "decoupled")):
         argv = _no_sync_argv(extra) if extra[0] != "--syncer" else \
             _learner_argv(("--rl-single-island-no-sync",))
         with pytest.raises(SystemExit):
@@ -441,8 +419,6 @@ def test_launcher_no_sync_island_and_refusals():
     with pytest.raises(ValueError, match="exactly one island"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-single-island-no-sync",),
                                         gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2"))
-    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
-        _prepare_rl_args(_launcher_args("legacy", ("--rl-single-island-no-sync",)))
     normal = _island_run(_launcher_args("ports"))
     assert "--syncer $SYNCER_ADDR" in normal and "no-sync" not in normal
 
@@ -518,8 +494,6 @@ def test_launcher_forwards_optimizer_steps():
                          (("--rl-optimizer-steps", "0"), "positive int")):
         with pytest.raises(ValueError, match=match):
             _prepare_rl_args(_launcher_args("ports", extra))
-    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
-        _prepare_rl_args(_launcher_args("legacy", ("--rl-optimizer-steps", "2")))
 
 
 # -- yeto launch --dry-run ----------------------------------------------------------
@@ -655,18 +629,15 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
 
 
 def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
-    from yeto.rl.adapters.miles.legacy import engine as miles
+    from yeto.rl.engine.events import append_tape_event
 
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
-    from yeto.rl.adapters.miles.legacy import engine as _miles
-
-    monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     assert rl_learner.install_event_echo() is True
     assert rl_learner.install_event_echo() is False  # idempotent
     tape = tmp_path / "tape.jsonl"
     ns = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0)
-    miles._append_rl_event(ns, {"event": "rl_engine_selected", "x": 1})
-    miles._append_rl_event(ns, {"event": "rl_round_trained", "masked_fraction": 0.5})
+    append_tape_event(ns, {"event": "rl_engine_selected", "x": 1})
+    append_tape_event(ns, {"event": "rl_round_trained", "masked_fraction": 0.5})
     echoed = [l[len("YETO_RL_EVENT "):] for l in capsys.readouterr().out.splitlines()
               if l.startswith("YETO_RL_EVENT ")]
     assert echoed == tape.read_text().splitlines()
@@ -677,24 +648,21 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
     import yeto.launcher as launcher
     import yeto.modal_runner as modal_runner
     from yeto import runs
-    from yeto.rl.adapters.miles.legacy import engine as miles
+    from yeto.rl.engine.events import append_tape_event
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     # the island side: produce the echoed log with the real echo
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
-    from yeto.rl.adapters.miles.legacy import engine as _miles
-
-    monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     rl_learner.install_event_echo()
     island_tape = tmp_path / "island.jsonl"
     ns = SimpleNamespace(yeto_rl_event_tape=str(island_tape), yeto_rl_learner_id=0)
     launch = _launch()
-    miles._append_rl_event(ns, selection_event(
+    append_tape_event(ns, selection_event(
         launch=launch, algorithm=launch.algorithm, miles_commit="x",
         unverified_mechanisms=("features:clip_higher",), outer_sync=False))
     for r in range(3):
-        miles._append_rl_event(ns, {"event": "rl_round_trained", "rollout_id": r})
-    miles._append_rl_event(ns, {"event": "rl_learner_finalized"})
+        append_tape_event(ns, {"event": "rl_round_trained", "rollout_id": r})
+    append_tape_event(ns, {"event": "rl_learner_finalized"})
     log = ["noise line"] + capsys.readouterr().out.splitlines()
     log = log + log[:3]  # a reconnecting stream replays lines
 
@@ -903,14 +871,14 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
     fake_sky = sys_modules_sky(monkeypatch)
     fake_sky.launch = lambda task, **kw: "rid-syncer"
     fake_sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
-    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
+    monkeypatch.setattr("yeto.launch.syncer.tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
     monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
     monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "make_syncer_task", lambda *a, **k: object())
     monkeypatch.setattr(launcher, "_tail", lambda *a, **k: None)
-    monkeypatch.setattr(launcher, "terminate_and_verify", lambda *a, **k: True)
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify", lambda *a, **k: True)
     monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
 
     class Controller:
@@ -920,6 +888,9 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
 
         def run(self):
             return {name: "JobStatus.SUCCEEDED" for name in self.learners}
+
+        def abort(self, error):  # the trainer scheduler's give-up hook
+            raise AssertionError(f"unexpected abort: {error!r}")
 
     monkeypatch.setattr(launcher, "FleetController", Controller)
     args = _launcher_args("ports", ("--controller", "local", "--rl-image",
@@ -949,12 +920,26 @@ def sys_modules_sky(monkeypatch):
     return sys.modules["sky"]
 
 
-def test_every_ports_island_gets_the_echo_flag_legacy_does_not():
+def test_every_island_gets_the_echo_flag():
     # every ports RL island echoes its tape: rl_learner_finalized is how the
     # launcher tells a shutdown-phase error from an island failure
     modal_run = _island_run(_launcher_args("ports", gpu="modal:1xa100"))
     assert "--rl-echo-events" in modal_run and "--syncer $SYNCER_ADDR" in modal_run
     assert "--rl-echo-events" in _island_run(_launcher_args("ports"))
-    assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
     args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
     assert args.rl_echo_events
+
+
+def test_algorithm_hash_ignores_placement_capabilities():
+    """rl-code-quality-cleanup 4.8 / rl-mixed-island-placement Q4: the launcher adds
+    the partitioned-serial capability only for fixed-partition, but the expected
+    AlgorithmSpec hash (part of the island contract) must not change with it."""
+    from yeto.launcher import _prepare_ports_algorithm
+
+    hashes = []
+    for placement in ("colocated", "fixed-partition"):
+        args = _launcher_args("ports", gpu="aws:2xa100@us-east-1")
+        args.rl_placement = placement
+        _prepare_ports_algorithm(args)
+        hashes.append(args.rl_expected_algorithm_sha256)
+    assert hashes[0] == hashes[1]

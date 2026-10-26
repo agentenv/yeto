@@ -103,6 +103,12 @@ class RolloutBatchHandle:
     # (rl-algo-seq-and-adv R2); None = not reported. Read by per-algorithm
     # gradient expectations (``gradient_expectation(batch, metrics)``).
     nonzero_advantages: int | None = None
+    # Groups a sample-buffer reader passed over this round as older than
+    # max_policy_age (consumed, never trained); None = not a buffer reader.
+    buffer_stale_groups: int | None = None
+    # S27 P4: the task-dispenser positions of those groups (row runs,
+    # ``data_split.row_runs``); None when no stale group had one.
+    buffer_stale_positions: list[list[int]] | None = None
     # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None
@@ -147,6 +153,10 @@ class RolloutBatchHandle:
     # (rollout_meta_hook.trajectory_reward_records: task_id/trajectory_id/reward/
     # success); None = not reported. The driver tapes them as ``rl_trajectory_reward``.
     trajectory_rewards: tuple[Mapping[str, Any], ...] | None = field(default=None, compare=False)
+    # S27 task assignment (observe only): every --data row the round trained,
+    # ``{"samples": n, "rows": data_split.row_runs(...)}``, not capped like the
+    # reward records; None = not reported. The driver tapes it as ``rl_round_data_rows``.
+    round_data_rows: Mapping[str, Any] | None = field(default=None, compare=False)
     # agentic-rollout-utilization 4.1 (limit > 0 only; None at limit 0): what the
     # round carried in from / back to the engine's buffer and discarded over the
     # limit (``carry_over.CARRY_FIELDS`` + carried_out_groups, cross_version_tokens,
@@ -158,6 +168,14 @@ class RolloutBatchHandle:
     # (:data:`OVER_SAMPLING_KEYS`: submit batch sizes, refill calls, filtered /
     # kept / surplus groups, groups in flight at the end). None = not reported.
     over_sampling: Mapping[str, int] | None = field(default=None, compare=False)
+    # rl-offpolicy-correction-passthrough L6.11: the engine backend that built
+    # this batch ("miles", "verl", ...), set by the adapter; it labels the
+    # driver's ``offpolicy_gate`` event. None = not reported ("unknown").
+    backend: str | None = field(default=None, compare=False)
+
+    # S27 G-EM relay mode: (merged version, policy-age limit) the driver checked the
+    # groups' external merged cuts against (``external_policy``); None off relay mode.
+    external_cut: tuple[int, int] | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
@@ -196,6 +214,11 @@ class RolloutPool(Protocol):
     #   -> Mapping[str, int]: move the data source to ``cursor`` (the ledger's
     #   restart point) and return the cursor it now reports; a pool whose
     #   batches carry ``data_cursor`` MUST implement it (driver fails closed).
+    # Optional (rollout ahead, ``rollout_ahead`` module):
+    #   def start_generate(self, rollout_id, *, expected_policy_version=None) -> Any
+    #     start the batch with the published policy and return while it generates;
+    #   def finish_generate(self, pending) -> RolloutBatchHandle: wait for it (the
+    #     engines are idle afterwards); def cancel_generate(self, pending) -> None.
     # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
 
 

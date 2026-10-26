@@ -82,11 +82,11 @@ def _stop(process):
     return process.communicate(timeout=10)[0]
 
 
-def test_legacy_syncer_without_key_refuses_to_start(syncer_binary, tmp_path):
+def test_syncer_without_key_refuses_to_start(syncer_binary, tmp_path):
     process = _syncer(syncer_binary, _port(), tmp_path)
     out = process.communicate(timeout=30)[0]
     assert process.returncode != 0
-    assert "legacy mode requires an island HMAC key" in out
+    assert "the syncer requires an island HMAC key" in out
 
 
 def test_legacy_hello_with_right_key_is_admitted_wrong_key_refused(syncer_binary, tmp_path):
@@ -147,12 +147,12 @@ def test_bad_pinned_contract_value_is_refused(syncer_binary, tmp_path):
 def _rl_args(**kw):
     import argparse
 
-    base = dict(training_mode="rl", rl_island_scheduling="legacy", rl_island_contract_sha256=None)
+    base = dict(training_mode="rl", rl_island_contract_sha256=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_launcher_generates_one_legacy_key_per_run(monkeypatch):
+def test_launcher_generates_one_key_per_run(monkeypatch):
     from yeto import launcher
 
     monkeypatch.delenv("YETO_ISLAND_HMAC_KEY", raising=False)
@@ -161,14 +161,6 @@ def test_launcher_generates_one_legacy_key_per_run(monkeypatch):
     key = first["YETO_ISLAND_HMAC_KEY"]
     assert len(key) == 64 and first == second
     assert launcher.island_hmac_secret(_rl_args(training_mode="sft")) == {}
-
-
-def test_launcher_elastic_still_needs_a_user_key(monkeypatch):
-    from yeto import launcher
-
-    monkeypatch.delenv("YETO_ISLAND_HMAC_KEY", raising=False)
-    with pytest.raises(ValueError, match="YETO_ISLAND_HMAC_KEY"):
-        launcher.island_hmac_secret(_rl_args(rl_island_scheduling="elastic"))
 
 
 def test_launcher_passes_the_pinned_contract_to_the_syncer():
@@ -180,11 +172,11 @@ def test_launcher_passes_the_pinned_contract_to_the_syncer():
 
 
 def test_cli_validates_the_pinned_contract():
-    from yeto import cli
+    from yeto.rl.engine.run_flags import sha256_hex_arg
 
-    assert cli._sha256_hex_arg(GOOD) == GOOD
+    assert sha256_hex_arg(GOOD) == GOOD
     with pytest.raises(Exception):
-        cli._sha256_hex_arg("ABC")
+        sha256_hex_arg("ABC")
 
 
 # --------------------------------------------------------------------------- D3 token boundary
@@ -197,37 +189,6 @@ def test_secret_envs_are_split_out_of_plain_envs():
          "YETO_SANDBOX_MODAL_TOKEN_SECRET": "s"})
     assert plain == {"LEARNER_ID": "0"}
     assert secrets == {"HF_TOKEN": "h", "WANDB_API_KEY": "w", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "s"}
-
-
-def test_main_modal_token_is_not_a_harness_passthrough():
-    from yeto import launcher
-
-    assert not set(launcher.HARNESS_PASSTHROUGH_ENV) & launcher.CLOUD_CREDENTIAL_ENV_NAMES
-    with pytest.raises(ValueError, match="YETO_SANDBOX_MODAL_TOKEN_ID"):
-        launcher.require_sandbox_modal_token({"MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"})
-    launcher.require_sandbox_modal_token(
-        {"YETO_SANDBOX_MODAL_TOKEN_ID": "a", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "b"})
-
-
-def test_sandbox_client_uses_only_the_sandbox_token(monkeypatch):
-    from yeto.rl.harness.codex import tb2_provider
-
-    assert tb2_provider.sandbox_modal_client({"MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"}) is None
-    seen = {}
-
-    class FakeClient:
-        @staticmethod
-        def from_credentials(token_id, token_secret):
-            seen["args"] = (token_id, token_secret)
-            return "client"
-
-    import sys
-    import types
-
-    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Client=FakeClient))
-    env = {"YETO_SANDBOX_MODAL_TOKEN_ID": "sid", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "ssec"}
-    assert tb2_provider.sandbox_modal_client(env) == "client"
-    assert seen["args"] == ("sid", "ssec")
 
 
 # --------------------------------------------------------------------------- D4 island start-up check

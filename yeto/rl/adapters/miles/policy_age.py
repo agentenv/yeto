@@ -19,7 +19,11 @@ N`` (agentenv fork: unfinished trajectories are suspended between two model
 turns at the cut-off and continued by the next rollout, at most N rollouts
 after the one that started them), else ``--partial-rollout`` (unfinished groups go back to Miles' data buffer and
 continue next round; :mod:`.carry_over` keeps those within the limit and drops
-older ones). Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
+older ones). With ``overlap`` (a partitioned island, P0-S) it emits
+``--fully-async --max-weight-staleness N`` instead: Miles keeps generating
+while the trainer trains and drops groups more than N versions old; the
+engines carry the plain policy version, so Miles' staleness filter works.
+Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
 tokens of an older version stay in the loss and are corrected by the TIS the
 algorithm spec must configure (``AlgorithmSpec`` refuses staleness > 0 without
 a correction), using their generation log-probabilities (design decision 3).
@@ -29,20 +33,30 @@ from __future__ import annotations
 
 from yeto.rl.engine.policy_age import STAGE_NAMES, PolicyAgeError, PolicyAgeSupport, validate_limit
 
-SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=1)
+# rl-offpolicy-correction-passthrough L6.9: the cap was 1 (the only limit
+# measured on GPU). Decoupled PPO needs A_hard >= 2. Miles itself has no upper
+# bound (--max-weight-staleness and --agentic-suspend-max-rounds take any int);
+# 4 bounds the rollout compute a dropped group can waste. Sub-agent decision,
+# 2026-10-14; limits above 1 are not yet run on GPU (L6.10).
+SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4)
+# --rl-rollout-ahead: whole batches the island generates ahead of its trainer
+# (MilesRolloutPool.start_generate; yeto.rl.engine.rollout_ahead).
+MAX_ROLLOUT_AHEAD = 1
 
 PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
 # Agent functions whose module defines the suspend()/resume() hooks Miles calls
 # under --agentic-suspend-between-turns (model-turn gate, survival limit).
-SUSPEND_CAPABLE_AGENTS = frozenset({
-    "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
-})
+# S26 E0.5 removed the self-written Codex harness; S26 E9.5 gave the Harbor
+# agent function the hooks (model calls held at its gate relay).
+SUSPEND_CAPABLE_AGENTS: frozenset[str] = frozenset({"yeto.rl.adapters.miles.harbor_agent.run"})
 
 
-def policy_age_argv(limit: int, *, agentic: bool = False) -> tuple[str, ...]:
+def policy_age_argv(limit: int, *, agentic: bool = False, overlap: bool = False) -> tuple[str, ...]:
     if validate_limit(limit) == 0:
         return ()
+    if overlap:
+        return ("--fully-async", "--max-weight-staleness", str(limit))
     if agentic:
         return ("--agentic-suspend-between-turns", "--agentic-suspend-max-rounds", str(limit))
     return PARTIAL_ROLLOUT_FLAGS

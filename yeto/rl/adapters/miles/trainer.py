@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import math
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ from yeto.rl.engine.ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
 from .state_plugin import (
+    ACTOR_RECORDERS,
     APPLIED_LRS,
     CRITIC_RECORDERS,
     CRITIC_STATE_SUMMARY,
@@ -41,6 +43,44 @@ from .state_plugin import (
 
 class TrainStepError(RuntimeError):
     pass
+
+
+
+def _is_expert_tensor(name: str) -> bool:
+    """A routed-expert tensor (Megatron ``mlp.experts.*``; not ``shared_experts``)."""
+    return ".mlp.experts." in name
+
+def optimizer_coverage_problems(summaries: list[dict[str, Any]]) -> list[str]:
+    """Check that every adapter tensor has optimizer state on at least one rank of
+    the group that shards it (DistOpt ranges); marks ``has_optimizer_state`` False on
+    the ranks of a group that fails. Expert tensors are sharded over the expert-DP
+    ranks of one (tp, pp, ep); every other tensor over all DP ranks of its (tp, pp),
+    which with EP>1 spans the EP ranks too (Modal run-16: the dense tensors were
+    checked per EP rank and found missing)."""
+    problems: list[str] = []
+    covered: dict[tuple[int, ...], tuple[set[str], set[str]]] = {}
+    for s in summaries:
+        tp, pp, ep = s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)
+        optimized = set(s.get("optimizer_names") or ())
+        for name in s.get("adapter_names") or ():
+            key = (tp, pp, ep) if _is_expert_tensor(name) else (tp, pp)
+            names, owned = covered.setdefault(key, (set(), set()))
+            names.add(name)
+            if name in optimized:
+                owned.add(name)
+    if not covered:
+        problems.append("no rank reported any adapter tensor")
+    for key, (adapters, optimized) in sorted(covered.items()):
+        if not adapters <= optimized:
+            missing = sorted(adapters - optimized)[:4]
+            for s in summaries:
+                if (s["coord"]["tp"], s["coord"]["pp"]) == key[:2] and (
+                        len(key) == 2 or s["coord"].get("ep", 0) == key[2]):
+                    s["has_optimizer_state"] = False
+            where = f"tp{key[0]}/pp{key[1]}" + (f"/ep{key[2]}" if len(key) == 3 else " (dense)")
+            problems.append(f"{where}: no optimizer state for {missing}")
+    return problems
+
 
 
 def batch_hash(batch: RolloutBatchHandle) -> str:
@@ -264,6 +304,7 @@ class MilesTrainerGroup:
         spec: Any = None,
         critic_model: Any = None,
         release_outputs: Callable[[Any], None] | None = None,
+        install_actor_recorders: bool = False,
     ) -> None:
         self._spec = spec
         # rl-algo-critic-family 3.1: shared actor/critic PPO (Miles train.py
@@ -289,6 +330,15 @@ class MilesTrainerGroup:
         # (``last_step_losses`` stays gated on the mechanisms that consume it).
         self.last_round_step_losses: list[dict[str, Any]] | None = None
         self.optimizer_steps_total = 0
+        # S25 N7.6: the restored cut's resume manifest until the first step after it is checked
+        self._resume_reference: Any = None
+        # ... and whether the data cursor the driver restored was compared with it
+        # (confirm_resumed_data_cursor); the first step refuses an unconfirmed one.
+        self._resume_cursor_confirmed = True
+        # A LoRA actor installs its step recorders through the state plugins
+        # the publisher calls before the first step; a full-parameter actor
+        # calls none of them, so the trainer installs the recorders itself.
+        self._actor_recorders_installed = not install_actor_recorders
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         if batch.payload is None:
@@ -303,8 +353,10 @@ class MilesTrainerGroup:
         try:
             self._reshard_guard(batch)
             if self._check_tokens:  # spec: reject before training
-                require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
+                # the generating publication (rollout ahead: one version behind the round)
+                require_policy_tokens(batch, policy_token(batch.policy_version, batch.policy_hash))
             critic_outputs = self._train_critic(batch) if self._critic is not None else None
+            self._install_actor_recorders()
             if critic_outputs is None:
                 outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
             else:
@@ -373,6 +425,8 @@ class MilesTrainerGroup:
                 self._release(self._args, batch.payload)
         steps = int(self._args.num_steps_per_rollout) if succeeded else 0
         self.optimizer_steps_total += steps
+        if succeeded and self._resume_reference is not None:
+            self._check_first_step_after_resume(steps)
         return LocalStepReceipt(
             algorithm=self._algorithm,
             learner_id=self._learner_id,
@@ -386,6 +440,60 @@ class MilesTrainerGroup:
             optimizer_step_succeeded=succeeded,
             parameter_layout_hash=self._layout_hash(),
         )
+
+    def _rank_resume_states(self, results: list[Mapping[str, Any]], what: str) -> dict[str, Any]:
+        from yeto.rl.engine.cut import CutError
+        from yeto.rl.engine.resume_manifest import OptimizerResumeState
+
+        refused = sorted({str(r["refused"]) for r in results if "refused" in r})
+        if refused:
+            raise CutError(f"{what}: rank could not report its optimizer state: " + "; ".join(refused))
+        return {str(r["path"]): OptimizerResumeState.from_dict(r["resume"]) for r in results}
+
+    def _check_first_step_after_resume(self, steps: int) -> None:
+        """The first round after ``restore_cut`` advanced every rank's Adam step and the
+        LR scheduler by exactly ``steps`` optimizer steps (S25 N7.6; A-TRN report #8)."""
+        from yeto.rl.engine.resume_manifest import ResumeAssertionError, ResumeManifest, require_first_step
+        from .cut_plugin import RESUME_STATE
+
+        if not self._resume_cursor_confirmed:
+            raise ResumeAssertionError(
+                "first step after resume, but the restored data cursor was never compared with the cut's "
+                "data watermark (confirm_resumed_data_cursor not called); refusing to continue")
+        saved, self._resume_reference = self._resume_reference, None
+        results = [dict(r) for r in self._run(self._actor.run_plugin(RESUME_STATE, {}))]
+        now = ResumeManifest(
+            global_step=saved.global_step + steps,  # the driver owns the global counter
+            data_watermark=saved.data_watermark,
+            scheduler_increment=saved.scheduler_increment,
+            ranks=self._rank_resume_states(results, "first step after resume"),
+        )
+        require_first_step(saved, now, steps=steps)
+
+    def confirm_resumed_data_cursor(self, cursor: Mapping[str, int]) -> None:
+        """Compare the data cursor the run actually resumed from with the restored
+        cut's data watermark (S25 N7.6). Called by whoever restored the cursor
+        after ``restore_cut`` / ``restore_cut_resharded``: the driver after its
+        seek landed (restart), or the trainer rebuild after its live re-read.
+        A no-op when no restore is pending its first step."""
+        from yeto.rl.engine.resume_manifest import require_data_watermark
+
+        if self._resume_reference is None:
+            return
+        require_data_watermark(self._resume_reference, int(cursor["sample_offset"]))
+        self._resume_cursor_confirmed = True
+
+    def _install_actor_recorders(self) -> None:
+        """Record every optimizer step's applied LR and grad norm in the actor
+        processes, once per trainer; without them ``_applied_lrs`` finds no
+        steps."""
+
+        if self._actor_recorders_installed:
+            return
+        installed = list(self._run(self._actor.run_plugin(ACTOR_RECORDERS, {})))
+        if not installed or not all(installed):
+            raise TrainStepError(f"actor step recorders could not be installed: {installed}")
+        self._actor_recorders_installed = True
 
     def _workers(self) -> int:
         return int(getattr(self._args, "actor_num_nodes", 1) or 1) * int(
@@ -707,7 +815,15 @@ class MilesTrainerGroup:
         a non-zero ``carried_over``/ready-unconsumed ledger, an unsettled outer
         commit or a missing data cursor.
         """
-        from yeto.rl.engine.cut import CutError, CutFile, CutManifest, commit_manifest, context_problems, cut_dir
+        return self.finish_cut(self.start_cut(epoch=epoch, context=context, background=False))
+
+    def start_cut(self, *, epoch: int, context: "CutContext", background: bool = True) -> dict[str, Any]:
+        """E1: the part of :meth:`save_cut` that must run at the step boundary: the
+        context checks and every rank's state capture. With ``background`` the ranks
+        write and hash their shards in a thread while training goes on; :meth:`finish_cut`
+        (later, before the next cut) collects them and commits the manifest. Nothing
+        names the cut until the manifest is committed. Returns the pending cut."""
+        from yeto.rl.engine.cut import CutError, context_problems, cut_dir
         from .cut_plugin import SAVE_CUT_SHARD, config_problems
 
         cut_id = context.cut_id
@@ -722,35 +838,53 @@ class MilesTrainerGroup:
         if problems:
             raise CutError("refusing to save a cut: " + "; ".join(problems))
         directory = cut_dir(context.root, cut_id)
-        summaries = [
-            dict(s) for s in self._run(
-                self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
-            )
-        ]
+        # the critic cut runs in finish_cut and reads the critic as it is then: inline only
+        background = bool(background) and self._critic is None
+        critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
+        kwargs = {"directory": str(directory), "cut_id": cut_id, **({"background": True} if background else {})}
+        results = [dict(s) for s in self._run(self._actor.run_plugin(SAVE_CUT_SHARD, kwargs))]
+        # E1: how each rank took its state (device copies or host path, and why)
+        capture = [dict(s["capture"]) for s in results if isinstance(s.get("capture"), Mapping)]
+        return {"epoch": int(epoch), "context": context, "runtime": runtime, "directory": directory,
+                "background": background, "results": results, "critic": critic,
+                **({"capture": capture} if capture else {})}
+
+    def finish_cut(self, pending: Mapping[str, Any]) -> str:
+        """Collect the shards of :meth:`start_cut` and commit the manifest; returns the cut id."""
+        return self.collect_cut(pending)()
+
+    def collect_cut(self, pending: Mapping[str, Any]) -> Callable[[], str]:
+        """E1: the trainer part of :meth:`finish_cut` (collect and check every rank's
+        shard summary, build the manifest). Returns the commit of that manifest: plain
+        filesystem work (no trainer call), so the caller may run it on another thread.
+        Raises like :meth:`finish_cut` before anything is committed."""
+        from yeto.rl.engine.cut import CutError, CutFile, CutManifest, commit_manifest
+        from .cut_plugin import FINISH_CUT_SHARD
+
+        epoch, context, runtime = pending["epoch"], pending["context"], pending["runtime"]
+        cut_id = context.cut_id
+        summaries = list(pending["results"])
+        if pending["background"]:
+            started = [s for s in summaries if "refused" not in s]
+            summaries = [s for s in summaries if "refused" in s]
+            if started:
+                summaries += [dict(s) for s in self._run(
+                    self._actor.run_plugin(FINISH_CUT_SHARD, {"cut_id": cut_id}))]
+        # E1: where each rank's background shard was written (writer process, or this
+        # thread after a writer-process failure); reported with rl_cut_committed
+        self.last_cut_writer = [dict(s["writer"]) for s in summaries if isinstance(s.get("writer"), Mapping)]
+        problems: list[str] = []
         refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
         if refused:
             raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
-        # has_optimizer_state means: every adapter tensor of each (tp, pp) has
-        # optimizer state on at least one of its DP ranks (DistOpt ranges).
-        covered: dict[tuple[int, int], tuple[set[str], set[str]]] = {}
-        for s in summaries:
-            key = (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0))
-            adapters, optimized = covered.setdefault(key, (set(), set()))
-            adapters.update(s.get("adapter_names") or ())
-            optimized.update(s.get("optimizer_names") or ())
-        for key, (adapters, optimized) in sorted(covered.items()):
-            if not adapters or not adapters <= optimized:
-                missing = sorted(adapters - optimized)[:4]
-                for s in summaries:
-                    if (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)) == key:
-                        s["has_optimizer_state"] = False
-                problems.append(f"tp{key[0]}/pp{key[1]}/ep{key[2]}: no optimizer state for {missing or 'any adapter'}")
+        problems += optimizer_coverage_problems(summaries)
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
-        critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
+        resume = self._resume_manifest(context, summaries)
+        critic = pending.get("critic")
         if critic is not None:  # 4.3; absent for every critic-free trainer (manifest unchanged)
             runtime = {**runtime, "critic": critic}
         manifest = CutManifest(
@@ -763,6 +897,8 @@ class MilesTrainerGroup:
             ledger=context.ledger,
             outer=context.outer,
             in_flight=tuple(getattr(context, "in_flight", ()) or ()),
+            resume=resume.to_dict(),
+            created_unix=time.time(),
             files=tuple(
                 CutFile(s["path"], s["sha256"], int(s["bytes"]), s["coord"]) for s in summaries
             ),
@@ -775,8 +911,26 @@ class MilesTrainerGroup:
         )
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
-        commit_manifest(context.root, manifest, check_files=context.shared_filesystem)
-        return cut_id
+        root, check_files = context.root, context.shared_filesystem
+
+        def commit() -> str:
+            commit_manifest(root, manifest, check_files=check_files)
+            return cut_id
+
+        return commit
+
+    def _resume_manifest(self, context: "CutContext", summaries: list[Mapping[str, Any]]) -> Any:
+        """Resume manifest of this cut: run counters plus every rank's optimizer state (S25 N7.6)."""
+        from yeto.rl.engine.resume_manifest import ResumeManifest, require_saveable
+
+        manifest = ResumeManifest(
+            global_step=int(context.progress.local_step),
+            data_watermark=int(context.data["sample_offset"]),
+            scheduler_increment=int(context.progress.global_batch_size),
+            ranks=self._rank_resume_states(list(summaries), "save_cut"),
+        )
+        require_saveable(manifest)
+        return manifest
 
     def _runtime(self, context: "CutContext") -> dict[str, Any]:
         return {
@@ -827,6 +981,7 @@ class MilesTrainerGroup:
         it as RECOVERY_REQUIRED and never resumes training on it.
         """
         from yeto.rl.engine.cut import CutError, cut_dir, verify_cut
+        from yeto.rl.engine.resume_manifest import require
         from .cut_plugin import RESTORE_CUT_SHARD
 
         self._reshard_plan = None  # exact same-shape restore: no DP change to guard (review L-1)
@@ -857,20 +1012,67 @@ class MilesTrainerGroup:
         saved = {s["path"]: s for s in manifest.rank_summaries}
         if len(results) != len(saved) or {r["path"] for r in results} != set(saved):
             raise CutError(f"restored shards {sorted(r['path'] for r in results)} != cut {sorted(saved)}")
+        reference, resume_problems = self._restored_resume(manifest, expect, results)
+        # The resume assertions name a reset Adam step / LR scheduler; the digest
+        # diagnostics below locate any other difference. Both go into one error.
+        prefix = ("resume assertions failed: " + "; ".join(resume_problems) + "; ") if resume_problems else ""
         for r in results:
             s = saved[r["path"]]
             for key in ("scheduler_samples", "state_digest", "rng_digest"):
                 if r[key] != s[key]:
                     saved_c, now_c = s.get("components") or {}, r.get("components") or {}
                     differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
-                    raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                    raise CutError(f"{prefix}{r['path']}: restored {key} differs from the cut; "
                                    f"cut->reexport {r.get('optimizer_cut_vs_reexport')}; "
                                    f"cut->after_load {r.get('optimizer_cut_vs_after_load')}; "
                                    f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
                                    f"rank diff {r.get('diff')}; "
                                    f"differing components ({len(differ)}): {differ[:40]}")
+        require(resume_problems, "restored optimizer does not continue the cut; refusing to resume")
         self._restore_critic_cut(cut_dir(root, cut_id) / "critic", manifest)
+        self._resume_reference = reference
+        self._resume_cursor_confirmed = False
         return manifest
+
+    def _restored_resume(self, manifest: Any, expect: Any,
+                         results: list[Mapping[str, Any]]) -> tuple[Any, list[str]]:
+        """The cut's resume manifest and every resume assertion the restored ranks fail
+        (S25 N7.6; A-TRN report #8: a silently reset Adam step). The data watermark is
+        not checked here: the data cursor is restored after this call, by the driver
+        or the trainer rebuild, which then call :meth:`confirm_resumed_data_cursor`."""
+        from yeto.rl.engine.cut import CutError
+        from yeto.rl.engine.resume_manifest import ResumeManifest, restore_problems
+
+        if not manifest.resume:
+            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written before S25 N7.6); "
+                           "refusing to resume without the optimizer-continuity checks")
+        saved = ResumeManifest.from_dict(manifest.resume)
+        now = ResumeManifest(
+            global_step=int(expect.local_step),
+            data_watermark=saved.data_watermark,  # unused: check_data_watermark=False
+            scheduler_increment=saved.scheduler_increment,
+            ranks=self._rank_resume_states(results, "restore_cut"),
+        )
+        return saved, restore_problems(saved, now, check_data_watermark=False)
+
+    def _resharded_resume(self, manifest: Any, expect: Any, results: list[Mapping[str, Any]]) -> Any:
+        """Resume assertions for a DP change (S25 N7.6). Shard names and optimizer
+        ranges change, so per-rank moment fingerprints have no counterpart; the
+        run-wide counters (global step, every rank's Adam step, LR scheduler
+        progress, applied LRs) must still continue the cut. Moments are covered by
+        the plugin's slice check; the data watermark by confirm_resumed_data_cursor."""
+        from yeto.rl.engine.cut import CutError
+        from yeto.rl.engine.resume_manifest import ResumeManifest, require, restore_problems, run_wide_reference
+
+        if not manifest.resume:
+            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written before S25 N7.6); "
+                           "refusing to resume without the optimizer-continuity checks")
+        ranks = self._rank_resume_states(results, "restore_cut_resharded")
+        reference = run_wide_reference(ResumeManifest.from_dict(manifest.resume), ranks)
+        now = ResumeManifest(int(expect.local_step), reference.data_watermark, reference.scheduler_increment, ranks)
+        require(restore_problems(reference, now, check_data_watermark=False),
+                "resharded optimizer does not continue the cut; refusing to resume")
+        return reference
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
                               certified: Any = None, shared_filesystem: bool = True) -> dict[str, Any]:
@@ -935,7 +1137,10 @@ class MilesTrainerGroup:
             c = r["coord"]
             if expected.get((c["tp"], c["pp"], c["dp"])) != r["rng"]:
                 raise CutError(f"rank {c}: RNG {r['rng']} does not follow the recorded mapping")
+        reference = self._resharded_resume(manifest, expect, results)
         self._reshard_plan = plan  # every later batch is guarded (batch_guard_problems)
+        self._resume_reference = reference
+        self._resume_cursor_confirmed = False
         return {"manifest": manifest, "plan": plan.to_dict(), "rng_mapping": mapping,
                 "full_state_digests": {f"tp{k[0]}_pp{k[1]}": g[0]["full_state_digest"]
                                        for k, g in sorted(by_group.items())},

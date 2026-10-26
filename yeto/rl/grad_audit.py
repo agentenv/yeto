@@ -1,15 +1,15 @@
-"""Pre-optimizer LoRA gradient audit for the legacy-vs-ports teacher-forcing check.
+"""Pre-optimizer LoRA gradient audit for the teacher-forcing check.
 
 rl-engine-ports tier 2 (design D12) gates the teacher-forcing step on the LoRA
 *gradient*, not on the Adam update: Adam's first step is ~``lr * sign(g)``, so
 bf16 noise flips the sign of near-zero gradient elements and inflates the update
-distance even when the gradients agree. Both engines therefore export, per
+distance even when the gradients agree. The island therefore exports, per
 optimizer step, the gradient every LoRA tensor carries when ``optimizer.step()``
 is entered:
 
 * after the pipeline forward/backward and Megatron's ``finalize_model_grads``
   (DP all-reduce / reduce-scatter of ``main_grad`` has run; with
-  ``--accumulate-allreduce-grads-in-fp32`` -- set on both paths -- ``main_grad``
+  ``--accumulate-allreduce-grads-in-fp32`` -- set by the adapter -- ``main_grad``
   is the FP32 DDP buffer; ``param.grad`` is only a fallback);
 * divided by the optimizer loss scale (1.0 for bf16 without a grad scaler);
 * BEFORE ``clip_grad_norm``: the raw gradient. The clip coefficient Megatron
@@ -28,13 +28,9 @@ Files (next to the round audit ``round-<n>.{base,delta}.f32``, same
 * ``round-<n>.grad.json`` -- index (name/shape/offset/numel), sha256, norms,
   clip coefficient and provenance.
 
-Enabled only when ``YETO_RL_AUDIT_GRADS=1``. Wiring:
-
-* ports: ``state_plugin.install_grad_norm_recorder`` wraps upstream
-  ``train_one_step`` and arms :func:`arm` for every step;
-* legacy: ``yeto.rl.adapters.miles.island_entry`` sets Miles'
-  ``--custom-megatron-before-train-step-hook-path`` to :data:`HOOK_PATH`
-  (fork code is untouched; the hook exists in both Miles trees).
+Enabled only when ``YETO_RL_AUDIT_GRADS=1``. The ports state plugin
+(``state_plugin.install_grad_norm_recorder``) wraps upstream ``train_one_step``
+and arms :func:`arm` for every step.
 
 The directory comes from ``args.yeto_rl_grad_audit_dir`` (set by the learner
 from the island's ``audit_dir``). torch / megatron are imported lazily.
@@ -52,7 +48,6 @@ from typing import Any
 
 GRAD_AUDIT_ENV = "YETO_RL_AUDIT_GRADS"
 GRAD_AUDIT_DIR_ATTR = "yeto_rl_grad_audit_dir"
-HOOK_PATH = "yeto.rl.grad_audit.before_train_step"
 CANONICAL_PREFIX = "base_model.model."
 LORA_SUFFIXES = (".lora_A.weight", ".lora_B.weight")
 SCHEMA = 1
@@ -301,56 +296,3 @@ def arm(
     optimizer.step = step
     optimizer._yeto_grad_audit_armed = True
     return True
-
-
-# --------------------------------------------------------------------------
-# Legacy entry point (Miles --custom-megatron-before-train-step-hook-path)
-# --------------------------------------------------------------------------
-
-_LEGACY_BINDINGS: dict[int, tuple[GradBinding, ...]] = {}
-
-
-def legacy_bindings(args: Any, model: Sequence[Any]) -> tuple[GradBinding, ...]:
-    """Megatron-Bridge adapter conversion tasks -> canonical names (same rule as the fork's export)."""
-
-    key = id(model[0]) if model else 0
-    cached = _LEGACY_BINDINGS.get(key)
-    if cached is not None:
-        return cached
-    from megatron.bridge import AutoBridge
-
-    # The run's own remote-code decision (the fork's export forces it; names do not depend on it).
-    bridge = AutoBridge.from_hf_pretrained(
-        args.hf_checkpoint, trust_remote_code=bool(getattr(args, "trust_remote_code", False))
-    )
-    build = getattr(getattr(bridge, "_model_bridge", None), "build_adapter_conversion_tasks", None)
-    if build is None:
-        raise GradAuditError("Megatron-Bridge lacks adapter conversion tasks")
-    tasks_by_base = build(model)
-    found = []
-    for base in sorted(tasks_by_base):
-        for task in sorted(tasks_by_base[base], key=lambda t: t.adapter_key or ""):
-            for side in (task.linear_in_task, task.linear_out_task):
-                if side.param_weight is None:
-                    continue
-                converted = side.mapping.megatron_to_hf(side.param_weight.detach(), side.megatron_module)
-                if len(converted) != 1:
-                    raise GradAuditError(f"ambiguous LoRA mapping for {side.param_name!r}")
-
-                def to_hf(tensor, _side=side):
-                    return next(iter(_side.mapping.megatron_to_hf(tensor, _side.megatron_module).values()))
-
-                found.append(GradBinding(canonical_grad_name(next(iter(converted))), side.param_weight, to_hf))
-    trainable = {id(p) for chunk in model for p in chunk.parameters() if p.requires_grad}
-    if {id(b.parameter) for b in found} != trainable:
-        raise GradAuditError("adapter conversion does not cover every trainable parameter")
-    result = tuple(sorted(found, key=lambda b: b.name))
-    _LEGACY_BINDINGS[key] = result
-    return result
-
-
-def before_train_step(args, rollout_id, step_id, model, optimizer, opt_param_scheduler) -> None:
-    """Miles before-train-step hook (legacy path): arm the one-shot gradient capture."""
-
-    del opt_param_scheduler
-    arm(args, rollout_id, step_id, optimizer, lambda: legacy_bindings(args, model), engine="legacy")

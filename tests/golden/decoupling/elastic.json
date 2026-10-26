@@ -1,4 +1,5 @@
 {
+ "algorithm_semantic_sha256": "1e843db7fd7e17df813ae42634f2b1f724082cbc29b2a475104e793a820d7eca",
  "algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "algorithm_sha256_launcher_expected": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "algorithm_sha256_learner_ports_spec": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
@@ -14,10 +15,8 @@
   "compat_group": "nvidia-h100",
   "device_family": "nvidia",
   "engine": "miles",
-  "engine_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
-  "schema": "yeto-backend-identity-v2",
-  "sha256": "efd577ac20fbefc81bde11c6bdcf230768ccbea3600d1673af8942dc1c1c48cd"
+  "schema": "yeto-backend-identity-v2"
  },
  "execution_profile": {
   "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
@@ -67,6 +66,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -202,7 +205,7 @@
   "120",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "c88e8996324d0261dc72f5b2949afc1e7eb81db916d3746ac76addea772020d1",
+ "miles_argv_sha256": "5aeca40e53d9f1b1a614a6a6ec814e5d037b354da3f448f04c1d10417751d135",
  "name": "elastic",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -222,25 +225,21 @@
  "plugins": [
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "a4d7d0d5ee8addaa7d2c1d0c1cfccd82a412500c58f9e6900a0554f32476c997"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups"
   }
  ],
- "ports_runtime_fingerprint": "sha256:e4b5399f949135a6f28e7df28e80b24ca8ee120056f2cbf97f96848f250b30b3",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定（yeto.rl.engine.backend_identity），离线不可得",
  "title": "岛内弹性模式（--rl-elastic，单配置资源表）"
 }

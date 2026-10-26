@@ -12,8 +12,8 @@ from importlib import metadata
 from pathlib import Path
 
 from yeto.provenance import source_tree_sha256
-from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.adapters.miles.legacy.engine import miles_execution_source_sha256
+from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, owner_affine_minimum_fragments
+from yeto.rl.adapters.miles.revision import miles_execution_source_sha256
 from yeto.rl.adapters.miles.models.chunked_full_parameter import MilesChunkedFullParameterAdapter
 from yeto.rl.adapters.miles.models.full_parameter_probe import _hardware_identity, _write_private_json
 
@@ -27,6 +27,9 @@ _YETO_SOURCE_ROOT_ENV = "YETO_FULL_PARAMETER_YETO_SOURCE_ROOT"
 _YETO_SOURCE_SHA256_ENV = "YETO_FULL_PARAMETER_YETO_SOURCE_SHA256"
 _MILES_SOURCE_ROOT_ENV = "YETO_FULL_PARAMETER_MILES_SOURCE_ROOT"
 _MILES_SOURCE_SHA256_ENV = "YETO_FULL_PARAMETER_MILES_SOURCE_SHA256"
+# The run's --rl-sync-matrix-merge: rda gives every non-vocabulary matrix its
+# own merge group, so it changes the fragment plan and the layout hash.
+_MATRIX_MERGE_ENV = "YETO_FULL_PARAMETER_MATRIX_MERGE"
 
 _MODEL_REPO = "Qwen/Qwen3.5-4B"
 _MODEL_PATH = "/models/hf"
@@ -265,6 +268,9 @@ class MilesFullParameterManifestProbeSync:
             _SHA256,
         )
         self.image_digest = _required_environment(_IMAGE_DIGEST_ENV, _IMAGE_DIGEST)
+        self.matrix_merge = os.environ.get(_MATRIX_MERGE_ENV, "avg")
+        if self.matrix_merge not in MATRIX_MERGES:
+            raise RuntimeError(f"{_MATRIX_MERGE_ENV} must be one of {', '.join(MATRIX_MERGES)}")
         self.evidence: dict[str, object] | None = None
 
     async def initialize(self, *, actor_model, rollout_manager) -> None:
@@ -279,7 +285,12 @@ class MilesFullParameterManifestProbeSync:
             minimum_fragments=owner_count,
             max_fragment_bytes=_MAX_FRAGMENT_BYTES,
             max_chunk_bytes=_MAX_CHUNK_BYTES,
+            matrix_merge=self.matrix_merge,
         )
+        # The smallest count an island accepts for this merge: one fragment
+        # per owner and, with rda, per merge group.
+        minimum_fragments = max(owner_count, owner_affine_minimum_fragments(
+            adapter.layout.specs, self.matrix_merge))
         topology_sizes = {
             (
                 manifest.topology.tp_size,
@@ -330,7 +341,8 @@ class MilesFullParameterManifestProbeSync:
             "sequence_length": _PRODUCTION_SEQUENCE_LENGTH,
             "parameter_layout_hash": adapter.layout.layout_hash,
             "owner_count": owner_count,
-            "minimum_fragment_count": owner_count,
+            "matrix_merge": self.matrix_merge,
+            "minimum_fragment_count": minimum_fragments,
             "derived_fragment_count": adapter.layout.fragments.num_fragments,
             "parameter_tensor_count": adapter.expected_parameter_tensor_count,
             "parameter_scalar_count": adapter.expected_parameter_scalar_count,

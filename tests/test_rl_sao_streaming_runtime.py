@@ -9,9 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.adapters.miles.models.sao_streaming import MilesSaoStreamingConfig
-from yeto.rl.sao_streaming_runtime import (
+from yeto.rl.adapters.miles.full_parameter.sao_binding import (
     bind_sao_streaming_runtime,
+    sao_sync_config,
+)
+from yeto.rl.adapters.miles.full_parameter.session import (
+    CONFIG_ATTRIBUTE,
+    FullParameterSyncConfig,
+)
+from yeto.rl.sao_streaming_runtime import (
     load_sao_streaming_runtime,
     streaming_layout_attestation_schema,
     streaming_runtime_schema,
@@ -22,6 +28,8 @@ from yeto.syncer_profile import (
 )
 
 SECRLENV_CONTEXT_SHA256 = "9" * 64
+
+ALGORITHM_SHA256 = "a1" * 32
 
 
 def _syncer_profile() -> dict[str, object]:
@@ -55,7 +63,16 @@ def _syncer_profile() -> dict[str, object]:
 
 def test_syncer_profile_matches_rust_canonical_vector():
     assert SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256 == (
-        "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+        "85a50d0e4fd5103b81a2295536fca0e5ad96cd50531fb1396208af8459be571e"
+    )
+
+
+def test_syncer_profile_hash_ignores_resume():
+    # P0-1.7b.1-Q7: a restarted syncer (--resume) keeps the islands' HELLO hash.
+    fresh = _syncer_profile()
+    fresh["resume"] = False
+    assert SyncerSemanticProfile.from_mapping(fresh).sha256 == (
+        SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256
     )
 
 
@@ -172,15 +189,11 @@ def _load(tmp_path: Path, payload: dict[str, object] | None = None):
 
 def _args(**overrides):
     values = {
-        "sao_online_recipe": "coding",
+        "policy_objective": "sao_dis",
         "use_critic": True,
         "num_critic_only_steps": 0,
         "start_rollout_id": 0,
         "lora_rank": 0,
-        "external_policy_sync_path": (
-            "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
-        ),
-        "rollout_function_path": "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
         "yeto_rl_learner_id": 0,
         "yeto_rl_base_model_revision": "a" * 40,
         "num_steps_per_rollout": 1,
@@ -193,51 +206,39 @@ def _args(**overrides):
 def test_load_constructs_two_role_scoped_streams(tmp_path):
     runtime, evidence = _load(tmp_path)
 
-    assert isinstance(runtime.streams, MilesSaoStreamingConfig)
+    sync = sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
+    assert isinstance(sync, FullParameterSyncConfig)
+    assert not sync.sweep
+    assert tuple(sync.by_role()) == ("actor", "critic")
     assert runtime.trajectory_evidence_dir == evidence
-    assert runtime.streams.actor.role == "actor"
-    assert runtime.streams.critic.role == "critic"
-    assert runtime.streams.actor.syncer_addr == ("127.0.0.1", 29400)
-    assert runtime.streams.critic.syncer_addr == ("127.0.0.1", 29401)
-    assert runtime.streams.actor.expected_layout_hash == "3" * 64
-    assert runtime.streams.critic.expected_layout_hash == "4" * 64
+    assert runtime.actor.role == "actor"
+    assert runtime.critic.role == "critic"
+    assert runtime.actor.syncer_addr == ("127.0.0.1", 29400)
+    assert runtime.critic.syncer_addr == ("127.0.0.1", 29401)
+    assert runtime.actor.expected_layout_hash == "3" * 64
+    assert runtime.critic.expected_layout_hash == "4" * 64
     expected_profile = SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256
-    assert runtime.streams.actor.syncer_profile_hash == expected_profile
-    assert runtime.streams.critic.syncer_profile_hash == expected_profile
-    assert runtime.streams.actor.pipeline_depth == 2
+    for stream in sync.roles:
+        assert stream.algorithm == "sao"
+        assert stream.syncer_profile_hash == expected_profile
+        assert stream.pipeline_depth == 2
     assert runtime.syncer_profile.sha256 == expected_profile
     assert runtime.layout_attestation_path == tmp_path / "streaming-layouts.json"
 
 
-def test_load_preserves_legacy_v1_secrlenv_runtime_compatibility(tmp_path):
-    payload = _payload(tmp_path / "legacy-evidence")
+def test_load_rejects_the_retired_v1_runtime_schema(tmp_path):
+    payload = _payload(tmp_path / "evidence")
     _bind_attestation(tmp_path, payload)
-    attestation_path = Path(payload["layout_attestation"]["path"])
-    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
-    attestation["schema"] = "miles.sao-streaming-layouts.v1"
-    attestation["sao_secrlenv_context_sha256"] = attestation.pop(
-        "sao_context_sha256"
-    )
-    payload["layout_attestation"]["sha256"] = _write_runtime(
-        attestation_path, attestation
-    )
     payload["schema"] = "yeto.sao-streaming-runtime.v1"
-    payload["sao_secrlenv_context_sha256"] = payload.pop("sao_context_sha256")
-    payload["trajectory_evidence_dir"] = payload.pop("trajectory_evidence")[
-        "directory"
-    ]
-    source = tmp_path / "legacy-streaming.json"
+    source = tmp_path / "streaming.json"
     digest = _write_runtime(source, payload)
 
-    runtime = load_sao_streaming_runtime(
-        source,
-        expected_sha256=digest,
-        expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
-    )
-
-    assert runtime.trajectory_evidence_kind == "secrlenv"
-    assert runtime.trajectory_evidence_schema_version == 1
-    assert runtime.trajectory_evidence_dir == tmp_path / "legacy-evidence"
+    with pytest.raises(ValueError, match="unsupported SAO streaming schema"):
+        load_sao_streaming_runtime(
+            source,
+            expected_sha256=digest,
+            expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+        )
 
 
 @pytest.mark.parametrize(
@@ -250,7 +251,7 @@ def test_load_preserves_legacy_v1_secrlenv_runtime_compatibility(tmp_path):
         ),
         (
             lambda value: value["critic"].update(expected_fragments=2),
-            "lockstep schedule",
+            "fragment totals differ from the layout",
         ),
         (
             lambda value: value["critic"].update(parameter_layout_sha256="3" * 64),
@@ -258,12 +259,14 @@ def test_load_preserves_legacy_v1_secrlenv_runtime_compatibility(tmp_path):
         ),
     ),
 )
-def test_load_rejects_role_or_lockstep_drift(tmp_path, mutation, message):
+def test_load_or_role_pairing_rejects_role_or_lockstep_drift(tmp_path, mutation, message):
+    """The neutral load checks the contract; the Miles sync config checks the
+    role pairing.  The island runs both before any GPU work."""
     payload = deepcopy(_payload(tmp_path / "evidence"))
     mutation(payload)
 
     with pytest.raises(ValueError, match=message):
-        _load(tmp_path, payload)
+        sao_sync_config(_load(tmp_path, payload)[0], algorithm_spec_sha256=ALGORITHM_SHA256)
 
 
 @pytest.mark.parametrize(
@@ -276,7 +279,7 @@ def test_load_rejects_role_or_lockstep_drift(tmp_path, mutation, message):
         ("checkpoint_every", 2, "checkpointing every round"),
         ("resume", False, "checkpointing every round"),
         ("max_base_lag", 1, "max_base_lag=0"),
-        ("policy_sweep_fragments", 4, "policy sweep"),
+        ("policy_sweep_fragments", 4, "policy.sweep"),
         ("learner_budget_steps", 2, "learner-budget cutoff mode"),
     ),
 )
@@ -329,34 +332,28 @@ def test_load_rejects_runtime_layout_drift_from_private_attestation(tmp_path):
         )
 
 
-def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
+def test_bind_installs_two_role_full_parameter_sync_and_private_evidence(tmp_path):
     runtime, evidence = _load(tmp_path)
     args = _args()
 
-    assert bind_sao_streaming_runtime(args, runtime) == evidence
+    assert bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256) == evidence
 
     assert evidence.is_dir()
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
-    assert args.yeto_rl_sao_streaming_config is runtime.streams
+    assert getattr(args, CONFIG_ATTRIBUTE) == sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert args.yeto_rl_trajectory_evidence_dir == str(evidence)
     assert args.yeto_rl_trajectory_evidence_kind == "secrlenv"
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
-    assert args.yeto_rl_sync_preset == "sao-streaming-full"
-    assert args.external_policy_sync_path == (
-        "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
-    )
-    assert args.external_policy_sync_run_until_stop is True
-    assert args.external_policy_identity_setter_path == (
-        "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
-    )
+    # The island sets the preset; the bind does not write it a second time.
+    assert not hasattr(args, "yeto_rl_sync_preset")
+    # The ports IslandDriver owns the loop: no Miles training-loop callback.
+    assert not hasattr(args, "external_policy_sync_path")
+    assert not hasattr(args, "rollout_function_path")
     assert args.yeto_rl_num_fragments == 4
     assert args.yeto_rl_total_fragment_steps == 8
-    assert args.yeto_rl_sao_layout_attestation == str(
-        tmp_path / "streaming-layouts.json"
-    )
 
 
-def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
+def test_terminal_bench_runtime_binds_v2_without_any_reward_key(
     tmp_path, monkeypatch
 ):
     payload = _payload(tmp_path / "trajectory-evidence-0")
@@ -365,16 +362,8 @@ def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY", raising=False)
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
 
-    with pytest.raises(RuntimeError, match="missing or outside"):
-        bind_sao_streaming_runtime(_args(), runtime)
-    assert not evidence.exists()
-
-    key_file = tmp_path / "tbench-hmac.key"
-    key_file.write_text("t" * 48)
-    key_file.chmod(0o400)
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY_FILE", str(key_file))
     args = _args()
-    bind_sao_streaming_runtime(args, runtime)
+    bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert args.yeto_rl_trajectory_evidence_kind == "terminal-bench-2.1"
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
 
@@ -383,19 +372,26 @@ def test_bind_rejects_optimizer_drift_before_creating_evidence(tmp_path):
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match="optimizer accounting"):
-        bind_sao_streaming_runtime(_args(num_critic_epochs=3), runtime)
+        bind_sao_streaming_runtime(_args(num_critic_epochs=3), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
 
 
-@pytest.mark.parametrize("callback", (None, "untrusted.streaming.factory"))
-def test_bind_requires_preparsed_trusted_sync_callback(tmp_path, callback):
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"policy_objective": "ppo"}, "SAO algorithm spec"),
+        ({"use_critic": False}, "Miles critic"),
+        ({"lora_rank": 16}, "full-parameter training"),
+    ),
+)
+def test_bind_requires_the_sao_spec_with_a_full_parameter_critic(
+    tmp_path, overrides, message
+):
     runtime, evidence = _load(tmp_path)
 
-    with pytest.raises(ValueError, match="trusted external sync callback"):
-        bind_sao_streaming_runtime(
-            _args(external_policy_sync_path=callback), runtime
-        )
+    with pytest.raises(ValueError, match=message):
+        bind_sao_streaming_runtime(_args(**overrides), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
 
@@ -417,6 +413,227 @@ def test_bind_rejects_state_bypassing_debug_shortcuts(tmp_path, overrides):
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match="state-bypassing debug options"):
-        bind_sao_streaming_runtime(_args(**overrides), runtime)
+        bind_sao_streaming_runtime(_args(**overrides), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
+
+
+# --- the ports island entry (P0-1.7b.3) ------------------------------------
+
+
+def _island_argv(*extra):
+    from test_rl_engine_selection import _learner_argv
+
+    argv = _learner_argv()
+    lora = argv.index("--lora-r")
+    return [*argv[:lora], *argv[lora + 4:], *extra]
+
+
+def _sao_island_argv(runtime_path, runtime_sha256):
+    return _island_argv(
+        "--parameter-mode", "full",
+        "--sync-preset", "sao-streaming-full",
+        "--sao-streaming-runtime", str(runtime_path),
+        "--sao-streaming-runtime-sha256", runtime_sha256,
+        "--sao-context-sha256", SECRLENV_CONTEXT_SHA256,
+    )
+
+
+def test_island_parses_the_sao_preset_only_with_its_runtime_contract(tmp_path):
+    from yeto.rl.adapters.miles import island_entry
+
+    args = island_entry.parse_args(_sao_island_argv(tmp_path / "rt.json", "1" * 64))
+    assert (args.parameter_mode, args.sync_preset) == ("full", "sao-streaming-full")
+
+    argv = _sao_island_argv(tmp_path / "rt.json", "1" * 64)
+    index = argv.index("--sao-context-sha256")
+    del argv[index:index + 2]
+    with pytest.raises(SystemExit):
+        island_entry.parse_args(argv)
+    with pytest.raises(SystemExit):  # the runtime belongs to the SAO preset only
+        island_entry.parse_args(
+            _island_argv(
+                "--lora-r", "8", "--lora-targets", "attention",
+                "--sao-streaming-runtime", str(tmp_path / "rt.json"),
+                "--sao-streaming-runtime-sha256", "1" * 64,
+                "--sao-context-sha256", SECRLENV_CONTEXT_SHA256,
+            )
+        )
+    with pytest.raises(SystemExit):  # full parameters need a full-parameter preset
+        island_entry.parse_args(_island_argv("--parameter-mode", "full"))
+
+
+def test_island_loads_the_runtime_for_its_own_learner(tmp_path):
+    from yeto.rl.adapters.miles import island_entry
+
+    payload = _payload(tmp_path / "evidence")
+    _bind_attestation(tmp_path, payload)
+    source = tmp_path / "streaming.json"
+    digest = _write_runtime(source, payload)
+    args = island_entry.parse_args(_sao_island_argv(source, digest))
+
+    args.syncer = "10.0.0.7:29400"
+    args.critic_syncer = "10.0.0.7:29401"
+    runtime = island_entry._load_sao_streaming_runtime(args)
+    assert tuple(sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256).by_role()) == ("actor", "critic")
+    # The contract fixes ports; the host follows the launch's syncer address.
+    assert runtime.actor.syncer_addr == ("10.0.0.7", 29400)
+    assert runtime.critic.syncer_addr == ("10.0.0.7", 29401)
+
+    args.critic_syncer = "10.0.0.7:29402"
+    with pytest.raises(ValueError, match="ports differ"):
+        island_entry._load_sao_streaming_runtime(args)
+    args.critic_syncer = None
+
+    args.learner_id = 1
+    with pytest.raises(ValueError, match="different learner"):
+        island_entry._load_sao_streaming_runtime(args)
+
+
+@pytest.mark.parametrize(
+    ("sync", "overrides", "message"),
+    (
+        (False, {}, "Yeto policy sync"),
+        (True, {"eval_only": True}, "eval-only"),
+    ),
+)
+def test_full_parameter_island_rejections(sync, overrides, message):
+    from yeto.rl.adapters.miles import island_entry
+
+    args = SimpleNamespace(**{"eval_only": False, "rl_max_policy_age": 0, **overrides})
+    with pytest.raises(ValueError, match=message):
+        island_entry._check_full_parameter_sync(args, yeto_policy_sync=sync)
+
+
+def test_island_entry_binds_the_sao_streaming_runtime_end_to_end(monkeypatch, tmp_path):
+    """run_miles with Megatron, Miles parsing and the ports loop stubbed: the
+    SAO preset reaches the ports loop with the two-role sync bound."""
+    from test_rl_launcher import _stub_full_parameter_island
+
+    evidence = tmp_path / "audit" / "sao-evidence"
+    payload = _payload(evidence)
+    _bind_attestation(tmp_path, payload)
+    source = tmp_path / "streaming.json"
+    digest = _write_runtime(source, payload)
+    captured, args, model, _config, prompts, _audit, _ref = _stub_full_parameter_island(
+        monkeypatch,
+        tmp_path,
+        miles_fields=_args(yeto_rl_learner_id=None).__dict__,
+        sync_preset="sao-streaming-full",
+        sao_streaming_runtime=str(source),
+        sao_streaming_runtime_sha256=digest,
+        sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+        critic_syncer="127.0.0.1:29401",
+        learner_id=0,
+        model_revision="a" * 40,
+        parameter_layout_sha256=None,
+        syncer_profile_sha256=None,
+    )
+    from yeto.rl.adapters.miles import island_entry
+
+    island_entry.run_miles(args, model_path=model, prompt_path=prompts)
+
+    miles_args = captured["miles_args"]
+    assert miles_args.yeto_rl_sync_preset == "sao-streaming-full"
+    # P0-4.8: both role sessions bind the island's algorithm spec hash.
+    assert getattr(miles_args, CONFIG_ATTRIBUTE) == sao_sync_config(
+        load_sao_streaming_runtime(
+            source,
+            expected_sha256=digest,
+            expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+        ),
+        algorithm_spec_sha256=captured["algorithm_spec_sha256"],
+    )
+    assert miles_args.yeto_rl_trajectory_evidence_dir == str(evidence)
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
+    assert "--lora-rank" not in miles_args.argv
+
+
+def test_island_entry_rejects_an_evidence_root_others_can_write(monkeypatch, tmp_path):
+    from test_rl_launcher import _stub_full_parameter_island
+
+    evidence = tmp_path / "shared-root" / "sao-evidence"
+    evidence.parent.mkdir()
+    evidence.parent.chmod(0o777)
+    payload = _payload(evidence)
+    _bind_attestation(tmp_path, payload)
+    source = tmp_path / "streaming.json"
+    digest = _write_runtime(source, payload)
+    _captured, args, model, _config, prompts, _audit, _ref = _stub_full_parameter_island(
+        monkeypatch,
+        tmp_path,
+        miles_fields=_args(yeto_rl_learner_id=None).__dict__,
+        sync_preset="sao-streaming-full",
+        sao_streaming_runtime=str(source),
+        sao_streaming_runtime_sha256=digest,
+        sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+        critic_syncer="127.0.0.1:29401",
+        learner_id=0,
+        model_revision="a" * 40,
+        parameter_layout_sha256=None,
+        syncer_profile_sha256=None,
+    )
+    from yeto.rl.adapters.miles import island_entry
+
+    with pytest.raises(ValueError, match="writable by others"):
+        island_entry.run_miles(args, model_path=model, prompt_path=prompts)
+    assert not evidence.exists()
+
+
+def test_full_parameter_island_accepts_a_policy_age_limit():
+    """P0-S: every trajectory records its own behavior policy (evidence schema 4)."""
+    from yeto.rl.adapters.miles import island_entry
+
+    args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)
+    island_entry._check_full_parameter_sync(args, yeto_policy_sync=True)
+
+
+def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_path):
+    """The context's ``schema_version`` (2) is an attested layout label only."""
+
+    from yeto.rl.adapters.miles.full_parameter.evidence import (
+        persist_published_round_evidence,
+    )
+    from yeto.rl.engine.policy_versions import PublishedPolicies
+    from yeto.rl import secrlenv_outcome as reward
+    from yeto.rl.trajectory_evidence import (
+        read_trajectory_batch_evidence,
+        trajectory_batch_evidence_path,
+    )
+
+    runtime, evidence = _load(tmp_path)
+    args = _args()
+    bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
+    assert args.yeto_rl_trajectory_evidence_schema_version == 2
+    args.yeto_rl_reward_sha256 = "b" * 64
+    outcome = {
+        "schema": 1,
+        "status": "completed",
+        "episode_id": "episode-0",
+        "task_id": "CVE-2026-0000",
+        "reward": 1.0,
+        "passed": True,
+        "class": None,
+        reward.INFRASTRUCTURE_503_RETRIES_KEY: 0,
+    }
+    sample = SimpleNamespace(
+        group_index=0,
+        index=0,
+        status=SimpleNamespace(value="completed"),
+        metadata={reward.OUTCOME_KEY: outcome},
+        reward=1.0,
+        tokens=[1, 2, 3],
+        response_length=2,
+        rollout_log_probs=[-0.1, -0.2],
+        weight_versions=[
+            SimpleNamespace(spans=[SimpleNamespace(version="0", abs_start=1, abs_end=3)])
+        ],
+    )
+
+    persist_published_round_evidence(
+        args, [[sample]], "yeto:0:" + "a" * 64, PublishedPolicies.from_dict({"0": "a" * 64})
+    )
+
+    path = trajectory_batch_evidence_path(evidence, 0)
+    assert json.loads(path.read_text())["schema"] == 4
+    assert read_trajectory_batch_evidence(path).schema_version == 4

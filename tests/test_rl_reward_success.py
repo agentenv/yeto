@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib.util
-import re
 import sys
 import types
 from pathlib import Path
@@ -11,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-KEY = "k" * 40
 
 
 def _run(coro):
@@ -104,33 +102,10 @@ def test_gdpo_success_is_correctness_not_format(monkeypatch):
 def _tb_sample(monkeypatch, reward, status="completed", verifier=None, rc=None):
     from yeto.rl import tbench_outcome
 
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, KEY)
-    monkeypatch.delenv(tbench_outcome.HMAC_FILE_ENV, raising=False)
     verifier = verifier or tbench_outcome.NATIVE_VERIFIER
-    meta = tbench_outcome.build_signed_metadata(
+    meta = tbench_outcome.build_outcome_metadata(
         task_id="t1", sample_id="s1", episode_id="e1", status=status, reward=reward,
-        verifier=verifier, testsh_rc=rc, key=KEY)
+        verifier=verifier, testsh_rc=rc)
     return SimpleNamespace(metadata=meta, status=None)
 
 
-def test_tbench_success_is_signed_pass_bit(monkeypatch):
-    from yeto.rl import tbench_outcome
-    from yeto.rl.harness.codex import tbench_reward
-
-    ok = _tb_sample(monkeypatch, 1.0, verifier=tbench_outcome.TEST_SH_VERIFIER, rc=0)
-    bad = _tb_sample(monkeypatch, 0.0)
-    timeout = _tb_sample(monkeypatch, 0.0, status="timeout", verifier=tbench_outcome.TIMEOUT_VERIFIER)
-    bad.metadata["success"] = True  # untrusted pre-set flag is overwritten
-    assert _run(tbench_reward.reward_func(None, [ok, bad, timeout])) == [1.0, 0.0, 0.0]
-    assert [s.metadata["success"] for s in (ok, bad, timeout)] == [True, False, False]
-    assert all(_fork_flag(s.metadata) in (0, 1) for s in (ok, bad, timeout))
-    # siblings / group filter still accept the extra key
-    tbench_reward.check_siblings([ok, bad])
-
-
-def test_tbench_infrastructure_sample_has_no_success(monkeypatch):
-    from yeto.rl.harness.codex import tbench_reward
-
-    sample = SimpleNamespace(metadata={tbench_reward.INFRASTRUCTURE_KEY: "boom", "success": True}, status=None)
-    assert _run(tbench_reward.reward_func(None, sample)) == 0.0
-    assert sample.status == "ABORTED" and "success" not in sample.metadata

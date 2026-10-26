@@ -1,9 +1,8 @@
 """``AlgorithmSpec``: yeto-owned algorithm description with a canonical SHA256.
 
 Pure Python; no torch/ray/miles imports. The spec is translated to engine
-arguments only by adapters (the legacy mapping used by
-``yeto.rl.adapters.miles.island_entry.build_miles_argv`` is documented by
-``miles_adapter.algorithm_flags.legacy_algorithm_argv``, decoupling 4.3/E14).
+arguments only by adapters (``yeto.rl.adapters.miles.algorithm_flags``,
+decoupling 4.3/E14).
 
 Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
 
@@ -43,6 +42,8 @@ from typing import Any
 
 ALGORITHM_SPEC_SCHEMA = "yeto-rl-algorithm-spec-v1"
 ALGORITHM_SPEC_SCHEMA_V2 = "yeto-rl-algorithm-spec-v2"
+# rl-identity-tiering D1: domain of AlgorithmSpec.semantic_sha256().
+ALGORITHM_SEMANTIC_SCHEMA = "yeto-rl-algorithm-semantic-v1"
 ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
 # Neutral dynamic-sampling filter names (yeto-framework-decoupling 4.4, design
 # D6).  The backend adapter binds each name to its implementation (Miles:
@@ -112,6 +113,18 @@ LOSS_AGGREGATIONS = ["default", "token", "constant"]
 KL_PLACEMENTS = ("none", "reward", "loss")
 KL_ESTIMATORS = ("k1", "k2", "k3", "low_var_kl")
 CORRECTION_METHODS = ["none", "tis", "opsm", "custom"]
+# rl-offpolicy-correction-passthrough D1/D3: neutral correction fields.
+CORRECTION_LEVELS = ("token", "sequence", "geometric")
+# Optional ratio masks on top of method='tis' (default none, design A2).
+RATIO_MASKS = ("none", "icepop", "mis")
+# The correction group as every pre-D1 hash saw a default spec. sha256() hashes
+# a default group as this constant, so default specs keep their hash (D8, L6b.1).
+DEFAULT_CORRECTION_IDENTITY = (
+    ("function", None), ("method", "none"), ("mismatch_metrics", False), ("opsm_delta", None),
+    ("tis_clip", None), ("tis_clip_low", None), ("use_rollout_logprobs", False),
+)
+# Pre-D1 names of the bounds, still accepted on input (constructor and JSON).
+CORRECTION_FIELD_ALIASES = {"tis_clip": "upper", "tis_clip_low": "lower"}
 DYNAMIC_SAMPLING_FILTERS = {BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER}
 # Plugins may only live in yeto or in Miles' own (built-in) namespace (D7).
 PLUGIN_NAMESPACES = ["yeto.", "miles."]
@@ -226,6 +239,22 @@ def _plugin(path: str, value: Any) -> "PluginRef | None":
     raise AlgorithmSpecError(f"{path} must be a plugin reference {{path, sha256}}, got {value!r}")
 
 
+def _strip_plugin_hashes(value: Any) -> Any:
+    """Copy of canonical JSON ``value`` with ``sha256`` dropped from plugin refs.
+
+    A plugin ref is the only canonical object whose keys are ``path`` plus an
+    optional ``sha256`` (:meth:`PluginRef.to_dict`).
+    """
+
+    if isinstance(value, Mapping):
+        if "path" in value and set(value) <= {"path", "sha256"}:
+            return {"path": value["path"]}
+        return {k: _strip_plugin_hashes(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strip_plugin_hashes(v) for v in value]
+    return value
+
+
 # --------------------------------------------------------------------------
 # PluginRef (design D7)
 # --------------------------------------------------------------------------
@@ -253,10 +282,17 @@ def plugin_source_sha256(path: str) -> str:
 
 @dataclass(frozen=True)
 class PluginRef:
-    """A plugin callable identified by dotted path + its module source SHA256."""
+    """A plugin callable identified by dotted path and, optionally, the SHA256
+    of its module source.
+
+    rl-identity-tiering migration step 2: ``sha256`` may be absent, and a
+    present ``sha256`` that differs from the runtime source is a warning, not
+    a reject (:meth:`verify`). The path stays part of the semantic hash; the
+    source hash does not (:meth:`AlgorithmSpec.semantic_sha256`).
+    """
 
     path: str
-    sha256: str
+    sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, str) or not self.path or " " in self.path:
@@ -267,6 +303,8 @@ class PluginRef:
                 f"{sorted(PLUGIN_NAMESPACES)}"
             )
         digest = self.sha256
+        if digest is None:
+            return
         if not isinstance(digest, str) or len(digest) != 64 or any(
             c not in "0123456789abcdef" for c in digest.lower()
         ):
@@ -285,19 +323,28 @@ class PluginRef:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any], *, field_path: str = "plugin") -> "PluginRef":
-        if not isinstance(payload, Mapping) or set(payload) != {"path", "sha256"}:
-            raise AlgorithmSpecError(f"{field_path} must be an object with exactly path and sha256")
-        return cls(path=payload["path"], sha256=payload["sha256"])
+        if (not isinstance(payload, Mapping) or "path" not in payload
+                or not set(payload) <= {"path", "sha256"}):
+            raise AlgorithmSpecError(
+                f"{field_path} must be an object with path and an optional sha256"
+            )
+        return cls(path=payload["path"], sha256=payload.get("sha256"))
 
     def to_dict(self) -> dict[str, str]:
-        return {"path": self.path, "sha256": self.sha256}
+        # No sha256 key when absent, so every pinned ref keeps its old canonical form.
+        return {"path": self.path, **({"sha256": self.sha256} if self.sha256 else {})}
 
-    def verify(self, *, import_callable: bool = True) -> None:
-        """Startup check: importable and the source hash matches (else reject)."""
+    def verify(self, *, import_callable: bool = True) -> str | None:
+        """Startup check: the module must be importable (else reject).
+
+        Returns a warning message when the pinned source hash differs from
+        the runtime source, else None. The caller records the warning.
+        """
 
         actual = plugin_source_sha256(self.path)
-        if actual != self.sha256:
-            raise PluginIdentityError(
+        warning = None
+        if self.sha256 is not None and actual != self.sha256:
+            warning = (
                 f"plugin {self.path!r} source hash mismatch: spec {self.sha256}, "
                 f"runtime {actual}"
             )
@@ -309,6 +356,7 @@ class PluginRef:
                 raise PluginIdentityError(f"plugin {self.path!r}: import failed: {exc}") from exc
             if not callable(getattr(loaded, name, None)):
                 raise PluginIdentityError(f"plugin {self.path!r}: {name!r} is not a callable")
+        return warning
 
 
 # --------------------------------------------------------------------------
@@ -781,10 +829,28 @@ class KlSpec(_Group):
 
 @dataclass(frozen=True)
 class CorrectionSpec(_Group):
+    """Off-policy / mismatch correction (rl-offpolicy-correction-passthrough D1).
+
+    The neutral fields are written in full because the backends have
+    different defaults: ``level`` (token | sequence | geometric), ``lower`` and
+    ``upper`` (the importance-weight bounds; ``upper`` is the truncation bound
+    ``C``), ``veto``, ``batch_normalize`` and ``ratio_mask`` (none | icepop |
+    mis, on top of ``method='tis'``). Adapters map them to backend settings;
+    yeto never computes the weights. ``tis_clip`` / ``tis_clip_low`` are the
+    pre-D1 names of ``upper`` / ``lower``: accepted on input, read-only after.
+
+    Phase 1 (design D8): the group does not enter ``AlgorithmSpec.sha256()``;
+    the run manifest and the island tapes record it instead.
+    """
+
     GROUP = "correction"
     method: str = "none"  # none | tis | opsm | custom (custom tis function)
-    tis_clip: float | None = None
-    tis_clip_low: float | None = None
+    level: str = "token"
+    lower: float | None = None
+    upper: float | None = None
+    veto: float | None = None
+    batch_normalize: bool = False
+    ratio_mask: str = "none"
     opsm_delta: float | None = None
     function: PluginRef | None = None  # --custom-tis-function-path
     use_rollout_logprobs: bool = False
@@ -794,22 +860,43 @@ class CorrectionSpec(_Group):
     def __post_init__(self) -> None:
         s = object.__setattr__
         s(self, "method", _choice("correction.method", self.method, CORRECTION_METHODS))
-        s(self, "tis_clip", _number("correction.tis_clip", self.tis_clip, low=0.0, low_open=True))
-        s(self, "tis_clip_low", _number("correction.tis_clip_low", self.tis_clip_low, low=0.0))
+        s(self, "level", _choice("correction.level", self.level, CORRECTION_LEVELS))
+        s(self, "ratio_mask", _choice("correction.ratio_mask", self.ratio_mask, RATIO_MASKS))
+        s(self, "upper", _number("correction.upper", self.upper, low=0.0, low_open=True))
+        s(self, "lower", _number("correction.lower", self.lower, low=0.0))
+        s(self, "veto", _number("correction.veto", self.veto, low=0.0, low_open=True))
         s(self, "opsm_delta",
           _number("correction.opsm_delta", self.opsm_delta, low=0.0, low_open=True))
         s(self, "function", _plugin("correction.function", self.function))
+        _boolean("correction.batch_normalize", self.batch_normalize)
         _boolean("correction.use_rollout_logprobs", self.use_rollout_logprobs)
         _boolean("correction.mismatch_metrics", self.mismatch_metrics)
         if self.method == "custom" and self.function is None:
             raise AlgorithmSpecError("correction.function is required for correction.method='custom'")
         if self.method != "custom" and self.function is not None:
             raise AlgorithmSpecError("correction.function requires correction.method='custom'")
-        if self.method not in ("tis", "custom") and (
-            self.tis_clip is not None or self.tis_clip_low is not None
-        ):
+        weighting = self.method in ("tis", "custom")
+        if not weighting and (self.upper is not None or self.lower is not None):
             raise AlgorithmSpecError(
-                "correction.tis_clip/tis_clip_low require correction.method tis or custom"
+                "correction.upper/lower (tis_clip/tis_clip_low) require correction.method "
+                "tis or custom"
+            )
+        if not weighting:
+            given = [name for name, default in (("level", "token"), ("veto", None),
+                                                ("batch_normalize", False))
+                     if getattr(self, name) != default]
+            if given:
+                raise AlgorithmSpecError(
+                    f"{', '.join('correction.' + n for n in given)} require correction.method "
+                    "tis or custom"
+                )
+        if self.ratio_mask != "none" and self.method != "tis":
+            raise AlgorithmSpecError(
+                f"correction.ratio_mask={self.ratio_mask!r} requires correction.method='tis'"
+            )
+        if self.level == "geometric" and self.ratio_mask != "mis" and self.method == "tis":
+            raise AlgorithmSpecError(
+                "correction.level='geometric' needs correction.ratio_mask='mis'"
             )
         if self.method == "none" and self.opsm_delta is not None:
             raise AlgorithmSpecError(
@@ -818,16 +905,53 @@ class CorrectionSpec(_Group):
             )
         if self.method == "opsm" and self.opsm_delta is None:
             raise AlgorithmSpecError("correction.opsm_delta is required for correction.method='opsm'")
-        if self.method == "tis" and (self.tis_clip is None or self.tis_clip_low is None):
+        if self.method == "tis" and (self.upper is None or self.lower is None):
             raise AlgorithmSpecError(
-                "correction.tis_clip and correction.tis_clip_low are required for "
-                "correction.method='tis' (no engine default is inherited)"
+                "correction.upper and correction.lower (tis_clip, tis_clip_low) are required "
+                "for correction.method='tis' (no engine default is inherited)"
             )
-        if self.mismatch_metrics and self.method not in ("tis", "custom"):
+        if self.mismatch_metrics and not weighting:
             raise AlgorithmSpecError(
                 "correction.mismatch_metrics needs a tis/custom correction function"
             )
         self._normalize_ext()
+
+    @property
+    def tis_clip(self) -> float | None:
+        return self.upper
+
+    @property
+    def tis_clip_low(self) -> float | None:
+        return self.lower
+
+    @classmethod
+    def from_dict(cls, payload: Any):
+        if isinstance(payload, Mapping):
+            payload = _rename_correction_aliases(dict(payload))
+        return super().from_dict(payload)
+
+
+def _rename_correction_aliases(values: dict[str, Any]) -> dict[str, Any]:
+    for alias, name in CORRECTION_FIELD_ALIASES.items():
+        if alias not in values:
+            continue
+        value = values.pop(alias)
+        if name in values and values[name] != value:
+            raise AlgorithmSpecError(
+                f"correction.{alias} is the old name of correction.{name}; give one of them")
+        values[name] = value
+    return values
+
+
+_correction_init = CorrectionSpec.__init__
+
+
+def _correction_init_with_aliases(self, *args: Any, **kwargs: Any) -> None:
+    _correction_init(self, *args, **_rename_correction_aliases(kwargs))
+
+
+# The pre-D1 keyword names stay accepted; dataclasses.replace() sees only fields.
+CorrectionSpec.__init__ = _correction_init_with_aliases  # type: ignore[method-assign]
 
 
 @dataclass(frozen=True)
@@ -1261,12 +1385,45 @@ class AlgorithmSpec:
         return self.default_at(path)
 
     def canonical_json(self) -> str:
+        """The full spec (correction group included): manifests, tapes, islands."""
         return json.dumps(
             self.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
         )
 
+    def identity_dict(self) -> dict[str, Any]:
+        """The payload of :meth:`sha256` (rl-offpolicy-correction-passthrough D8, L6b.1).
+
+        The correction group is hashed as written. A default group is hashed
+        as the pre-D1 default group (:data:`DEFAULT_CORRECTION_IDENTITY`), so
+        every spec whose correction group is the default keeps its hash.
+        """
+
+        out = self.to_dict()
+        if "correction" in out and self.correction.is_default():
+            out["correction"] = dict(DEFAULT_CORRECTION_IDENTITY)
+        return out
+
     def sha256(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        payload = json.dumps(
+            self.identity_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def semantic_dict(self) -> dict[str, Any]:
+        """The numerics-relevant part of the spec (rl-identity-tiering D1).
+
+        The full v2 form with every plugin reduced to its path: a plugin
+        source change alone does not change it; any configuration change does.
+        """
+
+        return {"schema": ALGORITHM_SEMANTIC_SCHEMA,
+                "spec": _strip_plugin_hashes(self.structured_dict())}
+
+    def semantic_sha256(self) -> str:
+        payload = json.dumps(
+            self.semantic_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @property
     def schema(self) -> str:
@@ -1318,9 +1475,12 @@ class AlgorithmSpec:
                     refs.setdefault(value.path, value)
         return tuple(refs[k] for k in sorted(refs))
 
-    def verify_plugins(self, *, import_callable: bool = True) -> None:
-        for ref in self.referenced_plugins():
-            ref.verify(import_callable=import_callable)
+    def verify_plugins(self, *, import_callable: bool = True) -> tuple[str, ...]:
+        """Verify every referenced plugin; returns the source hash warnings."""
+
+        warnings = (ref.verify(import_callable=import_callable)
+                    for ref in self.referenced_plugins())
+        return tuple(w for w in warnings if w is not None)
 
     # -- derived (design D4/D6) ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:
@@ -1756,29 +1916,15 @@ _builtin_rejections()
 # --------------------------------------------------------------------------
 
 
-def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | None":
+def resolve_ports_algorithm(args: Any) -> "AlgorithmSpec":
     """Base spec of a run (before extra-argv absorption).
 
     ``--rl-algorithm-spec PATH`` (v1 or v2 JSON) gives the base; without it
     the spec comes from the legacy CLI exactly as in R0. Legacy CLI algorithm
-    options given together with the file must agree with it. The ports-only
-    options are refused on the legacy engine (returns None there).
+    options given together with the file must agree with it.
     """
 
     path = getattr(args, "rl_algorithm_spec", None)
-    allow = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
-    if rl_engine != "ports":
-        used = [name for name, value in (
-            ("--rl-algorithm-spec", path),
-            ("--rl-allow-unverified-mechanism", allow),
-            ("--rl-expected-algorithm-sha256",
-             getattr(args, "rl_expected_algorithm_sha256", None)),
-        ) if value]
-        if used:
-            raise AlgorithmSpecError(
-                f"{', '.join(used)} only apply to --rl-engine ports (legacy is unchanged)"
-            )
-        return None
     legacy = AlgorithmSpec.from_legacy_args(args)
     if not path:
         return legacy
@@ -1800,10 +1946,13 @@ def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | No
 
 # rl-algo-critic-family (user decision 2026-10-07): the critic mechanisms may be
 # allowed (still explicitly, via --rl-allow-unverified-mechanism) on several
-# islands / with outer sync, but only under the strict-avg preset, whose
-# critic channel is the second syncer (DualStrictAvgSync, design D4).
+# islands / with outer sync, but only under a preset with a critic channel:
+# strict-avg, whose critic channel is the second syncer (DualStrictAvgSync,
+# design D4), and sao-streaming-full, whose critic role has its own syncer
+# (P0-D8, 2026-10-13; the preset requires the critic).
 # decoupled + critic stays refused (critic_run_problems). Every other
 # unverified mechanism keeps D11 as written.
+CRITIC_CHANNEL_SYNC_PRESETS = frozenset({"strict-avg", "sao-streaming-full"})
 CRITIC_STRICT_AVG_ALLOWANCES = frozenset({
     "advantage_estimators:ppo",
     "execution:critic",
@@ -1823,8 +1972,8 @@ def check_unverified_allowance(
 ) -> tuple[str, ...]:
     """D11 as written: refused with multiple islands *or* any outer sync.
 
-    Exception (critic family, design D4): when ``sync_preset == "strict-avg"``
-    and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
+    Exception (critic family, design D4): when ``sync_preset`` has a critic
+    channel (:data:`CRITIC_CHANNEL_SYNC_PRESETS`) and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
     ``execution:critic`` among them), the allowance is accepted on several
     islands / with outer sync. ``sync_preset=None`` (caller does not know the
     preset) keeps D11 as written.
@@ -1842,7 +1991,7 @@ def check_unverified_allowance(
             f"(known: {sorted(allowance_names())})"
         )
     if islands != 1 or outer_sync:
-        if (sync_preset == "strict-avg" and "execution:critic" in names
+        if (sync_preset in CRITIC_CHANNEL_SYNC_PRESETS and "execution:critic" in names
                 and set(names) <= CRITIC_STRICT_AVG_ALLOWANCES):
             return names
         raise AlgorithmSpecError(

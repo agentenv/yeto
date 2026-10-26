@@ -105,9 +105,15 @@ def parse_args(argv=None):
     p.add_argument("--output-dir", default="~/yeto-output")
     # Megatron parallelism.
     p.add_argument("--island-backend", default="megatron")
+    p.add_argument("--device-family", choices=("cuda", "ppu", "npu"), default=None,
+                   help="card family (default: $YETO_DEVICE_FAMILY, else auto-detect); "
+                        "selects the torch device type and collective backend")
     p.add_argument("--expert-parallel", type=int, default=1)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
+    # S27 G-FL: same default and same off-switch as the verl Megatron island
+    # (yeto.rl.megatron_grad_checks). NOT hardware-verified on this path.
+    p.add_argument("--rl-no-grad-nan-check", action="store_true")
     from ..wandb_logger import add_arguments as add_wandb_arguments
 
     add_wandb_arguments(p)
@@ -116,15 +122,22 @@ def parse_args(argv=None):
 
 def _init_distributed(args):
     """torch.distributed first, then Megatron parallel state, then the
-    model-parallel RNG (the order Megatron-Core asserts)."""
-    import torch
+    model-parallel RNG (the order Megatron-Core asserts).
+
+    The device family picks the card type and collective backend (accel).
+    PPU runs as "cuda" + NCCL over ACCL-P; NPU as torch_npu + HCCL, where
+    Megatron's CUDA-named RNG helper relies on torch_npu's CUDA-to-NPU patch
+    (MindSpeed). Neither family has run this learner yet (not verified)."""
     import torch.distributed as dist
     from megatron.core import parallel_state
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
+    from .. import accel
+
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    family = accel.device_family(args.device_family)
+    device = accel.bind_family_device(family, local_rank)
+    dist.init_process_group(backend=accel.family_dist_backend(family))
     parallel_state.initialize_model_parallel(
         tensor_model_parallel_size=args.tensor_parallel,
         pipeline_model_parallel_size=args.pipeline_parallel,
@@ -139,7 +152,7 @@ def _init_distributed(args):
             "of linear_in/linear_out and PP>1 a cross-stage gather before the "
             "DiLoCo push — implement those before enabling."
         )
-    return dist.get_rank(), dist.get_world_size(), local_rank
+    return dist.get_rank(), dist.get_world_size(), device
 
 
 def _build_model(args, device):
@@ -359,7 +372,7 @@ def main(argv=None):
 
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s megatron %(levelname)s %(message)s")
-    rank, world, local_rank = _init_distributed(args)
+    rank, world, device = _init_distributed(args)
     from ..provenance import (
         pin_distributed_runtime_provenance,
         verify_distributed_source_tree_sha256,
@@ -371,7 +384,6 @@ def main(argv=None):
         world=world,
     )
     pin_distributed_runtime_provenance(args, rank=rank, world=world)
-    device = torch.device("cuda", local_rank)
 
     model, bridge = _build_model(args, device)
 
@@ -385,8 +397,16 @@ def main(argv=None):
     adapter_init = {n: p.detach().clone() for n, p in _adapter_params(model).items()}
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
+    # S27 G-FL: check every gradient bucket for non-finite values (on by default);
+    # without it a NaN gradient is scaled into every parameter by clip_grads instead
+    # of raising (yeto.rl.megatron_grad_checks). This learner has no hardware
+    # verification at all, so the setting is for consistency with the verl Megatron
+    # island and is itself unverified here.
+    from yeto.rl.megatron_grad_checks import ddp_overrides
+
     ddp_cfg = DistributedDataParallelConfig(
-        use_distributed_optimizer=True, overlap_grad_reduce=True, grad_reduce_in_fp32=True
+        use_distributed_optimizer=True, overlap_grad_reduce=True, grad_reduce_in_fp32=True,
+        **ddp_overrides(check_for_nan_in_grad=not getattr(args, "rl_no_grad_nan_check", False)),
     )
     cfg = getattr(model[0], "config", None) or getattr(getattr(model[0], "module", None), "config")
     cfg.finalize_model_grads_func = finalize_model_grads

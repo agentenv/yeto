@@ -97,17 +97,36 @@ def test_modal_runner_writes_the_marker_and_signals_nobody(tmp_path):
     assert json.loads(marker.read_text()) == {"signal": int(_signal.SIGINT), "time": 12.5}
 
 
-def test_container_set_poller_trips_on_a_rescheduled_container():
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _poller(lists, expected, claims=None, clock=None):
     from yeto.modal_runner import ContainerSetPoller
 
-    lists = iter([set(), {"ta-1"}, {"ta-1"}, None, set(), {"ta-2"}, {"ta-3"}])
+    it = iter(lists)
     changes = []
-    g = ContainerSetPoller(lambda: next(lists), 1, changes.append)
-    for _ in range(5):
+    claims = {} if claims is None else claims
+    g = ContainerSetPoller(lambda: next(it), expected, changes.append, attributed=lambda: claims,
+                           grace_s=600.0, clock=clock or _Clock())
+    return g, changes, claims
+
+
+def test_container_set_poller_trips_on_a_rescheduled_container():
+    g, changes, claims = _poller([set(), {"ta-1"}, {"ta-1"}, None, set(), {"ta-2"}, {"ta-3"}], 1)
+    g.poll_once()
+    g.poll_once()
+    claims["ta-1"] = ("0", "0")  # island 0 printed its container line
+    for _ in range(3):
         g.poll_once()
-    assert g.baseline == {"ta-1"} and not g.tripped  # gone (killed) is not a change
+    assert not g.tripped  # gone (killed) is not a change
     g.poll_once()
     assert g.tripped and len(changes) == 1 and "ta-2" in changes[0] and g.expected is False
+    assert "an island was rescheduled" in changes[0] and "island 0 rank 0 = ta-1" in changes[0]
     g.poll_once()
     assert len(changes) == 1  # once
 
@@ -120,14 +139,210 @@ def test_container_set_poller_waits_for_all_islands_and_skips_list_errors():
 
     g = ContainerSetPoller(boom, 2)
     g.poll_once()
-    assert g.baseline is None and not g.tripped
+    assert not g.tripped
     lists = iter([{"a"}, {"a", "b"}, {"a", "b"}])
     g.list_ids = lambda: next(lists)
+    for _ in range(3):
+        g.poll_once()
+    assert not g.tripped
+
+
+def test_container_set_poller_late_first_container_is_not_a_reschedule():
+    # S27 s27-gr-i: island 0 runs; island 1's input gets a task that never prints its
+    # container line, the task leaves, and a later task is island 1's first container.
+    g, changes, claims = _poller([{"ta-0"}, {"ta-0", "ta-q"}, {"ta-0", "ta-q"}, {"ta-0"},
+                                  {"ta-0", "ta-late"}, {"ta-0", "ta-late"}], 2)
     g.poll_once()
-    assert g.baseline is None
+    claims["ta-0"] = ("0", "0")
+    for _ in range(4):
+        g.poll_once()
+    assert not g.tripped
+    claims["ta-late"] = ("1", "0")
+    g.poll_once()
+    assert not g.tripped and changes == []
+
+
+def test_container_set_poller_two_unclaimed_containers_for_one_free_slot_trip_after_the_grace(capsys):
+    clock = _Clock()
+    g, changes, claims = _poller([{"ta-0", "ta-a", "ta-b"}] * 3, 2, {"ta-0": ("0", "0")}, clock)
+    g.poll_once()
+    assert not g.tripped and "WARNING" in capsys.readouterr().out
+    clock.t = 600.0
+    g.poll_once()
+    assert not g.tripped and capsys.readouterr().out == ""  # warned once per container
+    clock.t = 601.0
+    g.poll_once()
+    assert g.tripped and "ta-a, ta-b" in changes[0] and "1 of 2" in changes[0]
+    assert "listed for 601 s" in changes[0] and "an island was rescheduled" in changes[0]
+
+
+def test_container_set_poller_extra_containers_beside_claimed_ones_do_not_trip():
+    # S27 s27-ch-d0a: both containers of island 0 claimed and training; two extra
+    # containers of the function appear (no island line) and later leave
+    clock = _Clock()
+    both = {"ta-r0", "ta-r1"}
+    lists = [both, both | {"ta-x", "ta-y"}, both | {"ta-x", "ta-y"}, both, both | {"ta-z"}, both | {"ta-z"}]
+    g, changes, _ = _poller(lists, 2, {"ta-r0": ("0", "0"), "ta-r1": ("0", "1")}, clock)
+    for t in (0.0, 30.0, 500.0, 530.0):
+        clock.t = t
+        g.poll_once()
+    assert not g.tripped and g.extra_since is None  # they left: the grace starts again
+    clock.t = 560.0
+    g.poll_once()
+    clock.t = 1100.0
+    g.poll_once()
+    assert not g.tripped  # ta-z: 540 s so far
+
+
+def test_container_set_poller_multi_island_reschedule_after_all_claimed():
+    # the S19 shape with two islands: both islands printed their lines, island 0's
+    # container leaves and a third container appears. (S27 s27-gr-h was first read as
+    # this case; its Modal log shows island 0 alive until the app stop and the third
+    # container idle in island 1's function, EXTRA-CONTAINER.md.)
+    lists = [{"ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1"}, {"ta-1", "ta-new"}]
+    g, changes, claims = _poller(lists, 2)
+    g.poll_once()
+    claims["ta-1"] = ("1", "0")
+    g.poll_once()
+    claims["ta-0"] = ("0", "0")
+    g.poll_once()
+    assert not g.tripped
+    g.poll_once()
+    assert g.tripped and "ta-new" in changes[0] and "0 of 2" in changes[0]
+    assert "ta-0 no longer listed" in changes[0]
+
+
+def test_container_set_poller_a_third_container_beside_both_claimed_trips_after_the_grace():
+    clock = _Clock()
+    lists = [{"ta-0", "ta-1"}, {"ta-0", "ta-1", "ta-new"}, {"ta-0", "ta-1", "ta-new"}]
+    g, changes, _ = _poller(lists, 2, {"ta-0": ("0", "0"), "ta-1": ("1", "0")}, clock)
     g.poll_once()
     g.poll_once()
-    assert g.baseline == {"a", "b"} and not g.tripped
+    assert not g.tripped
+    clock.t = 601.0
+    g.poll_once()
+    assert g.tripped and "ta-new" in changes[0] and "0 of 2" in changes[0]
+
+
+def test_container_set_poller_multi_node_islands_count_every_rank():
+    # island 0 has 2 ranks, island 1 has 1: three slots, rank 1 of island 0 is late
+    lists = [{"ta-00", "ta-1"}, {"ta-00", "ta-1", "ta-01"}, {"ta-00", "ta-1", "ta-01", "ta-x"},
+             {"ta-1", "ta-01", "ta-x"}]
+    claims = {"ta-00": ("0", "0"), "ta-1": ("1", "0")}
+    g, changes, _ = _poller(lists, 3, claims)
+    g.poll_once()
+    g.poll_once()
+    assert not g.tripped  # ta-01 is the late first container of island 0 rank 1
+    g.poll_once()
+    assert not g.tripped  # an extra container, every claimed one still listed
+    g.poll_once()
+    assert g.tripped and "ta-01, ta-x" in changes[0] and "ta-00 no longer listed" in changes[0]
+
+
+def test_container_set_poller_replacement_of_a_claimed_slot_trips_even_if_old_gone():
+    # the S19 case: the old container left, the new one never printed its line
+    g, changes, claims = _poller([{"ta-0", "ta-1"}, {"ta-1"}, {"ta-1", "ta-0b"}], 2,
+                                 {"ta-0": ("0", "0"), "ta-1": ("1", "0")})
+    g.poll_once()
+    g.poll_once()
+    assert not g.tripped
+    g.poll_once()
+    assert g.tripped and "ta-0b" in changes[0]
+
+
+# S27 s27-ek-b (2026-10-25): both islands finalized; at 14:43:25Z an idle container of
+# island 1's function started (no input); island 1's container left at its normal end;
+# the guard failed the completed run with exit 7.
+EK_I0, EK_I1, EK_X = ("ta-01M5SQHXHTE3G91GN7YZSGMPER", "ta-01M5SQHXNQ4FPENB16T90SWYTR",
+                      "ta-01M5SR86VJ7924QF3BRVTR6AXR")
+EK_LISTS = [{EK_I0, EK_I1}, {EK_I0, EK_I1, EK_X}, {EK_I0, EK_X}, set()]
+EK_CLAIMS = {EK_I0: ("0", "0"), EK_I1: ("1", "0")}
+
+
+def _ek_poller(finished):
+    from yeto.modal_runner import ContainerSetPoller
+
+    lists, changes = iter(EK_LISTS), []
+    return ContainerSetPoller(lambda: next(lists), 2, changes.append, attributed=lambda: EK_CLAIMS,
+                              finished=finished, clock=_Clock()), changes
+
+
+def test_container_set_poller_finished_island_leaving_beside_an_idle_extra_does_not_trip(capsys):
+    g, changes = _ek_poller(lambda: {EK_I1})
+    for _ in EK_LISTS:
+        g.poll_once()
+    assert not g.tripped and changes == []
+    out = capsys.readouterr().out
+    assert out.count("WARNING") == 1 and EK_X in out and "its island finished" in out
+
+
+def test_container_set_poller_unfinished_island_leaving_beside_an_extra_still_trips():
+    for finished in (None, lambda: set(), lambda: {EK_I0}):
+        g, changes = _ek_poller(finished)
+        for _ in EK_LISTS[:3]:
+            g.poll_once()
+        assert g.tripped and len(changes) == 1
+        assert f"{EK_I1} no longer listed" in changes[0] and EK_X in changes[0]
+
+
+def test_container_set_poller_finished_check_error_counts_every_claimed_container(capsys):
+    def boom():
+        raise RuntimeError("collectors")
+
+    g, changes = _ek_poller(boom)
+    for _ in EK_LISTS[:3]:
+        g.poll_once()
+    assert g.tripped and "finished-island check failed" in capsys.readouterr().out
+
+
+def test_finalized_island_containers_reads_guards_and_tapes(tmp_path):
+    from yeto.launch.modal_islands import finalized_island_containers
+    from yeto.modal_runner import ContainerIdGuard
+    from yeto.rl import event_echo
+
+    guards = {"run-l0-modal": ContainerIdGuard(), "run-l1-modal": ContainerIdGuard()}
+    tapes = {n: event_echo.TapeCollector(tmp_path / f"{n}.jsonl") for n in guards}
+    guards["run-l0-modal"].feed(f"[modal-island 0] rank 0 container {EK_I0}\n")
+    guards["run-l1-modal"].feed(f"[modal-island 1] rank 0 container {EK_I1}\n")
+    assert finalized_island_containers(guards, tapes) == set()
+    tapes["run-l1-modal"].feed(event_echo.format_record(
+        {"event": "rl_learner_finalized", "island_id": 1, "time_unix": 1.0}) + "\n")
+    assert finalized_island_containers(guards, tapes) == {EK_I1}
+    assert finalized_island_containers(guards, {}) == set()  # no tape: nothing finished
+
+
+def test_container_set_poller_attribution_error_keeps_slots_free():
+    from yeto.modal_runner import ContainerSetPoller
+
+    def bad():
+        raise RuntimeError("guards")
+
+    clock = _Clock()
+    lists = iter([{"a", "b"}, {"a", "b", "c"}, {"a", "b", "c"}])
+    g = ContainerSetPoller(lambda: next(lists), 2, attributed=bad, clock=clock)
+    g.poll_once()
+    assert not g.tripped
+    g.poll_once()
+    assert not g.tripped  # nothing claimed, so nothing claimed is lost: the grace applies
+    clock.t = 601.0
+    g.poll_once()
+    assert g.tripped
+
+
+def test_launcher_attribution_reads_container_id_guard_lines():
+    from yeto.modal_runner import ContainerIdGuard, ContainerSetPoller
+
+    guards = [ContainerIdGuard(), ContainerIdGuard()]
+    guards[0].feed("[modal-island 0] rank 0 container ta-0\n")
+    claims = lambda: {cid: k for g in guards for k, cid in g.first.items()}  # noqa: E731
+    lists = iter([{"ta-0", "ta-q"}, {"ta-0", "ta-1"}, {"ta-1", "ta-2"}])
+    p = ContainerSetPoller(lambda: next(lists), 2, attributed=claims)
+    p.poll_once()
+    guards[1].feed("[modal-island 1] rank 0 container ta-1")
+    p.poll_once()
+    assert not p.tripped
+    p.poll_once()
+    assert p.tripped and "ta-2" in p.changes[0]
 
 
 def test_container_set_poller_only_when_no_new_container_is_expected():
@@ -140,7 +355,10 @@ def test_container_set_poller_only_when_no_new_container_is_expected():
     cfg = SimpleNamespace(num_nodes=1, envs={})
     fixed = SimpleNamespace(no_island_relaunch=True, modal_retries=0, recover_timeout=600)
     poller = launcher.container_set_poller_for(fixed, Ops(), {"l0": cfg}, None, start=False)
-    assert poller is not None and poller.expected_count == 1
+    assert poller is not None and poller.expected_count == 1 and poller.finished() == set()
+    ended = launcher.container_set_poller_for(fixed, Ops(), {"l0": cfg}, None, start=False,
+                                              finished=lambda: {"ta-0"})
+    assert ended.finished() == {"ta-0"}
     relaunch = SimpleNamespace(no_island_relaunch=False, modal_retries=None, recover_timeout=600)
     assert launcher.container_set_poller_for(relaunch, Ops(), {"l0": cfg}, None, start=False) is None
     assert launcher.container_set_poller_for(fixed, None, {"l0": cfg}, None, start=False) is None
@@ -155,6 +373,11 @@ def test_list_container_ids_filters_by_app(monkeypatch):
     rows = [{"container_id": "ta-1", "app_name": "yeto-x"}, {"container_id": "ta-2", "app_name": "other"}]
     monkeypatch.setattr(mr.subprocess, "run", lambda *a, **k: sp.CompletedProcess(a, 0, json.dumps(rows), ""))
     assert mr.ModalOps("yeto-x").list_container_ids() == {"ta-1"}
+    rows = [{"Container ID": "ta-1", "App Name": "yeto-x", "Start Time": "2026-10-23 18:16:55+00:00"},
+            {"Container ID": "ta-q", "App Name": "yeto-x", "Start Time": "Pending"},
+            {"Container ID": "ta-n", "App Name": "yeto-x", "Start Time": None}]
+    monkeypatch.setattr(mr.subprocess, "run", lambda *a, **k: sp.CompletedProcess(a, 0, json.dumps(rows), ""))
+    assert mr.ModalOps("yeto-x").list_container_ids() == {"ta-1"}  # queued tasks are left out
     monkeypatch.setattr(mr.subprocess, "run", lambda *a, **k: sp.CompletedProcess(a, 1, "", "err"))
     assert mr.ModalOps("yeto-x").list_container_ids() is None
 

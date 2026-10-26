@@ -24,21 +24,24 @@ def _batches(n):
     return [torch.randn(3, 6, generator=g) for _ in range(n)]
 
 
-def test_same_shape_restore_matches_continuous_run_bitwise(tmp_path):
+@pytest.mark.parametrize("full", [False, True], ids=["lora", "full-parameter"])
+def test_same_shape_restore_matches_continuous_run_bitwise(tmp_path, full):
     batches = _batches(3)
     # continuous run: 2 steps, then the frozen third batch
-    cont = make_rank(seed=0)
+    cont = make_rank(seed=0, full=full)
     torch.manual_seed(99)
     for b in batches:
         train_step(cont, b)  # the RNG is global: finish the continuous run first
     # cut run: same 2 steps, save, "rebuild" (fresh rank, different init), restore, third batch
-    run = make_rank(seed=0)
+    run = make_rank(seed=0, full=full)
     torch.manual_seed(99)
     for b in batches[:2]:
         train_step(run, b)
     summary = save_cut_shard(run, directory=str(tmp_path), cut_id="c1")
     assert summary["has_optimizer_state"] and summary["has_rng"] and summary["scheduler_samples"] == 8
-    fresh = make_rank(seed=5)
+    assert summary["tuning"] == ("full" if full else "lora")
+    assert summary["adapter_names"] == sorted(params(run))
+    fresh = make_rank(seed=5, full=full)
     torch.manual_seed(12345)  # the rebuilt process has other RNG state
     restored = restore_cut_shard(fresh, directory=str(tmp_path), files=[summary], cut_id="c1")
     assert restored["state_digest"] == summary["state_digest"]
@@ -117,6 +120,20 @@ def test_non_lora_trainable_parameters_are_refused(tmp_path):
     assert re.search("other than LoRA", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
 
 
+def test_a_trainer_without_trainable_parameters_is_refused(tmp_path):
+    rank = make_rank(0, full=True)
+    rank.model[0].requires_grad_(False)
+    assert re.search("no trainable parameters", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
+
+
+def test_a_lora_cut_does_not_restore_into_a_full_parameter_trainer(tmp_path):
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    refused = restore_cut_shard(make_rank(0, full=True), directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("adapter names differ", refused["refused"])
+
+
 @pytest.mark.parametrize(
     "args, match",
     [
@@ -128,6 +145,15 @@ def test_non_lora_trainable_parameters_are_refused(tmp_path):
 )
 def test_unsupported_configurations(args, match):
     assert any(match in p for p in config_problems(args))
+
+
+def test_the_fp32_cpu_offload_path_of_the_precision_aware_optimizer_is_carried():
+    # N7.1d: Megatron's --optimizer-cpu-offload requires --use-precision-aware-optimizer.
+    offload = dict(use_precision_aware_optimizer=True, optimizer_cpu_offload=True, use_distributed_optimizer=True)
+    assert not config_problems(SimpleNamespace(**offload))
+    assert not config_problems(SimpleNamespace(**offload, main_params_dtype="torch.float32"))
+    low = config_problems(SimpleNamespace(**offload, exp_avg_dtype="torch.bfloat16"))
+    assert any("exp_avg_dtype" in p for p in low)
 
 
 def test_ep_is_carried_by_same_shape_cuts_but_not_by_resharding():
@@ -306,3 +332,49 @@ def test_weight_version_counter_is_carried_by_the_cut(tmp_path):
     no_updater = make_rank(5)
     assert "weight_updater" in restore_cut_shard(no_updater, directory=str(tmp_path), files=[s],
                                                  cut_id="c1")["refused"]
+
+
+def test_rewound_trained_trainer_restores_the_cut_like_a_fresh_one(tmp_path):
+    """A convertible node converts again in the same process: its trainer trained
+    in an earlier stint (other weights, moments and scheduler progress). After
+    rewind_scheduler the cut restores bitwise, as into a fresh trainer."""
+    batches = _batches(3)
+    run = make_rank(seed=0)
+    torch.manual_seed(99)
+    for b in batches[:2]:
+        train_step(run, b)
+    summary = save_cut_shard(run, directory=str(tmp_path), cut_id="c1")
+    reference = make_rank(seed=5)
+    restore_cut_shard(reference, directory=str(tmp_path), files=[summary], cut_id="c1")
+    live = make_rank(seed=3)
+    train_step(live, batches[2])  # the earlier stint
+    assert cut_plugin.rewind_scheduler(live) == {"rewound_from": 4}
+    restored = restore_cut_shard(live, directory=str(tmp_path), files=[summary], cut_id="c1")
+    assert restored["state_digest"] == summary["state_digest"]
+    assert live.opt_param_scheduler.num_steps == 8
+    for name, value in params(reference).items():
+        assert torch.equal(value, params(live)[name]), name
+    for p_r, p_l in zip(reference.optimizer.param_groups[0]["params"], live.optimizer.param_groups[0]["params"]):
+        for key in ("exp_avg", "exp_avg_sq", "step"):
+            assert torch.equal(reference.optimizer.state[p_r][key], live.optimizer.state[p_l][key])
+
+
+class _LayoutBackend(type(make_rank(0, full=True)._yeto_cut_backend)):
+    """A backend that records a ``param_layout`` like MilesCutBackend (R-5)."""
+
+    def param_layout(self, actor, named):
+        return {"schema": "test", "params": {n: {"shape": list(p.shape)} for n, p in named}}
+
+
+def test_full_parameter_restore_with_param_layout_matches_the_saved_digest(tmp_path):
+    # GPU s27-glf-l9-a-pb: the save added param_layout to the digested state, the
+    # restore re-snapshot did not, so every full-parameter resume was refused.
+    run = make_rank(seed=0, full=True)
+    run._yeto_cut_backend = _LayoutBackend(None)
+    train_step(run, _batches(1)[0])
+    summary = save_cut_shard(run, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(seed=5, full=True)
+    fresh._yeto_cut_backend = _LayoutBackend(None)
+    restored = restore_cut_shard(fresh, directory=str(tmp_path), files=[summary], cut_id="c1")
+    assert restored["state_digest"] == summary["state_digest"]
+    assert restored["components"] == summary["components"]

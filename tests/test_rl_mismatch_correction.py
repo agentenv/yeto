@@ -122,7 +122,7 @@ def test_observe_translation_and_identity():
     other = AlgorithmSpec(correction={"method": "custom", "mismatch_metrics": True,
                                       "function": {"path": mc.OBSERVE_PATH, "sha256": "1" * 64}})
     assert other.sha256() != s.sha256() != AlgorithmSpec().sha256()
-    s.verify_plugins(import_callable=True)
+    assert s.verify_plugins(import_callable=True) == ()
 
 
 @pytest.mark.parametrize(
@@ -130,7 +130,7 @@ def test_observe_translation_and_identity():
     [
         (lambda: spec(method="custom", function=mc.observe_ref().to_dict()), "mismatch_metrics"),
         (lambda: spec(method="custom", function=mc.observe_ref().to_dict(),
-                      mismatch_metrics=True, tis_clip=2.0), "tis_clip"),
+                      mismatch_metrics=True, tis_clip=2.0), "correction.upper"),
         (lambda: spec(method="custom", function=mc.observe_ref().to_dict(),
                       mismatch_metrics=True, use_rollout_logprobs=True),
          "tis_with_rollout_logprobs"),
@@ -193,15 +193,15 @@ def test_icepop_translation_and_hash():
         "--custom-tis-function-path", mc.ICEPOP_PATH, "--get-mismatch-metrics",
     ]
     assert s.correction.function.sha256 == mc.ICEPOP_SOURCE_SHA256
-    assert icepop(low=0.4).sha256() != s.sha256()
+    assert icepop(low=0.4).sha256() != s.sha256()  # L6b.1: the bounds are hashed
 
 
 @pytest.mark.parametrize(
     "build, needle",
     [
         (lambda: spec(method="custom", function=mc.icepop_ref().to_dict(), tis_clip=5.0),
-         "tis_clip_low"),
-        (lambda: spec(method="custom", function=mc.icepop_ref().to_dict()), "tis_clip"),
+         "correction.lower"),
+        (lambda: spec(method="custom", function=mc.icepop_ref().to_dict()), "correction.upper"),
         (lambda: icepop(low=5.0, high=0.5), "5.0"),
         (lambda: icepop(low=5.0, high=5.0), "smaller"),
     ],
@@ -310,7 +310,7 @@ def test_opsm_source_identity():
     trainer, rollout = opsm(), opsm(source="rollout")
     assert trainer.correction.opsm_old_logprob_source == "trainer"
     assert opsm(source="trainer").sha256() == trainer.sha256()
-    assert trainer.sha256() != rollout.sha256()
+    assert trainer.sha256() != rollout.sha256()  # L6b.1: the group is hashed
     assert json.loads(rollout.canonical_json())["correction"]["opsm_old_logprob_source"] == "rollout"
     # Not selecting OPSM: the field (at its default) does not affect the hash.
     assert spec(opsm_old_logprob_source="trainer").sha256() == AlgorithmSpec().sha256()
@@ -358,6 +358,7 @@ def test_mis_translation():
         "tis_lower_bound": 0.999, "tis_mode": "mask", "tis_upper_bound": 1.001, "use_rs": False,
     }
     assert s.correction.function.sha256 == PluginRef.from_path(mc.MIS_PATH).sha256
+    # L6b.1: MIS fields are hashed
     assert mis(mode="clip", low=0.5).sha256() != mis(mode="mask", low=0.5).sha256()
 
 
@@ -376,7 +377,7 @@ def test_runtime_attrs_unchanged_without_mis():
         (lambda: mis(mode="truncate", low=0.5), "unused"),
         (lambda: mis(mode="clip", low=3.0, high=2.0), "smaller"),
         (lambda: mis(level="geometric", mis_batch_normalize=True), "token|sequence"),
-        (lambda: mis(tis_clip=2.0), "tis_clip"),
+        (lambda: mis(tis_clip=2.0), "correction.lower/upper"),
         (lambda: spec(mis_mode="mask"), "require the MIS function"),
         (lambda: tis(mis_upper_bound=2.0), "require the MIS function"),
     ],
@@ -543,6 +544,6 @@ def test_doc_examples_pin_current_plugin_sources(tmp_path):
         spec = AlgorithmSpec.from_json_file(str(path))
         for ref in spec.referenced_plugins():
             if ref.path.startswith("yeto."):
-                ref.verify(import_callable=False)
+                assert ref.verify(import_callable=False) is None
             else:
                 assert ref.sha256 == mc.ICEPOP_SOURCE_SHA256

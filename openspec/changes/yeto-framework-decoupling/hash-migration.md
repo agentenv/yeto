@@ -258,3 +258,62 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ## S19 CompactionRL 段计数刷新（分支 s19-compaction-receipt-counts，2026-10-10）
 
 8 个标准样本只变 `plugins` 一项：rollout_meta_hook 插件的源码哈希变了（在掩码钩子之后刷新 CompactionRL 段计数）。算法哈希、契约哈希、argv 哈希不变。
+
+## S23 P2 删奖励签名（rl-drop-reward-tamper-hash，分支 s23-t8，2026-10-13）
+
+只变 codex_harness 一个标准样本的 `plugins` 一项：`codex_openenv_subprocess_agent_function.py` 源码哈希 `8bc115e4…` → `6055fcc8…`（删除向 worker 清除奖励密钥变量的 `scrubbed_environment`）。算法哈希、契约哈希、argv 哈希不变。已按 COORDINATION §5 P2-Q5 接受。`python tests/decoupling_golden.py --write` 后 diff 只有这 1 行。
+
+## S23 P0-1.11 GPU run image pin (branch s23-g2-pins, 2026-10-14)
+
+- `MILES_NEXT_COMMIT` 56068bd56 → 386ae3b07 (michaellchung/miles `s23-sao-streaming-roles`: 56068bd56 + LoRA-hybrid full-parameter transport 95533a0cd/5f7ac4e32/587bd258a + SAO streaming primitives). No loss_hub or training-loss file changes. `MILES_NEXT_IMAGE` `@sha256:fa2413be…` → `@sha256:bcd5ffd3…` (tag 386ae3b-2fa8801, public; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/`).
+- Golden: in all 8 samples, `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit, as with every earlier pin change. The three rollout_meta_hook plugin `source_sha256` entries also change `a4d7d0d5…` → `1188451c…`: the P0-S changes to `rollout_meta_hook.py` on s23-final had not been re-recorded (one of the expected failures listed under P0-1.7b.1-Q7). Algorithm hashes, contract hashes, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`; the diff is 48 lines.
+
+## S23 P0-S fix (branch s23-p0s-fix, 2026-10-14)
+
+- Only change: the source hash of `yeto/rl/adapters/miles/rollout_meta_hook.py` `1188451c…` → `a4fa982b…` (the three plugin entries in `plugins`, all 8 samples). Cause: fully_async rounds now report `execution_mode` on the carry-over event (ff6105fc). `algorithm_sha256`, contract hashes, `ports_runtime_fingerprint` and the Miles argv are unchanged.
+- Regenerated with `python tests/decoupling_golden.py --write`.
+
+## S24 L6.2 correction group out of the hash (rl-offpolicy-correction-passthrough D8, branch s24-l6-core, 2026-10-14)
+
+- Cause: in phase 1 the correction group is recorded in the run manifest and island tapes, not hashed. `AlgorithmSpec.sha256()` hashes a fixed default correction group (`identity_dict()`); `canonical_json()` still carries the full group, now with the neutral field names (`level`, `lower`, `upper`, `veto`, `batch_normalize`, `ratio_mask`; `tis_clip`/`tis_clip_low` are accepted input aliases). A custom correction function's source hash stays in the identity as a plugin reference.
+- Affected golden samples (3 of 8): `grpo_tis.json` — `algorithm_sha256` `5a8a5a9f…` → `27df1133…` (the default-spec hash), with the derived launcher/learner/execution-profile fields; `drgrpo.json` and `seq_adv_maxrl.json` — `algorithm_spec` text only (new field names), hashes unchanged. The other 5 samples and `fake_engine_tapes.json` are unchanged.
+- Hash boundary: runs with a TIS (or other non-default) correction group recorded before this change carry the old hash; runs after it carry the hash of the same spec without its correction group. Compare across the boundary by the recorded `algorithm_spec`, not by hash. Phase 2 (L6b.1) puts the group back into the hash at the same version boundary as the `rl-identity-tiering` semantic hash.
+- Accepted by the main agent (SESSION24 GOAL §6). Regenerated with `python tests/decoupling_golden.py --write`; the diff touches only these 3 files.
+
+## S24 L5.6 island sync timing (branch s24-l5-measure, 2026-10-14)
+
+- Only change: `fake_engine_tapes.json` `strict_progress.tape` gains one `rl_sync_timing` event (rl-trainer-start-stop L5.6: `sync/submit_ts`, `sync/global_ready_ts`, `sync/recv_seconds`, `sync/sync_wait_seconds`; all four are scrubbed to `<VOLATILE>`). The 8 config samples, algorithm hashes and contract hashes are unchanged.
+- Regenerated with `python tests/decoupling_golden.py --write`; the diff is 11 added lines.
+
+## S24 cold-start image pin (branch s24-image, 2026-10-14)
+
+- `MILES_NEXT_COMMIT` 386ae3b07 → 17aeb5cb5 (michaellchung/miles `s24-miles-import`: light Ray actors stay off `megatron_utils`, rl-trainer-cold-start-cost L2.1; master port held until use, S23 defect 9). No loss path change; appended to `MILES_FORK_LINEAGE`. `MILES_NEXT_IMAGE` `@sha256:bcd5ffd3…` → `@sha256:b304f857…` (tag 17aeb5c-2fa8801; the layer also carries peft 0.20.0 and the lazy-modelopt Megatron-Bridge `__init__.py`, L2.2–L2.4; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-17aeb5c-2fa8801/`).
+- Golden: in all 8 samples only `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit. Algorithm hashes, contract hashes, plugins, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`; the diff is 24 lines.
+
+## S24 lazy-modelopt image pin (branch s24-image, 2026-10-15)
+
+- `MILES_NEXT_COMMIT` 17aeb5cb5 → 44d41efd0 (michaellchung/miles `s24-miles-import2`: the `megatron_utils` package `__init__` no longer imports deep_ep and the Megatron-Bridge plugins; they moved to `megatron_utils.runtime_patches`, imported by the modules that need them. RayWorkerManager unpickles placement-group and worker-spec objects whose modules import `megatron_config`, so it loaded `megatron.bridge`. rl-trainer-cold-start-cost L2.2). No loss path change; appended to `MILES_FORK_LINEAGE`. `MILES_NEXT_IMAGE` `@sha256:b304f857…` → `@sha256:5b9dc2a9…` (tag 44d41ef-2fa8801; the layer also patches Megatron-LM a84b105 so `megatron.training` imports modelopt only where a model uses it, `docker/miles-ports/megatron_lm_lazy_modelopt.patch`; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-44d41ef-2fa8801/`).
+- Golden: in all 8 samples only `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit. Algorithm hashes, contract hashes, plugins, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`.
+
+## S24 TB2 infrastructure-as-abort (branch s24p2-tb2, 2026-10-15)
+
+- `codex_openenv_subprocess_agent_function.py`: a non-harness worker exception or a verifier exception (sandbox shut down) now returns infrastructure metadata instead of raising. The golden `codex_harness.json` plugin `source_sha256` changes (6055fcc8… → 8a78b597…). Algorithm hashes, contract hashes, Miles argv and the other 7 samples are unchanged. Regenerated with `python tests/decoupling_golden.py --write`.
+- `CODEX_HARNESS_AGENT_SHA256` 7b84b034… → 459855e8… (qwen38 profile may keep prose before its tool call; earlier commit on the same branch).
+
+## S24 phase 2 version boundary: L6b + island contract v3 + golden without code hashes (branch s24p2-hash, 2026-10-15)
+
+One version boundary for rl-offpolicy-correction-passthrough L6b and rl-identity-tiering L9.7–L9.8 and L9.10. Per design D5 this is the last entry for a code-only change; from now on an entry is written only when a semantic hash (`AlgorithmSpec.semantic_sha256()`) changes.
+
+- L6b.1: `AlgorithmSpec.sha256()` hashes the correction group as written (a default group keeps the pre-D1 form, so default specs keep their hash). `grpo_tis` `algorithm_sha256` `27df1133…` → `6a33a8e9…`, contract hash `sha256:67aee42a…` → `sha256:a0805cac…`. The new value is not the pre-L6.2 value `5a8a5a9f…`: the group now has the neutral field names (`level`, `lower`, `upper`, ...). TIS cuts from before this boundary do not resume (old-cut rule below).
+- L9.7: island contract domain `yeto-rl-island-contract-v2` → `-v3`; the algorithm slot is the semantic hash and the run code pack digest (else the attested source tree hash) is a fourth slot. Not in the golden files (`session_contract_hash` is runtime-only); v2 islands are refused by the syncer.
+- L9.8: new cuts record the spec and `semantic_sha256` and are compared by it; old cuts keep the whole-identity rule (SESSION24 GOAL §6).
+- L9.10 golden generator: no `plugins[*].source_sha256`, no `ports_runtime_fingerprint`, `backend_identity` without `engine_commit` and its `sha256`; `runtime_attrs` code hashes (`pipeline_sha256` and the `yeto_algo_plugins` digest over it) are `<CODE-HASH>`; new field `algorithm_semantic_sha256`. The `seq_adv_maxrl` sample spec now references its plugins by path only (L9.2), so its hashes no longer follow plugin source: `algorithm_sha256` `0cbaa821…` → `a26163b5…`, contract hash `sha256:66569e2a…` → `sha256:e96a5888…`.
+- Semantic hashes recorded at this boundary: default-spec samples (grpo_default, decoupled, codex_harness, elastic, fn_2x8) `1e843db7…`; grpo_tis `f17d78cf…`; drgrpo `3e99d912…`; seq_adv_maxrl `2805c735…`.
+- Other samples: only the removed code-hash fields change. `fake_engine_tapes.json` is unchanged.
+- Check: with a comment appended to `reward_pipeline.py`, `seq_adv.py` and `rollout_meta_hook.py`, `tests/test_decoupling_golden.py` passes without a re-record (CPU, 2026-10-15). Regenerated with `python tests/decoupling_golden.py --write`.
+- Integration (branch s24p2-integ, 2026-10-15): s24p2-tb2 was cut before this hash boundary. After the merge the golden files carry no plugin `source_sha256`, so its `codex_harness.json` change (6055fcc8… → 8a78b597…) has no effect; `python tests/decoupling_golden.py --write` on the merged tree reproduces the s24p2-hash golden files unchanged. `CODEX_HARNESS_AGENT_SHA256` is not a golden field and keeps the s24p2-tb2 value.
+
+## S24 item 7: L9.11 runtime plugin hash checks removed (branch s24p3-hash, 2026-10-19)
+
+- No semantic or contract hash changes. The translated `runtime_attrs` drop `reward_pipeline.pipeline_sha256` and `sample_filters_sha256`; the `yeto_algo_plugins` digest over that config changes with it. Golden: only `seq_adv_maxrl.json` changes (the `<CODE-HASH>` mask is gone; the digest is now a real value).
+- `examples/rl_algorithms/dapo-like.json` and `dr-grpo.json` reference plugins by path only (their `sha256` fields were stale after this change), so their `algorithm_sha256` changes; no golden uses them.

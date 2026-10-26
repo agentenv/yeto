@@ -72,10 +72,8 @@ def test_learner_elastic_sets_wiring_metadata_and_env():
 @pytest.mark.parametrize("extra, message", [
     (("--rl-elastic-cells", "a"), "need --rl-elastic"),
     (("--rl-elastic",), "--rl-elastic needs"),
-    (ELASTIC_LEARNER + ("--rl-engine", "legacy"), "only applies to --rl-engine ports"),
-    (("--rl-overlap-eval", "--rl-engine", "legacy"), "only applies to --rl-engine ports"),
 ])
-def test_learner_refuses_incomplete_or_legacy_switches(extra, message, capsys):
+def test_learner_refuses_incomplete_switches(extra, message, capsys):
     with pytest.raises(SystemExit):
         learner.parse_args(_learner_argv(extra))
     assert message in capsys.readouterr().err
@@ -116,7 +114,7 @@ def test_launcher_forwards_switches(monkeypatch, tmp_path):
                  *_eval_flags(_heldout(tmp_path)),
                  "--rl-elastic-attestation", str(attestation),
                  "--rl-elastic-initial-config", "c0", "--rl-elastic-cells", "a,b"))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     prelude, flags = launcher._ports_infra_flags(args)
     eval_part, _, flags = flags.partition(" --rl-overlap-eval")
     assert eval_part.startswith(" --eval-interval 2 --eval-data ~/yeto-rl/eval-heldout.jsonl")
@@ -140,9 +138,7 @@ def test_launcher_forwards_switches(monkeypatch, tmp_path):
 ])
 def test_launcher_refuses_incomplete_elastic(extra, message):
     with pytest.raises(ValueError, match=message):
-        launcher._check_ports_infra_switches(_cli(extra), "ports")
-    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
-        launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)), "legacy")
+        launcher._check_ports_infra_switches(_cli(extra))
 
 
 def _elastic_files(tmp_path, attestation="{}"):
@@ -170,7 +166,7 @@ def test_launcher_accepts_overlap_eval_from_real_cli_with_fixed_partition(monkey
     heldout = _heldout(tmp_path)
     args = _cli(("--rl-overlap-eval", "--rl-placement", "fixed-partition",
                  "--rl-rollout-gpus", "1", "--gpu", "aws:2xa100@us-east-1") + _eval_flags(heldout))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     _prepare_rl_args(args)
     run = _island_task(args, monkeypatch).run
     assert "--rl-placement fixed-partition" in run and "--rl-overlap-eval" in run
@@ -185,7 +181,7 @@ def test_launcher_eval_flags_parse_on_the_learner_and_ship_exact_bytes(tmp_path)
 
     heldout = _heldout(tmp_path, '{"prompt": "it\'s 100% $HOME \\n"}\n{"prompt": "b"}\n')
     args = _cli(("--rl-placement", "fixed-partition") + _eval_flags(heldout, "3"))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     prelude, flags = launcher._ports_infra_flags(args)
     home = tmp_path / "home"
     home.mkdir()
@@ -205,7 +201,7 @@ def test_launcher_refuses_overlap_eval_without_eval_interval():
 
     with pytest.raises(ProfileError, match="--eval-interval"):
         launcher._check_ports_infra_switches(
-            _cli(("--rl-overlap-eval", "--rl-placement", "fixed-partition")), "ports")
+            _cli(("--rl-overlap-eval", "--rl-placement", "fixed-partition")))
 
 
 @pytest.mark.parametrize("extra, message", [
@@ -216,41 +212,50 @@ def test_launcher_refuses_overlap_eval_without_eval_interval():
 ])
 def test_launcher_refuses_incomplete_eval(extra, message):
     with pytest.raises(ValueError, match=message):
-        launcher._check_ports_infra_switches(_cli(extra), "ports")
+        launcher._check_ports_infra_switches(_cli(extra))
 
 
-def test_launcher_refuses_eval_on_legacy_and_same_file_as_data(tmp_path):
+def test_launcher_refuses_eval_on_the_training_data_file(tmp_path):
     heldout = _heldout(tmp_path)
-    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
-        launcher._check_ports_infra_switches(_cli(_eval_flags(heldout)), "legacy")
     args = _cli(_eval_flags(heldout))
     args.data = str(heldout)
     with pytest.raises(ValueError, match="distinct from --data"):
-        launcher._check_ports_infra_switches(args, "ports")
+        launcher._check_ports_infra_switches(args)
 
 
-def test_ports_lora_training_eval_resolves_and_legacy_lora_still_refused(tmp_path):
+def test_ports_lora_training_eval_resolves(tmp_path):
     from yeto.rl.engine.run_config import _resolve_eval
 
     args = SimpleNamespace(eval_interval=2, eval_only=False, rl_engine="ports",
                            eval_dataset_name="held", eval_samples_per_prompt=4)
-    config = _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
+    config = _resolve_eval(args, prompt_path="/p",
                            eval_prompt_path="/e", yeto_policy_sync=True)
     assert config.interval == 2 and config.prompt_path == "/e"
     with pytest.raises(ValueError, match="heldout"):
-        _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
+        _resolve_eval(args, prompt_path="/p",
                       eval_prompt_path=None, yeto_policy_sync=True)
-    args.rl_engine = "legacy"
-    with pytest.raises(ValueError, match="restricted"):
-        _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
-                      eval_prompt_path="/e", yeto_policy_sync=True)
+
+
+def test_training_eval_on_a_single_island_without_outer_sync(tmp_path):
+    # S27 G-DA: the no-sync island owns its policy versions, so its driver can eval;
+    # an island of a synced run without the external boundary still cannot.
+    from yeto.rl.engine.run_config import _resolve_eval
+
+    base = dict(eval_interval=1000, eval_only=False, rl_engine="ports",
+                eval_dataset_name="held", eval_samples_per_prompt=8)
+    config = _resolve_eval(SimpleNamespace(**base, rl_single_island_no_sync=True), prompt_path="/p",
+                           eval_prompt_path="/e", yeto_policy_sync=False)
+    assert config.interval == 1000 and config.prompt_path == "/e" and config.samples_per_prompt == 8
+    with pytest.raises(ValueError, match="external policy boundary"):
+        _resolve_eval(SimpleNamespace(**base, rl_single_island_no_sync=False), prompt_path="/p",
+                      eval_prompt_path="/e", yeto_policy_sync=False)
 
 
 def test_launcher_refuses_overlap_eval_on_colocated_from_real_cli():
     from yeto.rl.engine.execution_profile import ProfileError
 
     with pytest.raises(ProfileError, match="fixed-partition"):
-        launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)))
 
 
 @pytest.mark.parametrize("miles, message", [
@@ -284,10 +289,10 @@ def test_launcher_refuses_colocated_elastic(tmp_path):
     res, _ = _elastic_files(tmp_path)
     args = _elastic_cli(res, "--rl-elastic-initial-config", "c0")
     with pytest.raises(ProfileError, match="fixed-partition"):
-        launcher._check_ports_infra_switches(args, "ports")
+        launcher._check_ports_infra_switches(args)
     launcher._check_ports_infra_switches(
         _elastic_cli(res, "--rl-elastic-initial-config", "c0",
-                     "--rl-placement", "fixed-partition"), "ports")
+                     "--rl-placement", "fixed-partition"))
 
 
 def test_launcher_refuses_unknown_initial_config_and_bad_attestation(tmp_path):
@@ -296,11 +301,11 @@ def test_launcher_refuses_unknown_initial_config_and_bad_attestation(tmp_path):
     res, att = _elastic_files(tmp_path, attestation=json.dumps({"execution_modes": ["bogus"]}))
     args = _elastic_cli(res, "--rl-elastic-initial-config", "nope", "--rl-placement", "fixed-partition")
     with pytest.raises(ValueError, match="not a manifest config"):
-        launcher._check_ports_infra_switches(args, "ports")
+        launcher._check_ports_infra_switches(args)
     args = _elastic_cli(res, "--rl-elastic-initial-config", "c0", "--rl-placement",
                         "fixed-partition", "--rl-elastic-attestation", att)
     with pytest.raises(ManifestError):
-        launcher._check_ports_infra_switches(args, "ports")
+        launcher._check_ports_infra_switches(args)
 
 
 def test_launcher_forwards_strict_pause_inputs_to_learner_and_syncer(tmp_path):
@@ -309,9 +314,9 @@ def test_launcher_forwards_strict_pause_inputs_to_learner_and_syncer(tmp_path):
                  "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
                  "--rl-elastic-cells", "a", "--rl-elastic-quorum-timeout-s", "120",
                  "--rl-elastic-idle-flow-timeout-s", "300", "--rl-elastic-pause-margin", "0.25"))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     _, flags = launcher._ports_infra_flags(args)
-    assert flags.endswith(" --rl-elastic-quorum-timeout-s 120 --rl-elastic-idle-flow-timeout-s"
+    assert flags.endswith(" --rl-elastic-quorum-timeout-s 120.0 --rl-elastic-idle-flow-timeout-s"
                           " 300.0 --rl-elastic-pause-margin 0.25")
     assert launcher._syncer_quorum_timeout(args) == " --quorum-timeout-s 120"
     island = [t.replace("~/yeto-rl", "/y") for t in flags.split()]
@@ -328,7 +333,7 @@ def test_default_syncer_command_has_no_quorum_timeout():
     assert launcher._syncer_quorum_timeout(args) == ""
     with pytest.raises(ValueError, match="need --rl-elastic"):
         launcher._check_ports_infra_switches(
-            _cli(("--rl-elastic-quorum-timeout-s", "120")), "ports")
+            _cli(("--rl-elastic-quorum-timeout-s", "120")))
 
 
 def test_launcher_refuses_an_eval_file_over_the_inline_cap(tmp_path):
@@ -336,7 +341,7 @@ def test_launcher_refuses_an_eval_file_over_the_inline_cap(tmp_path):
     heldout = _heldout(tmp_path, row * (launcher.EVAL_INLINE_MAX_BYTES // len(row) + 1))
     assert launcher.EVAL_INLINE_MAX_BYTES == 96 * 1024
     with pytest.raises(ValueError, match="larger than"):
-        launcher._check_ports_infra_switches(_cli(_eval_flags(heldout)), "ports")
+        launcher._check_ports_infra_switches(_cli(_eval_flags(heldout)))
 
 
 # ---------------------------------------------------------------- test-only start delay (A5)
@@ -351,13 +356,13 @@ def test_start_delay_injection_is_off_by_default_and_exported_when_given(tmp_pat
     args = _cli(("--rl-placement", "fixed-partition", "--rl-elastic",
                  "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
                  "--rl-elastic-cells", "a", "--rl-test-inject-start-delay-s", "150"))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     prelude, _ = launcher._ports_infra_flags(args)
     assert f"export {INJECT_START_DELAY_ENV}=150.0\n" in prelude
     with pytest.raises(ValueError, match="need --rl-elastic"):
-        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "150")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "150")))
     with pytest.raises(ValueError, match="positive"):
-        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "0")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "0")))
 
 
 def test_pool_sleeps_once_before_the_first_start_cells(monkeypatch):
@@ -433,7 +438,7 @@ def test_update_weights_block_is_off_by_default(monkeypatch):
 
     pub, order = _publisher(monkeypatch, None)
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked", "update_weights"] and pub.injected_blocks == []
 
 
@@ -455,11 +460,11 @@ def test_update_weights_block_fails_when_the_target_dies_and_applies_once(monkey
 
     pub.liveness_probe = Probe()
     with pytest.raises(PublicationError, match="dead: actor died"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked"] and pub.injected_blocks == [30.0] and len(polls) == 3
     # second member publication of the process: no block
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c3"], 2))
+        asyncio.run(pub._publish_members(1, "t", ["c3"], 2))
     assert order == ["tracked", "tracked", "update_weights"]
 
 
@@ -479,7 +484,7 @@ def test_update_weights_block_times_out_into_the_real_call(monkeypatch):
 
     pub.liveness_probe = Alive()
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked", "update_weights"]
 
 
@@ -493,12 +498,12 @@ def test_launcher_exports_the_update_weights_block_only_when_given(tmp_path, mon
     args = _cli(("--rl-placement", "fixed-partition", "--rl-elastic",
                  "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
                  "--rl-elastic-cells", "a", "--rl-test-inject-update-weights-block-s", "600"))
-    launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(args)
     prelude, _ = launcher._ports_infra_flags(args)
     assert f"export {INJECT_UPDATE_BLOCK_ENV}=600.0\n" in prelude
     with pytest.raises(ValueError, match="need --rl-elastic"):
         launcher._check_ports_infra_switches(
-            _cli(("--rl-test-inject-update-weights-block-s", "600")), "ports")
+            _cli(("--rl-test-inject-update-weights-block-s", "600")))
 
 
 

@@ -9,11 +9,19 @@ drive the real ``IslandDriver`` with the fake engine and the fake syncers.
 
 Recorded per configuration:
   * ``miles_argv``: the full Miles command line (temporary paths -> ``<TMP>``);
-  * ``algorithm_sha256`` (launcher-side expected hash and learner-side recompute);
+  * ``algorithm_sha256`` (launcher-side expected hash and learner-side recompute)
+    and ``algorithm_semantic_sha256``;
   * ``execution_profile`` + ``contract_hash`` (see ``_execution_profile``);
   * ``plugins``: every plugin reference in the spec and every ``yeto.*`` dotted
-    path in the argv, with module file (repo-relative) and source sha256;
-  * ``runtime_attrs`` / ``placement`` of the translated launch.
+    path in the argv, with its module file (repo-relative);
+  * ``runtime_attrs`` / ``placement`` of the translated launch;
+  * ``backend_identity`` without the engine commit.
+
+No code hash is recorded (rl-identity-tiering D5, L9.10): no plugin source
+hash, no ``ports_runtime_fingerprint``, no engine commit; since L9.11 the
+translated ``runtime_attrs`` carry no plugin source hash either. The run code
+pack pins code; a plugin-only change needs no re-record. Specs built here carry
+plugin references without a source hash, so their hashes do not depend on code.
 
 ``session_contract_hash`` is NOT recorded: it is the syncer layout fingerprint of
 the live LoRA tensors (``yeto.protocol.layout_fingerprint``), only known once the
@@ -45,10 +53,6 @@ for _p in (str(REPO), str(REPO / "tests"), str(REPO / "tests" / "multinode_gpu")
 
 
 # ---------------------------------------------------------------- helpers
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _module_file(dotted: str) -> Path | None:
     module = dotted.split(":", 1)[0]
     candidates = [module] if ":" in dotted else [module, module.rsplit(".", 1)[0]]
@@ -69,20 +73,18 @@ def _plugin_entry(path: str, recorded_sha: str | None) -> dict[str, Any]:
         entry["spec_sha256"] = recorded_sha
     if file is None:
         entry["module_file"] = None
-        entry["source_sha256"] = None
     else:
         try:
             entry["module_file"] = str(file.resolve().relative_to(REPO))
         except ValueError:
             entry["module_file"] = "<outside-repo>/" + file.name
-        entry["source_sha256"] = _sha256_file(file)
     return entry
 
 
 def _spec_plugins(node: Any, out: dict[str, str | None]) -> None:
     if isinstance(node, dict):
-        if set(node) == {"path", "sha256"} and isinstance(node["path"], str):
-            out[node["path"]] = node["sha256"]
+        if "path" in node and set(node) <= {"path", "sha256"} and isinstance(node["path"], str):
+            out[node["path"]] = node.get("sha256")  # a plugin ref (PluginRef.to_dict)
             return
         for value in node.values():
             _spec_plugins(value, out)
@@ -208,7 +210,15 @@ def _maxrl_spec():
                                     "reward_binary": True,
                                     "reward_postprocess": rp.dispatcher_ref().to_dict(),
                                     "reward_shapers": []})
-    return grpo_knobs.with_pipeline_plugins(spec)
+    return _without_plugin_hashes(grpo_knobs.with_pipeline_plugins(spec))
+
+
+def _without_plugin_hashes(spec):
+    """The spec with plugin references by path only (rl-identity-tiering L9.2), so
+    the recorded hashes do not change with plugin source code (L9.10)."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec, _strip_plugin_hashes
+
+    return AlgorithmSpec.from_dict(_strip_plugin_hashes(json.loads(spec.canonical_json())))
 
 
 def _elastic(tmp: Path) -> tuple[str, ...]:
@@ -224,47 +234,6 @@ def _fn_cli(_tmp: Path) -> tuple[str, ...]:
     return tuple(fta._argv("2x8"))
 
 
-def _codex_cli(_tmp: Path) -> tuple[str, ...]:
-    from yeto.rl import CODEX_OPENENV_AGENT
-    from yeto.rl.codex_backend import QWEN35_08B_MODEL, QWEN35_08B_REVISION
-
-    return BASE + (
-        "--model", QWEN35_08B_MODEL, "--model-revision", QWEN35_08B_REVISION,
-        "--lora-targets", "attention",
-        "--custom-generate-function-path", "miles.rollout.generate_hub.agentic_tool_call.generate",
-        "--custom-agent-function-path", CODEX_OPENENV_AGENT,
-        "--codex-reasoning-effort", "xhigh", "--codex-backend-profile", "qwen35_08b",
-        "--use-session-server", "--tito-model", "qwen35",
-        "--tito-allowed-append-roles", "tool", "user", "--agent-max-seq-len", "128",
-    )
-
-
-def _codex_bundle(mp, tmp: Path) -> None:
-    """The fake Codex bundle of ``test_rl_launcher_codex_bundle.bundle`` (contract
-    attestation stubbed to the pinned values; no 310 MB binary, no network)."""
-    import test_rl_launcher_codex_bundle as cb
-    import yeto.rl.ssh_harness as sh
-    from yeto import launcher as L
-
-    root = tmp / "codex-bundle" / "codex"
-    root.mkdir(parents=True)
-    for name in ("codex-x86_64-unknown-linux-musl", "codex-package.json",
-                 "codex_app_server_protocol.v2.schemas.json"):
-        (root / name).write_bytes(b"x")
-    mp.setattr(sh, "_codex_harness_contract", lambda _ns, args: cb._synthetic_contract(args))
-    mp.setenv(L.CODEX_BUNDLE_DIR_ENV, str(root))
-    mp.setenv(L.HARNESS_ENVIRONMENT_PROVIDER_ENV, cb.PROVIDER)
-    mp.delenv(L.CODEX_COMPACTION_ENV, raising=False)
-    mp.delenv(L.HARNESS_PREFLIGHT_ENV, raising=False)
-    # The reasoning / tool-call parser names are resolved by Miles
-    # (miles.utils.chat_template_utils), which this host must not import: the two
-    # values are recorded as explicit placeholders, everything else is yeto's own.
-    from yeto.rl.adapters.miles import config as mc
-
-    mp.setattr(mc, "_resolve_tito_parsers", lambda model: (
-        "<MILES-RESOLVED-REASONING-PARSER>", "<MILES-RESOLVED-TOOL-CALL-PARSER>"))
-
-
 CONFIGS: tuple[Config, ...] = (
     Config("grpo_default", "GRPO 默认（ports，固定分区，strict-avg）", lambda t: BASE),
     Config("grpo_tis", "GRPO + TIS 失配修正（tis_clip 2.0）",
@@ -275,8 +244,6 @@ CONFIGS: tuple[Config, ...] = (
            lambda t: BASE + ("--rl-algorithm-spec", str(REPO / DRGRPO_EVIDENCE))),
     Config("seq_adv_maxrl", "seq_adv：MaxRL 优势变换（含奖励流水线插件）",
            lambda t: BASE + ("--rl-algorithm-spec", _spec_file(t, "maxrl", _maxrl_spec))),
-    Config("codex_harness", "codex harness（ports，Qwen3.5-0.8B，假 bundle 合同）", _codex_cli,
-           patch=_codex_bundle),
     Config("elastic", "岛内弹性模式（--rl-elastic，单配置资源表）",
            lambda t: BASE + _elastic(t)),
     Config("fn_2x8", "Flash-Next 2×8 正式训练形状（fntrain.sh print 2x8）", _fn_cli, fn=True),
@@ -290,7 +257,6 @@ def record_config(config: Config) -> dict[str, Any]:
     from rl_e2e_launch import island_run, learner_from_run
     from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config
-    from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     tmp = Path(tempfile.mkdtemp(prefix="yeto-golden-"))
@@ -340,29 +306,29 @@ def record_config(config: Config) -> dict[str, Any]:
         "miles_argv_sha256": hashlib.sha256(shlex.join(argv).encode()).hexdigest(),
         "algorithm_spec": json.loads(spec.canonical_json()),
         "algorithm_sha256": spec.sha256(),
+        "algorithm_semantic_sha256": spec.semantic_sha256(),
         "algorithm_sha256_launcher_expected": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_sha256_learner_ports_spec": learner_spec.sha256(),
         "launch_algorithm_sha256": launch.algorithm_sha256,
         "execution_profile": _execution_profile(args, launch, spec,
                                                 yeto_policy_sync=yeto_policy_sync),
-        "ports_runtime_fingerprint": ports_runtime_fingerprint(launch),
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
         "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
-        # Phase 5 (design D7): parallel identity hash; the two hashes above are unchanged.
+        # Phase 5 (design D7); without the engine commit (L9.10, design D5).
         "backend_identity": _backend_identity(),
         "session_contract_hash": None,
         "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），"
-                                      "阶段 5 起再与 backend_identity.sha256 绑定"
-                                      "（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
+                                      "再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定"
+                                      "（yeto.rl.engine.backend_identity），离线不可得",
     }
 
 
 def _backend_identity() -> dict:
     from yeto.rl.adapters.miles.identity import backend_identity
 
-    identity = backend_identity("ports", compat_group="nvidia-h100")  # 7.7b: fixed sample card type
-    return {**identity.to_dict(), "sha256": identity.sha256()}
+    identity = backend_identity(compat_group="nvidia-h100")  # 7.7b: fixed sample card type
+    return {k: v for k, v in identity.to_dict().items() if k != "engine_commit"}
 
 
 # ---------------------------------------------------------------- fake-engine tapes / progress

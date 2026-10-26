@@ -26,5 +26,5 @@ Total L6 (estimate): about 12–12.5 d plus GPU cost of about $16. Exact admissi
 
 L6b lands at the same version boundary as the semantic hash replacement of change `rl-identity-tiering`.
 
-- [ ] L6b.1 Put the correction group into `algorithm_sha256`; hash migration and golden samples per `hash-migration.md`. Acceptance: CPU tests; golden samples regenerated. GPU: no. Estimate: 1 d
-- [ ] L6b.2 Refuse unmappable settings and cross-island differences at launch. Acceptance: CPU tests for each design D3 "warning" row. GPU: no. Estimate: 0.5 d
+- [x] L6b.1 Put the correction group into `algorithm_sha256`; hash migration and golden samples per `hash-migration.md`. Acceptance: CPU tests; golden samples regenerated. GPU: no. Estimate: 1 d
+- [x] L6b.2 Refuse unmappable settings and cross-island differences at launch, and also at island start. Acceptance: CPU tests for each design D3 "warning" row. GPU: no. Estimate: 0.5 d

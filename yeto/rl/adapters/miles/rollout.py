@@ -25,11 +25,18 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from collections.abc import Mapping
 from types import SimpleNamespace
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_DROPPED_LENGTHS,
+    GATE_GRANULARITY,
+    TRUNCATED_BY_TURN,
+)
+from yeto.rl.engine.policy_versions import PublishedPolicies
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_sampling_fields
 from .traits import MILES_ABORT_MECHANISM
 from . import LoopRunner
@@ -38,7 +45,9 @@ from .rollout_meta_hook import (
     METADATA_SCHEMA,
     ROUND_META_SCHEMA,
     put_max_policy_age,
+    put_published_policies,
     put_policy_token,
+    put_rollout_round,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,8 +152,10 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
 def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, int] | None:
     """Runs INSIDE the rollout executor actor (``__ray_call__``): move its data
     source to ``cursor`` the way Miles' ``RolloutDataSource.load`` would (the
-    same four fields; re-shuffle for the cursor's epoch when the source
-    shuffles per epoch) and return the cursor it reports afterwards."""
+    same four fields; re-order the rows for the cursor's epoch when the source
+    shuffles per epoch or follows the pass order of ``data_passes``) and return
+    the cursor it reports afterwards."""
+    from .data_passes import order_for_epoch
     from .rollout_meta_hook import _CURSOR_FIELDS
     from .rollout_meta_hook import data_cursor as read_cursor
 
@@ -160,9 +171,10 @@ def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, 
         setattr(source, name, int(cursor[name]))
     args = getattr(source, "args", None)
     dataset = getattr(source, "dataset", None)
-    if (dataset is not None and getattr(args, "rollout_shuffle", False)
-            and int(cursor["epoch_id"]) != previous_epoch):
-        dataset.shuffle(int(cursor["epoch_id"]))
+    epoch = int(cursor["epoch_id"])
+    if dataset is not None and epoch != previous_epoch and not order_for_epoch(source, epoch):
+        if getattr(args, "rollout_shuffle", False):
+            dataset.shuffle(epoch)
     return read_cursor(source)[0]
 
 
@@ -233,6 +245,20 @@ async def running_members(controller: Any) -> frozenset[str]:
 
 
 def require_policy_tokens(batch: RolloutBatchHandle, expected_token: str) -> None:
+    external = getattr(batch, "external_cut", None)
+    if external is not None:
+        # S27 G-EM relay mode: the groups name the merged versions of external cuts
+        # (yeto.rl.engine.external_policy); the same age rule the driver applied.
+        from yeto.rl.engine.external_policy import ExternalMergedCuts
+
+        merged, limit = external
+        problems, _ages = ExternalMergedCuts.check_groups(batch.groups, int(merged), int(limit))
+        if problems:
+            raise PolicyTokenMismatch(f"merged version {merged} (max_policy_age={limit})",
+                                      tuple(g for g in batch.groups if any(
+                                          p.startswith((f"{g.group_id}=", f"{g.group_id}:"))
+                                          for p in problems)))
+        return
     # A group carrying version segments (limit > 0, 4.1) names its oldest version;
     # the driver checked it against the policy-age window before training.
     bad = tuple(g for g in batch.mismatched_groups(expected_token) if not g.policy_versions)
@@ -262,8 +288,14 @@ class DirMetadataSource:
     def set_policy_token(self, token: str) -> None:
         put_policy_token(token, self.sink_spec)
 
+    def set_rollout_round(self, rollout_id: int) -> None:
+        put_rollout_round(rollout_id, self.sink_spec)
+
     def set_max_policy_age(self, limit: int) -> None:
         put_max_policy_age(limit, self.sink_spec)
+
+    def set_published_policies(self, policies: Mapping[str, str]) -> None:
+        put_published_policies(policies, self.sink_spec)
 
     def take(self, rollout_id: int) -> dict[str, Any]:
         for name in (f"rollout-{rollout_id}.json", "rollout-latest.json"):
@@ -316,6 +348,13 @@ def _sink_actor_class():
         def get_token(self) -> str | None:
             return self._token
 
+        # The round being generated (rollout ahead: one above the token's version).
+        def set_round(self, rollout_id: int) -> None:
+            self._round = int(rollout_id)
+
+        def get_round(self) -> int | None:
+            return getattr(self, "_round", None)
+
         # agentic-rollout-utilization 3.5/4.1: the run's policy-age limit after a
         # governor fallback (None = the configured limit; only ever lowered).
         def set_limit(self, limit: int) -> None:
@@ -323,6 +362,13 @@ def _sink_actor_class():
 
         def get_limit(self) -> int | None:
             return getattr(self, "_limit", None)
+
+        # P0-S: published version -> weight hash (JSON), for trajectory evidence.
+        def set_policies(self, payload: str) -> None:
+            self._policies = payload
+
+        def get_policies(self) -> str | None:
+            return getattr(self, "_policies", None)
 
         def put(self, encoded: str) -> None:
             self._pending.append(encoded)
@@ -344,21 +390,59 @@ class RayMetadataSink:
         self.timeout_s = timeout_s
         self._ray = ray
         self._actor = _sink_actor_class().options(name=name, get_if_exists=True).remote()
+        self._late: dict[int, dict[str, Any]] = {}
+        self._held: list[dict[str, Any]] = []
 
     @property
     def sink_spec(self) -> str:
         return f"ray:{self.name}"
 
+    def discard(self) -> int:
+        """Drop every pushed record (a sampler island has no consumer); returns the count."""
+        return len(self._ray.get(self._actor.take_all.remote()))
+
     def set_policy_token(self, token: str) -> None:
         self._ray.get(self._actor.set_token.remote(token))
+
+    def set_rollout_round(self, rollout_id: int) -> None:
+        self._ray.get(self._actor.set_round.remote(int(rollout_id)))
 
     def set_max_policy_age(self, limit: int) -> None:
         self._ray.get(self._actor.set_limit.remote(int(limit)))
 
+    def set_published_policies(self, policies: Mapping[str, str]) -> None:
+        self._ray.get(self._actor.set_policies.remote(json.dumps(dict(policies), sort_keys=True)))
+
+    def _take_items(self) -> list[dict[str, Any]]:
+        """Every pushed record not yet taken; late round records (E1) are kept aside
+        by rollout id, the others are returned (and forgotten) in push order."""
+        from .rollout_meta_hook import LATE_META_SCHEMA
+
+        for raw in self._ray.get(self._actor.take_all.remote()):
+            item = json.loads(raw)
+            if item.get("schema") == LATE_META_SCHEMA:
+                self._late[int(item["rollout_id"])] = item
+            else:
+                self._held.append(item)
+        items, self._held = self._held, []
+        return items
+
+    def take_late(self, rollout_id: int, *, timeout_s: float | None = None) -> dict[str, Any] | None:
+        """The late record of ``rollout_id`` (the deferred cross-version estimate),
+        waiting up to ``timeout_s``; None when it did not arrive."""
+        deadline = time.monotonic() + (self.timeout_s if timeout_s is None else timeout_s)
+        while True:
+            self._held = self._take_items()  # a next round's records stay for take()
+            if rollout_id in self._late:
+                return self._late.pop(rollout_id)
+            if time.monotonic() > deadline:
+                return None
+            time.sleep(0.05)
+
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
         while True:
-            items = [json.loads(i) for i in self._ray.get(self._actor.take_all.remote())]
+            items = self._take_items()
             main = [i for i in items if i.get("schema") != ROUND_META_SCHEMA]
             extra = [i for i in items if i.get("schema") == ROUND_META_SCHEMA]
             if items:
@@ -445,11 +529,19 @@ def handle_from_metadata(
         aborted_in_flight_tokens=payload.get("aborted_in_flight_tokens"),
         aborted_in_flight_unknown_groups=payload.get("aborted_in_flight_unknown_groups"),
         abort_mechanism=MILES_ABORT_MECHANISM,
+        backend="miles",
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
         ),
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
+        ),
+        buffer_stale_groups=(
+            int(payload["buffer_stale_groups"]) if "buffer_stale_groups" in payload else None
+        ),
+        buffer_stale_positions=(
+            [[int(v) for v in run] for run in payload["buffer_stale_positions"]]
+            if payload.get("buffer_stale_positions") else None
         ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
@@ -467,6 +559,7 @@ def handle_from_metadata(
         trajectory_rewards=(
             tuple(payload["trajectory_rewards"]) if payload.get("trajectory_rewards") else None
         ),
+        round_data_rows=payload.get("round_data_rows") or None,
         carry_over=_carry_over_fields(payload),
         cross_version_truncated_fraction=(
             float(payload["cross_version_truncated_fraction"])
@@ -477,6 +570,8 @@ def handle_from_metadata(
 
 
 _CARRY_OVER_KEYS = (
+    # P0-S overlap: Miles fully_async stale drops (None = unknown)
+    "stale_dropped_groups", "execution_mode",
     "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
     "cross_version_scored_tokens", "cross_version_unscored_samples",
     # 5.5: distribution of the cross-version IS ratio (calibrates warn/fallback)
@@ -490,6 +585,8 @@ _CARRY_OVER_KEYS = (
     "resumed_groups", "resumed_done_groups", "suspend_expired_trajectories",
     "policy_age_exceeded_trajectories", "suspended_trajectories", "suspended_env_seconds",
     "suspend_retried_turns",
+    # rl-offpolicy-correction-passthrough D5/D6: the driver pops these into ``offpolicy_gate``
+    GATE_DROPPED_LENGTHS, GATE_GRANULARITY, TRUNCATED_BY_TURN,
 )
 
 
@@ -577,6 +674,17 @@ def _engine_capacity(info: Any) -> int | None:
     return int(value) if isinstance(value, int) and value > 0 else None
 
 
+@dataclass(frozen=True)
+class PendingGeneration:
+    """A batch :meth:`MilesRolloutPool.start_generate` sent to the rollout executor:
+    its round, the published (version, hash) it is generated with, and the loop
+    task that returns its data pack."""
+
+    rollout_id: int
+    policy: tuple[int, str]
+    task: Any
+
+
 class MilesRolloutPool:
     """``RolloutPool`` port. ``expected_policy`` returns the published (version, hash)."""
 
@@ -618,14 +726,24 @@ class MilesRolloutPool:
         self._capacity: dict[str, int] = {}
         self._kv_capacity: dict[str, int] = {}
         self._args = args
+        self._fully_async = bool(getattr(args, "fully_async", False))
+        self._prompt_ledger_installed = False
+        # S27 task assignment: an island with a data slot reshuffles every later pass
+        # over its rows (data_passes); installed in the executor before the first draw
+        self._data_passes_pending = bool(getattr(args, "yeto_rl_data_slot", None))
+        # S27 P2: an island that claims its rows from the dispenser (task_dispense)
+        self._dispense_pending = bool(getattr(args, "yeto_rl_data_dispense", None))
+        self._dispense_installed = False
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
         self._controller = inference_controller
         self._executor = rollout_executor
         self._metadata = metadata
+        self._deferred_estimates: set[int] = set()  # E1: late cross-version estimates
         self._expected_policy = expected_policy
-        self._run = (runner or LoopRunner()).run
+        self._runner = runner or LoopRunner()
+        self._run = self._runner.run
         self._last_cursor: dict[str, int] | None = None
         # test-only start delay (INJECT_START_DELAY_ENV); applied once per process
         self._inject_start_delay = injected_start_delay()
@@ -663,6 +781,13 @@ class MilesRolloutPool:
         if not callable(setter):
             raise RuntimeError("this rollout metadata sink cannot lower the policy-age limit")
         setter(int(limit))
+
+    def set_published_policies(self, published: PublishedPolicies) -> None:
+        """P0-S (driver optional verb): the published versions in the policy-age
+        window, from which the rollout side names each trajectory's policy."""
+        setter = getattr(self._metadata, "set_published_policies", None)
+        if callable(setter):
+            setter(published.to_dict())
 
     def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
         """The data source position NOW (and its reuse-buffer length), read inside
@@ -712,6 +837,8 @@ class MilesRolloutPool:
         (same targets as ``live_data_cursor``); returns the cursor read back
         there, None = unknown (the driver then refuses to train)."""
         wanted = {k: int(v) for k, v in dict(cursor).items()}
+        if getattr(self, "_data_passes_pending", False):
+            self._install_data_passes()  # the seek then orders the rows of the cursor's pass
         kind, target = _executor_target(self._executor)
         if kind == "local":
             return seek_executor_cursor(SimpleNamespace(data_source=target), wanted)
@@ -726,19 +853,90 @@ class MilesRolloutPool:
         self._last_cursor = None if landed is None else dict(landed)
         return None if landed is None else dict(landed)
 
+    def _install_dispense(self) -> None:
+        """Once, before the first draw: the executor's data source takes its rows
+        from the task dispenser (``task_dispense`` module doc)."""
+        if not getattr(self, "_dispense_pending", False):
+            return
+        from yeto.protocol import island_hmac_key_from_env
+
+        from .task_dispense import install
+
+        installed = self._in_executor(install, dict(self._args.yeto_rl_data_dispense),
+                                      island_hmac_key_from_env())
+        logger.info("task dispenser installed in the rollout executor: %s", installed)
+        self._dispense_pending = False
+        self._dispense_installed = True
+
+    def commit_dispensed(self, rollout_id: int) -> dict[str, Any] | None:
+        """S27 P2 (driver, after the round's sync boundary): the rollout executor
+        reports the round's kept rows trained (``task_dispense.commit_round``).
+        None when this island takes no rows from the dispenser."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import commit_round
+
+        return self._in_executor(commit_round, int(rollout_id))
+
+    def close_dispensed(self) -> dict[str, Any] | None:
+        """S27 P2 (driver, finished run): release every row not trained yet."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import close_source
+
+        self._dispense_installed = False
+        return self._in_executor(close_source)
+
+    def _install_data_passes(self) -> None:
+        """Once, before the first draw or seek (``data_passes`` module doc)."""
+        if not self._data_passes_pending:
+            return
+        from .data_passes import install
+
+        self._in_executor(install, seed=int(getattr(self._args, "seed", 0) or 0))
+        self._data_passes_pending = False
+
     def _in_executor(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
         """Run ``fn(executor, ...)`` inside the rollout executor's process (same
         targets as ``live_data_cursor``); raises when it cannot."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+
+    def _in_executor_from_thread(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
+        """:meth:`_in_executor` for a thread other than the driver's: it waits on the
+        Ray reference itself instead of the driver's event loop (which may be running)."""
+        local, remote = self._executor_call()
+        if local is not None:
+            return fn(local, *fn_args, **fn_kwargs)
+        import ray
+
+        return ray.get(remote(fn, *fn_args, **fn_kwargs))
+
+    def _executor_call(self) -> tuple[Any, Any]:
+        """(local executor view, None) or (None, the actor's ``__ray_call__.remote``)."""
         kind, target = _executor_target(self._executor)
         if kind == "local":
-            return fn(SimpleNamespace(data_source=target), *fn_args, **fn_kwargs)
+            return SimpleNamespace(data_source=target), None
         if kind != "ray":
             raise RuntimeError("rollout executor %s is neither a local executor nor a Ray "
                                "actor (handle)" % type(self._executor).__name__)
         remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
         if not callable(remote):
             raise RuntimeError("Ray actor handle %s has no __ray_call__" % type(target).__name__)
-        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+        return None, remote
+
+    def late_cross_version_fraction(self, rollout_id: int) -> float | None:
+        """E1: the deferred cross-version IS estimate of ``rollout_id`` (fully_async),
+        None when the round deferred none or it did not arrive in time."""
+        take_late = getattr(self._metadata, "take_late", None)
+        if not callable(take_late) or rollout_id not in self._deferred_estimates:
+            return None
+        self._deferred_estimates.discard(rollout_id)
+        late = take_late(rollout_id)
+        value = (late or {}).get("cross_version_truncated_fraction")
+        return None if value is None else float(value)
 
     def export_in_flight(self) -> dict[str, Any]:
         """agentic-rollout-utilization 3.3 (limit > 0): the cut's in-flight
@@ -771,6 +969,32 @@ class MilesRolloutPool:
     def generate(
         self, rollout_id: int, *, expected_policy_version: str | None = None
     ) -> RolloutBatchHandle:
+        policy = self._begin_generation(rollout_id, expected_policy_version)
+        data_pack = self._run(self._executor.get(rollout_id))
+        return self._batch_of(rollout_id, policy, data_pack)
+
+    def start_generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> PendingGeneration:
+        """Rollout ahead (driver ``rollout_ahead``): send the batch of ``rollout_id``
+        to the rollout executor and return while the engines generate it."""
+        policy = self._begin_generation(rollout_id, expected_policy_version)
+        task = self._runner.spawn(self._executor.get(rollout_id))
+        return PendingGeneration(rollout_id=rollout_id, policy=policy, task=task)
+
+    def finish_generate(self, pending: PendingGeneration) -> RolloutBatchHandle:
+        """Wait for a batch :meth:`start_generate` sent; the engines are idle after it."""
+        data_pack = self._run(pending.task)
+        return self._batch_of(pending.rollout_id, pending.policy, data_pack)
+
+    def cancel_generate(self, pending: PendingGeneration) -> None:
+        """Drop a batch nobody will train (a failed round); its result is never read."""
+        pending.task.cancel()
+
+    def _begin_generation(self, rollout_id: int,
+                          expected_policy_version: str | None) -> tuple[int, str]:
+        """Bind the rollout side to the published policy and this round, then open
+        the rollout (upstream ``prepare_rollout``). Returns (version, hash)."""
         policy_version, policy_hash = self._expected_policy()
         token = policy_token(policy_version, policy_hash)
         if expected_policy_version is not None and expected_policy_version != token:
@@ -785,11 +1009,29 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
             setter(token)
+        round_setter = getattr(self._metadata, "set_rollout_round", None)
+        if round_setter is not None:  # the round may run ahead of the token's version
+            round_setter(rollout_id)
+        self._install_data_passes()
+        self._install_dispense()
+        if self._fully_async and not self._prompt_ledger_installed:
+            # P0-S: account for the prompts the background worker draws
+            from .fully_async_prompts import install as install_prompt_ledger
+
+            self._in_executor(install_prompt_ledger)
+            self._prompt_ledger_installed = True
         self._run(self._controller.prepare_rollout(rollout_id))
-        data_pack = self._run(self._executor.get(rollout_id))
-        self._offload_after_rollout()
+        return policy_version, policy_hash
+
+    def _batch_of(self, rollout_id: int, policy: tuple[int, str], data_pack: Any) -> RolloutBatchHandle:
+        """The batch handle of a finished generation (its metadata from the sink)."""
+        policy_version, policy_hash = policy
+        if not self.defer_offload:
+            self._offload_after_rollout()
         try:
             payload = self._metadata.take(rollout_id)
+            if payload.get("cross_version_estimate") == "deferred":
+                self._deferred_estimates.add(int(rollout_id))
             handle = handle_from_metadata(
                 payload,
                 rollout_id=rollout_id,
@@ -993,6 +1235,22 @@ class MilesRolloutPool:
 
         _resolve(_call(source, method, sorted(members)))
 
+    def set_admission(self, open_: bool) -> None:
+        """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
+        harness admission to this pool's running members (no-op without a board)."""
+        self._harness_admission("open_admission" if open_ else "close_admission", self.members())
+
+    # E1: set by a driver that runs the --offload-rollout step in its own phase
+    # (offload_after_generate); other callers keep the offload inside generate
+    defer_offload = False
+
+    @property
+    def offloads_after_generate(self) -> bool:
+        return self._args is not None and bool(getattr(self._args, "offload_rollout", False))
+
+    def offload_after_generate(self) -> None:
+        self._offload_after_rollout()
+
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
 
@@ -1019,7 +1277,16 @@ class MilesRolloutPool:
     def abort(self) -> None:
         self._run(self._controller.abort_all())
 
+    @property
+    def engineless(self) -> bool:
+        """True on a trainer-only island (Miles --debug-train-only): samples come
+        from the store and no engine serves a policy, so a publication has no
+        members to acknowledge it (the driver accepts an empty member set)."""
+        return bool(getattr(self._args, "debug_train_only", False))
+
     def members(self) -> frozenset[str]:
+        if self.engineless:
+            return frozenset()
         return self._run(running_members(self._controller))
 
     # -- E1 membership verbs (3.4) ---------------------------------------------

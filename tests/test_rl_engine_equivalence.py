@@ -462,29 +462,6 @@ def test_evaluate_verdicts():
     assert not dec["tiers"]["1_round1"]["gated"] and dec["verdict"] == "PASS"
 
 
-def test_plan_seeds_and_teacher_forcing_commands(tmp_path, capsys):
-    assert eq.main(["plan", "--launch-args", "--model m --global-rounds 3",
-                    "--seeds", "17,18,19", "--teacher-forcing", "--out-dir", str(tmp_path)]) == 0
-    plan = json.loads(capsys.readouterr().out)
-    names = [s["name"] for s in plan["steps"]]
-    assert names == ["legacy-s17", "legacy-s18", "legacy-s19", "ports-s17", "ports-s18",
-                     "ports-s19", "tf-legacy", "tf-ports"]
-    for s in plan["steps"]:
-        cmd = s["command"]
-        assert cmd[cmd.index("--rl-engine") + 1] == s["engine"]
-        assert cmd[cmd.index("--seeds") + 1] == str(s["seed"])
-    tf = plan["steps"][-1]
-    assert tf["command"][tf["command"].index("--custom-generate-function-path") + 1] == \
-        "yeto.rl.teacher_forcing.replay_generate"
-    assert tf["command"][len(tf["command"]) - tf["command"][::-1].index("--global-rounds")] == "1"
-    assert tf["env"]["YETO_RL_REPLAY_ROLLOUTS"].endswith("legacy-s17/work/seed-17/*/rollouts/island-*/0.pt")
-    assert all(s["env"].get("YETO_RL_AUDIT_GRADS") == "1" for s in plan["steps"][-2:])
-    assert not any(s["env"] for s in plan["steps"][:-2])
-    assert not list(tmp_path.iterdir())
-    with pytest.raises(SystemExit):
-        eq.parse_args(["plan", "--launch-args", "x", "--seeds", "18", "--primary-seed", "17"])
-
-
 def test_fake_mode_produces_labeled_layered_report(tmp_path):
     out = tmp_path / "eqv"
     assert eq.main(["fake", "--out-dir", str(out), "--rounds", "3"]) == 0
@@ -534,15 +511,13 @@ def test_replay_index_exact_then_occurrence_then_miss():
     assert idx.hits == {"exact": 2, "occurrence": 1}
 
 
-def test_apply_record_restamps_policy_token_per_engine():
-    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token="yeto:0:abc",
-                         legacy_token=None)
+def test_apply_record_restamps_the_policy_token():
+    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token="yeto:0:abc")
     assert s.response == "a" and s.tokens == [1, 2, 3] and s.status is _Status.COMPLETED
     assert s.weight_versions == [] and s.metadata["weight_version"] == "yeto:0:abc"
-    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token=None, legacy_token="L")
-    assert s.weight_versions == ["L"] and s.metadata["yeto_teacher_forced"]
+    assert s.metadata["yeto_teacher_forced"]
     with pytest.raises(tfm.ReplayMiss):
-        tfm.apply_record(_sample("q", 0), _rec("p", 0, "a"), ports_token=None, legacy_token=None)
+        tfm.apply_record(_sample("q", 0), _rec("p", 0, "a"), ports_token=None)
 
 
 def test_replay_generate_loads_recorded_dump(tmp_path, monkeypatch):
@@ -572,8 +547,8 @@ def test_benchmark_forwards_custom_generate_function_path(tmp_path):
     prompt = tmp_path / "prompts.jsonl"
     prompt.write_text("{}\n", encoding="utf-8")
     payload = bench.worker_payload(
-        args, bench.WorkerSpec(0, 1, 1, prompt, False),
-        arm=bench.select_arms("1", 1, 1, kinds=("native",))[0], run_dir=tmp_path,
+        args, bench.WorkerSpec(0, 1, 1, prompt),
+        arm=bench.select_arms("1", 1, 1, kinds=("single",))[0], run_dir=tmp_path,
         model_path=tmp_path / "model", syncer=None, reward_sha256="c" * 64)
     assert payload["arguments"]["custom_generate_function_path"] == \
         "yeto.rl.teacher_forcing.replay_generate"

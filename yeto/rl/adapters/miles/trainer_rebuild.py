@@ -26,8 +26,8 @@ functions are no-ops, the data source reads the rollout process' own
 state file exists there). Whatever a (custom) load does, the data cursor is
 read through ``data_cursor()`` (``RolloutPool.data_cursor``; E1 interface)
 before disposal and after the rebuild: any difference -> RECOVERY_REQUIRED.
-yeto's ports engine never reads ``args.start_rollout_id`` (review L3: only the
-legacy non-ports ``yeto/rl/adapters/miles/legacy/engine.py`` and other runtimes do).
+yeto's ports engine never reads ``args.start_rollout_id`` (review L3: only other
+runtimes do).
 
 Failure semantics (fork ``TrainerRebuildError``: no automatic rollback):
 
@@ -116,6 +116,14 @@ def live_cursor(rollout: Any, when: str) -> dict[str, int]:
     if cursor is None:
         raise RuntimeError(f"rollout data cursor unknown {when} (live read failed); refusing to compare")
     return dict(cursor)
+
+
+def confirm_resumed_cursor(trainer: Any, cursor: Mapping[str, int]) -> None:
+    """Hand the data cursor the rebuilt trainer continues from to its resume
+    assertions (S25 N7.6: compared with the cut's data watermark)."""
+    confirm = getattr(trainer, "confirm_resumed_data_cursor", None)
+    if callable(confirm):
+        confirm(cursor)
 
 
 def rebuild_preconditions(args: Any) -> list[str]:
@@ -222,8 +230,14 @@ def rebuild_same_shape(
     max_attempts: int = 2,
     critic: SwappableActor | None = None,
     critic_trainer_id: str = "critic",
+    resumed_cursor: Mapping[str, int] | None = None,
 ) -> RebuildResult:
     """Dispose + rebuild the trainer (same shape) and restore the cut via ``restore()``.
+
+    ``resumed_cursor`` is the data position the next batch starts from, compared
+    with the cut's data watermark after the restore (S25 N7.6); default: the
+    live data cursor read after the rebuild. Only a caller that replays a batch
+    drawn at the cut (the E2 harness) passes the cut's cursor.
 
     ``trainer`` is the :class:`~.trainer.MilesTrainerGroup`; its layout is
     read back from the running ranks before and after. ``restore`` calls
@@ -276,6 +290,7 @@ def rebuild_same_shape(
             if now != layout:
                 raise RuntimeError(f"layout changed across a same-shape rebuild: {layout} -> {now}")
             manifest = restore()
+            confirm_resumed_cursor(trainer, after if resumed_cursor is None else resumed_cursor)
         except Exception as error:  # noqa: BLE001
             attempts.append({"attempt": attempt, "stage": "after_rebuild", "error": repr(error)})
             raise RecoveryRequired(f"trainer unusable after rebuild: {error}", attempts=attempts) from error
@@ -388,7 +403,9 @@ def rebuild_resharded(
         now = trainer.actual_layout()
         if now != dict(layout):
             raise RuntimeError(f"{stage}: running layout {now} != expected {dict(layout)}")
-        return generation, restore()
+        restored = restore()
+        confirm_resumed_cursor(trainer, after)
+        return generation, restored
 
     fallback_view = old_view
     try:

@@ -239,16 +239,17 @@ def test_governor_fallback_lowers_the_rollout_limit_through_the_sink(sink, tmp_p
 def test_miles_stage_two_support_and_single_turn_check():
     from yeto.rl.adapters.miles.policy_age import SUPPORT, check_task, policy_age_argv
 
-    # agentic-rollout-utilization 5 (stage 3) raised the declared stage; limit still <= 1
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (3, 1)
+    # agentic-rollout-utilization 5 (stage 3); L6.9 raised the cap to 4 (A_hard >= 2)
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (3, 4)
     SUPPORT.check(1)
-    with pytest.raises(PolicyAgeError, match="at most 1"):
-        SUPPORT.check(2)
+    SUPPORT.check(2)
+    with pytest.raises(PolicyAgeError, match="at most 4"):
+        SUPPORT.check(5)
     assert policy_age_argv(0) == () and policy_age_argv(1) == ("--partial-rollout",)
     check_task(1)
     check_task(0, custom_agent="x.y", custom_generate="x.z")
     with pytest.raises(PolicyAgeError, match="stage 3"):
-        check_task(1, custom_generate="yeto.rl.harness.codex.codex_openenv_generate.generate")
+        check_task(1, custom_generate="yeto.rl.adapters.miles.records_generate.generate")
     with pytest.raises(PolicyAgeError, match="recompute"):
         check_task(1, recompute_prefill=True)
 
@@ -258,7 +259,7 @@ def test_launcher_refuses_agentic_carry_over_before_launch():
     from yeto.launcher import _prepare_rl_args
 
     args = _args(["--rl-max-policy-age", "1", "--custom-generate-function-path",
-                  "yeto.rl.harness.codex.codex_openenv_generate.generate"])
+                  "yeto.rl.adapters.miles.records_generate.generate"])
     with pytest.raises(PolicyAgeError, match="stage 3"):
         _prepare_rl_args(args)
 
@@ -301,7 +302,30 @@ def test_driver_reports_carry_over_and_governs_on_the_rollout_estimate(tmp_path)
     carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
     assert carry and carry[0]["carried_in_groups"] == 1
     assert carry[0]["cross_version_truncated_fraction"] == 0.9
+    assert carry[0]["execution_mode"] == driver.execution_mode  # no override: profile label
     assert [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]
+
+
+def test_an_overlapped_rollout_labels_its_carry_over_event(tmp_path):
+    """P0-S-fix B: the fully_async round's own mode replaces the profile label."""
+    import dataclasses
+
+    from tests.test_rl_policy_age import _driver
+
+    driver = _driver(tmp_path, 1)
+    original = driver.rollout.generate
+
+    def gen(rid, **kw):
+        return dataclasses.replace(original(rid, **kw), carry_over={
+            "max_policy_age": 1, "execution_mode": "partitioned-overlap"})
+
+    driver.rollout.generate = gen
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
+    assert carry and {e["execution_mode"] for e in carry} == {"partitioned-overlap"}
+    assert all(e["execution_mode"] == driver.execution_mode
+               for e in events if e["event"] != "rl_rollout_carry_over" and "execution_mode" in e)
 
 
 def test_trajectory_records_carry_start_round_and_segments(sink):
@@ -324,3 +348,47 @@ def test_trajectory_records_carry_start_round_and_segments(sink):
     for r in recs:
         assert not [p for p in validate_trajectory_reward({**r, "rollout_id": 4, "policy_version": 4})
                     if "started_rollout_id" in p or "policy_versions" in p]
+
+
+def test_deferred_cross_version_estimate_arrives_as_a_late_record(sink, tmp_path):
+    """E1 (fully_async): the estimate runs in the background and reaches the sink as
+    a late record of its rollout id; the round's fields only say it was deferred."""
+    import glob
+    import json
+    import time
+
+    engine = FakePartialEngine()
+    args = SimpleNamespace(yeto_rl_max_policy_age=1, tis_clip=2.0, tis_clip_low=0.0)
+    s = Sample(index=0, group_index=0)
+    engine.generate(s, 3, 4, finish=False)
+    engine.generate(s, 4, 2, finish=True, reward=1.0)
+    current = [0.5, -0.5, 0.0, 0.4, -0.5, -0.5]
+    hook.put_policy_token(tok(4), sink)
+    fields = hook.carry_over_fields(args, [s], sink, lambda _s: current, defer_estimate_for=4)
+    assert fields["cross_version_estimate"] == "deferred"
+    assert "cross_version_truncated_fraction" not in fields
+    handle = handle_from_metadata({**round_metadata(args, [[s]], sink), **fields}, rollout_id=4,
+                                  policy_version=4, policy_hash=HASHES[4], data_pack=None)
+    assert handle.cross_version_truncated_fraction is None
+    deadline = time.monotonic() + 5
+    late = []
+    while not late and time.monotonic() < deadline:
+        late = [json.loads(open(p).read()) for p in glob.glob(f"{tmp_path}/*.json")]
+        late = [r for r in late if r.get("schema") == hook.LATE_META_SCHEMA]
+        time.sleep(0.02)
+    assert late and late[0]["rollout_id"] == 4
+    assert math.isclose(late[0]["cross_version_truncated_fraction"], 0.5)
+
+
+def test_driver_governs_on_a_late_rollout_estimate(tmp_path):
+    """E1: a fully_async round's estimate arrives after its train step; the policy-age
+    governor still sees it."""
+    from tests.test_rl_policy_age import _driver
+
+    driver = _driver(tmp_path, 1)
+    calls, asked = [], []
+    driver.rollout.set_max_policy_age = calls.append
+    driver.rollout.late_cross_version_fraction = lambda rid: asked.append(rid) or 0.9
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    assert asked and [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]

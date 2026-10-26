@@ -147,16 +147,17 @@ def test_full_sequence_passes_on_the_cpu_fake(tmp_path, determinism, colocated):
             return result
 
         ctx.driver.rebuild_trainer = rebuild_trainer
-    if not colocated:  # a publication advances the Miles weight_version counter
+    if not colocated:  # P0-S: a re-publication stamps the same policy version again
         def publish(state):
             published.append(state)
             for r in ctx.actor.target.ranks:
-                r.weight_updater.weight_version += 1
+                r.weight_updater.weight_version = r.weight_updater.weight_version - 1  # align
+                r.weight_updater.weight_version += 1  # Miles update_weights
 
         ctx.driver.publisher = SimpleNamespace(publish=publish)
     results = e2_harness.run_harness(ctx)
     assert len(published) == (0 if colocated else 2)
-    assert results["criteria"]["G-4.3 arm A weight_version == cut + re-publications"]["pass"]
+    assert results["criteria"]["G-4.3 arm A weight_version == cut"]["pass"]
     assert results["pass"]
     names = set(results["criteria"])
     for case in "abcdeg":

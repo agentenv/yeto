@@ -80,7 +80,9 @@ def handle_notice(notice: ReclaimNotice, *, save: Callable[[float], Any] | None,
                   write_marker: Callable[[str], Any] | None = None) -> dict[str, Any]:
     """Run the fixed order and return the event written.
 
-    ``save(budget_s)`` must return within ``budget_s`` (it may return a mapping
+    ``save(budget_s)`` is the reclaim save of the one save path (on a learner:
+    ``InFlightSaver.save`` -> ``yeto.rl.engine.recovery.save``). It must return
+    within ``budget_s`` (it may return a mapping
     with ``dropped_trajectories`` / ``dropped_tokens``); it runs in a helper
     thread and is abandoned if it overruns. ``leave()`` returns truthy when the
     coordinator confirmed the LEAVE. ``cap_s`` bounds the whole handler."""
