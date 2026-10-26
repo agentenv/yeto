@@ -45,6 +45,7 @@ from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, Wei
 
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
 
+from .megatron_full_parameter import VerlMegatronSyncError
 from .ports_impl import MEMBER, VerlIsland, VerlRolloutPool, VerlTrainerGroup, _inner_worker  # noqa: F401
 from .separate import (READBACK_STATUS, SeparatePlacement, SeparatePublisher, execution_profile,  # noqa: F401
                        wire_rollout_ahead, with_policy_age)
@@ -196,6 +197,92 @@ def _save_hf(worker, directory: Path, model_path: str, rank: int) -> None:
         torch.distributed.barrier()
     if rank == 0:
         (directory / COMPLETE_MARKER).write_text("")
+
+
+def remote_release_hf_export(worker_dict, directory: str, model_path: str) -> dict | None:
+    """Write the island's current weights as an HF checkpoint into ``directory``, for a
+    policy release of a Megatron buffer trainer (S28 G-120).
+
+    Collective: every trainer rank calls it, because Megatron-Bridge's
+    ``save_hf_weights`` gathers over TP/PP/EP.  With ``distributed_save=False`` (what
+    :func:`_save_hf` uses) **only rank 0 writes the files**; the other ranks exhaust
+    the weight generator to take part in the collectives
+    (``megatron/bridge/models/hf_pretrained/state.py`` ``save_generator``, core 0.18.2
+    on npu1).  So ``directory`` is filled on rank 0's node only, and the other ranks
+    remove the empty directory they had to create.
+
+    Returns rank 0's record (host, directory, files), None on the other ranks: the
+    island side checks that the driver can see those files
+    (:class:`MegatronReleaseWriter`)."""
+    import socket
+
+    import torch
+
+    worker = _inner_worker(worker_dict)
+    rank = int(torch.distributed.get_rank()) if torch.distributed.is_initialized() else 0
+    path = Path(directory)
+    _save_hf(worker, path, model_path, rank)
+    if rank != 0:
+        # This rank wrote nothing. Remove the directory it had to create, but only when
+        # it is empty: the ranks that share rank 0's node see rank 0's files here, and
+        # must not touch them (rank 0 writes the weights before _save_hf's barrier).
+        try:
+            if not any(path.iterdir()):
+                path.rmdir()
+        except OSError:
+            pass
+        return None
+    return {"host": socket.gethostname(), "directory": str(path),
+            "files": {p.name: p.stat().st_size for p in sorted(path.iterdir()) if p.is_file()}}
+
+
+class MegatronReleaseWriter:
+    """``write(rollout_id, directory)`` of a Megatron island's policy release (S28 G-120):
+    the same contract as :class:`~.hf_export.VerlHfWriter`, so
+    ``buffer_ports.full_release_weights`` and ``merged_release.write_full_checkpoint``
+    hold it unchanged, but the weights are written by the trainer ranks through
+    Megatron-Bridge instead of being pulled name by name on the driver.
+
+    Why a separate writer: :class:`~.megatron_full_parameter.MegatronFullParameterGroup`
+    has no ``export_parameters`` (the Megatron boundary exports whole HF files, it does
+    not serve single HF tensors to the driver), so ``VerlHfWriter`` cannot run on a
+    Megatron island -- it raised and the island never published a release.
+
+    ``directory`` is chosen by the driver, and only trainer rank 0 writes into it, so
+    rank 0 must share the driver's filesystem.  That holds when rank 0's worker sits on
+    the driver's node, which is the placement this island uses; when it does not, the
+    files would be on another node and the release would silently be empty, so
+    :meth:`__call__` refuses instead."""
+
+    def __init__(self, island: Any, model_path: str | Path) -> None:
+        self.island = island
+        self.model_path = str(model_path)
+        self.last_record: dict | None = None
+
+    def __call__(self, rollout_id: int, directory: Path) -> None:
+        import socket
+
+        del rollout_id  # the directory names the release; the weights are the trainer's now
+        path = Path(directory)
+        records = [r for r in self.island.call_workers(remote_release_hf_export, str(path), self.model_path)
+                   if r is not None]
+        if len(records) != 1:
+            raise VerlMegatronSyncError(
+                f"a Megatron release export expects exactly one writing rank, got {len(records)}")
+        record = records[0]
+        self.last_record = record
+        if not record["files"]:
+            raise VerlMegatronSyncError(
+                f"the Megatron release export wrote no file into {path} on {record['host']}")
+        missing = [name for name in record["files"] if not (path / name).is_file()]
+        if missing:
+            raise VerlMegatronSyncError(
+                f"the Megatron release export wrote {len(record['files'])} file(s) into {path} on "
+                f"{record['host']}, but this process ({socket.gethostname()}) cannot see "
+                f"{len(missing)} of them (first: {missing[0]}): trainer rank 0 and the island driver "
+                "must share a filesystem for a staged release")
+        print(f"[yeto megatron release] {len(record['files'])} file(s), "
+              f"{sum(record['files'].values())} byte(s) on {record['host']}", flush=True)
 
 
 def remote_hf_export(worker_dict, config: dict, rollout_id: int, policy_version: int, final: bool,

@@ -188,11 +188,20 @@ def release_weights_for(island: FullyAsyncIsland, plan: Mapping[str, Any]):
     ``fully_async_full.full_parameter_ports`` before the ports are installed)."""
     if plan.get("parameter_mode") != "full":
         return None
+    from . import megatron_engine
     from .full_parameter_stream import _LoopRunner
     from .hf_export import VerlHfWriter
 
     if island.full_group is None:
         raise RuntimeError("a full-parameter buffer trainer installs its ports after its policy state")
+    if plan.get("engine") == megatron_engine.ENGINE_MEGATRON:
+        # S28 G-120: a Megatron island's weights are written by its trainer ranks through
+        # Megatron-Bridge (the HF boundary exports whole files and serves no single HF
+        # tensor to the driver, so VerlHfWriter's export_parameters raises there). Same
+        # ReleaseWeights contract, so the store, the delta chain and staging are unchanged.
+        from .megatron_ports import MegatronReleaseWriter
+
+        return full_release_weights(MegatronReleaseWriter(island, plan["model_path"]))
     return full_release_weights(VerlHfWriter(island.full_group, plan["model_path"], run=_LoopRunner().run))
 
 
