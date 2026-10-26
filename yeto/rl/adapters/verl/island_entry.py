@@ -391,6 +391,21 @@ def agentic_run_fields(args: Any, *, out_dir: str) -> dict:
             "agent_loop_workers": int(os.environ.get("YETO_VERL_AGENT_LOOP_WORKERS", "1"))}
 
 
+def _agent_task_model_name() -> str:
+    """``AgentTask.model_name``'s default: the name the agent sends when a row sets none.
+
+    ``task_lists.verl_rows`` deliberately keeps the model name out of the rows
+    (it is a deployment fact), so every sample uses this default.  A row that does
+    set ``model_name`` must be launched with a matching ``YETO_RECORDS_MODEL``.
+    """
+    from dataclasses import fields
+
+    from yeto.rl.agentic import AgentTask
+
+    field = next(f for f in fields(AgentTask) if f.name == "model_name")
+    return str(field.default)
+
+
 def agentic_records_env(run: Any, *, model_path: str, card: str) -> dict[str, str]:
     """Records-proxy environment of the agent-loop workers (``rollout_engine`` module doc).
 
@@ -418,7 +433,14 @@ def agentic_records_env(run: Any, *, model_path: str, card: str) -> dict[str, st
         "YETO_AGENTIC_RECORDER": "yeto.rl.harness.gateway.recorder:recorder_from_env",
         records_env.PROXY_ENV: "yeto.rl.adapters.verl.rollout_engine:records_proxy_from_env",
         records_env.TOKENIZER_ENV: str(model_path),
-        records_env.MODEL_ENV: os.environ.get("YETO_RECORDS_MODEL", Path(model_path).name),
+        # The model name the proxy accepts must equal the one the agent sends, and
+        # the agent sends ``AgentTask.model_name`` (Harbor's AgentConfig gets
+        # ``openai/<model_name>``, ``harbor.trial.build_trial_config``). The gateway
+        # refuses any other name outright ("model is fixed by the gateway",
+        # ``gateway/core.py:116-117``), so this is taken from the dataclass default
+        # rather than guessed from the checkpoint path: a plausible-looking
+        # checkpoint name would refuse every model call of the run.
+        records_env.MODEL_ENV: os.environ.get(records_env.MODEL_ENV) or _agent_task_model_name(),
         records_env.SAMPLING_ENV: json.dumps(sampling, sort_keys=True),
         records_env.MAX_MODEL_LEN_ENV: str(run.max_model_len or run.max_prompt_len + run.max_response_len),
         records_env.CARD_ENV: card,

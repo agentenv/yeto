@@ -659,6 +659,16 @@ def test_records_proxy_environment_is_derived_from_the_island_config(monkeypatch
         "temperature": run.temperature, "top_p": run.top_p, "top_k": run.top_k,
         "max_tokens": run.max_response_len}
     assert env[records_env.MAX_MODEL_LEN_ENV] == str(run.max_model_len)
+    # The gateway refuses any model name other than this one ("model is fixed by
+    # the gateway"), and the agent sends AgentTask.model_name. Pin the equality:
+    # a name taken from the checkpoint path would refuse every model call.
+    from dataclasses import fields
+
+    from yeto.rl.agentic import AgentTask
+
+    default_model = next(f for f in fields(AgentTask) if f.name == "model_name").default
+    assert env[records_env.MODEL_ENV] == default_model
+    assert "snap" not in env[records_env.MODEL_ENV] and "model_path" not in env[records_env.MODEL_ENV]
     # the tunnel owns the port and the public base; the island must not pin them
     assert records_env.PROXY_PORT_ENV not in env and records_env.PROXY_PUBLIC_BASE_ENV not in env
     assert env[records_env.PROXY_HOST_ENV] == "0.0.0.0"  # the tunnel reaches it from outside
