@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib
+import sys
 import os
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -428,6 +429,80 @@ def _install_once(root: str, *, log=None) -> dict[str, Any] | None:
         return install(root, log=log)
 
 
+def _wrap_worker_init(worker_cls: Any, root: str) -> bool:
+    """Make ``worker_cls.__init__`` install the stack when it returns.
+
+    Returns True when the class was already wrapped, so the caller can stay quiet."""
+
+    original = worker_cls.__init__
+    if getattr(original, "_yeto_ascend_stack", None) is not None:
+        return True
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        _install_once(root)
+
+    functools.update_wrapper(__init__, original)  # copies __dict__, so tag afterwards
+    __init__._yeto_ascend_stack = root
+    worker_cls.__init__ = __init__
+    return False
+
+
+def arm_without_importing(root: str, *, log=None) -> str:
+    """Wait for verl's base Worker **without importing verl here**.
+
+    This is what Ray's hook uses, and the reason is measured (S28 G-PIN, npu1 n4,
+    cards 6 and 7, Qwen2.5-1.5B, TP1/PP2): a hook that imports verl -- and through it
+    torch and torch_npu -- in the Ray worker process makes Megatron's first device
+    allocation fail with ``507033`` / ``rtSetDevice ... device retain error`` later in
+    that same process, and the island never builds its model. With the hook importing
+    nothing the same island builds its model and allocates on both cards. Ray runs the
+    hook before it leases the process to an actor, so that import happens before this
+    process has been told which card it owns.
+
+    So the hook only replaces ``builtins.__import__`` with a wrapper that watches for
+    :data:`VERL_WORKER`'s module. The worker itself imports verl a moment later, in
+    its own actor; the wrapper then wraps ``Worker.__init__`` and puts the original
+    ``__import__`` back. Nothing here imports torch, verl or a plugin."""
+
+    import builtins
+
+    say = log if log is not None else (lambda line: print(line, flush=True))
+    module_name, class_name = VERL_WORKER
+    already = getattr(sys.modules.get(module_name), class_name, None)
+    if already is not None:
+        # Someone in this process has already imported it, so waiting would import
+        # nothing anyway: wrap it now.
+        if not _wrap_worker_init(already, root):
+            say(f"[yeto-ascend-stack] root={root} deferred: {module_name}.{class_name} is "
+                f"already imported in this process, so the install runs when its "
+                f"__init__ returns")
+        return "deferred"
+    original_import = builtins.__import__
+    if getattr(original_import, "_yeto_ascend_stack", None) is not None:
+        return "deferred"
+
+    def watching_import(name, *args, **kwargs):
+        module = original_import(name, *args, **kwargs)
+        target = sys.modules.get(module_name)
+        if target is not None:
+            worker_cls = getattr(target, class_name, None)
+            if worker_cls is not None:
+                builtins.__import__ = original_import  # watch once, then step aside
+                if not _wrap_worker_init(worker_cls, root):
+                    say(f"[yeto-ascend-stack] root={root} armed: {module_name}.{class_name} has "
+                        f"now been imported by this worker, so the install runs when its "
+                        f"__init__ returns")
+        return module
+
+    watching_import._yeto_ascend_stack = root
+    builtins.__import__ = watching_import
+    say(f"[yeto-ascend-stack] root={root} waiting for this worker to import "
+        f"{module_name}.{class_name}; nothing is imported by this hook (S28 G-PIN: a hook "
+        f"that imports verl here makes Megatron's first device allocation fail with 507033)")
+    return "deferred"
+
+
 def install_when_rank_known(root: str, *, log=None) -> str:
     """Arrange for :func:`install` to run at the first moment this process owns a card.
 
@@ -464,17 +539,8 @@ def install_when_rank_known(root: str, *, log=None) -> str:
         say(f"[yeto-ascend-stack] NOT installed: no {RANK_ENV} yet and {module_name}.{class_name} "
             f"is not available to wait for ({type(error).__name__}: {error})")
         return "unavailable"
-    original = worker_cls.__init__
-    if getattr(original, "_yeto_ascend_stack", None) is not None:
+    if _wrap_worker_init(worker_cls, root):
         return "deferred"
-
-    def __init__(self, *args, **kwargs):
-        original(self, *args, **kwargs)
-        _install_once(root)
-
-    functools.update_wrapper(__init__, original)  # copies __dict__, so tag afterwards
-    __init__._yeto_ascend_stack = root
-    worker_cls.__init__ = __init__
     say(f"[yeto-ascend-stack] root={root} deferred: no {RANK_ENV} in this process yet, so the "
         f"install waits for {module_name}.{class_name}.__init__ (it writes {RANK_ENV} and binds "
         f"the card before the model is built)")
@@ -547,4 +613,7 @@ def setup_worker() -> None:
         _install_at_model_build(root, lambda line: print(line, flush=True),
                                 after=when == "after_init_model")
         return
-    install_when_rank_known(root)
+    if rank_is_known():
+        _install_once(root)
+        return
+    arm_without_importing(root)

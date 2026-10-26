@@ -584,3 +584,61 @@ def test_never_arms_nothing_and_imports_no_verl(tmp_path, monkeypatch, capsys):
     assert not bound.exists() and stack.LAST_REPORT is None
     assert "nothing armed, nothing imported" in capsys.readouterr().out
     assert "verl" not in {name.split(".")[0] for name in sys.modules} or True  # see refuse()
+
+
+def test_the_hook_does_not_import_verl_in_the_worker_process(tmp_path, monkeypatch):
+    """The fix S28 G-PIN measured: Ray's hook must import nothing.
+
+    A hook that imports verl -- and through it torch and torch_npu -- in a Ray worker
+    process makes Megatron's first device allocation fail with 507033 later in that
+    same process (npu1 n4, run b-noplug fails, run b-never with the same flag and an
+    importing-nothing hook builds the model). This test fails if the hook reaches for
+    the seam eagerly again."""
+    import builtins
+    import sys
+
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    monkeypatch.delenv(stack.RANK_ENV, raising=False)
+    monkeypatch.delenv(stack.INSTALL_AT_ENV, raising=False)
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setattr(stack, "VERL_WORKER", ("not_imported_yet_module", "Worker"))
+    assert "not_imported_yet_module" not in sys.modules
+
+    def refuse(name, *args, **kwargs):
+        raise AssertionError(f"the hook imported {name}")
+
+    monkeypatch.setattr(stack.importlib, "import_module", refuse)
+    original_import = builtins.__import__
+    stack.setup_worker()
+    assert builtins.__import__ is not original_import, "the hook armed nothing"
+    builtins.__import__ = original_import
+
+
+def test_the_armed_hook_installs_when_the_worker_imports_verl_itself(tmp_path, monkeypatch):
+    """And the wait has to end: once the worker imports the seam, the wrapper is in
+    place and the install runs when the constructor returns."""
+    import builtins
+    import sys
+    import types
+
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    monkeypatch.delenv(stack.RANK_ENV, raising=False)
+    bound = tmp_path / "bound_device.txt"
+    monkeypatch.setattr(stack, "PLUGINS", (_device_touching_plugin(tmp_path, bound),))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setattr(stack, "VERL_WORKER", ("late_verl_module", "Worker"))
+    original_import = builtins.__import__
+    try:
+        stack.setup_worker()
+        assert not bound.exists()
+        module = types.ModuleType("late_verl_module")
+        module.Worker = type("Worker", (_FakeVerlWorker,), {"seen": []})
+        monkeypatch.setitem(sys.modules, "late_verl_module", module)
+        import json  # noqa: F401 - any import at all drives the watcher
+        assert builtins.__import__ is original_import, (
+            "the watcher stayed in builtins.__import__ after it had wrapped the seam, so "
+            "every later import in this worker pays for it")
+        module.Worker(local_rank="3")
+    finally:
+        builtins.__import__ = original_import
+    assert bound.read_text() == "3"
