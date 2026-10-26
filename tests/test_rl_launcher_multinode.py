@@ -361,3 +361,26 @@ def test_learner_parses_bundle_map_into_the_run_config_layout():
         _island_bundle_map(SimpleNamespace(rl_island_bundle_map=payload, rl_island_gpus_per_node=2), None)
     with pytest.raises(ValueError, match="list of ints"):
         _island_bundle_map(SimpleNamespace(rl_island_bundle_map='{"trainer":["a"]}', rl_island_gpus_per_node=2), 1)
+
+
+def test_island_task_forwards_the_dp_optimizer(monkeypatch):
+    # S27 G-BE: --rl-dp-optimizer reaches the island; the default (auto) adds nothing.
+    import sys
+    import types
+
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task, _args, _prepare_rl_args
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    runs = {}
+    for extra in ((), ("--rl-dp-optimizer", "replicated")):
+        args = _args(("--gpu", "nebius:8xh100", "--rl-engine", "ports", "--rl-placement", "fixed-partition",
+                      "--rl-rollout-gpus", "4", "--tensor-parallel", "2", *extra))
+        args.model_revision = "a" * 40
+        args.data_revision = "b" * 40
+        args.source_sha256 = "c" * 64
+        args.reward_sha256 = "d" * 64
+        _prepare_rl_args(args)
+        runs[extra] = launcher.make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400").run
+    assert "--rl-dp-optimizer" not in runs[()]
+    assert "--rl-dp-optimizer replicated" in runs[("--rl-dp-optimizer", "replicated")]

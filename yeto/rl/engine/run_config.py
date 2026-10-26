@@ -254,6 +254,9 @@ class BatchConfig:
     rollout_max_response_len: int
 
 
+DP_OPTIMIZERS = ("auto", "distributed", "replicated")
+
+
 @dataclass(frozen=True)
 class TrainMemoryConfig:
     """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
@@ -270,6 +273,19 @@ class TrainMemoryConfig:
     # Megatron gradient-accumulation fusion (fused wgrad into main_grad; needs
     # APEX/TE fused kernels). Off keeps the historical argv.
     gradient_accumulation_fusion: bool = False
+    # Optimizer of a full-parameter trainer at DP>1 (--rl-dp-optimizer):
+    # "distributed" (sharded FP32 masters), "replicated" (whole masters on
+    # every DP rank) or "auto" (distributed when the Miles pin supports it).
+    dp_optimizer: str = "auto"
+    # Gradient buffers and the data-parallel gradient reduce in bf16
+    # (--rl-grad-reduce-bf16, Megatron --grad-reduce-in-bf16) instead of fp32;
+    # FP32 masters and Adam moments stay (the full-parameter sync reads them).
+    grad_reduce_bf16: bool = False
+    # Megatron precision-aware optimizer with bf16 Adam moments
+    # (--rl-precision-aware-optimizer): FP32 masters live as 16-bit remainders
+    # inside TE FusedAdam, which the full-parameter sync cannot read, so only a
+    # no-sync island may use it.
+    precision_aware_optimizer: bool = False
 
 
 @dataclass(frozen=True)
@@ -583,11 +599,22 @@ def _nemotron_h_recipe():
     return backends.module("nemotron_h_recipe", backends.DEFAULT_BACKEND)
 
 
-def _rules():
-    """Backend-specific checks of the run (decoupling 4.2): Miles -> adapters/miles/run_config_rules."""
+def _rules(backend: str | None = None):
+    """Backend-specific checks of the run (decoupling 4.2) of the selected backend.
+
+    ``backend`` is the run's ``--rl-backend`` (``args.rl_backend``); unset means
+    the default backend (Miles -> adapters/miles/run_config_rules).  The
+    environment (``$YETO_RL_BACKEND``) is not read: the rules follow the run's
+    arguments only, so a Miles island never picks up another backend's rules.
+    """
     from . import backends
 
-    return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
+    return backends.module("run_config_rules", backend or backends.DEFAULT_BACKEND)
+
+
+def _backend_of(args) -> str | None:
+    """The run's ``--rl-backend`` (None when the arguments do not name one)."""
+    return getattr(args, "rl_backend", None)
 
 
 def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
@@ -649,7 +676,7 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
 
 def _resolve_ref_load(args, model_path) -> str:
     """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
-    return _rules().resolve_ref_load(args, model_path)
+    return _rules(_backend_of(args)).resolve_ref_load(args, model_path)
 
 
 def _validate_callable_spec(spec: str) -> None:
@@ -731,7 +758,7 @@ def resolve_rl_run_config(
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
     context_parallel = int(getattr(args, "context_parallel", 1) or 1)
     model_parallel = tensor_parallel * pipeline_parallel * context_parallel
-    rules = _rules()
+    rules = _rules(_backend_of(args))
     rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
     if context_parallel < 1 or actor_gpus % model_parallel:
         raise ValueError("trainer world must be divisible by TP*PP*CP")
@@ -1190,11 +1217,25 @@ def _train_memory(args) -> TrainMemoryConfig:
     offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
     if not 0.0 <= offload <= 1.0:
         raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
+    dp_optimizer = getattr(args, "rl_dp_optimizer", None) or "auto"
+    if dp_optimizer not in DP_OPTIMIZERS:
+        raise ValueError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
+    precision_aware = bool(getattr(args, "rl_precision_aware_optimizer", False))
+    if precision_aware and not getattr(args, "rl_single_island_no_sync", False):
+        # Miles full_parameter_state reads FP32 masters; TE FusedAdam keeps only remainders
+        raise ValueError("--rl-precision-aware-optimizer needs --rl-single-island-no-sync "
+                         "(the full-parameter sync reads FP32 optimizer masters)")
+    if precision_aware and offload > 0:
+        raise ValueError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
+                         "are exclusive (the offload already runs the precision-aware path)")
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
         optimizer_offload_fraction=offload,
         gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
+        dp_optimizer=dp_optimizer,
+        grad_reduce_bf16=bool(getattr(args, "rl_grad_reduce_bf16", False)),
+        precision_aware_optimizer=precision_aware,
     )
 
 

@@ -31,6 +31,13 @@ order the rows are read, before any split):
   until a central dispenser exists (P2): the rows of an island that left are
   read by no island, a fast island starts its next pass while a slow island is
   still in its first, and an island added after the launch gets no slot.
+* Dispenser (``--rl-data-split dispense``, S27 P2, :mod:`.task_dispense`):
+  the actor syncer hands out the rows. Every training island reads every row
+  of ``--data`` but trains only the rows it claims, a block per round; a fast
+  island claims more often, the rows of an island that leaves go to the
+  others, a relaunched or added island just claims, and passes after the
+  first are reshuffled (:func:`pass_order` over the whole data). Opt-in
+  until it has passed its GPU check; ``auto`` stays ``stride``.
 * Resume and relaunch: every data cursor counts rows of the island's own slot,
   so a resumed or relaunched island with the same slot continues at the same
   row. A full-parameter island keeps its position in the run store
@@ -49,8 +56,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-AUTO, STRIDE, SHARED = "auto", "stride", "shared"
-DATA_SPLITS = (AUTO, STRIDE, SHARED)
+AUTO, STRIDE, SHARED, DISPENSE = "auto", "stride", "shared", "dispense"
+DATA_SPLITS = (AUTO, STRIDE, DISPENSE, SHARED)
 # the mode of a launch whose islands do not split by slot
 TASKS, SINGLE, ROLES = "tasks", "single", "roles"
 
@@ -142,7 +149,12 @@ class DataSplitPlan:
     @property
     def several_islands(self) -> bool:
         """Whether several islands read the one ``--data`` file (split or shared)."""
-        return self.mode in (STRIDE, SHARED)
+        return self.mode in (STRIDE, SHARED, DISPENSE)
+
+    @property
+    def dispense(self) -> bool:
+        """The islands claim their rows from the actor syncer's dispenser."""
+        return self.mode == DISPENSE
 
     def slot(self, learner_id: int) -> DataSlot | None:
         """The island's slot under :data:`STRIDE`, else None (no ``--rl-data-slot``)."""
@@ -160,6 +172,11 @@ class DataSplitPlan:
         if self.mode == SHARED:
             return (f"{n} training islands read every row of --data in the same order "
                     f"({self.reason})")
+        if self.mode == DISPENSE:
+            return (f"{n} training island(s) claim the rows of --data from the syncer's "
+                    "dispenser, one block per round: no row goes to two islands, a fast island "
+                    "claims more, the rows of an island that leaves go to the others, passes "
+                    "after the first are reshuffled")
         if self.mode == TASKS:
             return "each training island reads the rows of its --rl-island-tasks list"
         if self.mode == ROLES:
@@ -206,6 +223,17 @@ def plan_data_split(requested: str | None, *, islands: Sequence[int], tasks: boo
     if requested not in DATA_SPLITS:
         raise ValueError(f"{DATA_SPLIT_FLAG} {requested!r}: expected one of {DATA_SPLITS}")
     islands = tuple(int(i) for i in islands)
+    if requested == DISPENSE:
+        if sample_roles:
+            raise ValueError(f"{DATA_SPLIT_FLAG} dispense covers training islands that generate and "
+                             "train; sampler islands keep their row slots (P4)")
+        if tasks:
+            raise ValueError(f"{DATA_SPLIT_FLAG} dispense and --rl-island-tasks exclude each other")
+        if external_learners:
+            raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover --external-learners")
+        if not islands:
+            raise ValueError(f"{DATA_SPLIT_FLAG} dispense needs at least one training island")
+        return DataSplitPlan(DISPENSE, requested, islands)
     if sample_roles:
         if requested != AUTO:
             raise ValueError(f"{DATA_SPLIT_FLAG} {requested}: sampler islands always read "

@@ -74,9 +74,12 @@ CARRY_FIELDS = (
 
 def max_policy_age(args: Any) -> int:
     """The rollout's effective limit: the configured one, lowered to 0 once the
-    driver's 3.5 governor fell back (``MilesRolloutPool.set_max_policy_age``)."""
+    driver's 3.5 governor fell back (``MilesRolloutPool.set_max_policy_age``).
+    Rollout ahead (``yeto_rl_rollout_ahead``): 0. Each batch comes from one
+    publication and nothing is carried over; the lag of a whole batch is the
+    driver's (the configured limit still bounds the trajectory evidence)."""
     limit = int(getattr(args, "yeto_rl_max_policy_age", 0) or 0)
-    if limit == 0:
+    if limit == 0 or getattr(args, "yeto_rl_rollout_ahead", 0):
         return 0
     from .rollout_meta_hook import max_policy_age_override
 

@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
+from yeto.rl.engine.run_config import DP_OPTIMIZERS
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
@@ -192,6 +193,30 @@ _ROLLOUT_ENGINE = (
         help="ports: share (0, 1] of the Adam state (FP32 masters and moments) "
         "that Megatron keeps and updates on the host (--optimizer-cpu-offload, "
         "with the distributed optimizer). Default 0: all on the device",
+    ),
+    shared_flag(
+        "--rl-grad-reduce-bf16",
+        action="store_true",
+        help="ports: gradient buffers and the data-parallel gradient reduce in bf16 "
+        "(Megatron --grad-reduce-in-bf16) instead of fp32; FP32 masters and Adam moments "
+        "stay. Saves 2 bytes per local parameter (e.g. Nemotron-3 Nano EP8 on 80 GB cards)",
+    ),
+    shared_flag(
+        "--rl-precision-aware-optimizer",
+        action="store_true",
+        help="ports: Megatron precision-aware optimizer with bf16 Adam moments (FP32 masters "
+        "kept as 16-bit remainders). --rl-single-island-no-sync only: the full-parameter "
+        "sync reads FP32 masters",
+    ),
+    shared_flag(
+        "--rl-dp-optimizer",
+        choices=DP_OPTIMIZERS,
+        default="auto",
+        help="ports: optimizer of a full-parameter trainer at DP>1. distributed: Megatron's "
+        "distributed optimizer (each DP rank keeps 1/DP of the FP32 masters and Adam moments; "
+        "needs a Miles pin with sharded masters); replicated: the non-distributed optimizer "
+        "(whole FP32 masters on every DP rank). auto (default): distributed when the pinned "
+        "Miles supports it, else replicated. Same synced values either way",
     ),
     shared_flag(
         "--rl-distributed-timeout-minutes",
@@ -408,6 +433,14 @@ _ISLAND = (
         "final parameters)",
     ),
     island_flag(
+        "--sweep-verify-ahead",
+        choices=("auto", "off"),
+        default="auto",
+        help="full-parameter: auto = check each received broadcast's chunks on a background "
+        "thread and let the trainer's apply skip that check (when the trainer's Miles has the "
+        "verified apply); off = the trainer checks every chunk in its apply",
+    ),
+    island_flag(
         "--sweep-expert-token-weights",
         action="store_true",
         help="full-parameter async, MoE: count the tokens each router sends to each "
@@ -475,7 +508,12 @@ _ISLAND = (
     island_flag("--rl-island-bundle-map", default=None, metavar="JSON"),
     # decoupling 7.7a: "<vendor>-<card>" from the launcher's card catalog
     # (yeto.hw.catalog); falls back to $YETO_RL_COMPAT_GROUP, unset -> error.
-    island_flag("--rl-compat-group", default=None),
+    # On the launcher: one group exported to every island instead of each card's
+    # group (mixed-card islands in one session; tolerance not calibrated).
+    shared_flag("--rl-compat-group", default=None, metavar="VENDOR-CARD",
+                help="declare this compat group on every island instead of the group of each "
+                     "island's card, so islands on different cards (e.g. H200 and H100) merge; "
+                     "their numeric tolerance is not calibrated"),
     # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
     # synced after every commit point and restored on an empty state dir (machine replaced)
     island_flag("--rl-elastic-checkpoint-store", default=None, metavar="PATH"),
@@ -501,6 +539,9 @@ _ISLAND = (
     # number of synced trainers (its buffer lane is learner id of that count)
     island_flag("--rl-sample-store", default=None, metavar="PATH"),
     island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
+    # S27 G-CA: a sampler of a full-parameter synced group runs until its trainers
+    # ended (sample_roles module doc); 0: the island's own rounds
+    island_flag("--rl-sampler-until-trainers-end", type=int, default=0, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
     island_flag(
         "--lora-targets",

@@ -263,20 +263,69 @@ def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin(monkeypatch):
         cfg, AlgorithmSpec(), full_parameter_sync=False).runtime_attrs
 
 
-@pytest.mark.usefixtures("dp_replicas")
-def test_full_parameter_sync_at_dp_above_one_needs_whole_masters():
+def _pin_without_sharded_masters(monkeypatch):
+    """Pin Miles 59aea07f9 (S27 closing): DP replicas, but no sharded masters."""
+    from yeto.rl.adapters.miles import pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "59aea07f9a1e48b6fcb9fed03c70964a00275a40")
+
+
+def _dp_full_parameter_config(dp_optimizer: str = "auto", offload: float = 0.0):
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
-    assert mc.translate_run_config(cfg, AlgorithmSpec()).runtime_attrs["use_distributed_optimizer"] is False
-    cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
-    with pytest.raises(mc.MilesConfigError, match="drop --rl-optimizer-offload-fraction"):
-        mc.translate_run_config(cfg, AlgorithmSpec())
+    return dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(
+        dp_optimizer=dp_optimizer, optimizer_offload_fraction=offload))
+
+
+@pytest.mark.usefixtures("dp_replicas")
+@pytest.mark.parametrize("sharded_pin", [True, False])
+def test_full_parameter_sync_at_dp_above_one_refuses_optimizer_offload(monkeypatch, sharded_pin):
+    if not sharded_pin:
+        _pin_without_sharded_masters(monkeypatch)
+    for choice in rc.DP_OPTIMIZERS:
+        with pytest.raises(mc.MilesConfigError, match="drop --rl-optimizer-offload-fraction"):
+            mc.translate_run_config(_dp_full_parameter_config(choice, offload=1.0), AlgorithmSpec())
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_dp_optimizer_falls_back_to_whole_masters_without_the_sharded_pin(monkeypatch):
+    # S27 G-BE: a pin before the sharded masters keeps the non-distributed optimizer.
+    from yeto.rl.adapters.miles import run_config_rules
+
+    _pin_without_sharded_masters(monkeypatch)
+    assert "d50fb04dd or later (distributed optimizer at DP>1)" in run_config_rules.full_parameter_dp_sharded_master_gap()
+    for choice in ("auto", "replicated"):
+        attrs = mc.translate_run_config(_dp_full_parameter_config(choice), AlgorithmSpec()).runtime_attrs
+        assert attrs["use_distributed_optimizer"] is False
+    with pytest.raises(mc.MilesConfigError, match="--rl-dp-optimizer distributed at DP 2 needs Miles d50fb04dd"):
+        mc.translate_run_config(_dp_full_parameter_config("distributed"), AlgorithmSpec())
+
+
+@pytest.mark.usefixtures("dp_replicas")
+def test_dp_optimizer_keeps_the_distributed_optimizer_with_the_sharded_pin():
+    # The pinned image (S27 eff, 7402a53-2fa8801) has the sharded masters, so auto
+    # keeps Miles' default distributed optimizer at DP>1.
+    from yeto.rl.adapters.miles import run_config_rules
+
+    assert run_config_rules.full_parameter_dp_sharded_master_gap() is None
+    for choice in ("auto", "distributed"):
+        attrs = mc.translate_run_config(_dp_full_parameter_config(choice), AlgorithmSpec()).runtime_attrs
+        assert "use_distributed_optimizer" not in attrs  # Miles' default for Adam: distributed
+    attrs = mc.translate_run_config(_dp_full_parameter_config("replicated"), AlgorithmSpec()).runtime_attrs
+    assert attrs["use_distributed_optimizer"] is False
+
+
+def test_train_memory_reads_the_dp_optimizer():
+    assert rc._train_memory(SimpleNamespace(seq_len=8)).dp_optimizer == "auto"
+    assert rc._train_memory(SimpleNamespace(seq_len=8, rl_dp_optimizer="replicated")).dp_optimizer == "replicated"
+    with pytest.raises(ValueError, match="--rl-dp-optimizer"):
+        rc._train_memory(SimpleNamespace(seq_len=8, rl_dp_optimizer="sharded"))
 
 
 def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     from yeto.rl.adapters.miles import pins, run_config_rules
     from yeto.rl.engine.run_config import full_parameter_layout_problem
 
-    # The pinned image (S27 closing, 59aea07-2fa8801) has the replicas.
+    # The pinned image (S27 eff, 7402a53-2fa8801) has the replicas.
     assert run_config_rules.full_parameter_dp_replica_gap() is None
     assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
                                          rollout_gpus_per_engine=1) is None
@@ -307,10 +356,9 @@ def test_trainer_only_full_parameter_island_starts_no_engine():
 @pytest.mark.usefixtures("dp_replicas")
 def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     # Miles' set_default_megatron_args forces the distributed optimizer on for
-    # Adam, which leaves each FP32 master a flat slice; the full-parameter
-    # shard manifest needs whole masters. The override rides preprocess_args.
-    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
-    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    # Adam, which leaves each FP32 master a flat slice; the whole-master path
+    # (--rl-dp-optimizer replicated) turns it off. The override rides preprocess_args.
+    launch = mc.translate_run_config(_dp_full_parameter_config("replicated"), AlgorithmSpec())
     assert launch.runtime_attrs["use_distributed_optimizer"] is False
     assert "--use-distributed-optimizer" not in launch.argv
     namespace = SimpleNamespace(use_distributed_optimizer=True)
@@ -379,8 +427,7 @@ def test_lora_mode_leaves_the_distributed_optimizer_to_miles():
 
 @pytest.mark.usefixtures("dp_replicas")
 def test_validate_parsed_args_refuses_a_reenabled_distributed_optimizer():
-    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
-    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    launch = mc.translate_run_config(_dp_full_parameter_config("replicated"), AlgorithmSpec())
     with pytest.raises(mc.MilesConfigError, match="distributed optimizer"):
         mc.validate_parsed_args(
             _parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1
@@ -903,3 +950,42 @@ def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
     argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     at = argv.index("--mamba-training-ssm-states-dtype")
     assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain
+
+
+def _memory_config(**memory):
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    return dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(**memory))
+
+
+def test_grad_reduce_bf16_replaces_the_fp32_gradient_accumulation():
+    # G-DF C4: bf16 gradient buffers for Nemotron-3 Nano on 80 GB cards; FP32 masters stay
+    base = list(mc.translate_run_config(_memory_config(), AlgorithmSpec(), full_parameter_sync=False).argv)
+    assert "--accumulate-allreduce-grads-in-fp32" in base and "--grad-reduce-in-bf16" not in base
+    argv = list(mc.translate_run_config(_memory_config(grad_reduce_bf16=True), AlgorithmSpec(),
+                                   full_parameter_sync=False).argv)
+    assert "--grad-reduce-in-bf16" in argv and "--accumulate-allreduce-grads-in-fp32" not in argv
+
+
+def test_precision_aware_optimizer_only_without_the_full_parameter_sync():
+    # G-DF C4: bf16 Adam moments; the sync's FP32-master reader would find only remainders
+    argv = list(mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec(),
+                                   full_parameter_sync=False).argv)
+    i = argv.index("--use-precision-aware-optimizer")
+    assert argv[i:i + 7] == list(mc.PRECISION_AWARE_ARGV)
+    assert "--main-grads-dtype" in argv and "--accumulate-allreduce-grads-in-fp32" not in argv
+    assert "--grad-reduce-in-bf16" not in argv and "--optimizer-cpu-offload" not in argv
+    with pytest.raises(mc.MilesConfigError, match="drop --rl-precision-aware-optimizer"):
+        mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec())
+
+
+def test_train_memory_args_check_the_precision_aware_optimizer():
+    from types import SimpleNamespace as NS
+
+    ok = rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True, rl_single_island_no_sync=True,
+                             rl_grad_reduce_bf16=True))
+    assert ok.precision_aware_optimizer and ok.grad_reduce_bf16
+    with pytest.raises(ValueError, match="needs --rl-single-island-no-sync"):
+        rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True))
+    with pytest.raises(ValueError, match="exclusive"):
+        rc._train_memory(NS(seq_len=2560, rl_precision_aware_optimizer=True, rl_single_island_no_sync=True,
+                            rl_optimizer_offload_fraction=0.5))

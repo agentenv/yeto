@@ -79,16 +79,21 @@ ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
     """The training round of the rollout being processed.
 
-    Authoritative source: the policy token the driver published for this
-    rollout (``yeto:<rollout_id>:<hash>``). ``Sample.rollout_id`` is NOT used
-    when a token exists: in multi-segment agentic rollouts it is a trajectory
-    key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
-    fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
+    Authoritative source: the round the driver set for this rollout
+    (:func:`put_rollout_round`), else the version of the policy token it
+    published (``yeto:<rollout_id>:<hash>``; the two differ only under rollout
+    ahead). ``Sample.rollout_id`` is NOT used when either exists: in
+    multi-segment agentic rollouts it is a trajectory key (Miles
+    ``agentic_tool_call.py``), not the round. Without both (unit fixtures,
+    legacy) the first sample's ``rollout_id`` is the fallback.
     """
     try:
-        token = current_policy_token(sink)
+        explicit = current_rollout_round(sink)
+        token = current_policy_token(sink) if explicit is None else None
     except ImportError:  # no Ray in this process (unit fixtures): no published token
-        token = None
+        explicit = token = None
+    if explicit is not None:
+        return explicit
     if token:
         from yeto.rl.core import parse_policy_snapshot_token
 
@@ -186,13 +191,19 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
+    # S27 P2: the dispenser learns which of its rows entered this training batch
+    from .task_dispense import on_trained as dispense_on_trained
+
+    dispense_on_trained(data)
+    marks.append(("dispense", time.monotonic()))
     # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
     # final loss masks, for the role streams to read at the round boundary.
     from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
 
     if evidence_enabled(args):
         persist_published_round_evidence(
-            args, data, current_policy_token(), published_policies()
+            args, data, current_policy_token(), published_policies(),
+            rollout_id=current_rollout_round(),
         )
     if getattr(args, "fully_async", False):
         # P0-S: Miles' fully_async drains finished groups and runs no
@@ -942,6 +953,22 @@ def put_policy_token(token: str, sink: str | None = None) -> None:
 def current_policy_token(sink: str | None = None) -> str | None:
     """Rollout side: the token stored by :func:`put_policy_token`, if any."""
     return _sink_read(sink, POLICY_TOKEN_FILE, "get_token")
+
+
+ROLLOUT_ROUND_FILE = "rollout-round"
+
+
+def put_rollout_round(rollout_id: int, sink: str | None = None) -> None:
+    """Driver side: the round the next rollout is generated for. It equals the
+    token's version, except under rollout ahead (one above: the batch trains after
+    the next publication)."""
+    _sink_write(sink, ROLLOUT_ROUND_FILE, str(int(rollout_id)), "set_round", int(rollout_id))
+
+
+def current_rollout_round(sink: str | None = None) -> int | None:
+    """Rollout side: the round stored by :func:`put_rollout_round`, if any."""
+    value = _sink_read(sink, ROLLOUT_ROUND_FILE, "get_round")
+    return None if value is None else int(value)
 
 
 PUBLISHED_POLICIES_FILE = "published-policies.json"

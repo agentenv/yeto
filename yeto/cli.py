@@ -522,6 +522,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="use on-demand instances for learners instead of spot",
     )
     infra.add_argument(
+        "--spot-without-volume",
+        action="store_true",
+        help="RL spot islands on sky clouds: no per-island bucket volume for completed "
+        "rollout groups (a preemption loses them). For clouds without a store credential, "
+        "e.g. a single no-sync island whose run does not resume after a preemption",
+    )
+    infra.add_argument(
         "--modal-gpu-exact",
         action="store_true",
         help="Modal islands: request the exact GPU type (H100! -- Modal otherwise "
@@ -1610,6 +1617,9 @@ def cmd_launch_head(args) -> int:
         _print_detach_hints(name)
         return 0
     _record_head_result(name, head_cluster, job_id)
+    from .launch.dispense_evidence import pull_from_head
+
+    pull_from_head(args, head_cluster, runs.run_dir(name))  # S27 P2 (no-op without it)
     print(
         f"[yeto] head job ended; the head cluster {head_cluster} is still up — "
         f"tear everything down with: yeto down {name}"

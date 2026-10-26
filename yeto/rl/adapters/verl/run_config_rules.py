@@ -83,3 +83,13 @@ def refuse_agentic_argv(ignored: list[str]) -> None:
     given = sorted({token.split("=", 1)[0] for token in ignored} & flags)
     if given:
         raise ValueError("verl 后端不支持 Miles agentic 参数：" + ", ".join(given))
+
+
+def hf_export_supported(args) -> bool:
+    """``--rl-export-hf-rounds`` on verl (``launch.rl_ports._check_hf_export_launch_flags``):
+    synced full-parameter islands (S27 G-DS, ``hf_export.VerlHfWriter``). Merge with
+    S27 G-DC (the Megatron island): ``return megatron_run(args) or <this rule>``."""
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET
+
+    return (getattr(args, "training_mode", "sft") == "rl"
+            and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)

@@ -52,7 +52,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
-from .run_config_rules import full_parameter_dp_replica_gap
+from .run_config_rules import full_parameter_dp_replica_gap, full_parameter_dp_sharded_master_gap
 from . import sampler_snapshot
 from .binding import filter_argv
 
@@ -438,9 +438,13 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.max_tokens_per_gpu": _ok,
     "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
+    "train_memory.dp_optimizer": _ok,  # _full_parameter_optimizer_attrs
+    "train_memory.grad_reduce_bf16": _ok,  # base argv: --grad-reduce-in-bf16
+    "train_memory.precision_aware_optimizer": _ok,  # train_memory_argv
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
-                    "fused_stage", "release_legacy", "release_inline")},
+                    "fused_stage", "release_legacy", "release_inline",
+                    "release_delta_full_every", "until_trainers_end")},
 }
 
 
@@ -669,6 +673,7 @@ def translate_run_config(
     max_policy_age: int = 0,
     async_buffer_rounds: int | None = None,
     full_parameter_sync: bool = True,
+    rollout_ahead: int = 0,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
 
@@ -688,7 +693,12 @@ def translate_run_config(
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
-    no-sync trainer island (``_full_parameter_optimizer_attrs``)."""
+    no-sync trainer island (``_full_parameter_optimizer_attrs``).
+
+    ``rollout_ahead`` (--rl-rollout-ahead, ``yeto.rl.engine.rollout_ahead``):
+    the driver generates whole batches ahead; Miles then sees one on-policy
+    batch per publication, so neither fully_async nor partial rollout is set
+    and the argv is the limit-0 argv (the limit binds only the driver)."""
 
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
@@ -774,7 +784,8 @@ def translate_run_config(
         raise MilesConfigError("--rl-sample-role trainer with LoRA and a colocated placement "
                                "supports one trainer GPU only; use --rl-placement fixed-partition")
     # a buffer island selects its own rollout function, so never Miles' fully_async
-    rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
+    rollout_overlap = (max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
+                       and not rollout_ahead)
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -898,7 +909,10 @@ def translate_run_config(
         # algorithm (D7): the only place AlgorithmSpec becomes Miles args
         "--advantage-estimator", algorithm.advantage_estimator,
         "--lr", str(config.algorithm.lr),
-        "--accumulate-allreduce-grads-in-fp32",
+        # bf16 gradient buffers (--rl-grad-reduce-bf16, or the bf16 main grads of
+        # --rl-precision-aware-optimizer): Megatron asserts that
+        # --accumulate-allreduce-grads-in-fp32 is absent then
+        *_gradient_dtype_argv(config.train_memory),
         "--attention-softmax-in-fp32",
         "--attention-backend", recipe.training_attention_backend,
         *(() if config.train_memory.gradient_accumulation_fusion else ("--no-gradient-accumulation-fusion",)),
@@ -937,9 +951,10 @@ def translate_run_config(
                 f"--rl-max-policy-age {max_policy_age} needs an algorithm spec with "
                 f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
                 f"the run's spec tolerates {tolerated}")
-        values.extend(policy_age_argv(
-            max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
-            overlap=rollout_overlap))
+        if not rollout_ahead:
+            values.extend(policy_age_argv(
+                max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
+                overlap=rollout_overlap))
     if async_buffer_rounds is None and rollout_overlap:
         async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
     if async_buffer_rounds is not None:
@@ -1198,6 +1213,23 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+# --rl-precision-aware-optimizer (no-sync islands only): bf16 main grads and bf16
+# Adam moments on the device; Megatron keeps the FP32 masters as 16-bit remainders
+# of the bf16 params (store_param_remainders, its default). G-DF T1 job H4 measured
+# exactly these flags on 8 x H100 80 GB (Nemotron-3 Nano TP1/EP8/DP8, 8192 tokens
+# per GPU: PyTorch peak 64.6 GiB allocated, actor MFU 16.7%).
+PRECISION_AWARE_ARGV = ("--use-precision-aware-optimizer", "--main-grads-dtype", "bf16",
+                        "--exp-avg-dtype", "bf16", "--exp-avg-sq-dtype", "bf16")
+
+
+def _gradient_dtype_argv(memory: Any) -> tuple[str, ...]:
+    """fp32 gradient accumulation by default; none of it with bf16 main grads
+    (precision-aware optimizer) and ``--grad-reduce-in-bf16`` with --rl-grad-reduce-bf16."""
+    if getattr(memory, "precision_aware_optimizer", False):
+        return ()  # PRECISION_AWARE_ARGV sets --main-grads-dtype bf16
+    if getattr(memory, "grad_reduce_bf16", False):
+        return ("--grad-reduce-in-bf16",)
+    return ("--accumulate-allreduce-grads-in-fp32",)
 
 
 def megatron_moe_layer_freq(layer_freq: Any) -> str:
@@ -1278,6 +1310,8 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
     fraction = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0)
     if fraction > 0:
         values.extend((*OPTIMIZER_OFFLOAD_ARGV, "--optimizer-offload-fraction", repr(fraction)))
+    if getattr(memory, "precision_aware_optimizer", False):
+        values.extend(PRECISION_AWARE_ARGV)
     return tuple(values)
 
 
@@ -1306,12 +1340,13 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
     """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
-    ``sao-streaming-full``) reads one whole FP32 master per parameter on each
-    rank. At DP>1 one rank of each data-parallel replica group owns (exports)
-    a parameter and the other replicas apply its bytes; that needs a Miles pin
-    with data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
-    and a whole master on every replica, so no optimizer offload. A sampler
-    island (``builds_trainer=False``) has no trainer and no such check.
+    ``sao-streaming-full``) reads one FP32 master per parameter. At DP>1 one
+    rank of each data-parallel replica group owns (exports) a parameter and
+    the other replicas apply its bytes; that needs a Miles pin with
+    data-parallel replicas (``run_config_rules.full_parameter_dp_replica_gap``)
+    and no optimizer offload. The optimizer at DP>1 follows
+    ``--rl-dp-optimizer`` (:func:`_dp_optimizer_attrs`). A sampler island
+    (``builds_trainer=False``) has no trainer and no such check.
 
     * No optimizer offload: the non-distributed optimizer, whose masters are
       whole tensors. Miles' ``set_default_megatron_args`` turns the
@@ -1334,15 +1369,20 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
 
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
+    if getattr(memory, "precision_aware_optimizer", False):
+        raise MilesConfigError(
+            "the full-parameter sync reads FP32 optimizer masters, which the precision-aware "
+            "optimizer keeps only as remainders inside TE FusedAdam: drop --rl-precision-aware-optimizer "
+            "(no-sync islands only)")
     offload = float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0
     if data_parallel != 1 and builds_trainer:
         if (gap := full_parameter_dp_replica_gap()) is not None:
             raise MilesConfigError(f"the full-parameter sync at DP {data_parallel} needs {gap}")
         if offload:
             raise MilesConfigError(
-                f"the full-parameter sync at DP {data_parallel} needs a whole FP32 master on every "
-                "data-parallel rank (the non-distributed optimizer): drop --rl-optimizer-offload-fraction")
-        return {"use_distributed_optimizer": False}
+                f"the full-parameter sync at DP {data_parallel} needs its FP32 masters on the device: "
+                "drop --rl-optimizer-offload-fraction")
+        return _dp_optimizer_attrs(getattr(memory, "dp_optimizer", "auto"), data_parallel)
     if offload:
         if not _miles_reads_distributed_optimizer_masters():
             raise MilesConfigError(
@@ -1351,6 +1391,25 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
                 f"the pinned image ships {MILES_NEXT_COMMIT[:9]} (or use a no-sync trainer island)")
         return {}
     return {"use_distributed_optimizer": False}
+
+
+def _dp_optimizer_attrs(choice: str, data_parallel: int) -> dict[str, Any]:
+    """The optimizer of a full-parameter trainer at DP>1 (``--rl-dp-optimizer``).
+
+    ``distributed``: Miles' default distributed optimizer; each rank keeps one
+    FP32 range of every parameter and the sync reads and writes those ranges
+    (needs ``run_config_rules.full_parameter_dp_sharded_master_gap`` to be
+    None). ``replicated``: the non-distributed optimizer, whole FP32 masters
+    on every rank (the S27 G-AX replica path). ``auto``: distributed when the
+    pin supports it. Both give the same synced values (Miles CPU tests); the
+    distributed one keeps 1/DP of the masters and Adam moments per rank."""
+
+    gap = full_parameter_dp_sharded_master_gap()
+    if choice == "replicated" or (choice == "auto" and gap is not None):
+        return {"use_distributed_optimizer": False}
+    if gap is not None:
+        raise MilesConfigError(f"--rl-dp-optimizer distributed at DP {data_parallel} needs {gap}")
+    return {}
 
 
 def _miles_reads_distributed_optimizer_masters() -> bool:

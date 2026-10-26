@@ -198,6 +198,41 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
     return sync
 
 
+def _full_parameter_ports(island, plan: dict, identity_sha256: str):
+    """(sync, policy state, publisher) of a full-parameter island (S27 B10).
+
+    With an outer sync (``plan["full_parameter"]``): the engine-neutral
+    ``FullParameterSync`` over the verl role stream.  Without one
+    (``--rl-single-island-no-sync``): the local-only sync over a policy state
+    that exports whole cuts.  Round cuts and the LoRA publish self-test do not
+    apply to a full-parameter island and are refused."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.local_learner import ComponentIdentity
+
+    from .full_parameter_stream import (DEFAULT_MAX_FRAGMENT_BYTES, VerlFullParameterGroup,
+                                        VerlFullParameterLocalState, build_full_parameter_sync)
+    from .ports_impl import VerlFullParameterPublisher
+
+    if plan.get("resume"):
+        raise ValueError("round cuts of a full-parameter verl island are not wired (V9)")
+    if plan.get("publish_selftest"):
+        raise ValueError("the publish self-test checks a LoRA read-back; a full-parameter island has none")
+    island.full_group = VerlFullParameterGroup(island)
+    if plan["sync"] == "none":
+        component = ComponentIdentity(role="actor", model_revision=plan["model_revision"].lower(),
+                                      config_hash=plan["model_config_sha256"])
+        policy_state = VerlFullParameterLocalState(island.full_group, component=component,
+                                                   max_fragment_bytes=DEFAULT_MAX_FRAGMENT_BYTES)
+        island.layout_hash = policy_state.layout_hash
+        sync = LocalOnlySync(int(plan["global_rounds"]))
+    else:
+        if not plan.get("full_parameter"):
+            raise ValueError("a synced full-parameter verl island needs the full-parameter sync plan")
+        sync, policy_state, _stream = build_full_parameter_sync(
+            island, plan, backend_identity_sha256=identity_sha256)
+    return sync, policy_state, VerlFullParameterPublisher(island)
+
+
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     from verl.utils.skip import SkipManager
     from verl.utils.tracking import Tracking
@@ -234,10 +269,20 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
     learner_id = int(plan["learner_id"])
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
-    specs =derive_peft_lora_specs(plan["model_path"], None, rank=int(plan["lora_rank"]),
-                                   targets=plan["lora_targets"])
-    layout_hash = canonical_layout_hash(specs)
-    lora_hash = canonical_lora_config_hash(rank=int(plan["lora_rank"]), target_modules=adapter_targets(specs))
+    full = plan.get("parameter_mode") == "full"
+    if full:  # S27 B10: the model config is the identity; the layout is the fragment layout
+        from .full_parameter_stream import full_parameter_identity
+
+        specs = ()
+        _identity_layout, lora_hash = full_parameter_identity(plan["model_config_sha256"])
+        layout_hash = (plan["full_parameter"]["parameter_layout_sha256"] if plan.get("full_parameter")
+                       else None)  # no outer sync: the local state plans it below
+    else:
+        specs = derive_peft_lora_specs(plan["model_path"], None, rank=int(plan["lora_rank"]),
+                                       targets=plan["lora_targets"])
+        layout_hash = canonical_layout_hash(specs)
+        lora_hash = canonical_lora_config_hash(rank=int(plan["lora_rank"]),
+                                               target_modules=adapter_targets(specs))
     tape = EventTape(plan["event_tape"], learner_id)
     island = VerlIsland(trainer, learner_id=learner_id, out_dir=plan["out_dir"],
                         base_model_revision=plan["model_revision"], lora_config_hash=lora_hash,
@@ -249,25 +294,34 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
     identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    if full:
+        sync, policy_state, publisher = _full_parameter_ports(island, plan, identity.sha256())
+        layout_hash = island.layout_hash
+    else:
+        sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
+                          identity_sha256=identity.sha256(), compat_group=identity.compat_group)
+        policy_state = VerlPolicyState(island)
+        publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
-                 "init_seconds": time.time() - t0})
-    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
-                      identity_sha256=identity.sha256(), compat_group=identity.compat_group)
+                 "parameter_mode": "full" if full else "lora", "init_seconds": time.time() - t0})
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
-    publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
     # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
-        policy_state=VerlPolicyState(island),
+        policy_state=policy_state,
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
     driver.data_slot = plan.get("data_slot")  # S27 task assignment
+    if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
+        from .driver_extras import wire_full_parameter_extras
+
+        wire_full_parameter_extras(driver, island, plan)
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",

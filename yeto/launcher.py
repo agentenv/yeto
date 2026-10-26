@@ -49,6 +49,7 @@ from .launch.storage import (
 )
 from .launch.island_tasks import data_split_plan, island_task_plan
 from .launch.args import prepare_launch_args
+from .launch import engine_cluster
 from .launch.rl_island_task import _echoes_events, make_miles_island_task
 from .launch.learner_task import make_learner_task
 from .launch.sky_ops import (
@@ -197,7 +198,8 @@ def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
     (S26 E9.1). Modal signals only the container's main process (the runner), so
     the runner writes the marker and the driver's watcher thread -- in a Ray actor
     on verl -- writes the store's preemption notice."""
-    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
+    if (cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False)
+            or getattr(iargs, "rl_checkpoint_store_export_only", False)):  # no resume store
         return {}
     from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
 
@@ -288,6 +290,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     specs = parse_gpu_spec(args.gpu)
     nodes_by_cluster = dict(zip(learner_cluster_names(args.cluster_prefix, specs),
                                 (s.num_nodes for s in specs)))  # rl-multinode-island D10
+    # S27 G-DI two-cluster islands ({} without --rl-engine-cluster: nothing changes)
+    splits = engine_cluster.plan(
+        args, specs, learner_cluster_names(args.cluster_prefix, specs),
+        role_of=lambda m: _island_role(args, specs, m)) if engine_cluster.requested(args) else {}
+    if splits:
+        nodes_by_cluster.update(engine_cluster.nodes_by_cluster(splits))
+    mixed: dict[str, engine_cluster.MixedIsland] = {}
     no_sync_incomplete: list[str] = []
     # rl-trainer-start-stop L5.3c: the trainer scheduler starts and stops this island
     # (one Modal call per incarnation); the fleet controller never sees it.
@@ -326,7 +335,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     learner_names = learner_cluster_names(prefix, specs)
     if on_clusters is not None:
         try:
-            on_clusters(([] if syncer_cluster is None else [syncer_cluster]) + learner_names)
+            on_clusters(([] if syncer_cluster is None else [syncer_cluster]) + learner_names
+                        + [s.engine_name for s in splits.values()])
         except Exception as e:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
@@ -478,6 +488,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                   + (f" (physical {spec.gpus_per_node} GPUs/node billed, island allocated "
                      f"{alloc.gpus_per_node}/node = GPUs 0..{alloc.gpus_per_node - 1})"
                      if alloc is not spec else ""))
+            if name in splits:
+                split_tasks = engine_cluster.build_tasks(
+                    sky, args, splits[name],
+                    lambda m=m, spec=spec, role=role: _island_task(
+                        task_factory, args, spec, m, num_learners, syncer_addr, island_overrides, role))
+                mixed[name] = engine_cluster.MixedIsland(
+                    splits[name], split_tasks,
+                    submit=lambda s_, t_, n_: submit_island_launch(sky, args, s_, t_, n_))
+                tasks[name] = split_tasks.trainer  # the fleet's record: the trainer cluster
+                rids[name] = (m, ("mixed", mixed[name].submit()))
+                continue
             if spec.cloud == "verda":
                 # Launched in resolve(): live stock -> ordered any_of, with
                 # refresh + bounded backoff on capacity failures.
@@ -490,7 +511,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
         def resolve(name: str, m: int, rid) -> None:
             try:
-                if isinstance(rid, tuple) and rid and rid[0] == "verda":
+                if isinstance(rid, tuple) and rid and rid[0] == "mixed":
+                    results[name] = mixed[name].finish(sky, rid[1])
+                elif isinstance(rid, tuple) and rid and rid[0] == "verda":
                     from .cloud.droppable import role_args
 
                     results[name] = launch_verda_island(
@@ -533,6 +556,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         for name in list(rids) + list(modal_cfgs):
             if name not in errors:
                 clusters.append(name)
+        for split in splits.values():  # both clusters may exist even after an error
+            for name in (split.name, split.engine_name):
+                if name not in clusters:
+                    clusters.append(name)
         if errors:
             for name, e in errors.items():
                 print(f"[launcher] ERROR launching {name}: {e}", file=sys.stderr)
@@ -628,6 +655,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
+            if name in mixed and mixed[name].engine_job is not None:
+                spawn_tail(mixed[name].split.engine_name, mixed[name].engine_job)
         def attributed_containers() -> dict:
             # container id -> (island, rank) from each island's first container line
             return {cid: key for g in list(container_guards)
@@ -658,7 +687,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
-            sky_ops=RoutingOps(sky_sdk_ops, modal_island_ops),
+            sky_ops=RoutingOps(
+                engine_cluster.EngineClusterOps(sky_sdk_ops, mixed, sky) if mixed else sky_sdk_ops,
+                modal_island_ops),
             poll_interval=args.controller_poll,
             recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,
@@ -714,6 +745,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     modal_tape_dir=modal_tape_dir))
                 _record_trainer_start(args, events_dir)
 
+        # S27 G-DI design v2: a supervisor per two-cluster island relaunches only its
+        # engine cluster when the engine run is lost (none without the recover flag)
+        engine_watch_stop = threading.Event()
+        if engine_cluster.recover_s(args) > 0:
+            for name, island in mixed.items():
+                job = results[name][0]
+                threading.Thread(
+                    target=island.watch, args=(sky, engine_watch_stop),
+                    kwargs={"trainer_alive": lambda name=name, job=job: sky_sdk_ops.job_alive(name, job)},
+                    name=f"yeto-engine-watch-{name}", daemon=True).start()
         try:
             exit_codes = trainer_loop.run_with_trainer_loop(
                 args, controller.run,
@@ -873,6 +914,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             from .sky_patches import remove_local_pth
 
             remove_local_pth(verda["pth_written"])
+        for island in mixed.values():  # S27 G-DI v2: no engine relaunch during the teardown
+            island.stop_watch = True
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
@@ -888,6 +931,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             collect_diagnostics_parallel(
                 [n for n in remaining if n not in modal_cfgs], head=head_mode
             )
+            for island in mixed.values():  # two-cluster islands: peer rules first (never raises)
+                island.unlink()
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
                 if name in modal_cfgs:
@@ -904,7 +949,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             # (their tapes are in the pre-teardown diagnostics, also for islands
             # the controller tore down earlier) still give the manifest T_s.
             _record_sky_trainer_start(
-                args, [n for n in nodes_by_cluster if n not in modal_cfgs and n not in echo_names])
+                args, [n for n in nodes_by_cluster if n not in modal_cfgs and n not in echo_names
+                       and n not in {s.engine_name for s in splits.values()}])
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no
                 # function call of this run outlives the launcher.
@@ -928,6 +974,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     f"Terminate them from the cloud console, then: yeto down {prefix}",
                     file=sys.stderr,
                 )
+        if getattr(args, "training_mode", None) == "rl" and not getattr(args, "dry_run", False):
+            # S27 P2: the dispenser log of a syncer on this machine, with its check
+            from .launch.dispense_evidence import collect_dispense_log
+
+            collect_dispense_log(args, _modal_tape_run_dir(args),
+                                 since_unix=None if head_mode else run_started_unix)
         if head_mode:
             # The head VM cannot tear itself down here (the teardown would
             # kill this very process mid-flight). With a remote --output the
@@ -1013,6 +1065,10 @@ def dry_run_plan(args) -> dict:
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
+    splits = engine_cluster.plan(
+        args, specs, learner_cluster_names(args.cluster_prefix, specs),
+        role_of=lambda m: _island_role(args, specs, m)) if engine_cluster.requested(args) else {}
+    split_by_id = {split.learner_id: split for split in splits.values()}
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -1044,6 +1100,10 @@ def dry_run_plan(args) -> dict:
                 # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
+            if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
+                entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
+            if learner_id in (stops := sample_roles.sampler_stop_trainers(args, len(specs))):
+                entry["sampler_until_trainers_end"] = stops[learner_id]  # no fixed round count
             if learner_id == trainer_loop.held_island(args):
                 entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:
@@ -1059,6 +1119,12 @@ def dry_run_plan(args) -> dict:
                 (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,
             )
+            if learner_id in split_by_id:
+                entry["engine_cluster"] = engine_cluster.dry_run_record(
+                    split_by_id[learner_id], lambda learner_id=learner_id, spec=spec, role=role: _island_task(
+                        make_miles_island_task, args, spec, learner_id,
+                        sample_roles.syncer_learner_count(args, len(specs)) + external,
+                        "$SYNCER_ADDR", island_overrides, role), args)
         islands.append(entry)
     return {
         "dry_run": True,
@@ -1084,6 +1150,7 @@ def dry_run_plan(args) -> dict:
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
         "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),
-        "clusters": [] if not islands else learner_cluster_names(args.cluster_prefix, specs),
+        "clusters": [] if not islands else (learner_cluster_names(args.cluster_prefix, specs)
+                                            + [split.engine_name for split in splits.values()]),
         "island_requests": islands,
     }

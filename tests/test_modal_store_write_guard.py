@@ -122,3 +122,92 @@ def test_a_writer_in_another_process_blocks_the_reload(tmp_path):
         proc.communicate("\n", timeout=30)
     store.reload()
     assert volume.reloads == 1
+
+
+# S27 G-CC E2: the trainer driver's release reload failed with "there are open files
+# preventing the operation" while the buffer reader process read sample payloads.
+
+
+def test_a_reader_in_another_process_blocks_the_reload(tmp_path):
+    volume = _Volume()
+    store = _store(tmp_path, volume)
+    code = ("import sys; from yeto.cloud.modal_ckpt_store import ModalVolumeStore\n"
+            "s = ModalVolumeStore(sys.argv[1], sys.argv[2], volume_factory=lambda n: None)\n"
+            "g = s.hold_reader(); print('held', flush=True); sys.stdin.readline(); g.release()\n")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(tmp_path), store.volume_name],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "held"
+        PolicyReleaseStore(store).latest()  # the driver's release read reloads the store
+        assert volume.reloads == 0
+    finally:
+        proc.communicate("\n", timeout=30)
+    store.reload()
+    assert volume.reloads == 1
+
+
+def test_buffer_index_and_payload_reads_hold_the_reader_guard(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from yeto.rl.engine import sample_buffer as sb
+
+    volume = _Volume()
+    reader = _store(tmp_path, volume)
+    driver = _store(tmp_path, volume)  # another store object (process) of the same Volume
+    index = sb.JsonlIndex(reader)
+    ref = index.write_payload("g0.bin", b"payload")
+    index.append(lambda _records: None, lambda: {"pos": 0})
+    reloads_during: dict[str, int] = {}
+    original = Path.read_bytes
+
+    def read_bytes(path):
+        before = volume.reloads
+        driver.reload()  # a reload while the file is being read
+        reloads_during[path.name] = volume.reloads - before
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert index.read_payload(ref) == b"payload"
+    assert reloads_during == {"g0.bin": 0}
+    monkeypatch.setattr(Path, "read_bytes", original)
+    opened = []
+    real_open = open
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) == str(index.path):
+            before = volume.reloads
+            driver.reload()
+            opened.append(volume.reloads - before)
+        return real_open(file, *args, **kwargs)
+
+    fresh = sb.JsonlIndex(reader, create_index=False)  # a reader that has read nothing yet
+    monkeypatch.setattr("builtins.open", tracking_open)
+    reloads_before = volume.reloads
+    assert fresh.read_new() == [{"pos": 0}]
+    assert opened == [0]  # the index read held the guard; the reader's own reload ran before it
+    assert volume.reloads == reloads_before + 1
+    monkeypatch.setattr("builtins.open", real_open)
+    driver.reload()  # no read open: the reload runs
+    assert volume.reloads == reloads_before + 2
+
+
+def test_local_and_duck_typed_stores_hold_nothing_for_readers(tmp_path):
+    from yeto.rl.engine import sample_buffer as sb
+    from yeto.rl.engine.resume import CheckpointStore
+
+    guard = CheckpointStore(tmp_path).hold_reader()
+    guard.release()
+    guard.release()  # idempotent
+
+    class Bare:  # a store object without hold_reader (test fakes)
+        root = tmp_path / "bare"
+
+        def reload(self):
+            return None
+
+        def commit(self):
+            return 0.0
+
+    index = sb.JsonlIndex(Bare())
+    ref = index.write_payload("g1.bin", b"x")
+    assert index.read_payload(ref) == b"x" and index.read_new() == []

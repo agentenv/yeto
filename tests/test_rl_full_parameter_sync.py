@@ -813,7 +813,7 @@ def test_initial_cut_wait_leaves_the_event_loop_to_the_other_role(monkeypatch):
         return adapter, object()
 
     monkeypatch.setattr(module.MilesChunkedFullParameterAdapter, "initialize", fake_initialize)
-    monkeypatch.setattr(module, "SyncerClient", Client)
+    monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", Client)
     monkeypatch.setattr(module, "MilesRayInboundChunkSink", lambda sink: sink)
     config = replace(_role_stream_config("actor", 30100), learner_id=1, wait_timeout=0.5)
 
@@ -851,7 +851,7 @@ def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch,
                 bytes_sent=3 * 2**20, queued_chunks=7, reconnects=1, connected=True
             )
 
-    monkeypatch.setattr(module, "INITIAL_CUT_REPORT_SECONDS", 0.0)
+    monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.INITIAL_CUT_REPORT_SECONDS", 0.0)
     config = replace(_role_stream_config("actor", 30100), wait_timeout=0.05)
     adapter = SimpleNamespace(
         layout=SimpleNamespace(fragments=SimpleNamespace(num_fragments=2))

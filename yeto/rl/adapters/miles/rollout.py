@@ -25,6 +25,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from collections.abc import Mapping
@@ -46,6 +47,7 @@ from .rollout_meta_hook import (
     put_max_policy_age,
     put_published_policies,
     put_policy_token,
+    put_rollout_round,
 )
 
 logger = logging.getLogger(__name__)
@@ -272,6 +274,9 @@ class DirMetadataSource:
     def set_policy_token(self, token: str) -> None:
         put_policy_token(token, self.sink_spec)
 
+    def set_rollout_round(self, rollout_id: int) -> None:
+        put_rollout_round(rollout_id, self.sink_spec)
+
     def set_max_policy_age(self, limit: int) -> None:
         put_max_policy_age(limit, self.sink_spec)
 
@@ -329,6 +334,13 @@ def _sink_actor_class():
         def get_token(self) -> str | None:
             return self._token
 
+        # The round being generated (rollout ahead: one above the token's version).
+        def set_round(self, rollout_id: int) -> None:
+            self._round = int(rollout_id)
+
+        def get_round(self) -> int | None:
+            return getattr(self, "_round", None)
+
         # agentic-rollout-utilization 3.5/4.1: the run's policy-age limit after a
         # governor fallback (None = the configured limit; only ever lowered).
         def set_limit(self, limit: int) -> None:
@@ -377,6 +389,9 @@ class RayMetadataSink:
 
     def set_policy_token(self, token: str) -> None:
         self._ray.get(self._actor.set_token.remote(token))
+
+    def set_rollout_round(self, rollout_id: int) -> None:
+        self._ray.get(self._actor.set_round.remote(int(rollout_id)))
 
     def set_max_policy_age(self, limit: int) -> None:
         self._ray.get(self._actor.set_limit.remote(int(limit)))
@@ -641,6 +656,17 @@ def _engine_capacity(info: Any) -> int | None:
     return int(value) if isinstance(value, int) and value > 0 else None
 
 
+@dataclass(frozen=True)
+class PendingGeneration:
+    """A batch :meth:`MilesRolloutPool.start_generate` sent to the rollout executor:
+    its round, the published (version, hash) it is generated with, and the loop
+    task that returns its data pack."""
+
+    rollout_id: int
+    policy: tuple[int, str]
+    task: Any
+
+
 class MilesRolloutPool:
     """``RolloutPool`` port. ``expected_policy`` returns the published (version, hash)."""
 
@@ -687,6 +713,9 @@ class MilesRolloutPool:
         # S27 task assignment: an island with a data slot reshuffles every later pass
         # over its rows (data_passes); installed in the executor before the first draw
         self._data_passes_pending = bool(getattr(args, "yeto_rl_data_slot", None))
+        # S27 P2: an island that claims its rows from the dispenser (task_dispense)
+        self._dispense_pending = bool(getattr(args, "yeto_rl_data_dispense", None))
+        self._dispense_installed = False
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
@@ -695,7 +724,8 @@ class MilesRolloutPool:
         self._metadata = metadata
         self._deferred_estimates: set[int] = set()  # E1: late cross-version estimates
         self._expected_policy = expected_policy
-        self._run = (runner or LoopRunner()).run
+        self._runner = runner or LoopRunner()
+        self._run = self._runner.run
         self._last_cursor: dict[str, int] | None = None
         # test-only start delay (INJECT_START_DELAY_ENV); applied once per process
         self._inject_start_delay = injected_start_delay()
@@ -805,6 +835,40 @@ class MilesRolloutPool:
         self._last_cursor = None if landed is None else dict(landed)
         return None if landed is None else dict(landed)
 
+    def _install_dispense(self) -> None:
+        """Once, before the first draw: the executor's data source takes its rows
+        from the task dispenser (``task_dispense`` module doc)."""
+        if not getattr(self, "_dispense_pending", False):
+            return
+        from yeto.protocol import island_hmac_key_from_env
+
+        from .task_dispense import install
+
+        installed = self._in_executor(install, dict(self._args.yeto_rl_data_dispense),
+                                      island_hmac_key_from_env())
+        logger.info("task dispenser installed in the rollout executor: %s", installed)
+        self._dispense_pending = False
+        self._dispense_installed = True
+
+    def commit_dispensed(self, rollout_id: int) -> dict[str, Any] | None:
+        """S27 P2 (driver, after the round's sync boundary): the rollout executor
+        reports the round's kept rows trained (``task_dispense.commit_round``).
+        None when this island takes no rows from the dispenser."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import commit_round
+
+        return self._in_executor(commit_round, int(rollout_id))
+
+    def close_dispensed(self) -> dict[str, Any] | None:
+        """S27 P2 (driver, finished run): release every row not trained yet."""
+        if not getattr(self, "_dispense_installed", False):
+            return None
+        from .task_dispense import close_source
+
+        self._dispense_installed = False
+        return self._in_executor(close_source)
+
     def _install_data_passes(self) -> None:
         """Once, before the first draw or seek (``data_passes`` module doc)."""
         if not self._data_passes_pending:
@@ -887,6 +951,32 @@ class MilesRolloutPool:
     def generate(
         self, rollout_id: int, *, expected_policy_version: str | None = None
     ) -> RolloutBatchHandle:
+        policy = self._begin_generation(rollout_id, expected_policy_version)
+        data_pack = self._run(self._executor.get(rollout_id))
+        return self._batch_of(rollout_id, policy, data_pack)
+
+    def start_generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> PendingGeneration:
+        """Rollout ahead (driver ``rollout_ahead``): send the batch of ``rollout_id``
+        to the rollout executor and return while the engines generate it."""
+        policy = self._begin_generation(rollout_id, expected_policy_version)
+        task = self._runner.spawn(self._executor.get(rollout_id))
+        return PendingGeneration(rollout_id=rollout_id, policy=policy, task=task)
+
+    def finish_generate(self, pending: PendingGeneration) -> RolloutBatchHandle:
+        """Wait for a batch :meth:`start_generate` sent; the engines are idle after it."""
+        data_pack = self._run(pending.task)
+        return self._batch_of(pending.rollout_id, pending.policy, data_pack)
+
+    def cancel_generate(self, pending: PendingGeneration) -> None:
+        """Drop a batch nobody will train (a failed round); its result is never read."""
+        pending.task.cancel()
+
+    def _begin_generation(self, rollout_id: int,
+                          expected_policy_version: str | None) -> tuple[int, str]:
+        """Bind the rollout side to the published policy and this round, then open
+        the rollout (upstream ``prepare_rollout``). Returns (version, hash)."""
         policy_version, policy_hash = self._expected_policy()
         token = policy_token(policy_version, policy_hash)
         if expected_policy_version is not None and expected_policy_version != token:
@@ -901,7 +991,11 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
             setter(token)
+        round_setter = getattr(self._metadata, "set_rollout_round", None)
+        if round_setter is not None:  # the round may run ahead of the token's version
+            round_setter(rollout_id)
         self._install_data_passes()
+        self._install_dispense()
         if self._fully_async and not self._prompt_ledger_installed:
             # P0-S: account for the prompts the background worker draws
             from .fully_async_prompts import install as install_prompt_ledger
@@ -909,7 +1003,11 @@ class MilesRolloutPool:
             self._in_executor(install_prompt_ledger)
             self._prompt_ledger_installed = True
         self._run(self._controller.prepare_rollout(rollout_id))
-        data_pack = self._run(self._executor.get(rollout_id))
+        return policy_version, policy_hash
+
+    def _batch_of(self, rollout_id: int, policy: tuple[int, str], data_pack: Any) -> RolloutBatchHandle:
+        """The batch handle of a finished generation (its metadata from the sink)."""
+        policy_version, policy_hash = policy
         if not self.defer_offload:
             self._offload_after_rollout()
         try:

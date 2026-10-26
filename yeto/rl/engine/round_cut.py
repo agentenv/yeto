@@ -45,7 +45,7 @@ from typing import Any
 
 from . import recovery
 from .recovery import CUT_KEY, FINAL_TRIGGERS, MANUAL, PERIODIC, ConsistentCut
-from .resume import ROUND_CUTS  # under the checkpoint store (not under the state dir)
+from .resume import ROUND_CUTS, commit_budget  # under the checkpoint store (not under the state dir)
 
 ISLAND = "local"  # round cuts run without an outer syncer: one island, the local one
 POINTER = "round-cut.json"  # under the state dir (synced with the ledger/journal)
@@ -463,6 +463,8 @@ class RoundCutCheckpoint:
         return result
 
     def _join_running(self, driver: Any) -> dict[str, Any] | None:
+        """Wait for the running store commit, report it and hand its background
+        seconds (shard collection + store sync + commit) to the interval."""
         if self._commit is None:
             return None
         thread, box = self._commit
@@ -472,7 +474,12 @@ class RoundCutCheckpoint:
             "ok": False, "error": "commit thread ended without a result"})}
         self._commit_info = None
         result.setdefault("cut_id", box.get("cut_id"))
+        result["background_s"] = round(float(result.get("collect_s") or 0.0)
+                                       + float(box.get("thread_s") or 0.0), 3)
         self._report(driver, result)
+        add_cost = getattr(self.interval, "add_cost", None)
+        if callable(add_cost) and result.get("rollout_id") is not None:
+            add_cost(int(result["rollout_id"]), cost_s=result["background_s"])
         return result
 
     @staticmethod
@@ -480,7 +487,8 @@ class RoundCutCheckpoint:
         emit = getattr(driver, "emit", None)
         if callable(emit):
             emit("rl_cut_committed", **{k: result.get(k) for k in (
-                "cut_id", "rollout_id", "ok", "finish_s", "commit_s", "pruned", "seq", "cut_bytes")},
+                "cut_id", "rollout_id", "ok", "finish_s", "commit_s", "pruned", "seq", "cut_bytes",
+                "background_s")},
                 **({"writer": result["writer"]} if result.get("writer") else {}),
                 **({"error": result["error"]} if result.get("error") else {}))
 
@@ -545,12 +553,15 @@ class RoundCutCheckpoint:
                 box["result"] = {**done, "ok": False, "error": (
                     getattr(self.controller, "last_store_sync", None) or {}).get("error")}
                 return
-            box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
+            with commit_budget(getattr(self.controller, "store", None), done["cut_bytes"]):
+                box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
 
         def run_held() -> None:
+            started = time.monotonic()
             try:
                 run()
             finally:  # committed, or failed and dropped: nothing uncommitted is left
+                box["thread_s"] = time.monotonic() - started
                 deferred["guard"].release()
 
         thread = threading.Thread(target=run_held, name=f"yeto-cut-commit-{cut_id}", daemon=True)
@@ -697,12 +708,13 @@ class RoundCutCheckpoint:
                     "total_s": round(time.monotonic() - started, 3)}
         if pending is not None:
             self.trainer.finish_cut(pending)
-        saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
+        cut_bytes = directory_bytes(Path(self.root) / cut_id)
+        with commit_budget(getattr(ctl, "store", None), cut_bytes):  # S27 G-CD: a 473 GB cut
+            saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
         guard.release()  # the store sync committed (or failed): nothing uncommitted is left
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
-        cut_bytes = directory_bytes(Path(self.root) / cut_id)
         info.update(extra)
         info["store_synced"] = bool(synced)
         info["store_commit"] = "inline"

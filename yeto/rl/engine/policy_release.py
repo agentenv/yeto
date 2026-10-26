@@ -75,14 +75,24 @@ of twice; the follower then skips its own check.
 
 Staged releases (S27 G-AT): the trainer exports a full checkpoint into a
 directory on its local disk, and :meth:`PolicyReleaseStore.release_staged`
-publishes that directory: the weight files in one store upload
-(``CheckpointStore.put_directory``; a Modal Volume takes it in one
-``batch_upload``, without the trainer's mount), then the record and LATEST in
-one more (``put_files``). A reader still sees a release only once LATEST names
+publishes that directory: the weight files in one store put
+(``CheckpointStore.put_directory``: through the trainer's mount and one commit;
+a Modal Volume store that is not mounted, or that is asked to, takes it in one
+``batch_upload`` instead, ``ModalVolumeStore.put_path``), then the record and
+LATEST in one more (``put_files``). A reader still sees a release only once LATEST names
 it and its files are complete. The upload runs
 on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
 while the samplers' release is written; releases stay in version order (the next
 one waits for the upload of the previous one).
+
+Delta releases (S27 G-BG, ``--rl-release-delta-full-every N``): a staged full
+release may be uploaded as the bf16 delta against the trainer's previous release
+(:class:`DeltaBase`, its files kept on the trainer's local disk;
+:mod:`.release_delta`). The record's ``delta`` names the base and the digest of
+every rebuilt file; ``files`` lists the delta files in the store. A reader with a
+:class:`~.release_delta.DeltaMirror` rebuilds the release on its local disk
+(:meth:`PolicyReleaseStore.resolve`) and loads that copy. Pruning keeps every
+base a kept release needs.
 """
 
 from __future__ import annotations
@@ -94,7 +104,8 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -103,6 +114,7 @@ from typing import Any
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
 from .object_store import ObjectStore, download_file, object_size
+from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -117,6 +129,13 @@ LORA = "lora"
 WEIGHT_FORMATS = (FULL, LORA)
 _DIGEST_CHUNK = 1 << 20
 DEFAULT_CACHE_DIR = "~/.cache/yeto/policy-releases"
+# a delta larger than this share of the full release is not worth it: release in full
+MAX_DELTA_RATIO = 0.5
+# a sampler stops after this many releases in a row fail their digest checks
+# (PolicyFollower: a delta rebuilt from its mirror, then rebuilt again from the full
+# release in the store, downloaded again; a full release's file_sha256)
+MAX_REBUILD_FAILURES = 3
+DIGEST_WORKERS = 8  # files hashed at a time (file_digests)
 
 
 class PolicyReleaseError(RuntimeError):
@@ -142,6 +161,13 @@ class PolicyRelease:
     # Who released it when the trainers sync (S25 C3, yeto.rl.engine.merged_release):
     # {"kind": "merged", "learner_id", "num_learners", "local_version"}; None: one trainer.
     origin: dict[str, Any] | None = None
+    # A bf16 delta release (yeto.rl.engine.release_delta): {"base_seq", "base_path",
+    # "base_version", "ratio", "files": {name: {"mode", "size", "sha256"}}}; the
+    # directory holds the deltas, ``files`` above lists them. None: the weights themselves.
+    delta: dict[str, Any] | None = None
+    # sha256 of each weight file of a full release (``file_digests``; S27 G-CD: the full
+    # releases of a delta chain); None: not digested file by file
+    file_sha256: dict[str, str] | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -242,16 +268,22 @@ class ReleaseIncomplete(PolicyReleaseError):
     """A release whose files are not all present with their recorded sizes yet."""
 
 
+class ReleaseDigestMismatch(ReleaseDeltaError):
+    """A full release whose weight files are not the released ones (``file_sha256``);
+    the follower treats it like a failed delta rebuild (``PolicyFollower``)."""
+
+
 class ReleaseNotLoaded(PolicyReleaseError):
     """The load hook did not take this release, and the sampler may go on: the
     release scheme is not the one the engine serves, or a post-load check
     failed (``yeto.rl.engine.sampler_checks``). The follower keeps its served
     release and tries the newest one again on the next refresh. ``reason`` is
-    a short machine-readable cause."""
+    a short machine-readable cause; ``fields``: more event fields (hashable values)."""
 
-    def __init__(self, message: str, *, reason: str) -> None:
+    def __init__(self, message: str, *, reason: str, fields: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.reason = reason
+        self.fields = dict(fields or {})
 
 
 def file_sizes(directory: Path) -> dict[str, int]:
@@ -281,10 +313,28 @@ def check_complete(release: PolicyRelease, directory: Path) -> None:
         raise error
 
 
+def file_digests(directory: Path, names: Iterable[str] | None = None, *,
+                 workers: int = DIGEST_WORKERS) -> dict[str, str]:
+    """{relative path: sha256} of ``names`` (default: every file but the record)
+    under ``directory``, ``workers`` files at a time."""
+    root = Path(directory)
+    names = sorted(file_sizes(root)) if names is None else sorted(names)
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        return dict(zip(names, pool.map(lambda name: file_sha256(root / name), names)))
+
+
 def check_release_files(release: PolicyRelease, directory: Path) -> None:
-    """Raise when the weight files differ from the ones the trainer released."""
+    """Raise when the weight files differ from the ones the trainer released:
+    the release digest (``sha256``) or each file's (``file_sha256``)."""
     if release.sha256 is not None:
         check_release_digest(release, directory_digest(directory))
+    if release.file_sha256:
+        actual = file_digests(directory, release.file_sha256)
+        bad = sorted(name for name, digest in release.file_sha256.items() if actual[name] != digest)
+        if bad:
+            raise ReleaseDigestMismatch(f"release r{release.seq}-v{release.version}: {len(bad)} of "
+                                        f"{len(actual)} weight files differ from the released sha256 "
+                                        f"(first: {bad[0]})", file=bad[0])
 
 
 def check_release_digest(release: PolicyRelease, actual: str) -> None:
@@ -293,6 +343,48 @@ def check_release_digest(release: PolicyRelease, actual: str) -> None:
     if release.sha256 is not None and actual != release.sha256:
         raise PolicyReleaseError(f"release r{release.seq}-v{release.version}: weight files "
                                  f"sha256 {actual} != released {release.sha256}")
+
+
+@dataclass(frozen=True)
+class DeltaBase:
+    """The previous release of this trainer and its full weight files on local
+    disk: the base of the next delta release (``release_delta`` module doc)."""
+
+    release: PolicyRelease
+    directory: Path
+
+
+class DeltaChain:
+    """Trainer side of delta releases: which earlier release the next one is a
+    delta of. Every ``full_every``-th release is full (a sampler that starts or
+    falls behind rebuilds at most ``full_every - 1`` deltas); the others are
+    deltas against the release before them. After each upload the staged
+    directory becomes the next base (:meth:`advance`) and the older base's files
+    are deleted, so the trainer's disk holds at most two staged releases."""
+
+    def __init__(self, full_every: int) -> None:
+        if int(full_every) < 2:
+            raise ValueError("a delta chain needs full_every >= 2")
+        self.full_every = int(full_every)
+        self._base: DeltaBase | None = None
+        self._since_full = 0  # deltas since the last full release
+
+    def base(self) -> DeltaBase | None:
+        """The base of the next release; None: the next release is full."""
+        if self._base is None or self._since_full + 1 >= self.full_every:
+            return None
+        return self._base
+
+    def advance(self, release: PolicyRelease | None, staged: Path) -> bool:
+        """Record the upload of ``staged`` (``release``: what the store now holds;
+        None when nothing was released). True: ``staged`` is kept as the next base."""
+        if release is None:
+            return False
+        previous, self._base = self._base, DeltaBase(release, Path(staged))
+        self._since_full = 0 if release.delta is None else self._since_full + 1
+        if previous is not None and previous.directory != Path(staged):
+            shutil.rmtree(previous.directory, ignore_errors=True)
+        return True
 
 
 class PolicyReleaseStore:
@@ -306,10 +398,12 @@ class PolicyReleaseStore:
                  cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR,
                  release_dir: str = RELEASE_DIR,
                  timer: Callable[[], float] = time.perf_counter,
-                 cached_latest: bool = True) -> None:
+                 cached_latest: bool = True, mirror: DeltaMirror | None = None) -> None:
         if int(keep) < 1:
             raise ValueError("keep must be >= 1")
         self.store = store
+        self.mirror = mirror  # sampler side: where delta releases are rebuilt
+        self._bases: dict[str, str] = {}  # delta release name -> its base (this writer)
         self.keep = int(keep)
         self.clock = clock
         self.release_dir = str(release_dir)
@@ -330,20 +424,53 @@ class PolicyReleaseStore:
         if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
             self.cache_dir /= self.release_dir
 
-    def resolve(self, release: PolicyRelease) -> Path:
+    def resolve(self, release: PolicyRelease, *, from_store: bool = False) -> Path:
         """The release's weight directory on this island: in the store mount, or
-        downloaded from the store's object API. Raises :class:`ReleaseIncomplete`
-        when a recorded file is missing or of another size."""
+        downloaded from the store's object API; a delta release is rebuilt in the
+        mirror (``release_delta.DeltaMirror``). Raises :class:`ReleaseIncomplete`
+        when a recorded file (or a base record) is missing or of another size, and
+        ``ReleaseDeltaError`` when a rebuilt file is not the released one.
+        ``from_store``: download again (not from an earlier download), and rebuild a
+        delta release from the full release in the store (not from a rebuilt copy)."""
+        if from_store and self.store.objects is not None:
+            self._prune_cache(keep=())
+        if release.delta is None:
+            return self._stored(release)
+        if self.mirror is None:
+            raise PolicyReleaseError(f"release r{release.seq}-v{release.version} is a delta "
+                                     "release: this reader has no mirror to rebuild it in")
+        directory = self.mirror.materialize(release, record_of=self._record_at, from_store=from_store,
+                                            weights_dir=lambda r: self._stored(r, prune_cache=False))
+        if self.store.objects is not None:
+            self._prune_cache(keep=())
+        return directory
+
+    def _stored(self, release: PolicyRelease, *, prune_cache: bool = True) -> Path:
+        """The release directory as stored (for a delta release: the deltas)."""
         objects = self.store.objects
         if objects is None:
             directory = self.root / release.path
             check_complete(release, directory)
             return directory
-        return self._download(objects, release)
+        return self._download(objects, release, prune_cache=prune_cache)
 
-    def _download(self, objects: ObjectStore, release: PolicyRelease) -> Path:
+    def _record_at(self, path: str) -> PolicyRelease:
+        """The record in release directory ``path`` (a delta's base)."""
+        objects = self.store.objects
+        if objects is not None:
+            raw = objects.read(f"{self.release_dir}/{path}/{RECORD}")
+        else:
+            record = self.root / path / RECORD
+            raw = record.read_bytes() if record.is_file() else None
+        if raw is None:
+            raise ReleaseIncomplete(f"release {path}: no record (pruned, or not yet visible)")
+        return PolicyRelease.from_record(json.loads(raw))
+
+    def _download(self, objects: ObjectStore, release: PolicyRelease, *,
+                  prune_cache: bool = True) -> Path:
         """Download every object of the release into ``cache_dir/<path>`` (once:
-        a complete download is renamed into place) and drop older downloads.
+        a complete download is renamed into place) and drop older downloads
+        (unless ``prune_cache`` is false: a delta chain needs its bases).
         The recorded files are checked against the object sizes first."""
         target = self.cache_dir / release.path
         if not target.is_dir():
@@ -366,12 +493,16 @@ class PolicyReleaseStore:
                     raise ReleaseIncomplete(f"release object {key} disappeared during the download")
             check_complete(release, staging)
             staging.replace(target)
-        for old in self.cache_dir.iterdir():
+        if prune_cache:
+            self._prune_cache(keep=(release.path,))
+        return target
+
+    def _prune_cache(self, keep: tuple[str, ...]) -> None:
+        for old in self.cache_dir.iterdir() if self.cache_dir.is_dir() else ():
             # The cache of another release directory (e.g. W4A8_RELEASE_DIR under the
             # default one) belongs to another store: never drop it here.
-            if old.is_dir() and old.name != release.path and not old.name.startswith(RELEASE_DIR):
+            if old.is_dir() and old.name not in keep and not old.name.startswith(RELEASE_DIR):
                 shutil.rmtree(old, ignore_errors=True)
-        return target
 
     def latest(self) -> PolicyRelease | None:
         objects = self.store.objects
@@ -447,7 +578,9 @@ class PolicyReleaseStore:
     def release_staged(self, version: int, policy_hash: str, staged: Path, *,
                        position: Callable[[], tuple[int | None, dict[str, int] | None]],
                        weights: str = FULL, engine_checksum: str | None = None,
-                       origin: dict[str, Any] | None = None) -> PolicyRelease | None:
+                       origin: dict[str, Any] | None = None,
+                       delta_base: DeltaBase | None = None,
+                       digest_full: bool = False) -> PolicyRelease | None:
         """Publish the weights already written into the local directory ``staged``
         (module doc, staged releases): the weight files go into the store first;
         then the record, in the release directory and as LATEST, in one put.
@@ -455,6 +588,14 @@ class PolicyReleaseStore:
         buffer_shards)`` then include the rounds the trainer took while the weights
         uploaded, so a sampler's backlog cap lifts with this release. ``staged``
         keeps its files.
+
+        ``delta_base``: upload the bf16 delta of ``staged`` against this earlier
+        release instead of the weights (``release_delta``), unless the delta is
+        above :data:`MAX_DELTA_RATIO` of the weights; the record's ``delta`` names
+        the base. The base stays in the store while a kept release needs it.
+
+        ``digest_full``: a full release records the sha256 of each weight file
+        (``file_sha256``), which the follower checks before it loads the release.
 
         Returns None (puts nothing) when the latest release is this version and hash."""
         version = int(version)
@@ -474,11 +615,20 @@ class PolicyReleaseStore:
             self._names = self._listed_names()
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
-        with timer.phase("digest_s"):
-            sha256 = directory_digest(staged) if weights == LORA else None
-            files = file_sizes(staged)
-        with timer.phase("upload_s"):
-            self.store.put_directory(staged, f"{self.release_dir}/{name}")
+        upload, delta = staged, None
+        if delta_base is not None and weights == FULL:
+            with timer.phase("delta_s"):
+                upload, delta = self._stage_delta(staged, delta_base)
+        try:
+            with timer.phase("digest_s"):
+                sha256 = directory_digest(staged) if weights == LORA else None
+                files = file_sizes(upload)
+                digests = file_digests(staged, files) if digest_full and weights == FULL and delta is None else None
+            with timer.phase("upload_s"):
+                self.store.put_directory(upload, f"{self.release_dir}/{name}")
+        finally:
+            if upload != staged:
+                shutil.rmtree(upload, ignore_errors=True)
         buffer_selected, buffer_shards = position()
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
@@ -486,20 +636,57 @@ class PolicyReleaseStore:
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
-                               origin=None if origin is None else dict(origin))
+                               origin=None if origin is None else dict(origin), delta=delta,
+                               file_sha256=digests)
         text = json.dumps(asdict(record), sort_keys=True).encode("utf-8")
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
                                   f"{self.release_dir}/{LATEST}": text})
         self._names = [n for n in self._names if n != name] + [name]
+        if delta is not None:
+            self._bases[name] = str(delta["base_path"])
         with timer.phase("prune_s"):
-            for old in self._names[:-self.keep]:
-                self.store.remove_tree(f"{self.release_dir}/{old}")
-            self._names = self._names[-self.keep:]
+            kept = self._kept_names()
+            for old in self._names:
+                if old not in kept:
+                    self.store.remove_tree(f"{self.release_dir}/{old}")
+                    self._bases.pop(old, None)
+            self._names = [n for n in self._names if n in kept]
         self._written = record
         self.last_timings = timer.as_dict()
         self.last_visible_at = round(self.clock(), 3)  # LATEST names it
         return record
+
+    def _stage_delta(self, staged: Path, base: DeltaBase) -> tuple[Path, dict[str, Any] | None]:
+        """(directory to upload, the record's ``delta`` field): the delta of
+        ``staged`` against ``base`` when its files are still there and the delta
+        is small enough, else ``staged``."""
+        if not Path(base.directory).is_dir():
+            return staged, None
+        out = staged.parent / f".{staged.name}.delta"
+        shutil.rmtree(out, ignore_errors=True)
+        try:
+            result = encode_directory(base.directory, staged, out, skip=lambda name: name == RECORD)
+        except BaseException:
+            shutil.rmtree(out, ignore_errors=True)
+            raise
+        if result.ratio > MAX_DELTA_RATIO:
+            shutil.rmtree(out, ignore_errors=True)
+            return staged, None
+        return out, {"base_seq": base.release.seq, "base_path": base.release.path,
+                     "base_version": base.release.version, "ratio": round(result.ratio, 6),
+                     "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}
+
+    def _kept_names(self) -> set[str]:
+        """The newest ``keep`` releases and every base their deltas need."""
+        kept = set(self._names[-self.keep:])
+        pending = list(kept)
+        while pending:
+            base = self._bases.get(pending.pop())
+            if base is not None and base not in kept:
+                kept.add(base)
+                pending.append(base)
+        return kept
 
     def _listed_names(self) -> list[str]:
         """The release directories under the root, in ``seq`` order."""
@@ -648,13 +835,16 @@ class FollowerCounters:
     is loaded); ``lineage_resets``: loaded releases whose version is below the
     served one (a trainer restored from an older cut); ``deferred_in_flight``:
     refreshes refused because a round was generating on engines that cannot
-    update their weights mid-generation."""
+    update their weights mid-generation; ``rebuild_failures``: tries whose
+    rebuilt (delta) or downloaded (full, ``file_sha256``) files were not the
+    released ones (nothing is loaded)."""
 
     loaded: int = 0
     superseded: int = 0
     stale_reads: int = 0
     lineage_resets: int = 0
     deferred_in_flight: int = 0
+    rebuild_failures: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -684,6 +874,16 @@ class PolicyFollower:
     the version that produced it). A refused refresh is counted and the release
     is loaded at the next refresh outside the round.
 
+    Rebuild failures: a delta release whose rebuilt files fail their digest
+    check (``ReleaseDeltaError``), or a full release whose files fail their
+    ``file_sha256`` (:class:`ReleaseDigestMismatch`), is not loaded; the engines
+    keep the release they serve and :meth:`refresh` raises :class:`ReleaseNotLoaded`
+    (reason ``delta_rebuild_failed`` or ``release_digest_mismatch``). Each later
+    try downloads again and rebuilds from the full release in the store
+    (``resolve(from_store=True)``) until one release passes its checks.
+    The ``max_rebuild_failures``-th failure in a row raises the error (the
+    island stops).
+
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
     release (``last_seen``) in ``LATEST``."""
@@ -692,7 +892,12 @@ class PolicyFollower:
                  load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
                  scheme: str | None = None, live_update: bool = False,
                  timer: Callable[[], float] = time.perf_counter,
-                 wall: Callable[[], float] = time.time) -> None:
+                 wall: Callable[[], float] = time.time,
+                 max_rebuild_failures: int = MAX_REBUILD_FAILURES) -> None:
+        if int(max_rebuild_failures) < 1:
+            raise ValueError("max_rebuild_failures must be >= 1")
+        self.max_rebuild_failures = int(max_rebuild_failures)
+        self.rebuild_failures = 0  # in a row, since a release was last resolved
         self.releases = releases
         self.scheme = scheme
         self._load = load
@@ -750,14 +955,20 @@ class PolicyFollower:
             check_release_scheme(latest, self.scheme)
         try:
             with timer.phase("resolve_s"):
-                directory = self.releases.resolve(latest)
+                directory = self.releases.resolve(latest, from_store=self.rebuild_failures > 0)
         except ReleaseIncomplete as error:
             self.incomplete = str(error)
             return None
+        except ReleaseDeltaError as error:
+            self._rebuild_failed(latest, error)
         self.incomplete = None
         if not getattr(self._load, "verifies_files", False):
-            with timer.phase("verify_s"):
-                check_release_files(latest, directory)
+            try:
+                with timer.phase("verify_s"):
+                    check_release_files(latest, directory)
+            except ReleaseDigestMismatch as error:
+                self._rebuild_failed(latest, error)
+        self.rebuild_failures = 0
         with timer.phase("load_s"):
             self._load(latest, directory)
         previous = self.release
@@ -770,3 +981,21 @@ class PolicyFollower:
         self.release = latest
         self.last_timings = timer.as_dict()
         return latest
+
+    def _rebuild_failed(self, release: PolicyRelease, error: ReleaseDeltaError) -> None:
+        """Count a failed rebuild of ``release`` and raise (class doc)."""
+        self.rebuild_failures += 1
+        self.counters.rebuild_failures += 1
+        failures = self.rebuild_failures
+        if failures >= self.max_rebuild_failures:
+            raise type(error)(f"r{release.seq}-v{release.version}: {failures} delta rebuilds or "
+                              f"digest checks in a row failed (last: {error})", file=error.file) from error
+        full = isinstance(error, ReleaseDigestMismatch)
+        raise ReleaseNotLoaded(
+            f"r{release.seq}-v{release.version}: {'digest check' if full else 'delta rebuild'} failed "
+            f"({error}); the engines keep v{self.version}, the next try rebuilds from the full "
+            "release in the store",
+            reason="release_digest_mismatch" if full else "delta_rebuild_failed",
+            fields={"release_version": release.version, "file": error.file,
+                    "rebuild_failures": failures, "max_rebuild_failures": self.max_rebuild_failures},
+        ) from error

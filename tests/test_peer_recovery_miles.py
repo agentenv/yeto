@@ -240,7 +240,7 @@ def stubs(monkeypatch):
 
     monkeypatch.setattr(MilesChunkedFullParameterAdapter, "initialize", classmethod(initialize))
     _install_miles_rebase_stub(monkeypatch)
-    monkeypatch.setattr(role_stream_module, "SyncerClient", make_client)
+    monkeypatch.setattr("yeto.rl.engine.full_parameter_stream.SyncerClient", make_client)
     monkeypatch.setattr(role_stream_module, "MilesRayInboundChunkSink", lambda sink: sink)
     monkeypatch.setattr(role_stream_module, "role_stream_session_contract_hash", lambda *_a: b"\0" * 32)
     return SimpleNamespace(clients=clients, kwargs=seen_kwargs)

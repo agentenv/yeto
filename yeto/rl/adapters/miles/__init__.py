@@ -18,40 +18,8 @@ Modules:
 
 from __future__ import annotations
 
-import asyncio
-import inspect
-from typing import Any
+# The runner is engine-neutral (yeto/rl/engine/loop_runner.py); this name stays
+# importable for the Miles ports.
+from yeto.rl.engine.loop_runner import LoopRunner
 
 __all__ = ["LoopRunner"]
-
-
-class LoopRunner:
-    """Drive upstream Miles' async handles from the synchronous ports.
-
-    One persistent event loop is used for the lifetime of an island so that
-    handles bound to a loop (RPC clients, Ray async refs) stay valid. Plain
-    (non-awaitable) values are returned unchanged, which lets tests use
-    synchronous fakes.
-    """
-
-    def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        self._loop = loop
-
-    @property
-    def loop(self) -> asyncio.AbstractEventLoop:
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-        return self._loop
-
-    def run(self, value: Any) -> Any:
-        if inspect.isawaitable(value):
-            return self.loop.run_until_complete(_await(value))
-        return value
-
-    def close(self) -> None:
-        if self._loop is not None and not self._loop.is_closed():
-            self._loop.close()
-
-
-async def _await(value: Any) -> Any:
-    return await value

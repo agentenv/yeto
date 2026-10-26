@@ -222,6 +222,30 @@ def test_one_island_keeps_the_strict_values(extra):
     assert args.rl_sync_push_dtype == "f32"
 
 
+def test_one_island_warns_that_async_does_not_apply_and_names_the_final_cut(capsys):
+    """S27 G-CD (GBC-120B-STAGEB §3): one full-parameter island with the default
+    --rl-sync-mode async ran strict and downloaded the f32 model at the final cut."""
+    from yeto.launch.rl_args import _apply_rl_sync_mode, rl_sync_mode_off_reasons
+
+    args = _launcher_args("ports", FULL, gpu="modal:2xh100")
+    args.controller = "local"
+    assert rl_sync_mode_off_reasons(args) == ["1 island"]
+    _apply_rl_sync_mode(args)
+    err = capsys.readouterr().err
+    assert args.rl_sync_mode_effective == "strict"
+    assert "WARNING: --rl-sync-mode async does not apply (1 island)" in err
+    assert "rl_sync_mode_effective strict" in err and "final cut: download" in err
+    assert "--rl-sync-final-cut ack" in err
+    explicit = _launcher_args("ports", FULL + ("--rl-sync-final-cut", "ack"), gpu="modal:2xh100")
+    _apply_rl_sync_mode(explicit)
+    err = capsys.readouterr().err
+    assert "final cut: ack" in err and "downloads" not in err
+    for quiet in (_launcher_args("ports", FULL, gpu=TWO_ISLANDS),  # async applies
+                  _launcher_args("ports", FULL + ("--rl-sync-mode", "strict"), gpu="modal:2xh100")):
+        _apply_rl_sync_mode(quiet)
+        assert "WARNING" not in capsys.readouterr().err
+
+
 def test_peer_recovery_defaults_on_where_it_applies():
     from yeto.launcher import _prepare_rl_args
 
@@ -230,13 +254,19 @@ def test_peer_recovery_defaults_on_where_it_applies():
     assert args.rl_peer_recovery is True
     args, _ = _plan(FULL)  # no snapshot store: off
     assert args.rl_peer_recovery is False
-    # Off: the store alone is then refused, which shows recovery stayed off.
-    for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up"),
-                  ("--rl-sync-mode", "strict")):
-        args = _launcher_args("ports", FULL + store + extra, gpu=TWO_ISLANDS)
-        with pytest.raises(ValueError, match="or --rl-peer-recovery"):
-            _prepare_rl_args(args)
-        assert args.rl_peer_recovery is False
+    # Off with asynchronous rounds (S27 G-DS): the store then keeps only the
+    # islands' data positions for the catch-up, and no island gets a snapshot store.
+    for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up")):
+        args, plan = _plan(FULL + store + extra)
+        assert args.rl_peer_recovery is False and args.rl_island_state_source == "catch-up"
+        for island in plan["island_requests"]:
+            assert "--rl-data-position-store" in island["learner_command"]
+            assert "--rl-peer-recovery-store" not in island["learner_command"]
+    # The strict mode has no catch-up: the store alone is refused.
+    args = _launcher_args("ports", FULL + store + ("--rl-sync-mode", "strict"), gpu=TWO_ISLANDS)
+    with pytest.raises(ValueError, match="or --rl-peer-recovery"):
+        _prepare_rl_args(args)
+    assert args.rl_peer_recovery is False
 
 
 def test_peer_recovery_defaults_on_in_an_island_pool():

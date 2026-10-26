@@ -110,6 +110,34 @@ def copy_verified(src: Path, dst: Path) -> tuple[str, int]:
     return want, dst.stat().st_size
 
 
+PUT_COPY_WORKERS = 8  # files CheckpointStore.put_directory copies at once
+
+
+def _copy_renamed(src: Path, dst: Path, rename: bool = True) -> int:
+    """Copy ``src`` to ``dst`` through the hidden name ``.<name>.tmp`` in the
+    directory of ``dst``, then rename it to ``dst`` (``rename=False``: straight
+    to ``dst``). Returns the bytes copied. ``_tree_files`` and the release
+    readers never take a ``.tmp`` file."""
+    tmp = dst.with_name(f".{dst.name}.tmp") if rename else dst
+    shutil.copyfile(src, tmp)
+    if rename:
+        os.replace(tmp, dst)
+    return dst.stat().st_size
+
+
+def _copy_files(pairs: list[tuple[Path, Path]], *, rename: bool = True, workers: int | None = None) -> int:
+    """:func:`_copy_renamed` for every ``(src, dst)``, up to ``workers``
+    (:data:`PUT_COPY_WORKERS`) at once; the first error is raised after the
+    copies in flight end. Returns the bytes copied."""
+    workers = max(1, min(int(workers or PUT_COPY_WORKERS), len(pairs)))
+    if workers == 1:
+        return sum(_copy_renamed(src, dst, rename) for src, dst in pairs)
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="yeto-put") as pool:
+        return sum(pool.map(lambda pair: _copy_renamed(*pair, rename), pairs))
+
+
 def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
     skip = set(skip) | set(SKIP_NAMES)
     out = []
@@ -150,6 +178,10 @@ class CheckpointStore:
 
     kind = "local"
     objects: Any = None
+    # put_directory writes each file under a temporary name, then renames it. A
+    # bucket mount sets False: a rename there is a copy of the object, and the
+    # object store shows an object only once its upload is whole anyway.
+    put_renames = True
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root).expanduser()
@@ -165,6 +197,13 @@ class CheckpointStore:
         """Mark a write in progress until the returned guard is released. A
         backend whose ``reload`` can drop uncommitted files (a Modal Volume)
         skips reloads while any guard is held; locally it does nothing."""
+        return StoreWriterGuard()
+
+    def hold_reader(self) -> "StoreWriterGuard":
+        """Mark an open read of a store file until the returned guard is released.
+        A backend whose ``reload`` fails while a file is open (a Modal Volume:
+        "there are open files preventing the operation") skips reloads while any
+        guard is held, in any process of the container; locally it does nothing."""
         return StoreWriterGuard()
 
     def describe(self) -> dict[str, Any]:
@@ -184,15 +223,30 @@ class CheckpointStore:
     def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
         """Copy the local directory ``local`` to ``relative`` under the root (an
         existing directory there is replaced) and make it visible to readers: one
-        commit, under the writer guard. The files in ``local`` stay."""
+        commit, under the writer guard. The files in ``local`` stay.
+
+        Each file is written under a hidden temporary name in its directory and
+        then renamed (:func:`_copy_renamed`; :attr:`put_renames`), up to
+        :data:`PUT_COPY_WORKERS` files at once: no reader sees a partial file
+        under its final name, neither a process of this host nor, on a Modal
+        Volume, another container after a background commit. The commit may take
+        as long as the copied bytes need (:func:`commit_budget`)."""
         source, target = Path(local), self.root / relative
+        if not source.is_dir():
+            raise FileNotFoundError(f"put_directory: {source} is not a directory")
+        entries = sorted(source.rglob("*"))
+        files = [path.relative_to(source) for path in entries if path.is_file()]
+        folders = [path.relative_to(source) for path in entries if path.is_dir()]
         guard = self.hold_writer()
         try:
             if target.exists():
                 shutil.rmtree(target)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source, target)
-            self.commit()
+            target.mkdir(parents=True)
+            for folder in folders:
+                (target / folder).mkdir(parents=True, exist_ok=True)
+            total = _copy_files([(source / rel, target / rel) for rel in files], rename=self.put_renames)
+            with commit_budget(self, total):
+                self.commit()
         finally:
             guard.release()
 
@@ -230,6 +284,7 @@ class BucketMountStore(CheckpointStore):
     mount; fsync on every write is the only commit we can issue."""
 
     kind = "bucket-mount"
+    put_renames = False
 
 
 STORE_IMPL_ENV = "YETO_RL_STORE_IMPL"  # "package.module:callable", exported by the launch layer
@@ -533,6 +588,16 @@ def stage_state_dir(state_dir: Path, staged: Path) -> Path:
 
 def directory_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
+
+
+def commit_budget(store: Any, pending_bytes: int | None) -> Any:
+    """A context in which the commits of ``store`` on this thread may take as long as
+    ``pending_bytes`` uncommitted bytes need (a store whose commit has a timeout, the
+    Modal Volume, offers ``commit_budget``); a no-op for other stores."""
+    from contextlib import nullcontext
+
+    budget = getattr(store, "commit_budget", None)
+    return budget(pending_bytes) if callable(budget) else nullcontext()
 
 
 # ---------------------------------------------------------------------------
