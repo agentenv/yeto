@@ -498,7 +498,8 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
 
     from yeto.rl.adapters.verl import patch_verl
 
-    for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB}:
+    for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB
+                + (patch_verl.AUTO_CLASS,)}:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(VERL_FORK / rel, tmp_path / rel)
     patch_verl.apply(tmp_path, "megatron")
@@ -511,6 +512,10 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
     assert engine.count("_yeto_sub_key") == 2 and engine.count("time.sleep(1.0)  # yeto") == 1
     compile(engine, "nccl_checkpoint_engine.py", "exec")
+    # S27 G-EQ2: the auto-class fix applies on both profiles and stays valid python
+    model = (tmp_path / patch_verl.AUTO_CLASS[0]).read_text()
+    assert model.count("yeto S27 G-EQ2") == 1 and patch_verl.AUTO_CLASS[1] not in model
+    compile(model, "model.py", "exec")
     with pytest.raises(SystemExit, match="unknown profile"):
         patch_verl.apply(tmp_path, "nope")
 

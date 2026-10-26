@@ -35,6 +35,29 @@ merge (elastic: several local rounds per merge) releases nothing: its weights
 are not a merged policy. The driver is bound after it is built
 (:meth:`BufferReleasePublisher.bind`).
 
+Delta releases (S27 G-EQ3, ``--rl-release-delta-full-every N`` on a
+full-parameter trainer): the release is written into a staging directory on the
+island's local disk and published with
+:meth:`~yeto.rl.engine.policy_release.PolicyReleaseStore.release_staged`, which
+uploads the bf16 delta against the previous release (:class:`DeltaChain`)
+instead of the weights. The first release of the process is a delta against the
+release the store already holds when its files are readable there -- for a
+cross-cloud run that is the base checkpoint both sides have, so the first
+update sends only the words one optimizer step moved instead of the whole
+checkpoint (Nemotron Nano: 63 GB). It needs the export to write the base's own
+file names and sizes, which :mod:`.hf_export` does.
+
+Relaunch (S27 G-EQ5, gap 22, ``resume_versions``): a buffer trainer without an
+outer sync counts its policy versions itself, so a new process of it continues
+the account above the releases its store already holds
+(:class:`~yeto.rl.engine.merged_release.ResumedReleases`): the driver's rounds
+start at the store's newest release version vK, the island's first publication
+is vK and releases nothing, the versions in the policy-age window below vK are
+restored with the hashes the store recorded, and the island judges behavior
+versions with an outer <-> outer map seeded from those releases. Before this a
+relaunched trainer discarded every group a sampler had written with a release
+above v0 and re-used version numbers the store already held.
+
 The publication is complete when the release record and ``LATEST.json`` are in
 the store. Whether a sampler has loaded it is the sampler's report
 (``rl_sampler_policy_loaded`` on its tape) and the behavior versions of the
@@ -52,13 +75,15 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest
-from yeto.rl.engine.merged_release import BufferLane, MergedReleaseGuard, is_publisher, merged_version
+from yeto.rl.engine.merged_release import (BufferLane, MergedReleaseGuard, ResumedReleases, is_publisher,
+                                           merged_version, resumed_releases)
 from yeto.rl.engine.policy_release import FULL, PolicyReleaseStore
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 
 from .buffer_feed import BufferCall, BufferFeed, MergedVersions, RowShape
 from .fully_async_ports import MEMBER, FullyAsyncIsland, FullyAsyncRolloutPool
 from .fully_async_round import FULLY_ASYNC_PLACEMENT
+from .fully_async_translate import VersionMap
 from .merged_release import LORA_B, write_full_checkpoint, write_merged_checkpoint
 
 BASE_POLICY_VERSION = 0
@@ -104,6 +129,43 @@ def lora_release_weights(base_dir: str | Path, merge: Callable[..., dict[str, An
     return weights
 
 
+def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Callable[..., None] | None = None):
+    """A :class:`DeltaChain` for this trainer, started from the release the store
+    already holds when that release's files are readable in the store (module
+    doc, delta releases); None when ``full_every`` is 0 (deltas off). A release
+    that is itself a delta is rebuilt first when the store has a mirror
+    (S27 G-EQ3, gap 20), so a restarted island's next release stays a delta."""
+    from yeto.rl.engine.policy_release import DeltaChain
+
+    if int(full_every) < 1:
+        return None
+    chain = DeltaChain(int(full_every))
+    latest = releases.latest()
+    if latest is None:
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=False, rebuilt=False,
+                 reason="the store holds no release")
+        return chain
+    # A delta release is rebuilt first (S27 G-EQ3, gap 20): its own directory holds
+    # ``.ydelta`` files, which are no base, but ``PolicyReleaseStore.resolve`` with a
+    # mirror rebuilds it on local disk (Nemotron Nano: about 1 min) -- far cheaper than
+    # the whole-checkpoint upload the alternative costs (63 GB, about 2.3 h on this link).
+    rebuilt = latest.delta is not None
+    try:
+        directory = releases.resolve(latest)
+    except Exception as error:  # noqa: BLE001 -- no usable base: the next release goes out whole
+        directory = None
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=False, rebuilt=rebuilt,
+                 reason=f"{type(error).__name__}: {error}"[:200])
+    if directory is not None and Path(directory).is_dir():
+        chain.adopt(latest, directory)
+        if emit is not None:
+            emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
+                 base_version=latest.version, base_path=str(directory), rebuilt=rebuilt)
+    return chain
+
+
 def full_release_weights(writer: Callable[[int, Path], None]):
     """A full-parameter trainer's releases (S27 G-EK): ``writer`` is the island's HF
     writer (``hf_export.VerlHfWriter`` over the trainer workers); version 0 is the
@@ -146,7 +208,19 @@ class BufferReleasePublisher:
                  *, base_dir: str | Path, clock: Callable[[], float] = time.monotonic,
                  merge: Callable[..., dict[str, Any]] = write_merged_checkpoint,
                  lane: BufferLane | None = None,
-                 weights: Callable[[Any], ReleaseWeights] | None = None) -> None:
+                 weights: Callable[[Any], ReleaseWeights] | None = None,
+                 staging: str | Path | None = None, delta: Any = None,
+                 resumed: ResumedReleases | None = None) -> None:
+        """``staging``: publish each release from a directory under it instead of
+        writing it into the store (module doc, delta releases); ``delta``: the
+        :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
+        follow (:func:`delta_chain_for`), which needs ``staging``; ``resumed``: the
+        version account this process continues (module doc, relaunch)."""
+        if delta is not None and staging is None:
+            raise ValueError("delta releases need a staging directory")
+        self.resumed = resumed
+        self.staging = None if staging is None else Path(staging)
+        self.delta = delta
         self.island = island
         self.releases = releases
         self.feed = feed
@@ -160,8 +234,20 @@ class BufferReleasePublisher:
         self.releasing = lane is None or is_publisher(lane.index, lane.count)
 
     def bind(self, driver: Any) -> None:
-        """The island's driver (synced trainers read its outer version)."""
+        """The island's driver (synced trainers read its outer version; a resumed
+        version account is wired into it here, module doc "relaunch")."""
         self.driver = driver
+        if self.resumed is not None:
+            # S27 G-EQ5 (gap 22): the island's rounds and publications continue at vK,
+            # and the versions published below it are restored with the hashes the
+            # store recorded, so a group inside the policy-age window is trained.
+            resume_at = getattr(driver.sync, "resume_at", None)
+            if not callable(resume_at):
+                raise RuntimeError(
+                    f"a buffer trainer resuming the store's version account needs a sync session "
+                    f"that takes a start version; {type(driver.sync).__name__} does not")
+            resume_at(self.resumed.start_version)
+            driver.published_policy_history = self.resumed.history
         if self.lane is not None:
             self.island.emit("rl_policy_release_role", learner_id=self.lane.index,
                              num_learners=self.lane.count, publisher=self.releasing)
@@ -175,6 +261,15 @@ class BufferReleasePublisher:
         the first time this island applies it (module doc)."""
         local = int(state.policy_version)
         if self.lane is None:
+            if self.resumed is not None and local <= self.resumed.base_version:
+                # S27 G-EQ5 (gap 22): the first publication of a relaunched trainer is
+                # the version its store already holds and nothing is trained yet, so
+                # releasing it would write a second release with that version number
+                # and other weights. The first trained round releases vK+1.
+                self.island.emit("rl_policy_release_skipped", policy_version=local,
+                                 latest_version=self.resumed.base_version,
+                                 reason="resumed_base_version")
+                return None
             return local
         if self.driver is None:
             raise RuntimeError("synced buffer trainer: publish before bind(driver)")
@@ -189,6 +284,37 @@ class BufferReleasePublisher:
             return None
         return merged
 
+    def _release_from_staging(self, version: int, digest: str, write: Callable[[Path], None],
+                              position: int | None, shards: dict[str, int] | None, state: Any):
+        """Write the release into a staging directory and publish it from there,
+        as the delta against the chain's base when it has one (module doc).
+        The staged directory stays only while it is the next delta's base."""
+        import shutil
+        import tempfile
+
+        self.staging.mkdir(parents=True, exist_ok=True)
+        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+        base = None if self.delta is None else self.delta.base()
+        kept = False
+        try:
+            write(staged)
+            release = self.releases.release_staged(
+                version, digest, staged, position=lambda: (position, shards),
+                weights=FULL, origin=self._origin(state), delta_base=base,
+                digest_full=self.delta is not None)
+            kept = self.delta is not None and self.delta.advance(release, staged)
+        finally:
+            if not kept:
+                shutil.rmtree(staged, ignore_errors=True)
+        delta = None if release is None else release.delta
+        self.island.emit("rl_policy_release_delta", policy_version=int(version),
+                         base_seq=None if delta is None else delta["base_seq"],
+                         base_version=None if delta is None else delta["base_version"],
+                         ratio=None if delta is None else delta["ratio"],
+                         bytes=None if release is None else sum(int(v) for v in (release.files or {}).values()),
+                         timings=self.releases.last_timings)
+        return release
+
     def _origin(self, state: Any) -> dict[str, Any] | None:
         if self.lane is None:
             return None
@@ -200,6 +326,10 @@ class BufferReleasePublisher:
         version = int(state.policy_version)
         param_version = int(isl.call("yeto_param_version"))
         isl.vmap.record(param_version, version)  # raises on contradiction / regression
+        if isl.consume_map is not isl.vmap:
+            # the version the samplers stamp on the groups of this release is the
+            # outer version itself (S27 G-EQ5); idempotent when it is already seeded
+            isl.consume_map.record(version, version)
         digest = state.policy_tensor_hash()
         weights = (self.weights or lora_release_weights(self.base_dir, self.merge))(state)
         started = self.clock()
@@ -212,8 +342,12 @@ class BufferReleasePublisher:
             def write(directory: Path) -> None:
                 merge.update(weights.write(directory))
 
-            release = self.releases.release(released, digest, write, buffer_selected=position,
-                                            buffer_shards=shards, weights=FULL, origin=self._origin(state))
+            if self.staging is not None:
+                release = self._release_from_staging(released, digest, write, position, shards, state)
+            else:
+                release = self.releases.release(released, digest, write, buffer_selected=position,
+                                                buffer_shards=shards, weights=FULL,
+                                                origin=self._origin(state))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
                   "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
@@ -257,27 +391,60 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          tokenize: Callable[[str], Sequence[int]] | None = None,
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
                          weights: Callable[[Any], ReleaseWeights] | None = None,
+                         staging: str | Path | None = None, delta_full_every: int = 0,
+                         resume_versions: bool = False,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
     port, the publisher and the placement of a buffer trainer (module doc); the
     feed is ``publisher.feed``. A lane reader ``buffer`` (``buffer.lane``) makes
     a synced trainer: ``cursor_log`` is its lane cursor log
-    (``merged_release.lane_cursor_log``)."""
+    (``merged_release.lane_cursor_log``).
+
+    ``delta_full_every`` > 0 (``--rl-release-delta-full-every``) publishes the
+    releases from ``staging`` as bf16 deltas (module doc, delta releases).
+
+    ``resume_versions`` (S27 G-EQ5, gap 22): this island counts its policy
+    versions itself (no outer sync), so it continues the account above the
+    releases its store already holds (``merged_release.ResumedReleases``) --
+    its round counter, its version map and its published policies all start at
+    the store's newest release version. A synced trainer takes its versions
+    from the syncer and refuses this."""
     lane = getattr(buffer, "lane", None)
-    if (lane is None) != (cursor_log is None):
+    if lane is not None and cursor_log is None:
         raise ValueError("a synced buffer trainer needs both a lane reader and its cursor log")
+    if resume_versions and lane is not None:
+        raise ValueError("a synced buffer trainer's versions come from the syncer, not from the store")
     actor_call = island.call
     log = CONSUMED_LOG.format(learner=island.learner_id)
 
     def record(fields: dict[str, Any]) -> None:
         island.append_jsonl(log, fields)
 
-    feed = BufferFeed(buffer, vmap=lambda: island.vmap, shape=shape,
+    # A buffered group's behavior version is a store release version (an outer
+    # version), not a verl param version, so the round judges it with its own map.
+    island.consume_map = VersionMap()
+    resumed = resumed_releases(releases, island.limit) if resume_versions else None
+    if resumed is not None:
+        for version in resumed.known_versions():
+            island.consume_map.record(version, version)
+        island.hashes.update(resumed.window())
+        island.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
+                    start_version=resumed.start_version, max_policy_age=resumed.limit,
+                    known_versions=list(resumed.known_versions()),
+                    restored_versions=sorted(resumed.window()))
+    feed = BufferFeed(buffer, vmap=lambda: island.consume_map, shape=shape,
                       add_group=lambda rows: actor_call("yeto_add_group", rows), record=record,
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
-    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane, weights=weights)
+    if int(delta_full_every) > 0 and staging is None:
+        raise ValueError("--rl-release-delta-full-every needs a staging directory")
+    delta = (delta_chain_for(releases, int(delta_full_every), emit=island.emit)
+             if int(delta_full_every) > 0 else None)
+    publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane,
+                                       weights=weights,
+                                       staging=staging if int(delta_full_every) > 0 else None,
+                                       delta=delta, resumed=resumed)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

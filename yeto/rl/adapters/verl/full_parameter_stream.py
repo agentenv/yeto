@@ -463,6 +463,12 @@ class VerlFullParameterGroup:
             raise RuntimeError(f"verl export returned {len(readers)} reader results, expected 1")
         return {name: _owned(array) for name, array in readers[0]["arrays"].items()}
 
+    async def release_memory(self) -> list[dict]:
+        """Free the workers' cached device blocks (:func:`.full_parameter.remote_release_memory`);
+        the island calls it after an export, whose gathers leave large blocks cached."""
+
+        return await asyncio.to_thread(self.island.call_workers, fp.remote_release_memory)
+
     async def export_fragment(self, units: Sequence[tuple[str, int, int]], numel: int, *,
                               payload: bool, sha256: bool) -> dict[str, Any]:
         """One fragment read on the workers (:func:`.full_parameter.remote_export_flat`):
@@ -628,6 +634,23 @@ class VerlChunkedFullParameterAdapter:
         names = {name for fragment_id in fragment_ids for name in self._names[fragment_id]}
         return {other for other in range(self.layout.fragments.num_fragments)
                 if other not in fragment_ids and names.intersection(self._names[other])}
+
+    async def fragment_digests(self, group: VerlFullParameterGroup) -> tuple[str, ...]:
+        """The content hash of every fragment, hashed on the reading rank: no
+        payload crosses Ray and the driver keeps nothing (S27 G-EZ2). The hashes
+        are the ones :meth:`capture` gets from the same worker call."""
+
+        stats = _Stats("digest", lazy=False)
+        hashes = []
+        for fragment_id in range(self.layout.fragments.num_fragments):
+            numel = self.fragment_numel(fragment_id)
+            result = await group.export_fragment(self._units[fragment_id], numel, payload=False, sha256=True)
+            stats.add(result["timings"], fragments=1, nbytes=numel * 4)
+            if not result["finite"]:
+                raise ValueError(f"fragment {fragment_id} has NaN/Inf")
+            hashes.append(result["sha256"])
+        self.last_stats["digest"] = stats.done()
+        return tuple(hashes)
 
     async def capture(self, group: VerlFullParameterGroup, *, policy_version: int,
                       local_step_generation: int, defer_payload: bool = False,
@@ -1116,8 +1139,16 @@ def _never_materialize(_version: int):
 
 class VerlFullParameterLocalState:
     """``PolicyState`` of a full-parameter island without an outer sync
-    (``--rl-single-island-no-sync``): every export is a whole cut of the
-    trainer, returned as a trainer-resident handle (no tensors leave)."""
+    (``--rl-single-island-no-sync``): every export hashes the whole trainer on
+    its reading rank and returns a trainer-resident handle (no tensors leave).
+
+    S27 G-EZ2: the export used to be a whole :meth:`~VerlChunkedFullParameterAdapter.capture`,
+    which brings every fragment's FP32 payload into the island driver only to
+    hash it, and keeps it there as the adapter's resident cut. For the 120B
+    text model that is 449 GiB in the driver process on the head node, on top of
+    that node's share of the training state (npu1 n3: the driver's RSS reached
+    374 GiB before the first step). The digest is the same content hash, taken
+    from the same worker call without the payload."""
 
     def __init__(self, group: VerlFullParameterGroup, *, component, max_fragment_bytes: int,
                  max_chunk_bytes: int = 256 << 20, matrix_merge: str = "avg") -> None:
@@ -1136,7 +1167,16 @@ class VerlFullParameterLocalState:
 
     def _adapter(self) -> VerlChunkedFullParameterAdapter:
         if self.adapter is None:
-            shapes = fp.agree_on_shapes(self.runner.run(self.group.manifests()))
+            manifests = self.runner.run(self.group.manifests())
+            # S27 G-EQ3: a persistent buffer is not sharded, so a rank whose copy did
+            # not come from the checkpoint computes wrong log-probs with perfectly
+            # fine parameters; this raises before any training happens.
+            digests = fp.agree_on_buffers(manifests)
+            emit = getattr(getattr(self.group, "island", None), "emit", None)
+            if callable(emit) and digests:
+                emit("rl_verl_buffer_digests", buffers=len(digests),
+                     values={name: digests[name] for name in sorted(digests)[:64]})
+            shapes = fp.agree_on_shapes(manifests)
             layout = fp.plan_layout(fp.island_specs(shapes), component=self.component, minimum_fragments=1,
                                     max_fragment_bytes=self.max_fragment_bytes, matrix_merge=self.matrix_merge)
             self.adapter = VerlChunkedFullParameterAdapter(layout, max_chunk_bytes=self.max_chunk_bytes)
@@ -1152,11 +1192,16 @@ class VerlFullParameterLocalState:
 
         version = self.policy_version if policy_version is None else int(policy_version)
         adapter = self._adapter()
-        cut = self.runner.run(adapter.capture(self.group, policy_version=version, local_step_generation=0))
+        # S27 G-EZ2 (s27-verl-pool-profile): hash every fragment on its reading rank
+        # instead of capturing the whole cut into the island driver, which for the 120B
+        # text model is 449 GiB of FP32 payload in the driver process. Same content hash.
+        hashes = self.runner.run(adapter.fragment_digests(self.group))
+        layout_hash = adapter.layout.layout_hash
+        policy_hash, content_hash = _cut_hashes(layout_hash, version, 0, hashes)
         state = TrainerResidentState(
             layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
-            config_hash=self.component.config_hash, layout_hash=cut.layout_hash, policy_version=version,
-            digest=PolicyDigest(cut.policy_hash, cut.content_hash, adapter.expected_parameter_scalar_count * 4, ()),
+            config_hash=self.component.config_hash, layout_hash=layout_hash, policy_version=version,
+            digest=PolicyDigest(policy_hash, content_hash, adapter.expected_parameter_scalar_count * 4, ()),
             materialize_fn=_never_materialize, weights_mark=self._mark(), holds_fn=self._holds)
         self._last_verified = state
         return state

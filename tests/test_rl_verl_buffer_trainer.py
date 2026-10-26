@@ -126,10 +126,19 @@ def test_feed_returns_none_at_the_data_end_and_times_out_without_data(tmp_path):
 
 def test_buffer_call_routes_queue_calls_to_the_feed():
     seen = []
-    call = bf.BufferCall(lambda name, *a: seen.append(("feed", name)), lambda name, *a, **k: seen.append(("actor", name)))
+
+    class _Feed:  # S27 G-EQ4: the call also commits the cursor record after a train call
+        def __call__(self, name, *a):
+            seen.append(("feed", name))
+
+        def commit_round(self):
+            seen.append(("feed", "commit_round"))
+
+    call = bf.BufferCall(_Feed(), lambda name, *a, **k: seen.append(("actor", name)))
     call("yeto_pull_sample")
     call("yeto_train_step")
-    assert seen == [("feed", "yeto_pull_sample"), ("actor", "yeto_train_step")]
+    assert seen == [("feed", "yeto_pull_sample"), ("actor", "yeto_train_step"),
+                    ("feed", "commit_round")]
 
 
 # ---------------------------------------------------------------------- merge
@@ -224,7 +233,8 @@ class FakeBufferActor:
         return [{"applied": len(tensors)}]
 
 
-def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None):
+def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None, limit=1,
+             releases=None, resume_versions=False):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -233,7 +243,8 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None)
     from yeto.rl.engine.driver import EventTape, IslandDriver
 
     specs = (CanonicalTensorSpec(NAMES[0], (2, 4), "float32", 8), CanonicalTensorSpec(NAMES[1], (4, 2), "float32", 8))
-    island = FullyAsyncIsland(actor, learner_id=0, limit=1, required=required, out_dir=str(tmp_path / "out"),
+    island = FullyAsyncIsland(actor, learner_id=0, limit=limit, required=required,
+                              out_dir=str(tmp_path / "out"),
                               readback_dir=str(tmp_path / "rb"), base_model_revision="a" * 40,
                               lora_config_hash="b" * 64, layout_hash=canonical_layout_hash(specs),
                               expected_specs=specs)
@@ -244,14 +255,15 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None)
         buffer = FileSampleBuffer(store, batch_size=1, create_index=False)
     rollout, publisher, placement = install_buffer_ports(
         island, buffer=buffer,
-        releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
-        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30)
+        releases=releases or PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
+        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, resume_versions=resume_versions)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
     driver = IslandDriver(
         learner_id=0, rollout=rollout, trainer=FullyAsyncTrainerGroup(island), policy_state=VerlPolicyState(island),
         publisher=publisher, placement=placement,
         capabilities=verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1),
         algorithm=TOLERANT, sync=LocalOnlySync(rounds), events=tape, profile=profile)
+    publisher.bind(driver)  # as trainer.run_fully_async_island does for a buffer trainer
     return driver, island, publisher
 
 
@@ -312,6 +324,102 @@ def test_sampler_island_and_verl_buffer_trainer_run_three_rounds(tmp_path):
     assert sum(e["pulled"] for e in rounds) == len(consumed)
 
 
+def _released(releases, version):
+    """One release of an earlier process of the island, with a hash-shaped policy hash."""
+    releases.release(version, f"{version:064d}", lambda d: (d / "w.bin").write_text(str(version)))
+
+
+def test_a_relaunched_buffer_trainer_trains_the_groups_of_the_releases_it_finds(tmp_path):
+    """S27 G-EQ5 (gap 22): the version account continues above the store's releases.
+
+    An earlier process released v1, v2 and v3; the samplers then wrote groups with
+    v1, v2 and v3. This process must start at v3, train the groups inside the
+    policy-age window (v3 and v2), discard v1 as over-age (not as unknown), and
+    release v4 -- never v3 again."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store, keep=4)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    for version in (1, 2, 3):
+        _released(releases, version)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i, version in enumerate((1, 2, 3)):  # oldest first: all three are judged this round
+        writer.write([_sample(version, index=0), _sample(version, index=1)], group_key=f"g{i}")
+    actor = FakeBufferActor()
+    driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=1, required=2, base=base,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                          releases=releases, resume_versions=True)
+    state = driver.run()
+
+    assert driver.rounds_completed == 1 and state.policy_version == 4  # one round from v3
+    events = {e["event"]: e for e in _lines(tmp_path / "tape.jsonl")}
+    assert {k: events["rl_buffer_resume_versions"][k] for k in
+            ("base_version", "start_version", "known_versions", "restored_versions")} == {
+        "base_version": 3, "start_version": 3, "known_versions": [1, 2, 3], "restored_versions": [2]}
+    # the driver restored the publication of v2 (v3 is published again by this process)
+    assert events["rl_published_policies_restored"]["versions"] == [2]
+    # the first publication is v3, which the store already holds: nothing is released
+    assert events["rl_policy_release_skipped"]["reason"] == "resumed_base_version"
+    consumed = _lines(tmp_path / "out" / CONSUMED_LOG.format(learner=0))
+    assert [(r["position"], r["behavior_versions"], r["param_versions"], r["kept"]) for r in consumed] == [
+        (0, [1, 1], [1, 1], False),   # age 2 > max_policy_age 1
+        (1, [2, 2], [2, 2], True),    # age 1
+        (2, [3, 3], [3, 3], True)]    # age 0
+    rounds = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_verl_fa_round"]
+    assert [(e["rollout_id"], e["kept"], e["discarded"]) for e in rounds] == [(3, 2, 1)]
+    carry = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_rollout_carry_over"]
+    assert carry[0]["over_age_discarded_groups"] == 1 and carry[0]["unknown_version_discarded_groups"] == 0
+    assert carry[0]["discard_reasons"] == ["policy age 2 exceeds max_policy_age=1"]
+    # the group of v2 kept the label of the release that generated it, and the driver took it
+    policies = [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_group_policies"][0]
+    assert sorted(g[1] for g in policies["groups"]) == [f"yeto:2:{2:064d}",
+                                                        f"yeto:3:{island.hashes[3]}"]
+    # the round's release is v4: the version numbers of the store stay distinct
+    release_log = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    assert [(r["policy_version"], r["released"]) for r in release_log] == [(3, False), (4, True)]
+    assert releases.latest().version == 4
+    assert island.vmap.to_dict() == {"0": 3, "1": 4}  # verl's param versions still start at 0
+    assert island.consume_map.to_dict() == {"1": 1, "2": 2, "3": 3, "4": 4}
+
+
+def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):
+    """S27 G-EQ5: a run that starts here is unchanged (the account begins at v0)."""
+    from yeto.rl.engine.merged_release import resumed_releases
+
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    assert resumed_releases(releases, 1) is None
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="g0")
+    actor = FakeBufferActor()
+    driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=1, required=1, base=base,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                          releases=releases, resume_versions=True)
+    state = driver.run()
+    assert state.policy_version == 1 and driver.rounds_completed == 1
+    events = [e["event"] for e in _lines(tmp_path / "tape.jsonl")]
+    assert "rl_buffer_resume_versions" not in events and "rl_published_policies_restored" not in events
+    # v0 is the base (nothing released), v1 is released, as without a store history
+    assert [(r["policy_version"], r["released"]) for r in
+            _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))] == [(0, False), (1, True)]
+    assert island.consume_map.to_dict() == {"0": 0, "1": 1}
+
+
+def test_a_synced_buffer_trainer_refuses_a_resumed_version_account(tmp_path):
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
+    from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+
+    store = CheckpointStore(tmp_path / "store")
+    island = FullyAsyncIsland(FakeBufferActor(), learner_id=0, limit=1, required=1,
+                              out_dir=str(tmp_path / "out"), readback_dir=str(tmp_path / "rb"))
+    buffer = FileSampleBuffer(store, batch_size=1, lane=BufferLane(0, 2))
+    with pytest.raises(ValueError, match="come from the syncer"):
+        install_buffer_ports(island, buffer=buffer, releases=PolicyReleaseStore(store), shape=SHAPE,
+                             base_dir=tmp_path, cursor_log=lane_cursor_log(buffer), resume_versions=True)
+
+
 def test_publisher_releases_the_base_when_its_adapter_is_not_zero(tmp_path):
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
 
@@ -360,7 +468,8 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
     section = sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s",
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
-    assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
+    assert section == {"store": "/s", "wait_s": 60.0, "lane": None,
+                       "release_delta_full_every": 0}  # G-EQ3: staged bf16 deltas, off here
     # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
     assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
@@ -374,7 +483,8 @@ def test_island_entry_plans_a_synced_trainer_lane_and_refuses_partial_flags():
 
     synced = ("--rl-sample-role", "trainer", "--syncer", "h:1", "--rl-max-policy-age", "2")
     section = sample_buffer_section(_entry_args(*synced, "--rl-sample-store", "/s", "--rl-sample-lanes", "2"))
-    assert section == {"store": "/s", "wait_s": None, "lane": "0/2"}
+    assert section == {"store": "/s", "wait_s": None, "lane": "0/2",
+                       "release_delta_full_every": 0}
     for extra, message in ((("--rl-sample-store", "/s"), "needs --rl-sample-store and --rl-sample-lanes"),
                            (("--rl-sample-store", "/s", "--rl-sample-lanes", "2", "--rl-resume-store", "/s"),
                             "not --rl-resume-store")):
@@ -473,8 +583,13 @@ def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_r
         feed.keep() if None not in meta["min_steps"] else feed.drop()
     # lane 1 of 2: positions 1, 3, 5; merged v0 -> local 0, v1 -> local 1, v3 never applied here
     assert pulled == [("buf1", (0,)), ("buf3", (1,)), ("buf5", (None,))]
-    island.call("yeto_assemble")  # the round's collection ended: one lane cursor line
+    island.call("yeto_assemble")  # collection ended: the cursor record is only pending
     lane_file = tmp_path / "store" / "sample-buffer" / "lanes" / "1-of-2.jsonl"
+    assert not lane_file.exists()  # nothing recorded yet: the round has not trained
+    # S27 G-EQ4: the record is written once the round has trained, so an island that
+    # stopped between the two reads these groups again (tests/test_rl_buffer_feed_cursor.py
+    # covers that, and BufferCall commits after the train call returns)
+    feed.commit_round()
     assert _lines(lane_file) == [{"rollout_id": 2, "positions": [1, 3], "cursor": 6}]
     # a restarted island continues after the recorded cursor
     again = _synced_publisher(tmp_path, store, 1, [])[2].feed
@@ -559,3 +674,23 @@ def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path)
     events = _lines(tmp_path / "tape.jsonl")
     exhausted = [e for e in events if e["event"] == "rl_buffer_exhausted"]
     assert [e["rollout_id"] for e in exhausted] == [2] and "SampleBufferExhausted" in exhausted[0]["error"]
+
+
+def test_a_single_buffer_trainer_continues_after_the_groups_it_trained(tmp_path):
+    """S27 G-EQ3 (gap 21): a restarted trainer without a lane used to read the
+    buffer from the first group again. The cursor log the synced trainers already
+    have now serves it too, so it continues where it stopped."""
+    from yeto.rl.engine.merged_release import lane_cursor_log
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer
+
+    store = CheckpointStore(tmp_path)
+    buffer = open_trainer_buffer(store, batch_size=1, create_index=True, shards=["modal-0"])
+    assert lane_cursor_log(buffer) is None  # no lane, no learner id: as before
+    log = lane_cursor_log(buffer, 0)
+    assert log is not None and log.last_cursor() == 0
+    log.append(0, [0, 1, 2, 3], 4)
+    log.append(1, [4, 5, 6, 7], 8)
+    assert lane_cursor_log(buffer, 0).last_cursor() == 8  # a new process reads the same log
+    assert lane_cursor_log(buffer, 1).last_cursor() == 0  # another learner has its own
+    assert log.path.name == "solo0.jsonl"

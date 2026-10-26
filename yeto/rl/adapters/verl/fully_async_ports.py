@@ -83,6 +83,12 @@ class FullyAsyncIsland:
         self.start_rollouter = start_rollouter
         self.rollouter_started = False
         self.vmap = VersionMap()
+        # The map a round judges the queued groups' behavior versions with. On this
+        # path the queue reports verl's param versions, so it is the param <-> outer
+        # map itself; a buffer trainer replaces it with an outer <-> outer map
+        # (``buffer_ports.install_buffer_ports``): a buffered group's behavior version
+        # is a store release version, which is an outer version, never a param version.
+        self.consume_map = self.vmap
         self.hashes: dict[int, str] = {}       # outer version -> published policy hash
         self.published: tuple[int, str] | None = None
         self.last_metrics: dict = {}
@@ -181,7 +187,10 @@ class FullyAsyncRolloutPool:
                   "gen_seconds": time.monotonic() - started, "carry_over": carry,
                   "versions": {g.group_id: list(g.policy_versions or (rollout_id,)) for g in groups},
                   "rewards": [g.reward_mean for g in groups], "queue": queue,
-                  "version_map": isl.vmap.to_dict()}
+                  "version_map": isl.vmap.to_dict(),
+                  # a buffer trainer judges behavior versions with its own map (S27 G-EQ5)
+                  **({} if isl.consume_map is isl.vmap
+                     else {"behavior_map": isl.consume_map.to_dict()})}
         isl.append_jsonl(f"verl-fa-rollout-{isl.learner_id}.jsonl", record)
         isl.emit("rl_verl_fa_round", rollout_id=rollout_id, pulled=pulled, kept=len(groups),
                  discarded=len(collector.discarded), queue_size_after=queue.get("queue_size"))
@@ -201,10 +210,10 @@ class FullyAsyncRolloutPool:
         )
 
     def _collector(self, rollout_id: int) -> RoundCollector:
-        """The round's collector: ages in the island's policy versions (a relay
+        """The round's collector: ages in the island's behavior-version map (a relay
         trainer counts merged versions, ``relay_trainer.RelayRolloutPool``)."""
         isl = self.island
-        return RoundCollector(isl.vmap, rollout_id, isl.limit, isl.required)
+        return RoundCollector(isl.consume_map, rollout_id, isl.limit, isl.required)
 
     def _group_metadata(self, collector: RoundCollector, rollout_id: int):
         return group_metadata(collector, rollout_id, self.island.hashes)

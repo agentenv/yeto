@@ -58,6 +58,20 @@ def rows_to_dataproto(rows: dict):
     return DataProto(batch=batch, non_tensor_batch=non_tensor, meta_info=meta)
 
 
+def release_staging_dir(plan: dict, environ: dict) -> "Path":
+    """Where a buffer trainer stages a release before it publishes it (S27 G-EQ3):
+    ``$YETO_RL_RELEASE_STAGING``, else a directory beside the island's output on
+    local disk (the staged release is a whole checkpoint, and a Modal Volume or
+    a shared mount is not a place to build one)."""
+    from pathlib import Path
+
+    named = environ.get("YETO_RL_RELEASE_STAGING")
+    if named:
+        return Path(named)
+    out_dir = plan.get("out_dir") or environ.get("YETO_RL_WORK_DIR") or "."
+    return Path(out_dir) / "release-staging"
+
+
 class _YetoBufferTrainerMixin(_YetoTrainerMixin):
     def yeto_add_group(self, rows: dict) -> int:
         from verl.experimental.fully_async_policy.detach_utils import RolloutSample
@@ -115,6 +129,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.rl.engine.policy_release import PolicyReleaseStore
         from yeto.rl.engine.resume import store_for
         from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+        from yeto.rl.engine.release_delta import default_mirror
         from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
         from .buffer_feed import RowShape
@@ -153,16 +168,28 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
                                      lane=BufferLane.parse(section.get("lane")),
                                      shards=section.get("shards"))
+        # S27 G-EQ3 (gap 20): the mirror lets this trainer rebuild the store's newest
+        # release when that one is a delta, so a restarted island can still make its
+        # next release a delta against it instead of uploading a whole checkpoint.
         releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
-                                                environ=environ))
+                                                environ=environ),
+                                      mirror=default_mirror(environ))
 
         def ports(island):
             return install_buffer_ports(island, buffer=buffer, releases=releases, shape=shape,
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
                                         wait_s=float(section.get("wait_s") or 3600.0),
                                         poll_s=float(section.get("poll_s") or 2.0),
-                                        cursor_log=lane_cursor_log(buffer),
-                                        weights=release_weights_for(island, plan))
+                                        # S27 G-EQ3: a trainer without a lane keeps its own cursor,
+                                        # so a restart continues after the groups it already trained
+                                        cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
+                                        weights=release_weights_for(island, plan),
+                                        staging=release_staging_dir(plan, environ),
+                                        delta_full_every=int(section.get("release_delta_full_every") or 0),
+                                        # S27 G-EQ5 (gap 22): this island counts its own
+                                        # versions, so a new process of it continues the
+                                        # account above the store's newest release
+                                        resume_versions=plan["sync"] == "none")
 
         return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
                                       buffer_ports=ports)

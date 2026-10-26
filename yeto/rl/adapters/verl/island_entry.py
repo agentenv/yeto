@@ -35,7 +35,7 @@ from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 from . import config as vconf
 from . import megatron_engine
 from . import run_config_rules
-from .pins import VERL_COMMIT, VERL_ROOT, expected_versions_for_engine
+from .pins import VERL_COMMIT, expected_versions_for_engine, verl_root
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -69,6 +69,12 @@ def parse_args(argv):
     # S26 E3: bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
+    # S27 G-EQ2: the launcher passes this to every island; the verl island used to
+    # ignore it, so a model whose HF support ships with the checkpoint could not load
+    p.add_argument("--trust-remote-code", action="store_true")
+    # S27 G-EQ2: FSDP2 host-memory offload (npu1: 64 GiB cards, 30B full parameters)
+    p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
+                   default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
@@ -83,6 +89,9 @@ def parse_args(argv):
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
+    # S27 G-EQ3: staged bf16 delta releases on a full-parameter buffer trainer
+    # (sample_roles._check_release_delta; 0 turns them off)
+    p.add_argument("--rl-release-delta-full-every", type=int, default=0)
     # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
     # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
     p.add_argument("--rl-sampler-node", default=None)
@@ -336,14 +345,25 @@ def _ray_resources(address: str) -> dict:
     return {}
 
 
-def island_gpus(ray_info: Mapping[str, Any]) -> int:
-    """GPUs of this single-node island: the island-local Ray's ``GPU`` resource
-    (the launcher starts it with every card of the container), else 1.
+def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None) -> int:
+    """Cards of this single-node island: the island-local Ray's accelerator
+    resource (the launcher starts it with every card of the container), else 1.
 
     S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
-    trained on one rank (e9-g3-a); every card now joins the FSDP2 group."""
+    trained on one rank (e9-g3-a); every card now joins the FSDP2 group.
+
+    S27 G-EQ2 (npu1): the resource is named ``GPU`` on CUDA and ``NPU`` on
+    Ascend (``catalog.ray_accelerator_resource``), so an 8-card Ascend island
+    used to read 1 here and train on one rank. Either key is read, so a node
+    whose Ray reports the other name still gives its cards."""
+    from yeto.hw.catalog import ray_accelerator_resource
+
     resources = ray_info.get("after") or ray_info.get("before") or {}
-    return max(1, int(resources.get("GPU", 0)))
+    resource = ray_accelerator_resource(device_family)
+    count = int(resources.get(resource, 0))
+    if not count:  # the other family's spelling, when this node's family was read wrong
+        count = max(int(resources.get(name, 0)) for name in ("GPU", "NPU"))
+    return max(1, count)
 
 
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
@@ -372,9 +392,14 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself (V2 b).
     # Inside a Modal container the launcher's island Ray is the only Ray on the node.
     info["stop_rc"] = subprocess.run(["ray", "stop", "--force"], timeout=180).returncode
-    gpus = int(before.get("GPU", 0))
+    # S27 G-EQ2: the cards come back under this node's own resource name; on an
+    # Ascend node that is --resources '{"NPU": n}', not --num-gpus (catalog).
+    from yeto.hw.catalog import ray_accelerator_resource, ray_start_accelerator_flag
+
+    resource = ray_accelerator_resource()
+    gpus = int(before.get(resource, 0)) or max(int(before.get(name, 0)) for name in ("GPU", "NPU"))
     cmd = (f'ray start --head --node-ip-address={host} --port={port} --num-cpus={min_cpus} '
-           f'--num-gpus={gpus} --include-dashboard=false --temp-dir={temp}')
+           f'{ray_start_accelerator_flag(gpus)} --include-dashboard=false --temp-dir={temp}')
     info["restart"] = cmd
     info["restart_rc"] = subprocess.run(cmd, shell=True).returncode
     info["after"] = _ray_resources(address)
@@ -426,8 +451,6 @@ def main(argv=None) -> int:
         print("[yeto-verl] Ray restart did not give enough CPU slots", file=sys.stderr, flush=True)
         return 3
 
-    from huggingface_hub import snapshot_download
-
     from .task_dispense import DispenseIslandError, dispense_section, island_dispense
     from .train_options import debug_plan, refuse_unmapped_argv, verify_plan
 
@@ -438,7 +461,9 @@ def main(argv=None) -> int:
         verify = {**verify_plan(args, full=full_mode), **debug_plan(args)}
     except ValueError as error:
         raise SystemExit(str(error)) from None
-    model_path = snapshot_download(args.model, revision=args.model_revision)
+    # S27 G-EQ2 (s27-verl-pool-profile): a directory on this node is used as is
+    # (npu1's n2-n4 have no route to the hub)
+    model_path = island_model_path(args.model, args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
                                         slot=island_data_slot(args), number_rows=dispense)
@@ -541,7 +566,12 @@ def main(argv=None) -> int:
     overrides += quant_overrides
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         before = asserted_keys
-        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync, pools=pools)
+        # pools (G-EV) and trainer_cards (G-EZ2) never both apply: a buffer trainer with
+        # fixed-partition pools is refused above (G-EW), so pools is None whenever
+        # buffer_section is not None.
+        overrides, asserted_keys = fully_async_plan(
+            limit, overrides, spec_dict, args, sync, pools=pools,
+            trainer_cards=run.n_gpus if buffer_section is not None else None)
         if full:  # S27 G-EV: a full-parameter island keeps its training options' asserted keys
             asserted_keys = tuple(dict.fromkeys((*asserted_keys, *before)))
         pools = None  # S27 G-EV: the fully_async path places its own pools; not verl's separate mode
@@ -608,7 +638,7 @@ def main(argv=None) -> int:
         start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
     try:
         with log.open("a") as handle:
-            proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
+            proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in proc.stdout:
                 sys.stdout.write(line)
@@ -652,6 +682,74 @@ def rollout_ahead_of(args) -> tuple[int, int]:
     return ahead, 0
 
 
+def island_model_path(model: str, revision: str | None) -> str:
+    """This island's model directory: a hub repo id at the pinned revision, or a
+    directory that already exists on this node.
+
+    S27 G-EQ2 (npu1): an on-prem cluster stages the weights itself and its nodes
+    may have no route to the hub at all (npu1's n2-n4 do not), so a directory is
+    used as is. The pinned revision then cannot be checked -- the plan keeps the
+    flag's value and the island's identity still fingerprints ``config.json`` of
+    the files actually loaded (``full_parameter_stream.plan_section``)."""
+    local = Path(os.path.expanduser(model))
+    if local.is_dir():
+        if not (local / "config.json").is_file():
+            raise SystemExit(f"--model {model} 是本机目录但没有 config.json")
+        print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} 未校验)", flush=True)
+        return str(local)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model, revision=revision)
+
+
+def model_supports_gradient_checkpointing(model_path: str, *, trust_remote_code: bool = False) -> bool | None:
+    """Whether this model's HF implementation can recompute activations, or None
+    when it cannot be determined (no transformers, an unmapped architecture).
+
+    Only the model class is looked at, never the weights: ``supports_gradient_
+    checkpointing`` is a class attribute of ``PreTrainedModel``."""
+    try:
+        from transformers import AutoConfig
+        from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING
+
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+        model_class = MODEL_FOR_CAUSAL_LM_MAPPING[type(config)]
+        return bool(getattr(model_class, "supports_gradient_checkpointing", True))
+    except Exception as error:  # noqa: BLE001 - a probe never stops the island
+        print(f"[yeto-verl] gradient checkpointing support unknown for {model_path}: "
+              f"{type(error).__name__}: {error}", flush=True)
+        return None
+
+
+def gradient_checkpointing_for(args, model_path: str) -> bool:
+    """Whether this island recomputes activations (S27 G-EQ2).
+
+    Default on, as before. Turned off only when this model's implementation says
+    it cannot: verl's FSDP2 engine calls ``gradient_checkpointing_enable()``
+    unconditionally, and a model that refuses takes the island down after the
+    whole model is built (npu1: HF NemotronH of transformers 5.3 sets
+    ``supports_gradient_checkpointing = False``). ``--rl-activation-recompute``
+    is an explicit request, so it is refused instead of silently dropped.
+
+    S27 G-EQ4: a false answer here no longer means the island stores every
+    activation. transformers' NemotronH has no recompute hook at all (its source
+    never mentions ``gradient_checkpointing``), so an Ascend island installs one
+    itself -- :mod:`yeto.rl.nemotron_h_recompute` wraps the block forward, which
+    is what made a 64 GiB card fit more than one step. That hook is applied in
+    the worker, next to the Mamba2 scan fix, and it leaves verl's own flag off."""
+    supported = model_supports_gradient_checkpointing(
+        model_path, trust_remote_code=bool(getattr(args, "trust_remote_code", False)))
+    requested = bool(getattr(args, "rl_activation_recompute", False))
+    if supported is False:
+        if requested:
+            raise SystemExit(f"--rl-activation-recompute：{model_path} 的 transformers 实现不支持"
+                             "重算激活（supports_gradient_checkpointing = False）")
+        print(f"[yeto-verl] activation recompute off (verl 的开关): {model_path} 的 transformers 实现不支持；"
+              "昇腾岛改由 yeto.rl.nemotron_h_recompute 自己装重算钩子", flush=True)
+        return False
+    return True
+
+
 def fsdp_separate_pools(args, ray_info: dict):
     """S27 G-EK (VERL-PARITY #13): the trainer and rollout pools of a full-parameter
     FSDP2 island with ``--rl-placement fixed-partition`` (verl's separate mode,
@@ -670,6 +768,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
     except that a spec clip range is refused: only the Megatron island maps it).
     ``pools`` (:func:`fsdp_separate_pools`, S27 G-EK): the trainer trains on its own
     cards and the rollout runs on standalone vLLM servers (``separate.with_separate_pools``)."""
+    offload = getattr(args, "rl_fsdp_offload", "none") or "none"
     clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
     if clips:
         raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
@@ -689,6 +788,11 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
+        trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
+        gradient_checkpointing=gradient_checkpointing_for(args, model_path),
+        param_offload=offload in ("param", "both"), optimizer_offload=offload in ("optimizer", "both"),
+        # fsdp2 offloads through CPUOffloadPolicy; the two flags above are the FSDP1 path
+        offload_policy=offload in ("param", "both"),
         n_gpus=island_gpus(ray_info) if pools is None else pools.trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
     overrides = vconf.build_overrides(run)
@@ -700,7 +804,86 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         "actor_rollout_ref.rollout.agent.num_workers=2",
         "reward.num_workers=2",
     ]
+    from yeto.hw.catalog import device_family
+
+    if device_family() == "ascend":
+        # S27 G-EQ2 (npu1): verl compiles the entropy/log-prob helpers with
+        # torch.compile by default (actor.use_torch_compile, actor.yaml:110).
+        # An Ascend image carries triton-ascend, which has no inductor backend:
+        # the first training step dies in dynamo with "cannot import name
+        # 'Language' from 'triton.backends.compiler'" (it even tried to load
+        # triton's AMD backend). Eager is correct, only slower.
+        # S27 G-EQ3: the *engine* workers read their own key
+        # (``FSDPEngineConfig.use_torch_compile``, engine/fsdp/transformer_impl.py:183),
+        # and the generated config hardcodes it to true instead of selecting the
+        # actor's value, so the actor key alone left compute_log_prob compiling.
+        overrides += ["actor_rollout_ref.actor.use_torch_compile=False",
+                      "actor_rollout_ref.actor.fsdp_config.use_torch_compile=False",
+                      "actor_rollout_ref.ref.fsdp_config.use_torch_compile=False"]
+        overrides += ascend_memory_overrides(run.gradient_checkpointing)
     return run, overrides
+
+
+def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
+    """What an Ascend FSDP2 island changes to fit a step into a 64 GiB card
+    (S27 G-EQ3, npu1; the NVIDIA reference card has 141 GiB).
+
+    The first backward of Nemotron Nano 30B-A3B died with "NPU out of memory.
+    Tried to allocate 5.04 GiB (60.96 GiB total capacity; 50.30 GiB already
+    allocated)". Two costs dominate, and both are optional:
+
+    * the **gradient of a stacked MoE expert tensor**. One Nano MoE layer holds
+      ``mixer.experts.up_proj`` as a single (128, 3712, 2688) parameter, 1.28e9
+      values; FSDP2's default ``reduce_dtype=fp32`` upcasts the whole unsharded
+      gradient before the reduce-scatter, which is 4.8 GiB of transient device
+      memory per layer. Reducing in bf16 halves it. The FP32 master parameters
+      are untouched (``model_dtype=fp32``), so the full-parameter export and the
+      sync boundary still read FP32 masters.
+    * the **entropy of the log-prob head**: Nano's vocabulary is 131072, so a
+      2560-token micro-batch has 2560x131072 logits; entropy over them, kept for
+      the backward, is another 1.3 GiB per copy. Chunking computes it in slices
+      and checkpointing recomputes it in the backward instead of keeping it.
+
+    A model whose implementation supports activation recomputation does not need
+    the entropy knobs (the recompute already bounds the head), so they are only
+    added when it is off.
+
+    S27 G-EQ4 checked the first bullet instead of assuming it: the fork holds two
+    engine config classes, and only the VeOmni one takes ``mixed_precision`` as a
+    bool (``workers/config/engine.py:418``), while the FSDP one takes the dict
+    (:282). ``FSDPActorConfig.__post_init__`` sets ``engine = fsdp_config``, so the
+    override does arrive -- composed and converted, the engine reports
+    ``mixed_precision = {'param_dtype': 'bf16', 'reduce_dtype': 'bf16',
+    'buffer_dtype': 'fp32'}`` and FSDP2's policy is ``reduce_dtype=torch.bfloat16``
+    (``tools/probe_mp.py`` on npu1). The bf16 reduce was therefore **already** in
+    force through every out-of-memory attempt, and it is not the missing saving.
+    What was missing is activation recompute, which this implementation cannot do
+    at all: see :mod:`yeto.rl.nemotron_h_recompute`, installed in the worker.
+
+    What is deliberately *not* here: verl's ``enable_activation_offload``. It
+    looked like the remaining lever, but on this model it fails in the backward
+    of the first MoE layer -- ``activation_offload.tensor_push`` asserts that a
+    saved tensor's tag is new, and ``transformers``' NemotronH router saves the
+    same tensor twice (``route_tokens_to_experts``: ``.topk(2, dim=-1)[0]``),
+    which trips that assertion (S27 G-EQ3, measured on npu1).
+    """
+    # the key is absent from the generated config (fsdp_config.mixed_precision defaults
+    # to None in the dataclass), so it is added, not overridden: hydra needs the "+".
+    overrides = ["+actor_rollout_ref.actor.fsdp_config.mixed_precision="
+                 "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
+    # One sample per micro-batch instead of packing up to the token budget (S27 G-EQ3,
+    # npu1): with packing, what fits depends on which samples a round draws -- the same
+    # island did a step with the groups at buffer position 0..3 and ran out of memory on
+    # the groups after them (8.50 GiB short of 60.96 GiB). verl requires the actor and
+    # the log-prob pass to agree on this, so both are switched.
+    overrides += ["actor_rollout_ref.actor.use_dynamic_bsz=False",
+                  "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+                  "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False",
+                  "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1"]
+    if not gradient_checkpointing:
+        overrides += ["actor_rollout_ref.actor.entropy_from_logits_with_chunking=True",
+                      "actor_rollout_ref.actor.entropy_checkpointing=True"]
+    return overrides
 
 
 def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
@@ -841,6 +1024,8 @@ def sample_buffer_section(args) -> dict | None:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
+            # S27 G-EQ3: staged bf16 delta releases (0: the release goes into the store whole)
+            "release_delta_full_every": int(config.release_delta_full_every or 0),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
@@ -879,10 +1064,16 @@ def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
     return env
 
 
-def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *, pools=None):
+def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str, *,
+                     pools=None, trainer_cards: int | None = None):
     """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
     and a TIS correction) so a wrong spec fails before verl starts.
+
+    ``trainer_cards`` (S27 G-EZ2): a buffer trainer's island cards; its trainer
+    pool is all of them over ``--actor-num-nodes`` nodes
+    (``fully_async_round.buffer_trainer_shape``). None keeps the in-island
+    rollout split (one rollout card, one trainer card).
 
     The ``algorithm.rollout_correction`` overrides come from the correction
     mapping (rl-offpolicy-correction-passthrough D2/D3): decoupled PPO with
@@ -891,8 +1082,8 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
-    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, execution_profile_for,
-                                    fully_async_run_overrides)
+    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, VerlTranslationError, buffer_trainer_shape,
+                                    execution_profile_for, fully_async_run_overrides)
     from .offpolicy_correction import apply_to_overrides, correction_mapping
     from .policy_age import SUPPORT
 
@@ -902,8 +1093,18 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
                                     samples_per_group=args.samples_per_group, sync=sync)
     check_algorithm_contract(profile, spec)
     # S27 G-EV (VERL-PARITY #11): a full-parameter island's pools from the launcher's
-    # fixed-partition flags (separate.pools_from_args); a LoRA island keeps 1 + 1
+    # fixed-partition flags (separate.pools_from_args); a LoRA island keeps 1 + 1.
+    # S27 G-EZ2: a buffer trainer has no rollout pool, so its trainer takes every card
+    # of the island over --actor-num-nodes nodes (buffer_trainer_shape). The two never
+    # apply together: fixed-partition pools on a buffer trainer are refused (G-EW).
     sizes = {} if pools is None else {"rollout_gpus": pools.rollout_gpus, "trainer_gpus": pools.trainer_gpus}
+    if trainer_cards is not None:
+        try:
+            nodes, per_node = buffer_trainer_shape(trainer_cards, getattr(args, "actor_num_nodes", 1),
+                                                   getattr(args, "actor_num_gpus_per_node", None))
+        except VerlTranslationError as exc:
+            raise SystemExit(str(exc)) from exc
+        sizes = {**sizes, "trainer_gpus": per_node, "trainer_nodes": nodes}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds, **sizes)
     out = apply_to_overrides(out, correction_mapping(spec))

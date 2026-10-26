@@ -157,6 +157,9 @@ _FSDP_ONLY_PREFIXES = (
     *separate.POOL_PREFIXES,
     "actor_rollout_ref.model.use_remove_padding=",
     "actor_rollout_ref.model.enable_gradient_checkpointing=",
+    # S27 G-EQ2: the FSDP2 island maps --trust-remote-code; a Megatron island
+    # pins it False below (its bridge needs native Megatron support anyway)
+    "actor_rollout_ref.model.trust_remote_code=",
     "actor_rollout_ref.actor.strategy=",
     "actor_rollout_ref.actor.fsdp_config.",
     "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=",

@@ -26,7 +26,7 @@ SHAPES = {
 class _Module:
     """Stand-in for the unwrapped FSDP2 training module."""
 
-    def __init__(self, shapes=SHAPES, *, dtype=torch.float32, prefix="", frozen=()):
+    def __init__(self, shapes=SHAPES, *, dtype=torch.float32, prefix="", frozen=(), buffers=()):
         self._params = {
             f"{prefix}{name}": torch.nn.Parameter(
                 torch.arange(_numel(shape), dtype=dtype).reshape(shape),
@@ -34,9 +34,17 @@ class _Module:
             )
             for name, shape in shapes.items()
         }
+        # persistent buffers, as a leaf nn.Module holds them (S27 G-EQ3: the HF
+        # export reads them too, a MoE router's correction bias is one)
+        self._buffers = {f"{prefix}{name}": torch.full(shape, 0.5, dtype=dtype)
+                         for name, shape in dict(buffers).items()}
+        self._non_persistent_buffers_set: set[str] = set()
 
     def named_parameters(self):
         return list(self._params.items())
+
+    def named_modules(self):
+        return [("", self)]
 
 
 def _numel(shape) -> int:
@@ -218,3 +226,34 @@ def test_the_lora_island_command_is_unchanged():
     assert "actor_rollout_ref.model.target_modules=all-linear" in overrides
     assert "actor_rollout_ref.model.lora.merge=False" in overrides
     assert not [key for key in overrides if "parameter_mode" in key]
+
+
+def test_the_manifest_and_the_export_include_persistent_buffers():
+    """S27 G-EQ3: a checkpoint tensor can be a persistent buffer, so the export
+    must read it; the sync layout stays parameters only."""
+    module = _Module(buffers={"gate.bias": (4,)})
+    manifest = fp.remote_manifest(_worker(module))
+    assert "gate.bias" not in manifest["shapes"]  # not a parameter: not in the sync layout
+    assert manifest["buffers"] == {"gate.bias": [4]} and manifest["buffer_dtypes"] == ["torch.float32"]
+    assert fp.agree_on_shapes([manifest, manifest], key="buffers") == {"gate.bias": (4,)}
+    exported = fp.remote_export_fragment(_worker(module), ["gate.bias"], True)["tensors"]
+    assert torch.equal(exported["gate.bias"], torch.full((4,), 0.5))
+    assert fp.agree_on_shapes([manifest]) == {name: tuple(shape)
+                                              for name, shape in manifest["shapes"].items()}
+
+
+def test_a_rank_whose_buffer_differs_stops_the_island():
+    """S27 G-EQ3: persistent buffers are not sharded, so each rank's forward reads
+    its own copy; a rank that did not get the checkpoint's values computes wrong
+    log-probs while the parameters are fine."""
+    good = fp.remote_manifest(_worker(_Module(buffers={"gate.bias": (4,)})))
+    assert good["buffer_digests"] == {"gate.bias": [2.0, 2.0, 4.0]}  # 4 x 0.5
+    assert fp.agree_on_buffers([good, good]) == good["buffer_digests"]
+    other = _Module(buffers={"gate.bias": (4,)})
+    other._buffers["gate.bias"] = torch.zeros(4)  # an uninitialised copy
+    bad = fp.remote_manifest(_worker(other))
+    with pytest.raises(fp.VerlFullParameterError, match="持久 buffer 不分片"):
+        fp.agree_on_buffers([good, bad])
+    with pytest.raises(fp.VerlFullParameterError, match="buffer 集合不一致"):
+        fp.agree_on_buffers([good, fp.remote_manifest(_worker(_Module()))])
+    assert fp.agree_on_buffers([{"shapes": {}}]) == {}  # an older worker: no field, no failure
