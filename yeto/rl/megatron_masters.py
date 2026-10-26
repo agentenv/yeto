@@ -105,8 +105,7 @@ def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, 
         if not _is_distributed(leaf):
             continue
         found = True
-        if getattr(getattr(leaf, "config", None), "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False):
-            raise MegatronMasterError("sharded masters under the precision-aware optimizer are not supported")
+        _check_precision_aware(leaf)
         for gbuf_range_maps in leaf.gbuf_ranges:
             for per_bucket in gbuf_range_maps.values():
                 for bucket_range_map in per_bucket:
@@ -117,6 +116,66 @@ def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, 
                                 raise MegatronMasterError("a parameter range appears twice on one rank")
                             owned[id(param)] = (leaf, param, int(r.start), int(r.end))
     return found, owned
+
+
+# Precision-aware optimizer (S28 G-RCP). Megatron hands the master and the Adam
+# moments to TE FusedAdam, which stores each in its configured dtype. With an FP32
+# master (main_params_dtype fp32, store_param_remainders False) the master is still
+# an exact FP32 shard: ``get_unscaled_state(shard, "master_param")`` returns it as is
+# (TE fused_adam.get_unscaled_state). FusedAdam creates ``master_param`` only in the
+# first step(), as the bf16 shard cast to FP32 (fused_adam._init_or_fix_state); before
+# that the same cast is the master. Refused: INT16 remainders, a non-FP32 master, and
+# the CPU offload (HybridDeviceOptimizer keeps a different state layout).
+
+
+def _precision_aware(leaf: Any) -> bool:
+    return bool(getattr(getattr(leaf, "config", None), "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False))
+
+
+def _check_precision_aware(leaf: Any) -> None:
+    if not _precision_aware(leaf):
+        return
+    import torch
+
+    config = leaf.config
+    if getattr(config, "optimizer_cpu_offload", False):
+        raise MegatronMasterError("sharded masters under the precision-aware optimizer with "
+                                  "optimizer_cpu_offload are not supported")
+    if getattr(config, "main_params_dtype", torch.float32) != torch.float32:
+        raise MegatronMasterError("precision-aware optimizer master is not FP32 "
+                                  f"(main_params_dtype={config.main_params_dtype})")
+    inner = getattr(leaf, "optimizer", None)
+    remainders = getattr(inner, "store_param_remainders", None)
+    if remainders is None:
+        remainders = getattr(config, "store_param_remainders", True) and getattr(config, "bf16", False)
+    if remainders:
+        raise MegatronMasterError("precision-aware optimizer keeps the master as INT16 remainders "
+                                  "(store_param_remainders); set it False to read FP32 masters")
+
+
+def _pa_shard(leaf: Any, param: Any) -> Any:
+    """The optimizer's own (low-precision) shard of ``param`` under the precision-aware optimizer."""
+    group_index, group_order = leaf.model_param_group_index_map[param]
+    return leaf.optimizer.param_groups[group_index]["params"][group_order]
+
+
+def _main_shard(leaf: Any, param: Any) -> Any:
+    """This rank's FP32 master shard of ``param`` (a read-only value under precision-aware)."""
+    if not _precision_aware(leaf):
+        return leaf._get_main_param_and_optimizer_states(param)["param"]
+    shard = _pa_shard(leaf, param)
+    if "master_param" not in leaf.optimizer.state.get(shard, {}):
+        return shard.detach().float()  # before the first step(): what FusedAdam will create
+    return leaf.optimizer.get_unscaled_state(shard, "master_param")
+
+
+def _write_main_shard(leaf: Any, param: Any, value: Any) -> None:
+    if not _precision_aware(leaf):
+        shard = leaf._get_main_param_and_optimizer_states(param)["param"]
+        shard.data.copy_(value.reshape(shard.shape))
+        return
+    shard = _pa_shard(leaf, param)
+    leaf.optimizer.set_scaled_state(shard, "master_param", value.reshape(shard.shape).float().clone())
 
 
 def _leaf_members(leaf: Any) -> set[int]:
@@ -232,7 +291,7 @@ def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=No
             full = flat[offset : offset + n]
             if id(param) in owned:
                 _, _, start, end = owned[id(param)]
-                shard = owned[id(param)][0]._get_main_param_and_optimizer_states(param)["param"]
+                shard = _main_shard(owned[id(param)][0], param)
                 if shard.dtype != torch.float32 or shard.numel() != end - start:
                     raise MegatronMasterError("distributed-optimizer main shard does not match its range")
                 full[start:end].copy_(shard.detach().reshape(-1))
@@ -265,8 +324,7 @@ def write_masters(optimizer: Any, parameters: Sequence[Any], targets: Sequence[A
             master_of(param)  # raises
         if id(param) in owned:
             leaf, _, start, end = owned[id(param)]
-            shard = leaf._get_main_param_and_optimizer_states(param)["param"]
-            shard.data.copy_(target.reshape(-1)[start:end].reshape(shard.shape))
+            _write_main_shard(leaf, param, target.reshape(-1)[start:end])
         param.data.copy_(target.to(dtype=param.dtype))
         wrote_model = True
     return wrote_model

@@ -446,3 +446,18 @@ def test_a_buffer_trainer_asks_for_the_naive_weight_transport(tmp_path):
     # the engine-neutral default is unchanged
     assert key + "=nccl" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2)
     assert key + "=naive" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2, rollouter=False)
+
+
+def test_bf16_moments_flag_writes_precision_aware_keys_with_fp32_masters(tmp_path):
+    """S28 G-RCP: --rl-megatron-bf16-moments keeps the optimizer state on the card with
+    bf16 Adam moments and an FP32 master the full-parameter boundary can read."""
+    on = _plan(tmp_path, extra=["--rl-megatron-bf16-moments"])
+    actor = "actor_rollout_ref.actor"
+    assert on["shape"]["bf16_moments"] is True
+    assert f"{actor}.optim.use_precision_aware_optimizer=True" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_dtype=bf16" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_sq_dtype=bf16" in on["overrides"]
+    assert f"++{actor}.optim.override_optimizer_config.store_param_remainders=False" in on["overrides"]
+    assert not [o for o in on["overrides"] if "cpu_offload" in o or "main_grads_dtype" in o]
+    with pytest.raises(me.MegatronShapeError):
+        _plan(tmp_path, extra=["--rl-megatron-bf16-moments", "--rl-optimizer-offload-fraction", "0.5"])
