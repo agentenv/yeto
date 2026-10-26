@@ -29,9 +29,34 @@ the trainer's read cursor (``FileSampleBuffer.select``).
 
 Synced trainers (S25 C3, ``yeto.rl.engine.merged_release``): the buffer is a
 lane reader (positions ``p % N == m`` only) and the feed keeps the lane cursor
-(``cursor_log``): it continues after the last recorded round, and
-:meth:`BufferFeed.close_round` records the round's trained positions when its
-collection ends, before the round trains (at most once, as the Miles reader).
+(``cursor_log``): it continues after the last recorded round.
+
+**What a relaunch reads again** (S27 G-EQ4 changed this). ``close_round`` holds the
+round's positions as a *pending* record and ``commit_round`` writes it only after
+the train call returns, so:
+
+* never again the groups of a round that trained;
+* **again** the groups of the round that was collected but not trained when the
+  process stopped -- which is what :mod:`yeto.rl.engine.data_position` promises for
+  a full-parameter island ("again, the rows of the round that was running when the
+  process stopped").
+
+Until G-EQ4 the record was written when collection ended, *before* the round
+trained. That guaranteed "trained at most once" but **lost** a round's groups
+whenever the island stopped between collection and the optimizer step: measured on
+npu1, a kill during round 4 left the record ``cursor 32, positions [28, 29, 30, 31]``
+for a round that never trained, and the relaunch started at 32 (S27 G-EQ4,
+VERL-ASCEND-RL.md section 36).
+
+The remaining window is the opposite one and is **not** closed here: if the process
+stops between the train call returning and the record reaching the store, the
+relaunch reads those groups again and trains them twice. Closing it needs the
+cursor record and the round's release to land in **one** atomic commit, which this
+store API does not offer. So the guarantee this module gives is "a group is trained
+**at least** once, and at most once unless the island dies in that window" -- the
+dispenser's "generated at least once, trained at most once" holds per *generation*,
+not across a crash in that window. A reader that must never train a group twice has
+to make the release and the cursor record one commit first.
 The groups carry the *merged* version as behavior version;
 :class:`MergedVersions` turns it into the island's local policy version (the
 first local version that applied that merge, whose weights are the merged
@@ -227,6 +252,9 @@ class BufferFeed:
         self.cursor_log = cursor_log
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
+        # the closed round's cursor record, written only once that round has trained
+        # (:meth:`commit_round`, S27 G-EQ4)
+        self._pending: tuple[int, list[int], int] | None = None
         if cursor_log is not None:
             self.buffer.reset_to(cursor_log.last_cursor())
 
@@ -309,13 +337,24 @@ class BufferFeed:
         return last
 
     def close_round(self, rollout_id: int) -> None:
-        """The round's collection ended (before it trains): record its trained
-        positions and the read position in the lane cursor log (module doc)."""
+        """The round's collection ended. Hold the round's positions and read position
+        as a *pending* cursor record; :meth:`commit_round` writes it once the round
+        has trained (module doc, "What a relaunch reads again")."""
         if self._last is not None:
             raise BufferFeedError("round closed with a pulled group not kept or dropped")
         kept, self._round_kept = self._round_kept, []
-        if self.cursor_log is not None:
-            self.cursor_log.append(int(rollout_id), kept, int(self.buffer.read_cursor))
+        self._pending = (int(rollout_id), kept, int(self.buffer.read_cursor))
+
+    def commit_round(self) -> tuple[int, list[int], int] | None:
+        """Write the pending cursor record: the round trained, so a relaunch must not
+        read its groups again. Returns the record written, or None when there is none
+        (a round that never closed, or one already committed). S27 G-EQ4."""
+        pending, self._pending = self._pending, None
+        if pending is None or self.cursor_log is None:
+            return pending
+        rollout_id, kept, cursor = pending
+        self.cursor_log.append(rollout_id, kept, cursor)
+        return pending
 
     def read_cursor(self) -> int:
         """The buffer position after the last pulled group (released to the
@@ -330,13 +369,16 @@ class BufferFeed:
 
 
 ASSEMBLE_METHOD = "yeto_assemble"  # the rollout port's call after a round's collection
+TRAIN_METHOD = "yeto_train_step"  # the trainer's step; it returns when the round has trained
 
 
 class BufferCall:
     """The island's ``call(method, *args)``: the queue calls go to the feed, every
     other call to the trainer actor (``actor_call``). ``round_id()``: the round
     being collected; its collection ends at the assemble call, where the feed
-    closes the round (:meth:`BufferFeed.close_round`)."""
+    closes the round (:meth:`BufferFeed.close_round`), and the feed writes that
+    round's cursor record after the train call returns
+    (:meth:`BufferFeed.commit_round`, S27 G-EQ4)."""
 
     def __init__(self, feed: BufferFeed, actor_call: Callable[..., Any],
                  round_id: Callable[[], int] | None = None) -> None:
@@ -349,4 +391,9 @@ class BufferCall:
             return self.feed(name, *args)
         if name == ASSEMBLE_METHOD and self.round_id is not None:
             self.feed.close_round(self.round_id())
-        return self.actor_call(name, *args, **kwargs)
+        out = self.actor_call(name, *args, **kwargs)
+        if name == TRAIN_METHOD:
+            # the round trained: only now may a relaunch skip its groups. A train call
+            # that raises leaves the record pending, so the groups are read again.
+            self.feed.commit_round()
+        return out

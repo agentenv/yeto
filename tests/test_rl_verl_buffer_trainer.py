@@ -126,10 +126,19 @@ def test_feed_returns_none_at_the_data_end_and_times_out_without_data(tmp_path):
 
 def test_buffer_call_routes_queue_calls_to_the_feed():
     seen = []
-    call = bf.BufferCall(lambda name, *a: seen.append(("feed", name)), lambda name, *a, **k: seen.append(("actor", name)))
+
+    class _Feed:  # S27 G-EQ4: the call also commits the cursor record after a train call
+        def __call__(self, name, *a):
+            seen.append(("feed", name))
+
+        def commit_round(self):
+            seen.append(("feed", "commit_round"))
+
+    call = bf.BufferCall(_Feed(), lambda name, *a, **k: seen.append(("actor", name)))
     call("yeto_pull_sample")
     call("yeto_train_step")
-    assert seen == [("feed", "yeto_pull_sample"), ("actor", "yeto_train_step")]
+    assert seen == [("feed", "yeto_pull_sample"), ("actor", "yeto_train_step"),
+                    ("feed", "commit_round")]
 
 
 # ---------------------------------------------------------------------- merge
@@ -475,8 +484,13 @@ def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_r
         feed.keep() if None not in meta["min_steps"] else feed.drop()
     # lane 1 of 2: positions 1, 3, 5; merged v0 -> local 0, v1 -> local 1, v3 never applied here
     assert pulled == [("buf1", (0,)), ("buf3", (1,)), ("buf5", (None,))]
-    island.call("yeto_assemble")  # the round's collection ended: one lane cursor line
+    island.call("yeto_assemble")  # collection ended: the cursor record is only pending
     lane_file = tmp_path / "store" / "sample-buffer" / "lanes" / "1-of-2.jsonl"
+    assert not lane_file.exists()  # nothing recorded yet: the round has not trained
+    # S27 G-EQ4: the record is written once the round has trained, so an island that
+    # stopped between the two reads these groups again (tests/test_rl_buffer_feed_cursor.py
+    # covers that, and BufferCall commits after the train call returns)
+    feed.commit_round()
     assert _lines(lane_file) == [{"rollout_id": 2, "positions": [1, 3], "cursor": 6}]
     # a restarted island continues after the recorded cursor
     again = _synced_publisher(tmp_path, store, 1, [])[2].feed
