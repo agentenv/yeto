@@ -42,7 +42,8 @@ def dispense_planned(args) -> bool:
     try:
         from .data_split_plan import data_split_plan
 
-        return bool(data_split_plan(args).dispense)
+        # a sampler launch of its own (P4) claims from another launch's dispenser
+        return bool(data_split_plan(args).dispense) and not getattr(args, "rl_dispense_addr", None)
     except Exception:  # noqa: BLE001 - not an RL launch, or no plan: nothing to keep
         return False
 

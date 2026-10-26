@@ -41,8 +41,11 @@ pub const MSG_INIT_CONFIRM: u8 = 29;
 /// Task dispenser (S27 P2, `dispense.rs`): the first frame of a dispense
 /// connection, its own connection like BW_PROBE (never part of a learner
 /// session). Payload: `u16 version (=1) | u32 learner_id | u64 incarnation |
-/// u64 rows | [32] data fingerprint`, sealed with `TASK_HELLO_MAC_DOMAIN`
-/// when the syncer has an island HMAC key.
+/// u64 rows | [32] data fingerprint`, or with streams (S27 P3, version 2):
+/// `u16 version (=2) | u32 learner_id | u64 incarnation | [32] fingerprint |
+/// u16 n | n x (u64 rows, u64 weight, u16 name_len, name) | u16 m |
+/// m x u16 accepted stream (m = 0: every stream)`; sealed with
+/// `TASK_HELLO_MAC_DOMAIN` when the syncer has an island HMAC key.
 pub const MSG_TASK_HELLO: u8 = 50;
 /// Syncer -> island answer to TASK_HELLO: `u16 version | u64 lease_ms |
 /// u64 passes (0 = unlimited) | u32 max_block | u8 reconnect |
@@ -64,6 +67,10 @@ pub const MSG_TASK_ACK: u8 = 55;
 /// Island -> syncer: empty; renews the lease.
 pub const MSG_TASK_HEARTBEAT: u8 = 56;
 pub const TASK_PROTOCOL_VERSION: u16 = 1;
+/// TASK_HELLO / TASK_WELCOME version of an island with streams (S27 P3).
+pub const TASK_PROTOCOL_VERSION_STREAMS: u16 = 2;
+/// Largest TASK_HELLO payload (256 streams with 64-byte names, the HMAC).
+pub const MAX_TASK_HELLO: u64 = 32 * 1024;
 /// HMAC domain of TASK_HELLO (distinct from HELLO's).
 pub const TASK_HELLO_MAC_DOMAIN: &[u8] = b"yeto-task-hello-mac-v1\0";
 /// Largest TASK_REPORT payload (65536 ranges).
@@ -93,6 +100,10 @@ pub fn leave_reason_name(reason: u8) -> String {
 /// (never part of a learner session): the island uploads N bytes, the syncer
 /// acknowledges with the u64 byte count, then streams M bytes back.
 pub const MSG_BW_PROBE: u8 = 26;
+/// S27 G-EA: first frame of a receive-only subscriber (`subscriber.rs`):
+/// a HELLO body sealed in the subscribe MAC domain. 60-66 are the sample
+/// relay (`sample_relay.rs`).
+pub const MSG_SUBSCRIBE: u8 = 67;
 
 /// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
 /// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with

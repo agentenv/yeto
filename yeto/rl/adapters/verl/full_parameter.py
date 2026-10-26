@@ -16,8 +16,12 @@ What this module provides:
   Miles islands use, so one syncer profile covers both backends' fragments;
 * the worker-side operations a fragment needs
   (:func:`remote_manifest`, :func:`remote_export_fragment`,
-  :func:`remote_apply_fragment`), run on every actor worker through
-  ``VerlIsland.call_workers``.
+  :func:`remote_export_flat`, :func:`remote_apply_fragment`), run on every
+  actor worker through ``VerlIsland.call_workers``.  Since S27 G-EC a
+  fragment is read with :func:`remote_export_flat` (rank 0 builds the flat
+  payload, checks it finite on the device, hashes it) and every payload
+  crosses Ray as a numpy array, not a torch tensor (Ray pickles torch tensors
+  through ``torch.save``; numpy goes out of band).
 
 Two properties of the verl FSDP2 boundary, both different from Miles:
 
@@ -215,10 +219,102 @@ def remote_export_fragment(worker_dict, names: Sequence[str], return_tensors: bo
 def remote_export_for_reader(worker_dict, names: Sequence[str]) -> dict:
     """:func:`remote_export_fragment` where only rank 0 (the reader) keeps the tensors."""
 
+    return remote_export_fragment(worker_dict, names, _is_reader())
+
+
+def remote_export_arrays_for_reader(worker_dict, names: Sequence[str]) -> dict:
+    """:func:`remote_export_for_reader` with the reader's tensors as numpy arrays
+    (S27 G-EC): Ray moves a numpy array out of band into its object store,
+    while a torch tensor goes through ``torch.save`` pickling (two extra
+    copies of every byte at about 0.5 GB/s each way, measured on CPU)."""
+
+    result = remote_export_fragment(worker_dict, names, _is_reader())
+    if "tensors" in result:
+        result["arrays"] = {name: tensor.numpy() for name, tensor in result.pop("tensors").items()}
+    return result
+
+
+def _is_reader() -> bool:
     import torch.distributed as dist
 
-    reader = not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
-    return remote_export_fragment(worker_dict, names, reader)
+    return not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
+
+
+def fragment_units(layout: ParameterLayout, fragment_id: int) -> tuple[tuple[str, int, int], ...]:
+    """``(canonical name, flat start, flat stop)`` of every slice of one fragment,
+    in the layout's order: the fragment's flat FP32 payload is these element
+    ranges of the whole parameters, one after another."""
+
+    return tuple((unit.spec.name, *unit.flat_range) for unit in layout.fragment_slices(fragment_id))
+
+
+def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_payload: bool,
+                       want_hash: bool) -> dict:
+    """One fragment's flat FP32 payload, built on the reading rank (S27 G-EC).
+
+    Collective like :func:`remote_export_fragment`: every rank gathers each
+    parameter of ``units`` whole, in the order the parameters first appear.
+    Rank 0 (the reader) copies each unit's element range into one CPU FP32
+    buffer in ``units`` order and checks on the parameter's device that every
+    value is finite.  It returns ``finite`` and, when asked, the buffer as a
+    numpy array (``want_payload``; Ray moves it without torch pickling) and
+    its SHA256 (``want_hash``; the fragment's wire hash, so an apply proof
+    needs no bytes back).  Every rank returns its seconds per step."""
+
+    import hashlib
+    import time
+
+    import torch
+
+    started = time.perf_counter()
+    reader = _is_reader()
+    module = _trainable_module(worker_dict)
+    by_name = dict(_named_full_parameters(module))
+    names = list(dict.fromkeys(str(unit[0]) for unit in units))
+    missing = sorted(set(names) - set(by_name))
+    if missing:
+        raise VerlFullParameterError(f"分片引用了模型里没有的参数: {missing[:4]}")
+    offsets, offset = [], 0
+    for _name, start, stop in units:
+        offsets.append(offset)
+        offset += int(stop) - int(start)
+    if offset != int(numel):
+        raise VerlFullParameterError(f"分片元素数不符: 切片合计 {offset}，布局是 {numel}")
+    flat = torch.empty(int(numel), dtype=torch.float32) if reader else None
+    finite = None
+    gather_s = copy_s = 0.0
+    with torch.no_grad():
+        for name in names:  # the island's order, the same on every rank
+            mark = time.perf_counter()
+            parameter = by_name[name]
+            whole = parameter.full_tensor() if hasattr(parameter, "full_tensor") else parameter
+            gather_s += time.perf_counter() - mark
+            if reader:
+                mark = time.perf_counter()
+                values = whole.detach().reshape(-1)
+                for (unit_name, start, stop), at in zip(units, offsets, strict=True):
+                    if unit_name != name:
+                        continue
+                    part = values[int(start):int(stop)]
+                    ok = torch.isfinite(part).all()
+                    finite = ok if finite is None else finite & ok.to(finite.device)
+                    flat[at:at + part.numel()].copy_(part)
+                copy_s += time.perf_counter() - mark
+            del whole
+    timings = {"gather_s": gather_s, "copy_s": copy_s}
+    if not reader:
+        timings["total_s"] = time.perf_counter() - started
+        return {"names": names, "timings": timings}
+    result: dict = {"names": names, "finite": bool(finite.item()) if finite is not None else True}
+    if want_hash:
+        mark = time.perf_counter()
+        result["sha256"] = hashlib.sha256(memoryview(flat.numpy()).cast("B")).hexdigest()
+        timings["hash_s"] = time.perf_counter() - mark
+    if want_payload:
+        result["flat"] = flat.numpy()
+    timings["total_s"] = time.perf_counter() - started
+    result["timings"] = timings
+    return result
 
 
 def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_optimizer: bool) -> dict:
@@ -239,7 +335,7 @@ def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_opti
     with torch.no_grad():
         for name in sorted(tensors):
             parameter = by_name[name]
-            value = tensors[name]
+            value = _as_tensor(tensors[name])
             if tuple(value.shape) != _global_shape(parameter):
                 raise VerlFullParameterError(
                     f"{name!r} 形状不符: 收到 {tuple(value.shape)}，模型是 {_global_shape(parameter)}")
@@ -253,6 +349,23 @@ def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_opti
             applied += 1
     zeroed = _reset_moments(worker_dict) if reset_optimizer else 0
     return {"applied": applied, "moments_zeroed": zeroed}
+
+
+def _as_tensor(value):
+    """A torch view of one value to write: a numpy array (Ray hands one over
+    read-only, out of its object store) is wrapped without a copy; the write
+    only reads it."""
+
+    import warnings
+
+    import numpy as np
+    import torch
+
+    if isinstance(value, np.ndarray):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # read-only buffer: never written here
+            return torch.from_numpy(value)
+    return value
 
 
 def _reset_moments(worker_dict) -> int:

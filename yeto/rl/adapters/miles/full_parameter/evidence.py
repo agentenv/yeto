@@ -76,6 +76,28 @@ def persist_published_round_evidence(
         rollout_id = token_round
     elif rollout_id < token_round:
         raise RuntimeError(f"round {rollout_id} is older than its policy token {policy_token}")
+    from ..buffer_rollout import EXTERNAL_CUT_ROUND_ATTR
+
+    external = getattr(args, EXTERNAL_CUT_ROUND_ATTR, None)
+    if external is not None:
+        # S27 G-EM relay trainer: every trajectory names its external merged cut
+        # (schema 5); the age bound is the merged version the round's take gated on.
+        from yeto.rl.engine.external_policy import behavior_cut_of
+
+        if int(external["rollout_id"]) != int(rollout_id):
+            raise RuntimeError(f"round {rollout_id}: the relay take was for round {external['rollout_id']}")
+        evidence = build_trajectory_batch_evidence(
+            groups,
+            rollout_id=rollout_id,
+            behavior_policy_hash=policy_hash,
+            reward_contract_hash=getattr(args, "yeto_rl_reward_sha256", None),
+            evidence_kind=evidence_kind,
+            behavior_cut_of=behavior_cut_of,
+            merged_version=int(external["merged_version"]),
+            max_policy_age=int(getattr(args, "yeto_rl_max_policy_age", 0) or 0),
+        )
+        write_trajectory_batch_evidence(args.yeto_rl_trajectory_evidence_dir, evidence)
+        return
     evidence = build_trajectory_batch_evidence(
         groups,
         rollout_id=rollout_id,

@@ -333,6 +333,22 @@ def test_synced_trainer_plan_forwards_the_sample_store_and_lanes():
         assert sample_roles.buffer_lane(parsed) == BufferLane(m, 2)
 
 
+def test_relay_trainers_read_their_whole_relay_buffer_as_one_lane():
+    """S27 G-EE: with --rl-sample-relay each synced trainer's local buffer holds only
+    its own relay channel, so it reads every position (lane 0 of 1), not every
+    second one."""
+    from yeto.rl.adapters.miles import island_entry
+    from yeto.rl.engine.merged_release import OWN_LANE
+
+    _, plan = _synced_plan(("--rl-spot-subscribers", "2", "--rl-sample-relay"))
+    assert len(plan["island_requests"]) == 2
+    for m, island in enumerate(plan["island_requests"]):
+        tokens = _island_tokens(island["learner_command"], str(m))
+        assert tokens[tokens.index("--rl-sample-lanes") + 1] == "1"
+        assert "--rl-sample-relay" in tokens
+        assert sample_roles.buffer_lane(island_entry.parse_args(tokens)) == OWN_LANE
+
+
 def test_synced_trainer_launch_writes_island_round_cuts():
     """S27 R-2: a cut interval gives every synced trainer, in a fixed roster or an
     island pool, its own write-only cuts."""

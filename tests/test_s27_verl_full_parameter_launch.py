@@ -97,8 +97,9 @@ def test_a_miles_full_parameter_launch_still_needs_fixed_partition():
 
 
 @pytest.mark.parametrize("extra, match", [
-    # refused earlier by the verl placement role; full_parameter_problems names it too
-    (("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"), "fixed-partition"),
+    # S27 G-EK: fixed-partition is verl's separate mode now, but without standby cards
+    (("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--rl-standby-gpus", "1"),
+     "no --rl-standby-gpus|standby"),
     (("--rl-sync-full-parameter-rounds", "sweep", "--rl-sync-overlap"), "no --rl-sync-overlap"),
     (("--rl-sync-expert-token-weights",), "no --rl-sync-expert-token-weights"),
 ])
@@ -116,22 +117,24 @@ def test_a_missing_layout_hash_names_the_verl_planner():
 def test_verl_problems_cover_the_island_refusals():
     from types import SimpleNamespace
 
-    args = SimpleNamespace(rl_placement="fixed-partition", rl_sample_role="trainer", rl_max_policy_age=2,
+    args = SimpleNamespace(rl_placement="standby-only", rl_sample_role="trainer", rl_max_policy_age=2,
                            rl_rollout_quant_tier=1, expert_full_count=2, rl_peer_recovery=True,
                            rl_parameter_layout_sha256="e" * 64)
     problems = " | ".join(verl_flags.full_parameter_problems(args))
     for needle in ("--rl-placement colocated", "--rl-sample-role trainer", "--rl-max-policy-age 0", "--rl-rollout-quant-tier",
-                   "--expert-full-count", "--rl-peer-recovery"):
+                   "--expert-full-count"):
         assert needle in problems, needle
+    assert "--rl-peer-recovery" not in problems  # S27 G-ED: the verl stream recovers from a peer
 
 
-def test_the_async_mode_never_turns_peer_recovery_on_for_verl():
+def test_the_async_mode_turns_peer_recovery_on_for_verl_as_for_miles():
+    """S27 G-ED: without a snapshot store it stays off; a store turns it on (as on Miles)."""
     from yeto.launch.rl_args import _peer_recovery_applies
 
     args = _prepared(_verl_args())
     assert args.rl_sync_mode_effective == "async" and args.rl_peer_recovery is False
-    args.rl_checkpoint_store = "modal-volume://v/run"  # a snapshot store would turn it on for Miles
-    assert _peer_recovery_applies(args) is False
+    args.rl_checkpoint_store = "modal-volume://v/run"
+    assert _peer_recovery_applies(args) is True
 
 
 # ----------------------------------------------------------------------------- the island argv

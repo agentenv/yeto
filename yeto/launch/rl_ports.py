@@ -303,7 +303,7 @@ def _synced_launch_uses_store(args) -> bool:
 
 def _catch_up_keeps_data_positions(args) -> bool:
     """S27 G-DS: asynchronous full-parameter rounds without peer recovery
-    (``--rl-island-state-source catch-up``; verl always) keep the islands'
+    (``--rl-island-state-source catch-up``) keep the islands'
     data positions in the store (:func:`data_positions_kept`), so a relaunched
     island that takes the syncer's catch-up continues at its next row."""
     from .syncer import rl_full_parameter_async
@@ -330,8 +330,8 @@ def _check_hf_export_launch_flags(args) -> None:
         supported = getattr(_rl_backend_module(args, "run_config_rules"), "hf_export_supported", None)
         if not (callable(supported) and supported(args)):
             raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles and the runs its backend's "
-                             "run_config_rules.hf_export_supported accepts only (verl: synced full-parameter "
-                             "islands, --rl-sync-preset full-parameter)")
+                             "run_config_rules.hf_export_supported accepts only (the verl Megatron island, TP/PP/EP > 1; "
+                             "verl: synced full-parameter islands, --rl-sync-preset full-parameter)")
     if getattr(args, "rl_elastic", False):
         raise ValueError(f"{EXPORT_HF_FLAG} is not wired for --rl-elastic")
     if (sample_roles.sample_role(args) != sample_roles.BOTH or sample_roles.is_pair(args)
@@ -420,9 +420,10 @@ def _check_resume_launch_flags(args) -> bool:
                              "island round cuts), HF exports (--rl-export-hf-rounds) or --rl-peer-recovery")
         if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
             raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
-        if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
+        # S27 G-ED: the verl island writes island cuts too (adapters/verl/round_cuts.py)
+        if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") not in ("miles", "verl"):
             raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
-                             "launch) are wired for --rl-backend miles only")
+                             "launch) are wired for --rl-backend miles and verl only")
         rl_checkpoint_store_plan(args)  # validates the form
         return False
     if elastic:
@@ -728,6 +729,18 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     from ..rl.engine.sample_roles import substore_uri
 
     flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0):  # S27 G-EA: 0 (default) adds nothing
+        flags += f" --rl-spot-subscribers {int(args.rl_spot_subscribers)}"
+    if getattr(args, "rl_sample_relay", False):
+        if getattr(args, "rl_single_island_no_sync", False):
+            raise ValueError("--rl-sample-relay needs the syncer (no --rl-single-island-no-sync)")
+        flags += " --rl-sample-relay"
+        if getattr(args, "rl_sample_relay_prefetch", None) is not None:
+            flags += f" --rl-sample-relay-prefetch {int(args.rl_sample_relay_prefetch)}"
+    if getattr(args, "rl_spot_syncer", None):  # a sampler launch of its own (any cloud)
+        flags += f" --rl-spot-syncer {shlex.quote(args.rl_spot_syncer)}"
+        if int(getattr(args, "rl_spot_channel", 0) or 0):
+            flags += f" --rl-spot-channel {int(args.rl_spot_channel)}"
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_pool(args):  # a fixed roster adds nothing
@@ -750,7 +763,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         # trainer whose samplers follow it reads its own sub-store (one lane)
         substore = getattr(args, "rl_sample_substore", None)
         sample_store = resume_store[0] if substore is None else substore_uri(resume_store[0], substore)
-        lanes = 1 if substore else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
+        # S27 G-EE: a relay trainer reads its own relay channel through a local buffer
+        # that only it fills, so it reads that whole buffer (one lane)
+        own = substore or getattr(args, "rl_sample_relay", False)
+        lanes = 1 if own else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
         flags += f" --rl-sample-store {shlex.quote(sample_store)} --rl-sample-lanes {lanes}"
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):

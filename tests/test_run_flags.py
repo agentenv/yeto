@@ -251,7 +251,7 @@ def test_forward_tables_name_flags_of_both_layers():
 # flag renamed in the schema but still spelled the old way in the launcher fails.
 _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
-    "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
+    "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--inline-resend", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-at-steps", "--checkpoint-every", "--checkpoint-path", "--config-json",
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     # S27 P2 task dispenser (syncer flags)
@@ -263,6 +263,8 @@ _NON_RL_LITERALS = frozenset({
     "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
     "--max-base-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
+    # syncer: S27 G-EA spot rollout (subscribers, sample relay)
+    "--max-subscribers", "--sample-relay",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
     "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--object-store-memory",
     "--output-dir",

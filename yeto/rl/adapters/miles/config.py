@@ -87,6 +87,15 @@ FAULT_TOLERANCE_FLAGS = frozenset(
         "--save-local-weight-checksum",
     }
 )
+# Session server timeout for its upstream model calls (Miles --miles-router-timeout,
+# default None: no limit). Without a limit a call to a dead engine hangs until the
+# router's own limit (14400 s) instead of failing (S27 G-EB section 7.1). 600 s is
+# above one turn's longest generation (4096 tokens at about 70 tokens/s per sequence
+# under a large batch is about 60 s, plus queueing) and below Codex's stream idle
+# timeout (1800 s, codex_provider), so the session server answers 502 first and the
+# caller retries. Extra argv may set its own value.
+SESSION_UPSTREAM_TIMEOUT_S = 600
+
 # Flags whose value this adapter owns; an override via extra argv would bypass
 # placement/algorithm/driver invariants.
 ADAPTER_OWNED_FLAGS = frozenset(
@@ -1076,6 +1085,7 @@ def translate_run_config(
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
+        values.extend(harbor_rollout_argv(agent.custom_agent_function_path, sample_buffer=sample_buffer))
     if agent.agent_max_seq_len is not None:
         values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
@@ -1087,6 +1097,8 @@ def translate_run_config(
             values.extend(str(port) for port in agent.session_server_port)
         if agent.session_server_workers is not None:
             values.extend(("--session-server-workers", str(agent.session_server_workers)))
+        if "--miles-router-timeout" not in _flags(extra_argv):
+            values.extend(("--miles-router-timeout", str(SESSION_UPSTREAM_TIMEOUT_S)))
         if agent.tito_model:
             resolver = tito_parser_resolver or _resolve_tito_parsers
             values.extend(("--tito-model", agent.tito_model))
@@ -1254,6 +1266,10 @@ TRAIN_EXTRA_FLAGS = frozenset({
     "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
     "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
     "--moe-flex-dispatcher-backend",
+    # S27 G-EF: Miles computes the loss log-probabilities over the sequence in chunks
+    # of N tokens instead of one fp32 full-vocabulary block (s27-ef-c1 ran out of
+    # memory there on a long agentic sample: 11.94 GiB for one block)
+    "--log-probs-chunk-size",
 })
 
 
@@ -1313,6 +1329,20 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
     if getattr(memory, "precision_aware_optimizer", False):
         values.extend(PRECISION_AWARE_ARGV)
     return tuple(values)
+
+
+def harbor_rollout_argv(agent_function: str, *, sample_buffer: Any = None) -> tuple[str, ...]:
+    """The Harbor agent's rollout function: the stock one plus boat VM cleanup at
+    ``RolloutExecutor.dispose()`` (``harbor_rollout``). Without it the pool's idle
+    VMs outlive the island until their boat TTL. ``()`` for any other agent."""
+    from .harbor_agent import AGENT_FUNCTION, ROLLOUT_FUNCTION
+
+    if agent_function != AGENT_FUNCTION:
+        return ()
+    if sample_buffer is not None:
+        raise MilesConfigError("the Harbor agent's rollout function and the sample buffer rollout "
+                               "both replace Miles' rollout function; use one of them")
+    return ("--rollout-function-path", ROLLOUT_FUNCTION)
 
 
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:

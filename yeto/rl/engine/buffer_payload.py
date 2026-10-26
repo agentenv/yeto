@@ -154,6 +154,11 @@ def _sample_versions(sample: Mapping[str, Any]) -> list[int]:
     return [int(n) for n in numbers]
 
 
+def behavior_versions(sample: Mapping[str, Any]) -> list[int]:
+    """Engine weight versions of one sample's tokens (the buffer's behavior versions)."""
+    return _sample_versions(sample)
+
+
 def group_entry_fields(samples: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     """``(behavior_version, tokens)`` of a group: the oldest engine version of any
     token, and the response tokens. Every sample must carry per-token behavior

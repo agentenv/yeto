@@ -13,6 +13,10 @@ REWARDS = {
     "gsm8k_reward:score": "compute_score_gsm8k",
     "yeto.rl.gsm8k_reward:score": "compute_score_gsm8k",
     "yeto.rl.gsm8k_reward.score": "compute_score_gsm8k",
+    # S27 G-DC: DAPO-Math rows (one-number labels), the reward of the Miles Nemotron runs
+    "numeric_answer_reward:score": "compute_score_numeric_answer",
+    "yeto.rl.numeric_answer_reward:score": "compute_score_numeric_answer",
+    "yeto.rl.numeric_answer_reward.score": "compute_score_numeric_answer",
 }
 
 def validate_rlf_row(row):
@@ -56,3 +60,11 @@ def compute_score_gsm8k(data_source, solution_str, ground_truth, extra_info=None
     from yeto.rl.rewards.types import Trajectory
 
     return float(gsm8k_reward(Trajectory(response=solution_str or "", label=ground_truth)).value)
+
+
+def compute_score_numeric_answer(data_source, solution_str, ground_truth, extra_info=None, **_kwargs):
+    """``yeto.rl.numeric_answer_reward`` (the same grader as the Miles islands)."""
+    from yeto.rl.rewards.builtin import numeric_answer_reward
+    from yeto.rl.rewards.types import Trajectory
+
+    return float(numeric_answer_reward(Trajectory(response=solution_str or "", label=ground_truth)).value)

@@ -372,6 +372,17 @@ class _LifecycleSync:
         h.advance(LifecycleState.WARMING)
         return start
 
+    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
+        """The inner session's E1 cut preparation, except before a park. A prepared cut
+        holds the store's writer guard until its safe point, and on a Modal Volume that
+        guard skips every reload of the container: a trainer parked after this
+        publication never sees its next command in the store (GPU run s27-eg-a1, a
+        convertible node). Before a park the safe point cuts the usual way."""
+        if self.handle.wants_park():
+            driver.emit("rl_cut_prepare_skipped", rollout_id=int(rollout_id), reason="park")
+            return
+        self.inner.prepare_cut(driver, rollout_id=rollout_id, state=state)
+
     def published(self, driver: IslandDriver, *, rollout_id: int, policy_hash: str) -> None:
         self.inner.published(driver, rollout_id=rollout_id, policy_hash=policy_hash)
         h = self.handle

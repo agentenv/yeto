@@ -236,6 +236,21 @@ def test_ports_lora_training_eval_resolves(tmp_path):
                       eval_prompt_path=None, yeto_policy_sync=True)
 
 
+def test_training_eval_on_a_single_island_without_outer_sync(tmp_path):
+    # S27 G-DA: the no-sync island owns its policy versions, so its driver can eval;
+    # an island of a synced run without the external boundary still cannot.
+    from yeto.rl.engine.run_config import _resolve_eval
+
+    base = dict(eval_interval=1000, eval_only=False, rl_engine="ports",
+                eval_dataset_name="held", eval_samples_per_prompt=8)
+    config = _resolve_eval(SimpleNamespace(**base, rl_single_island_no_sync=True), prompt_path="/p",
+                           eval_prompt_path="/e", yeto_policy_sync=False)
+    assert config.interval == 1000 and config.prompt_path == "/e" and config.samples_per_prompt == 8
+    with pytest.raises(ValueError, match="external policy boundary"):
+        _resolve_eval(SimpleNamespace(**base, rl_single_island_no_sync=False), prompt_path="/p",
+                      eval_prompt_path="/e", yeto_policy_sync=False)
+
+
 def test_launcher_refuses_overlap_eval_on_colocated_from_real_cli():
     from yeto.rl.engine.execution_profile import ProfileError
 

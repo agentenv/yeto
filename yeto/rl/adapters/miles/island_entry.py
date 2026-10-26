@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -288,18 +287,11 @@ def _check_resume_switches(args) -> None:
 
 
 def _check_island_cut_store(args) -> None:
-    """S27 R-2: island round cuts belong to a synced island (a syncer, no elastic store,
-    no resume store); its cuts are written only, so the resume switches do not apply."""
-    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
-        raise ValueError("--rl-island-cut-store is a synced island's (no --rl-single-island-no-sync, "
-                         "no --rl-elastic)")
-    if getattr(args, "rl_resume_store", None):
-        raise ValueError("--rl-island-cut-store and --rl-resume-store exclude each other")
-    for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
-                       ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
-        if getattr(args, name, None):
-            raise ValueError(f"{flag}: a synced island does not resume from its round cuts "
-                             "(the syncer is authoritative)")
+    """S27 R-2: island round cuts belong to a synced island (engine-neutral check,
+    shared with the verl island since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import check_island_cut_store
+
+    check_island_cut_store(args)
 
 
 def _check_hf_exports(args) -> None:
@@ -341,6 +333,12 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
 
     from .buffer_rollout import island_env
 
+    env = os.environ if environ is None else environ
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
+        # S27 G-EA: island 0 publishes its fragment layout for the spot subscribers
+        from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
+
+        env[PUBLISH_ENV] = "1"
     if sample_roles.sample_role(args) == sample_roles.BOTH:
         return
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
@@ -348,21 +346,54 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
     # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
     sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
-    (os.environ if environ is None else environ).update(island_env(
+    env.update(island_env(
         config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
         shard=node, shards=getattr(args, "rl_buffer_shards", None),
         lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None)))
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
+    if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
+        env.update(sample_relay_env(args))
+    if getattr(args, "rl_spot_syncer", None) and config.role == sample_roles.SAMPLER:
+        env.update(spot_sampler_env(args))
+
+
+def spot_sampler_env(args) -> dict[str, str]:
+    """S27 G-EA (--rl-spot-syncer, sampler island): weights from that syncer as a
+    receive-only subscriber, groups to its relay channel --rl-spot-channel."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
+
+    host, port = _syncer_address(args.rl_spot_syncer)
+    return {SPOT_SYNCER_ENV: f"{host}:{port}", RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(getattr(args, "rl_spot_channel", 0) or 0))}
+
+
+def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
+    """S27 G-EA (--rl-sample-relay, trainer island): the spot samplers' groups come
+    through the head's sample relay. The trainer reads them from a buffer on local
+    disk (the relay pump fills it: ``yeto.rl.spot_rollout.relay_buffer``) and makes
+    no policy releases (the samplers follow the syncer as subscribers)."""
+    import tempfile
+
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, RELAY_PREFETCH_ENV
+
+    from .buffer_rollout import BUFFER_ROOT_ENV
+
+    host, port = _syncer_address(args.syncer)
+    root = Path(tmp_root or tempfile.gettempdir()) / "yeto-relay-buffer" / f"island{int(args.learner_id)}"
+    root.mkdir(parents=True, exist_ok=True)
+    prefetch = getattr(args, "rl_sample_relay_prefetch", None)
+    if prefetch is None:
+        prefetch = 2 * int(args.groups_per_round)
+    return {BUFFER_ROOT_ENV: str(root), RELAY_ADDR_ENV: f"{host}:{port}",
+            RELAY_CHANNEL_ENV: str(int(args.learner_id)), RELAY_PREFETCH_ENV: str(int(prefetch))}
 
 
 def _cut_auto(args) -> dict[str, float]:
-    """The timed cut interval flags (empty: every N rounds)."""
-    mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)
-    if mtbf is None:
-        return {}
-    cap = getattr(args, "rl_cut_max_interval_s", None)
-    return {"auto_mtbf_s": float(mtbf), **({} if cap is None else {"max_interval_s": float(cap)})}
+    """The timed cut interval flags (empty: every N rounds; engine-neutral since S27 G-ED)."""
+    from yeto.rl.engine.cut_interval import cut_auto_options
+
+    return cut_auto_options(args)
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
@@ -440,10 +471,12 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
     island_store = getattr(args, "rl_island_cut_store", None)
     if getattr(args, "rl_resume_store", None) or island_store:
+        from yeto.rl.engine.cut_interval import island_cut_store_for
+
         every = getattr(args, "rl_cut_every", None)
         miles_args.yeto_rl_resume = {
             "store": (str(args.rl_resume_store) if not island_store
-                      else f"{str(island_store).rstrip('/')}/island{int(args.learner_id)}"),
+                      else island_cut_store_for(island_store, args.learner_id)),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
             # None: the default timed interval (cut_interval module doc)
             "every": None if auto or every is None else int(every),
@@ -1044,24 +1077,11 @@ def _island_syncer_epoch(args) -> int | None:
 
 def peer_recovery_options(args, environ=None):
     """S27 E-3: peer recovery of a full-parameter island, or None without
-    ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
-    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`)."""
-    from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
+    ``--rl-peer-recovery-store`` (engine-neutral since S27 G-ED, shared with
+    the verl island: :func:`yeto.rl.engine.stream_recovery.peer_recovery_options`)."""
+    from yeto.rl.engine.stream_recovery import peer_recovery_options as options
 
-    store = getattr(args, "rl_peer_recovery_store", None)
-    env = os.environ if environ is None else environ
-    recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
-    if store is None:
-        if recover or getattr(args, "rl_peer_recovery_staging", None):
-            raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
-        return None
-    ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
-    return PeerRecoveryOptions(
-        store=str(store),
-        recover=recover,
-        ttl_s=3600.0 if ttl is None else float(ttl),
-        staging=getattr(args, "rl_peer_recovery_staging", None),
-    )
+    return options(args, environ)
 
 
 def _island_pool_membership(args) -> dict:
@@ -1351,18 +1371,10 @@ def _messages(row: dict[str, Any], prompt_column: str | None = None) -> list[dic
 
 def _prompt_split(source, revision: str | None) -> str:
     """`train`, or a Hub dataset's only split when it has no `train`
-    (e.g. HuggingFaceH4/MATH-500 ships just `test`)."""
-    if not isinstance(source, str) or os.path.exists(os.path.expanduser(source)):
-        return "train"
-    try:
-        from datasets import get_dataset_split_names
+    (``yeto.data.prompt_split``; the launcher's label check reads the same split)."""
+    from yeto.data import prompt_split
 
-        names = list(get_dataset_split_names(source, revision=revision))
-    except Exception:  # noqa: BLE001 - load_rows reports the real error
-        return "train"
-    if "train" not in names and len(names) == 1:
-        return names[0]
-    return "train"
+    return prompt_split(source, revision)
 
 
 def prepare_prompt_data(
@@ -1462,8 +1474,15 @@ def _island_dispense(args) -> bool:
         raise ValueError("--rl-data-dispense and --rl-data-slot exclude each other")
     if getattr(args, "data_sha256", None):
         raise ValueError("--rl-data-dispense and per-island task data (--data-sha256) exclude each other")
-    if sample_roles.sample_role(args) != sample_roles.BOTH or getattr(args, "rl_sampler_data_slot", None):
-        raise ValueError("--rl-data-dispense belongs to a training island that generates and trains")
+    role = sample_roles.sample_role(args)
+    if getattr(args, "rl_sampler_data_slot", None):
+        raise ValueError("--rl-data-dispense and --rl-sampler-data-slot exclude each other")
+    if role == sample_roles.SAMPLER:  # S27 P4: a sampler island claims its rows too
+        if not getattr(args, "rl_dispense_addr", None):
+            raise ValueError("--rl-data-dispense on a sampler island needs --rl-dispense-addr")
+    elif role != sample_roles.BOTH:
+        raise ValueError("--rl-data-dispense belongs to an island that generates (a training "
+                         "island that generates and trains, or a sampler island)")
     if getattr(args, "eval_only", False):
         raise ValueError("--rl-data-dispense: an eval-only island evaluates every row")
     return True
@@ -1479,14 +1498,49 @@ def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
         raise ValueError("--rl-data-dispense does not cover Miles fully_async rollouts yet")
     from yeto.rl.engine.task_dispense import file_fingerprint
 
+    from yeto.rl.engine import sample_roles
+    from yeto.rl.engine.task_dispense import sampler_holder_id
+
     rows, digest = file_fingerprint(prompt_path)
-    host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:
+        # S27 P4: the sampler's dispenser (a synced group's actor syncer); its island
+        # id comes from its sampler id, apart from the training islands' learner ids
+        host, port = _syncer_addresses(args.rl_dispense_addr)[0]
+        sampler = getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
+        learner_id = sampler_holder_id(sampler)
+    else:
+        host, port = _syncer_addresses(args.syncer)[0]  # the actor syncer (shard 0) dispenses
+        learner_id = int(args.learner_id)
     block = int(getattr(miles_args, "over_sampling_batch_size", None)
                 or getattr(miles_args, "rollout_batch_size"))
-    return {"address": f"{host}:{port}", "learner_id": int(args.learner_id), "rows": rows,
-            "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
-            "block": block,
-            "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
+    config = {"address": f"{host}:{port}", "learner_id": learner_id, "rows": rows,
+              "fingerprint": digest.hex(), "seed": int(getattr(miles_args, "seed", 0) or 0),
+              "block": block,
+              "prefetch_blocks": int(getattr(args, "rl_dispense_prefetch_blocks", 2) or 2)}
+    config.update(_dispense_streams(args, prompt_path, rows, digest))
+    return config
+
+
+def _dispense_streams(args, prompt_path, rows: int, digest: bytes) -> dict[str, Any]:
+    """S27 P3: the streams of ``--rl-dispense-mix`` / ``--rl-dispense-by-label``
+    and this island's ``--rl-dispense-labels``; {} for the plain P2 data. An
+    island whose labels are on no row fails here, before any training."""
+
+    mix = getattr(args, "rl_dispense_mix", None)
+    by_label = bool(getattr(args, "rl_dispense_by_label", False))
+    labels = getattr(args, "rl_dispense_labels", None)
+    if not (mix or by_label or labels):
+        return {}
+    from yeto.rl.engine.task_dispense import StreamTable
+
+    table = StreamTable.from_prompts(prompt_path, mix=mix.split(",") if mix else None,
+                                     by_label=by_label or bool(labels))
+    if table.total_rows != rows or table.fingerprint != digest:
+        raise ValueError("the prompt file changed while its streams were read")
+    accept = table.accept(labels.split(",")) if labels else None
+    if table.single and accept is None:
+        return {}
+    return {"streams": table.to_config(), "accept": accept, "stream_record": table.record()}
 
 
 def _island_data_slot(args) -> Any:
@@ -1519,32 +1573,11 @@ def _verify_eval_dataset_identity(args) -> Path | None:
             raise ValueError("--eval-only requires evaluation configuration")
         return None
     eval_only = getattr(args, "eval_only", False)
-    from yeto.rl.engine.run_config import ports_training_eval
+    from yeto.rl.engine.run_config import ports_training_eval, verify_eval_dataset_file
 
-    train_eval = ports_training_eval(args)
-    if not eval_only and not train_eval:
+    if not eval_only and not ports_training_eval(args):
         raise ValueError("evaluation configuration requires --eval-only or the ports engine")
-    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise ValueError("evaluation dataset requires an immutable SHA256")
-    source_value = args.data if eval_only else getattr(args, "eval_data", None)
-    if not isinstance(source_value, str) or not source_value:
-        raise ValueError("training-time evaluation requires --eval-data")
-    source = Path(source_value).expanduser()
-    if source.is_symlink() or not source.is_file():
-        raise ValueError("evaluation requires one regular local dataset file")
-    if train_eval and (
-        source.resolve() == Path(args.data).expanduser().resolve()
-    ):
-        raise ValueError("training-time evaluation must use a distinct heldout dataset")
-    from yeto.provenance import file_sha256
-
-    actual = file_sha256(source)
-    if actual != expected:
-        raise ValueError(
-            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
-        )
-    return source
+    return verify_eval_dataset_file(args, eval_only=eval_only)
 
 
 def miles_lr_schedule_sha256(miles_args):  # noqa: D103 - see lr_schedule.miles_lr_schedule_sha256

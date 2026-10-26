@@ -1,4 +1,4 @@
-"""A verl LoRA policy as a full HF checkpoint for a sampler island (S25 C2).
+"""A verl policy as a full HF checkpoint for a sampler island (S25 C2; full parameters S27 G-EK).
 
 The engine sampler island loads full checkpoints only (``SamplerEngine.load``:
 the SGLang and vllm-ascend adapters reload weights from a model directory). A
@@ -17,6 +17,12 @@ Rounding: a bf16 base keeps about 8 bits of mantissa, so a LoRA delta far below
 ``|W| / 256`` does not change the stored weight. The sampler then serves the
 merged weights, not the trainer's exact ``W + BA``; the trainer's log-prob
 recomputation shows the difference as off-policy mismatch.
+
+Full parameters (S27 G-EK, VERL-PARITY #14): :func:`write_full_checkpoint` puts a
+full-parameter trainer's weights into a release directory with the island's HF
+writer (``hf_export.VerlHfWriter``: the FP32 masters read from the trainer
+workers, cast to the model's dtype, the base's non-weight files copied). Nothing
+is merged: the trainer holds the whole model.
 """
 
 from __future__ import annotations
@@ -110,3 +116,31 @@ def write_merged_checkpoint(base_dir: str | Path, lora: Mapping[str, Any], out_d
         if item.is_file() and item.name not in files and not item.name.startswith("."):
             shutil.copy2(item, out / item.name)
     return {"merged_modules": merged, "files": sorted(files), "max_relative_change": max_rel}
+
+
+def write_full_checkpoint(writer: Any, out_dir: str | Path) -> dict[str, Any]:
+    """Write a full-parameter policy into ``out_dir`` with ``writer(rollout_id, directory)``
+    (``hf_export.VerlHfWriter``). The writer creates its directory itself and leaves the
+    HF export completion marker, so it writes into a fresh sibling; the files then move
+    into ``out_dir`` (the release store may have created it) without the marker.
+    Returns a summary (files, bytes)."""
+    from yeto.rl.engine.hf_export import COMPLETE_MARKER
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    staged = out.parent / f".{out.name}.full-write"
+    if staged.exists():
+        shutil.rmtree(staged)
+    try:
+        writer(0, staged)
+        files = {}
+        for item in sorted(staged.iterdir()):
+            if item.name == COMPLETE_MARKER:
+                continue
+            if (out / item.name).exists():
+                raise MergeError(f"{out}: {item.name} exists already")
+            files[item.name] = item.stat().st_size
+            item.rename(out / item.name)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+    return {"files": sorted(files), "bytes": sum(files.values())}

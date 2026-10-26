@@ -19,6 +19,12 @@ ENGINE = "verl"
 # ``yeto.hw.catalog.device_family()``.
 DEVICE_FAMILY = "nvidia"
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
+# S27 G-DC: the Megatron engine (verl ``model_engine=megatron``) names parameters
+# by Megatron-Core module path; Megatron-Bridge maps them to the HF names the
+# rollout loads. A Megatron island and an FSDP2 island therefore never share a
+# session contract.
+MEGATRON_PARAM_MAP = {"names": "megatron-core module paths", "export": "megatron-bridge export_hf_weights"}
+PARAM_MAP_SHA256_BY_BACKEND = {"fsdp2": PARAM_MAP_SHA256, "megatron": param_map_sha256(MEGATRON_PARAM_MAP)}
 
 
 def backend_identity(*, device_family: str | None = None,
@@ -30,11 +36,11 @@ def backend_identity(*, device_family: str | None = None,
     is part of the identity hash: a GPU island and an NPU island therefore get
     different session contracts and cannot merge weights (task 3.10).
     """
-    if train_backend != "fsdp2":
+    if train_backend not in PARAM_MAP_SHA256_BY_BACKEND:
         raise ValueError(f"verl train backend {train_backend!r} has no parameter-name map yet")
     from yeto.hw.catalog import device_family as detect_device_family
     from yeto.hw.catalog import island_compat_group
 
     family = device_family if device_family is not None else detect_device_family()
-    return BackendIdentity(ENGINE, VERL_COMMIT, family, PARAM_MAP_SHA256,
+    return BackendIdentity(ENGINE, VERL_COMMIT, family, PARAM_MAP_SHA256_BY_BACKEND[train_backend],
                            island_compat_group(compat_group))

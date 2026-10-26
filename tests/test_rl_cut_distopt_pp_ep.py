@@ -543,3 +543,29 @@ def test_pack_hands_the_state_over_in_one_buffer_and_unpacks_it_exactly():
     for key in ("a", "view", "empty"):
         assert back[key].dtype == state[key].dtype and torch.equal(back[key], state[key])
     assert back["b"][0].untyped_storage().data_ptr() != flat.untyped_storage().data_ptr()  # own copies
+
+
+def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
+    """S27 G-EL peer snapshots (``background="host"``): the state is copied to the
+    host at the step boundary and a thread of the rank writes it; the shard, its
+    summary and its bytes equal the inline save's. ``poll_cut_shard`` never waits."""
+    import time
+
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    assert cp.poll_cut_shard(rank, cut_id="c1") == {"done": True, "missing": True}
+    inline = cp.save_cut_shard(rank, directory=str(tmp_path / "inline"), cut_id="c1")
+    started = cp.save_cut_shard(rank, directory=str(tmp_path / "host"), cut_id="c1", background=cp.HOST_BACKGROUND)
+    assert started["pending"] == "c1"
+    assert started["capture"] == {"mode": "host", "reason": "host_background"}
+    deadline = time.monotonic() + 30
+    while not cp.poll_cut_shard(rank, cut_id="c1")["done"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    summary = cp.finish_cut_shard(rank, cut_id="c1")
+    assert summary.pop("writer") == {"mode": "host_thread"}
+    assert summary == inline
+    for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
+        assert (tmp_path / "host" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
