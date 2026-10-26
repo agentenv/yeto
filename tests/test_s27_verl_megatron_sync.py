@@ -917,10 +917,12 @@ def test_the_launcher_refuses_what_a_synced_megatron_island_cannot_run(change, m
 
 
 def test_pipeline_parallelism_is_gated_and_the_gate_names_the_cause(tmp_path):
-    """S27 G-FL: the boundary handles PP (CPU-verified), but a PP > 1 island does not
-    start on cards (run s27-fl-1: the stage-1 trainer rank segfaults at the manifest
-    step), so the launcher refuses the shape by default and says why.
-    ``--rl-allow-pipeline-parallel-sync`` lifts the gate; the code stays in place."""
+    """S27 G-FL: the boundary handles PP (verified on CPU and, since section 7.7, on
+    Ascend HCCL), but a PP > 1 island does not start on GPU cards (run s27-fl-1: the
+    stage-1 trainer rank segfaults in the first sharded export, after the manifest step
+    finished on both ranks -- section 7.4 withdrew the earlier manifest attribution).
+    So the launcher refuses the shape by default and says why;
+    ``--rl-allow-pipeline-parallel-sync`` lifts the gate and the code stays in place."""
     from argparse import Namespace
 
     from yeto.rl.adapters.verl import megatron_engine, run_config_rules

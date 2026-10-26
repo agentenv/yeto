@@ -397,12 +397,20 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     call("yeto_configure", float(plan.get("tis_upper", 2.0)), list(plan["thresholds_key"]))
     from yeto.hw.catalog import runtime_versions
 
-    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    # 7.7a: unset -> error. S27 G-FN: a Megatron engine island declares the Megatron
+    # parameter-name map here, as the synchronous Megatron island does (megatron_ports).
+    identity = backend_identity(compat_group=plan.get("compat_group"),
+                                **({"train_backend": "megatron"} if plan.get("engine") == "megatron"
+                                   else {}))
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     identity_sha = bind_policy_age(identity.sha256(), limit)
     if full:  # S27 G-EW: sets island.full_group (and the local layout hash without a syncer)
         sync, policy_state = full_parameter_ports(island, plan, backend_identity_sha256=identity_sha)
         layout_hash = island.layout_hash
+    if plan.get("engine") == "megatron":  # S27 G-FN (B4): the Megatron island's readbacks
+        from .megatron_ports import island_megatron_checks
+
+        island_megatron_checks(island, plan, tape)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,

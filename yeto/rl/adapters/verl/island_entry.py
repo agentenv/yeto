@@ -465,7 +465,8 @@ def main(argv=None) -> int:
         megatron = megatron_island_plan(
             args, model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
             algo=algo, chat=chat, ray_info=ray_info, reward_path=str(Path(__file__).with_name("reward_fn.py")),
-            reward_name=function_for(args.reward_function))
+            reward_name=function_for(args.reward_function),
+            buffer_trainer=buffer_section is not None)  # S27 G-FN (B1-B3)
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
@@ -497,8 +498,13 @@ def main(argv=None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     full_plan: dict = {}
-    if full and (megatron is None or sync != "none"):  # S27 B10: model identity, and the outer
-        # full-parameter sync when synced (S27 G-FG: a synced Megatron island too)
+    if full and (megatron is None or sync != "none"
+                 or buffer_section is not None):  # S27 B10: model identity, and the outer
+        # full-parameter sync when synced (S27 G-FG: a synced Megatron island too).
+        # S27 G-FN (B4): a Megatron buffer trainer runs on the fully_async ports, and
+        # their identity is this section's too (``fully_async_full.full_parameter_hashes``
+        # reads ``plan["model_config_sha256"]``); only the synchronous Megatron island
+        # takes its identity from ``megatron_ports.config_hash`` instead.
         from yeto.rl.engine.algorithm import AlgorithmSpec
 
         from .full_parameter_stream import plan_section
@@ -513,7 +519,7 @@ def main(argv=None) -> int:
     asserted_keys = vconf.ASSERTED_KEYS
     store_note = None
     if megatron is not None:
-        asserted_keys = megatron_engine.ASSERTED_KEYS
+        asserted_keys = megatron["asserted_keys"]  # S27 G-FN: without a rollout pool, fewer keys
         resume, store_note = megatron_resume(args, resume)
     elif pools is not None and not limit:  # S27 G-EK: the FSDP2 island in verl's separate mode
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
@@ -735,13 +741,23 @@ def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
 
 
 def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
-                         chat: dict, ray_info: dict, reward_path: str, reward_name: str) -> dict:
+                         chat: dict, ray_info: dict, reward_path: str, reward_name: str,
+                         buffer_trainer: bool = False) -> dict:
     """S27 G-DC: the Megatron island (``megatron_engine``): full parameters, trainer and
     rollout pools apart, age 0, no outer sync (S27 G-FG: or the full-parameter
-    outer sync, ``megatron_engine.sync_problems``). Returns run, overrides and the plan
-    sections ``megatron`` (the shape) and ``hf_exports``; every flag the island cannot
-    honour is refused here, before verl starts."""
-    from .megatron_engine import MegatronShape, build_overrides
+    outer sync, ``megatron_engine.sync_problems``). Returns run, overrides, the keys the
+    island re-reads and the plan sections ``megatron`` (the shape) and ``hf_exports``;
+    every flag the island cannot honour is refused here, before verl starts.
+
+    ``buffer_trainer`` (S27 G-FN, blockers B1-B3): the island runs as a buffer trainer
+    (``--rl-sample-role trainer``): it consumes samples from the store and publishes
+    its weights there, and it holds no rollout engine. Three requirements of the
+    separate mode are then lifted, because each of them exists only to place a rollout
+    pool: the fixed partition (B3, ruled by the main agent 07:4xZ), the policy age of 0
+    (B2: a buffer trainer is on the fully_async path and needs age >= 1) and the
+    refusal of ``--rl-sample-role`` itself (B1). ``--rl-rollout-quant-tier`` stays
+    refused on both roles. Every card the island's Ray reports is a training card."""
+    from .megatron_engine import MegatronShape, asserted_keys, build_overrides
 
     problems = []
     if (args.parameter_mode or "lora") != "full":
@@ -749,19 +765,35 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     synced = not args.rl_single_island_no_sync  # S27 G-FG: the full-parameter outer sync
     if synced:
         problems += megatron_engine.sync_problems(args)
-    if (args.rl_placement or "colocated") != "fixed-partition":
-        problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
-    if int(args.rl_max_policy_age or 0) != 0 and not int(args.rl_rollout_ahead or 0):
-        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the fully_async path is not wired)")
-    if args.rl_sample_role or args.rl_rollout_quant_tier:
-        problems.append("no --rl-sample-role / --rl-rollout-quant-tier")
+    placement = args.rl_placement or "colocated"
+    if buffer_trainer:
+        # S27 G-FN (B3): no rollout cards, so nothing to keep apart from the training
+        # cards; a fixed partition would carve a rollout pool out of the training cards.
+        if placement != "colocated":
+            problems.append("--rl-placement colocated（缓冲训练角色没有 rollout 卡，不分池）")
+        if int(args.rl_max_policy_age or 0) < 1:
+            problems.append("--rl-max-policy-age >= 1（缓冲训练角色走 fully_async 路径）")
+    else:
+        if placement != "fixed-partition":
+            problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
+        if int(args.rl_max_policy_age or 0) != 0 and not int(args.rl_rollout_ahead or 0):
+            problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1 (the fully_async path is "
+                            "not wired), or --rl-sample-role trainer (the buffer trainer role)")
+        if args.rl_sample_role:
+            problems.append("no --rl-sample-role")
+    if args.rl_rollout_quant_tier:
+        problems.append("no --rl-rollout-quant-tier")
     if args.rl_data_slot and not synced:
         problems.append("no --rl-data-slot (one island)")
     if problems:
         raise SystemExit("verl Megatron 岛需要：" + "; ".join(problems))
-    from .separate import pools_from_args
+    from .separate import pools_from_args, trainer_only_pools
 
-    pools = pools_from_args(args, island_gpus(ray_info), what="verl Megatron 岛")  # S27 G-EK: shared
+    cards = island_gpus(ray_info)
+    # S27 G-EK: shared with the FSDP2 separate island; S27 G-FN: the buffer trainer
+    # role takes every card as a training card (no rollout pool to carve out).
+    pools = (trainer_only_pools(args, cards, what="verl Megatron 缓冲训练岛") if buffer_trainer
+             else pools_from_args(args, cards, what="verl Megatron 岛"))
     trainer_gpus = pools.trainer_gpus
     with open(Path(model_path) / "config.json") as handle:
         num_experts = json.load(handle).get("n_routed_experts")
@@ -774,7 +806,8 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
         gpu_memory_utilization=pools.gpu_memory_utilization,
         num_experts=int(num_experts) if num_experts else None,
-        grad_nan_check=not args.rl_no_grad_nan_check)
+        grad_nan_check=not args.rl_no_grad_nan_check,
+        rollout_pool=not buffer_trainer)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,
@@ -802,6 +835,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     if args.rl_lr_schedule not in (None, "constant"):
         raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
     return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports,
+            "asserted_keys": asserted_keys(shape),
             "ascend_plugin_stack": ascend_plugin_stack_section(args, engine=megatron_engine.ENGINE_MEGATRON)}
 
 

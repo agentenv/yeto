@@ -33,6 +33,7 @@ the engine-neutral role stream over the Megatron trainer group of
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -430,29 +431,34 @@ def driver_options(plan: dict, spec, fingerprint: str) -> dict:
             "profile": _execution_profile(spec, plan), "layout": LAYOUT_FRAGMENTS}
 
 
-def _check_grad_checks(trainer, shape: dict, tape) -> None:
+def _check_grad_checks(on_workers, shape: dict, tape) -> None:
     """S27 G-FL: every trainer rank must carry the gradient check the plan asked for.
 
     The check turns a non-finite gradient into a RuntimeError instead of letting
     ``clip_grads`` scale it into every parameter; a run that wants the old behaviour
-    says so with ``--rl-no-grad-nan-check``."""
+    says so with ``--rl-no-grad-nan-check``.
+
+    ``on_workers(fn)`` runs ``fn`` on every trainer worker. The synchronous island
+    passes :func:`call_workers` over the in-process trainer; the buffer trainer passes
+    ``island.call_workers``, which goes through the trainer actor (S27 G-FN)."""
     from yeto.rl import megatron_grad_checks
 
     wanted = bool(shape.get("grad_nan_check", True))
-    reports = call_workers(trainer, remote_megatron_grad_checks)
+    reports = on_workers(remote_megatron_grad_checks)
     tape.append({"event": "rl_megatron_grad_checks", "wanted": wanted, "ranks": reports})
     print(f"[yeto-verl] gradient NaN check wanted={wanted} ranks="
           f"{[ (r.get('rank'), r.get('check_for_nan_in_grad')) for r in reports ]}", flush=True)
     megatron_grad_checks.check_reports(reports, wanted=wanted)
 
 
-def _log_ascend_plugin_stack(trainer, section: dict, tape) -> None:
+def _log_ascend_plugin_stack(on_workers, section: dict, tape) -> None:
     """S27 G-FL: print what every trainer worker installed, and put it on the tape.
 
     Reading the report back cannot fail the island: a worker that never ran the
-    install reports ``ran: False`` and the line says so."""
+    install reports ``ran: False`` and the line says so. ``on_workers`` is as in
+    :func:`_check_grad_checks`."""
     try:
-        reports = call_workers(trainer, remote_ascend_plugin_report)
+        reports = on_workers(remote_ascend_plugin_report)
     except Exception as error:  # noqa: BLE001 - a log must not stop the island
         reports = [{"rank": -1, "ran": False, "error": repr(error)}]
     print(f"[yeto-verl] ascend plugin stack root={section.get('root')} "
@@ -474,6 +480,24 @@ def _log_ascend_plugin_stack(trainer, section: dict, tape) -> None:
     tape.append({"event": "rl_ascend_plugin_stack", "root": section.get("root"),
                  "env": section.get("env"), "unset": sorted(section.get("unset") or {}),
                  "excluded": sorted(section.get("excluded") or {}), "ranks": reports})
+
+
+def island_megatron_checks(island, plan: dict, tape) -> None:
+    """S27 G-FN (blocker B4): the Megatron island's two start-up readbacks on a path
+    that does not run :func:`run_megatron_island`.
+
+    A buffer trainer runs the fully_async ports (``trainer.run_fully_async_island``),
+    so these two checks would otherwise be skipped although the island does run the
+    Megatron engine:
+
+    1. the per-rank gradient non-finite check the plan asked for (refuses the island
+       when a rank does not carry it);
+    2. one line per Ascend plugin-stack switch and plugin (a log, never a refusal).
+
+    The calls go to the trainer workers through ``island.call_workers``."""
+    _check_grad_checks(island.call_workers, dict(plan["megatron"]), tape)
+    if plan.get("ascend_plugin_stack"):
+        _log_ascend_plugin_stack(island.call_workers, plan["ascend_plugin_stack"], tape)
 
 
 def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
@@ -536,9 +560,10 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         thresholds_key=plan["thresholds_key"], emit=lambda event, **f: tape.append({"event": event, **f}))
     sync, policy_state = sync_ports(island, plan, identity_sha)
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
-    _check_grad_checks(trainer, shape, tape)  # S27 G-FL: refuses a trainer without the NaN check
+    on_workers = functools.partial(call_workers, trainer)
+    _check_grad_checks(on_workers, shape, tape)  # S27 G-FL: refuses a trainer without the NaN check
     if plan.get("ascend_plugin_stack"):  # S27 G-FL: one line per switch and per plugin
-        _log_ascend_plugin_stack(trainer, plan["ascend_plugin_stack"], tape)
+        _log_ascend_plugin_stack(on_workers, plan["ascend_plugin_stack"], tape)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "engine": "megatron",
                  "backend_identity": identity.to_dict(), "backend_identity_sha256": identity_sha,
                  "layout_hash": layout_hash, "config_hash": identity_hash, "n_specs": len(specs),
