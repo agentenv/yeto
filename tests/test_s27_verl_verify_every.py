@@ -76,7 +76,17 @@ class _Cut:
 
 
 class _Adapter:
+    """The two whole-trainer reads of VerlChunkedFullParameterAdapter.
+
+    ``fragment_digests`` is what VerlFullParameterLocalState.export() calls (S27
+    G-EZ2, s27-verl-pool-profile): it hashes every fragment on its reading rank
+    instead of capturing the whole cut into the island driver. ``capture`` is the
+    other caller's path and is kept here for the same reason the real adapter
+    keeps both. Both bump ``captures``, so the counts below still mean "a whole
+    read of the trainer happened"."""
+
     expected_parameter_scalar_count = 10
+    layout = SimpleNamespace(layout_hash="l" * 64)
 
     def __init__(self) -> None:
         self.captures = 0
@@ -85,6 +95,10 @@ class _Adapter:
     async def capture(self, group, *, policy_version, local_step_generation):
         self.captures += 1
         return _Cut(policy_version, self.content)
+
+    async def fragment_digests(self, group):
+        self.captures += 1
+        return ((self.content * 32)[:64],)  # one fragment; hex, as the real hashes are
 
 
 def _local_state():
