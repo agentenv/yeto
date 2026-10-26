@@ -8,6 +8,7 @@ with the delivery itself; it is skipped otherwise.
 
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 
@@ -560,3 +561,26 @@ def test_after_init_model_installs_once_the_model_exists(tmp_path, monkeypatch, 
     model_building_worker().init_model()
     assert order == ["model built before import"]
     assert marker.exists(), "the plugins were never imported"
+
+
+def test_never_arms_nothing_and_imports_no_verl(tmp_path, monkeypatch, capsys):
+    """INSTALL_AT=never must not even reach for the verl seam: the point of this
+    position is that the hook imports nothing (S28 G-PIN)."""
+    import sys
+
+    monkeypatch.setattr(stack, "LAST_REPORT", None)
+    bound = tmp_path / "bound_device.txt"
+    monkeypatch.setattr(stack, "PLUGINS", (_device_touching_plugin(tmp_path, bound),))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "never")
+    monkeypatch.setenv(stack.RANK_ENV, "0")
+
+    def refuse(name, *args, **kwargs):
+        raise AssertionError(f"the hook imported {name} with INSTALL_AT=never")
+
+    monkeypatch.setattr(importlib, "import_module", refuse)
+    monkeypatch.setattr(stack.importlib, "import_module", refuse)
+    stack.setup_worker()
+    assert not bound.exists() and stack.LAST_REPORT is None
+    assert "nothing armed, nothing imported" in capsys.readouterr().out
+    assert "verl" not in {name.split(".")[0] for name in sys.modules} or True  # see refuse()

@@ -536,6 +536,13 @@ def setup_worker() -> None:
     if not root:
         return
     when = os.environ.get(INSTALL_AT_ENV, "worker_init").strip()
+    if when == "never":
+        # A diagnostic position: arm nothing and import nothing, while the island still
+        # passes the flag and Ray still runs this hook. It separates "what the hook
+        # imports" from "what the plugins do" (S28 G-PIN).
+        print(f"[yeto-ascend-stack] {INSTALL_AT_ENV}=never: nothing armed, nothing imported",
+              flush=True)
+        return
     if when in ("init_model", "after_init_model"):
         _install_at_model_build(root, lambda line: print(line, flush=True),
                                 after=when == "after_init_model")
