@@ -1,7 +1,8 @@
 # Harbor harness for agentic RL (S25 N10.1-N10.4)
 
-Status: code and CPU tests only. **No trajectory has run on a real sandbox yet
-(not verified).** One TB2 trajectory needs a Modal sandbox; see "Run".
+Status: Harbor trials with the oracle/nop agents ran on boat sandboxes (see
+"boat sandbox provider"). **No model-driven (codex) trajectory has run yet
+(not verified).**
 
 ## Who does what
 
@@ -101,3 +102,43 @@ provider, ...}`. Worker env: `YETO_AGENTIC_RECORDER=module:callable` (N10.5),
 sample is a mask-0 placeholder with reward 0; it still counts in its GRPO
 group mean. The verl launcher and island entry refuse the Miles agentic flags
 (`--custom-agent-function-path`, `--use-session-server`, `--tito-model`, ...).
+
+## boat sandbox provider (N10.8)
+
+`provider: boat` maps to `EnvironmentConfig.import_path =
+"yeto.rl.harness.harbor.boat_env:BoatEnvironment"` (Harbor unchanged).
+Code: `boat_client.py` (official `boat-sdk` 1.10.0, quota guard),
+`boat_sandbox.py` (VM + task container, no Harbor import), `boat_env.py`
+(Harbor `BaseEnvironment`). Install: `pip install boat-sdk==1.10.0`.
+Credentials: `BOAT_API_KEY`, else the boat CLI token in
+`~/.config/ascii/boat/config.json`.
+
+- One boat VM per environment; the task's prebuilt `docker_image` runs as
+  container `main` on the Docker bridge network; exec = `docker exec` through
+  boat's detached command API (polled, no 600 s cap). Files go through a
+  signed URL to `/tmp/yeto-xfer` on the VM, then `docker cp`; directories as
+  one tar.gz.
+- The VM is deleted on `stop` (also for `delete=False`), on any `start`
+  failure and after cancellation; `ttl_s` (default 3 h) is the backstop.
+- Machine type: smallest that fits the task (`small` = 2 vCPU / 3 GiB, half
+  rate). Refused: Dockerfile-only or compose tasks, GPU/TPU, Windows,
+  network modes other than public.
+- Quota per process (`BoatQuota`): `YETO_BOAT_MAX_ACTIVE` (default 100) live
+  VMs, `YETO_BOAT_STARTS_PER_MINUTE` (default 12) creates. Several processes
+  share one account: split the caps. `check_in_flight_cap()` refuses an
+  admission gate above the active cap. Hourly/daily start caps (60/200) are
+  left to the server.
+- `docker exec -e` values land in boat's command history (90 days): pass
+  no secrets as exec env.
+- Miles backend: the Miles example maps `HARBOR_ENV_TYPE` to Harbor's
+  `EnvironmentType` and rejects `boat`; only the yeto builder
+  (`build_trial_config`, verl path and `scripts/harbor_boat_trial.py`) uses
+  boat today (not wired for Miles).
+
+Verified 2026-10-19 (`scripts/harbor_boat_trial.py`, Harbor `oracle` and
+`nop` agents, no model endpoint): 6 TB2 tasks (fix-git, regex-log,
+sqlite-db-truncate, log-summary-date-ranges, openssl-selfsigned-cert,
+git-multibranch): oracle reward 1 on all 6, nop reward 0 on all 6, the same
+as the earlier Modal record of the self-written harness (official solutions
+1, empty 0). 15-36 s per trial; 102 billable s for the final 12 trials.
+`boat list` empty afterwards. Codex + model endpoint on boat: not verified.
