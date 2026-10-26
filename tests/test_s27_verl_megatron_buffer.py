@@ -461,3 +461,34 @@ def test_bf16_moments_flag_writes_precision_aware_keys_with_fp32_masters(tmp_pat
     assert not [o for o in on["overrides"] if "cpu_offload" in o or "main_grads_dtype" in o]
     with pytest.raises(me.MegatronShapeError):
         _plan(tmp_path, extra=["--rl-megatron-bf16-moments", "--rl-optimizer-offload-fraction", "0.5"])
+
+
+def test_s28_the_120b_recipe_shape_plans_uneven_stages_full_recompute_and_host_offload(tmp_path):
+    """S28 G-120: 24 cards TP4/PP3/EP8, 29/30 first/last stage layers (88 layers),
+    full-layer recompute and the whole optimizer state on the host."""
+    plan = _plan(tmp_path, cards=24, config={"n_routed_experts": 512},
+                 actor_num_nodes=3, actor_num_gpus_per_node=8, rl_island_gpus_per_node=8,
+                 tensor_parallel=4, pipeline_parallel=3, expert_parallel=8,
+                 extra=["--rl-megatron-first-stage-layers", "29", "--rl-megatron-last-stage-layers", "30",
+                        "--rl-megatron-recompute-full-layers", "1", "--rl-optimizer-offload-fraction", "1.0"])
+    shape, o = plan["shape"], plan["overrides"]
+    assert (shape["tp"], shape["pp"], shape["ep"], shape["data_parallel"], shape["trainer_gpus"]) == (4, 3, 8, 2, 24)
+    t = "++actor_rollout_ref.actor.megatron.override_transformer_config"
+    assert _value(o, f"{t}.num_layers_in_first_pipeline_stage") == "29"
+    assert _value(o, f"{t}.num_layers_in_last_pipeline_stage") == "30"
+    assert (_value(o, f"{t}.recompute_granularity"), _value(o, f"{t}.recompute_method"),
+            _value(o, f"{t}.recompute_num_layers")) == ("full", "uniform", "1")
+    assert _value(o, f"{t}.recompute_modules") is None
+    assert _value(o, "++actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload") == "True"
+
+
+def test_s28_default_shape_writes_no_stage_keys_and_keeps_selective_recompute(tmp_path):
+    o = _plan(tmp_path)["overrides"]
+    t = "++actor_rollout_ref.actor.megatron.override_transformer_config"
+    assert not any("pipeline_stage" in x for x in o)
+    assert _value(o, f"{t}.recompute_granularity") == "selective"
+
+
+def test_s28_stage_layers_need_pp():
+    with pytest.raises(me.MegatronShapeError, match="PP >= 2"):
+        me.validate(me.MegatronShape(rollout_pool=False, pp=1, first_stage_layers=29))

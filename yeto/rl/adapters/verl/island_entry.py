@@ -155,6 +155,10 @@ def parse_args(argv):
     p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
     # S28 G-RCP: precision-aware optimizer on the card, bf16 Adam moments, FP32 master
     p.add_argument("--rl-megatron-bf16-moments", action="store_true")
+    # S28 G-120: uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
+    p.add_argument("--rl-megatron-first-stage-layers", type=int, default=None)
+    p.add_argument("--rl-megatron-last-stage-layers", type=int, default=None)
+    p.add_argument("--rl-megatron-recompute-full-layers", type=int, default=None)
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -1154,6 +1158,9 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         rollout_pool=not buffer_trainer,
         optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0),
         bf16_moments=bool(getattr(args, "rl_megatron_bf16_moments", False)),
+        first_stage_layers=getattr(args, "rl_megatron_first_stage_layers", None),
+        last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
+        recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(

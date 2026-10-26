@@ -96,7 +96,7 @@ def optimizer_memory_overrides(fraction: float, bf16_moments: bool = False) -> d
     for this flag, ``adapters.miles.config``, and the one the Ascend SFT recipe runs)."""
     if bf16_moments and fraction:
         raise MegatronShapeError("bf16 moments on the card and optimizer_offload_fraction are exclusive "
-                                 "(the full-parameter boundary cannot read offloaded masters)")
+                                 "(both pick the optimizer: on-card FusedAdam or the host HybridDeviceOptimizer)")
     if bf16_moments:
         return bf16_moment_overrides()
     if not fraction:
@@ -203,6 +203,14 @@ class MegatronShape:
     # S27 G-FN: write mtp_hybrid_override_pattern=null (MTP_OFF_PATTERN). True for a
     # hybrid model whose config.json declares no MTP layers at all.
     close_mtp_pattern: bool = False
+    # S28 G-120: uneven pipeline stages (Megatron num_layers_in_first/last_pipeline_stage;
+    # the hybrid model takes them when its pattern has no '|'). 120B NemotronH has 88
+    # layers, which PP=3 cannot split evenly; the Ascend SFT recipe runs 29/29/30.
+    first_stage_layers: int | None = None
+    last_stage_layers: int | None = None
+    # S28 G-120: full-layer recompute of this many layers per stage (uniform); None
+    # keeps the selective recompute of recompute_modules
+    recompute_full_layers: int | None = None
 
     @property
     def trainer_gpus(self) -> int:
@@ -275,12 +283,18 @@ def validate(shape: MegatronShape) -> None:
     unknown = sorted(set(s.recompute_modules) - set(RECOMPUTE_MODULES))
     if unknown:
         raise MegatronShapeError(f"未知的 selective 重算模块 {unknown}（可选 {RECOMPUTE_MODULES}）")
+    for name in ("first_stage_layers", "last_stage_layers", "recompute_full_layers"):
+        value = getattr(s, name)
+        if value is not None and int(value) < 1:
+            raise MegatronShapeError(f"{name} 必须 >= 1，得到 {value}")
+    if (s.first_stage_layers is not None or s.last_stage_layers is not None) and s.pp < 2:
+        raise MegatronShapeError("first/last_stage_layers 只用于 PP >= 2")
     if not 0.0 <= float(s.optimizer_offload_fraction) <= 1.0:
         raise MegatronShapeError("optimizer_offload_fraction 必须在 [0, 1]，"
                                  f"得到 {s.optimizer_offload_fraction}")
     if s.bf16_moments and float(s.optimizer_offload_fraction) > 0:
         raise MegatronShapeError("bf16_moments 与 optimizer_offload_fraction > 0 互斥"
-                                 "（全参数边界读不到卸载到主机的 master）")
+                                 "（两者各自决定优化器：卡上 FusedAdam 或主机 HybridDeviceOptimizer）")
 
 
 def validate_run(cfg: vconf.VerlRunConfig) -> None:
@@ -305,6 +319,19 @@ _FSDP_ONLY_PREFIXES = (
     "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=",
     "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=",
 )
+
+
+def recompute_overrides(tcfg: str, shape: MegatronShape) -> list[str]:
+    """Megatron recompute keys: selective over ``recompute_modules`` (default), or
+    full-layer uniform recompute of ``recompute_full_layers`` layers (S28 G-120)."""
+    if shape.recompute_full_layers is None:
+        return [f"{tcfg}.recompute_granularity=selective",
+                f"{tcfg}.recompute_modules=[{','.join(shape.recompute_modules)}]",
+                f"{tcfg}.recompute_method=null",
+                f"{tcfg}.recompute_num_layers=null"]
+    return [f"{tcfg}.recompute_granularity=full",
+            f"{tcfg}.recompute_method=uniform",
+            f"{tcfg}.recompute_num_layers={int(shape.recompute_full_layers)}"]
 
 
 def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
@@ -352,10 +379,7 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         f"{meg}.dtype=bfloat16",
         f"{meg}.use_remove_padding=True",
         f"{meg}.router_replay.mode={shape.router_replay}",
-        f"{tcfg}.recompute_granularity=selective",
-        f"{tcfg}.recompute_modules=[{','.join(shape.recompute_modules)}]",
-        f"{tcfg}.recompute_method=null",
-        f"{tcfg}.recompute_num_layers=null",
+        *recompute_overrides(tcfg, shape),
         f"{tcfg}.moe_router_dtype=fp32",
         f"{tcfg}.moe_token_dispatcher_type={shape.dispatcher}",
         f"{tcfg}.moe_permute_fusion=True",
@@ -364,6 +388,10 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         f"{tcfg}.moe_router_bias_update_rate=0.0",
         f"{tcfg}.moe_aux_loss_coeff=0.0",
     ]
+    if shape.first_stage_layers is not None:  # S28 G-120
+        out.append(f"{tcfg}.num_layers_in_first_pipeline_stage={int(shape.first_stage_layers)}")
+    if shape.last_stage_layers is not None:
+        out.append(f"{tcfg}.num_layers_in_last_pipeline_stage={int(shape.last_stage_layers)}")
     if shape.close_mtp_pattern:  # S27 G-FN: MTP_OFF_PATTERN
         out.append(f"{tcfg}.mtp_hybrid_override_pattern={MTP_OFF_PATTERN}")
     actor = "actor_rollout_ref.actor"

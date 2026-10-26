@@ -125,11 +125,22 @@ def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, 
 # (TE fused_adam.get_unscaled_state). FusedAdam creates ``master_param`` only in the
 # first step(), as the bf16 shard cast to FP32 (fused_adam._init_or_fix_state); before
 # that the same cast is the master. Refused: INT16 remainders, a non-FP32 master, and
-# the CPU offload (HybridDeviceOptimizer keeps a different state layout).
+# the CPU offload is read through HybridDeviceOptimizer.param_to_fp32_param (S28 G-120).
 
 
 def _precision_aware(leaf: Any) -> bool:
     return bool(getattr(getattr(leaf, "config", None), "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False))
+
+
+def _hybrid(leaf: Any) -> bool:
+    """The leaf's inner optimizer is Megatron's HybridDeviceOptimizer (CPU offload).
+
+    Megatron builds it with ``param_update_in_fp32=True`` (optimizer/__init__.py) and
+    ``param_to_fp32_param`` maps each bf16 shard of the param groups to the FP32 tensor
+    the sub-optimizers step (on the host for the offloaded share); after step() the
+    same tensor is ``state[shard]["master_param"]`` and a post-step hook copies it back
+    into the bf16 shard (cpu_offloading/hybrid_optimizer.py, core 0.18.2 on npu1)."""
+    return hasattr(getattr(leaf, "optimizer", None), "param_to_fp32_param")
 
 
 def _check_precision_aware(leaf: Any) -> None:
@@ -139,8 +150,15 @@ def _check_precision_aware(leaf: Any) -> None:
 
     config = leaf.config
     if getattr(config, "optimizer_cpu_offload", False):
-        raise MegatronMasterError("sharded masters under the precision-aware optimizer with "
-                                  "optimizer_cpu_offload are not supported")
+        # S28 G-120: Megatron's CPU offload (HybridDeviceOptimizer) keeps its own FP32
+        # copy of every shard; readable only when it updates in FP32.
+        if not _hybrid(leaf):
+            raise MegatronMasterError("optimizer_cpu_offload without a HybridDeviceOptimizer "
+                                      "is not supported")
+        if not getattr(leaf.optimizer, "param_update_in_fp32", False):
+            raise MegatronMasterError("HybridDeviceOptimizer without param_update_in_fp32 keeps no "
+                                      "FP32 master")
+        return  # HDO runs torch AdamW on FP32 copies: no TE remainders, no main_params_dtype
     if getattr(config, "main_params_dtype", torch.float32) != torch.float32:
         raise MegatronMasterError("precision-aware optimizer master is not FP32 "
                                   f"(main_params_dtype={config.main_params_dtype})")
@@ -164,6 +182,8 @@ def _main_shard(leaf: Any, param: Any) -> Any:
     if not _precision_aware(leaf):
         return leaf._get_main_param_and_optimizer_states(param)["param"]
     shard = _pa_shard(leaf, param)
+    if _hybrid(leaf):
+        return leaf.optimizer.param_to_fp32_param[shard]
     if "master_param" not in leaf.optimizer.state.get(shard, {}):
         return shard.detach().float()  # before the first step(): what FusedAdam will create
     return leaf.optimizer.get_unscaled_state(shard, "master_param")
@@ -175,6 +195,10 @@ def _write_main_shard(leaf: Any, param: Any, value: Any) -> None:
         shard.data.copy_(value.reshape(shard.shape))
         return
     shard = _pa_shard(leaf, param)
+    if _hybrid(leaf):
+        master = leaf.optimizer.param_to_fp32_param[shard]
+        master.data.copy_(value.reshape(master.shape).to(master.dtype))
+        return
     leaf.optimizer.set_scaled_state(shard, "master_param", value.reshape(shard.shape).float().clone())
 
 
