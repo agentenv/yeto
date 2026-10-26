@@ -19,12 +19,19 @@ object another host replaced. So these paths address the store as objects:
 Keys are relative to the store root (the run's ``--rl-checkpoint-store``) and use
 ``/`` as separator. Backends: :class:`DirectoryObjectStore` here (a local or
 shared directory, for tests and single-host runs); ``yeto.cloud.s3_store`` for
-S3 and S3-compatible endpoints.
+S3 and S3-compatible endpoints; ``yeto.cloud.oss_store`` for Alibaba Cloud OSS.
+
+A backend may also move whole files without holding them in memory
+(``write_file`` / ``read_file``, e.g. a multipart upload of a policy release of
+hundreds of GB) and report an object's size without reading it (``size``).
+:func:`upload_file`, :func:`download_file` and :func:`object_size` use these
+when the backend has them and fall back to whole-object reads and writes.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -46,6 +53,37 @@ class ObjectStore(Protocol):
     def exists(self, key: str) -> bool: ...
     def list(self, prefix: str, *, start_after: str = "") -> list[str]: ...
     def delete(self, key: str) -> None: ...
+
+
+def upload_file(objects: ObjectStore, key: str, path: str | os.PathLike[str]) -> None:
+    """Write the file at ``path`` as object ``key``."""
+    write_file = getattr(objects, "write_file", None)
+    if write_file is not None:
+        write_file(key, path)
+    else:
+        objects.write(key, Path(path).read_bytes())
+
+
+def download_file(objects: ObjectStore, key: str, path: str | os.PathLike[str]) -> bool:
+    """Write object ``key`` to the file at ``path``; False (nothing written) when
+    the key is missing. The caller renames a temporary ``path`` into place."""
+    read_file = getattr(objects, "read_file", None)
+    if read_file is not None:
+        return bool(read_file(key, path))
+    data = objects.read(key)
+    if data is None:
+        return False
+    Path(path).write_bytes(data)
+    return True
+
+
+def object_size(objects: ObjectStore, key: str) -> int | None:
+    """The size of object ``key`` in bytes, None when it is missing."""
+    size = getattr(objects, "size", None)
+    if size is not None:
+        return size(key)
+    data = objects.read(key)
+    return None if data is None else len(data)
 
 
 def check_key(key: str) -> str:
@@ -97,6 +135,23 @@ class DirectoryObjectStore:
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
+    def size(self, key: str) -> int | None:
+        path = self._path(key)
+        return path.stat().st_size if path.is_file() else None
+
+    def write_file(self, key: str, source: str | os.PathLike[str]) -> None:
+        path = self._path(key)
+        tmp = self._staged(path, b"")
+        shutil.copyfile(source, tmp)
+        os.replace(tmp, path)
+
+    def read_file(self, key: str, target: str | os.PathLike[str]) -> bool:
+        path = self._path(key)
+        if not path.is_file():
+            return False
+        shutil.copyfile(path, target)
+        return True
+
     def list(self, prefix: str, *, start_after: str = "") -> list[str]:
         base = self.root / prefix.rsplit("/", 1)[0] if "/" in prefix else self.root
         if not base.is_dir():
@@ -122,9 +177,10 @@ class TreeMirror:
     place on the object store.
 
     * ``push`` uploads every file under ``root`` that is new or changed since the
-      last push (size and mtime), the pointer files (``pointers``, by file name)
-      after every other file, so a reader that follows a pointer finds what it
-      names; then it deletes the objects of files removed here (a prune). It
+      last push (size and mtime): first the data files, then the record files
+      (``records``, by file name: a record lists the data files next to it), then
+      the pointer files (``pointers``, by file name), so a reader that follows a
+      pointer finds what it names; then it deletes the objects of files removed here (a prune). It
       returns the seconds it took.
     * ``pull`` downloads the keys under ``subtrees`` that are missing here, and
       every pointer file again (pointers are the only rewritten objects).
@@ -132,15 +188,23 @@ class TreeMirror:
     What was pushed or pulled is kept in :data:`PUSHED_STATE` under ``root`` (under
     ``flock``), so several processes of one host share one mirror without
     uploading each other's files again. Every writer of the subtrees must be on
-    this host (one-node islands: a rank on another node writes to its own disk)."""
+    this host (one-node islands: a rank on another node writes to its own disk).
+    Files move with :func:`upload_file` / :func:`download_file`, so a large file
+    is never held in memory when the backend streams it."""
 
     def __init__(self, root: str | os.PathLike[str], objects: ObjectStore, *,
-                 subtrees: tuple[str, ...], pointers: frozenset[str]) -> None:
+                 subtrees: tuple[str, ...], pointers: frozenset[str],
+                 records: frozenset[str] = frozenset()) -> None:
         self.root = Path(root).expanduser()
         self.objects = objects
         self.subtrees = tuple(subtrees)
         self.pointers = frozenset(pointers)
+        self.records = frozenset(records)
         self.root.mkdir(parents=True, exist_ok=True)
+
+    def _upload_rank(self, rel: str) -> int:
+        name = rel.rsplit("/", 1)[-1]
+        return 2 if name in self.pointers else 1 if name in self.records else 0
 
     def _locked(self):
         import contextlib
@@ -188,9 +252,9 @@ class TreeMirror:
             state = self._state()
             local = self._local_files()
             changed = [rel for rel, stamp in local.items() if state.get(rel) != stamp]
-            changed.sort(key=lambda rel: (rel.rsplit("/", 1)[-1] in self.pointers, rel))
+            changed.sort(key=lambda rel: (self._upload_rank(rel), rel))
             for rel in changed:
-                self.objects.write(rel, (self.root / rel).read_bytes())
+                upload_file(self.objects, rel, self.root / rel)
                 state[rel] = local[rel]
                 self._save_state(state)
             for rel in sorted(set(state) - set(local)):
@@ -208,12 +272,11 @@ class TreeMirror:
                     pointer = key.rsplit("/", 1)[-1] in self.pointers
                     if path.is_file() and not pointer:
                         continue
-                    data = self.objects.read(key)
-                    if data is None:  # deleted since the listing (a prune)
-                        continue
                     path.parent.mkdir(parents=True, exist_ok=True)
                     tmp = path.with_name(path.name + TMP_SUFFIX)
-                    tmp.write_bytes(data)
+                    if not download_file(self.objects, key, tmp):  # deleted since the listing (a prune)
+                        tmp.unlink(missing_ok=True)
+                        continue
                     os.replace(tmp, path)
                     st = path.stat()
                     state[key] = [st.st_size, st.st_mtime_ns]

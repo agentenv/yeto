@@ -183,6 +183,19 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     args.rl_total_fragment_steps = args.total_steps * args.fragments
 
 
+def _prepare_node_inventory(args) -> None:
+    """Validate ``--rl-node-inventory`` before any cloud or SSH work and keep the
+    parsed nodes on ``args`` (rl-ssh-node-pool: the launcher reads the nodes from
+    an inventory file; a missing device family or an unknown card is refused)."""
+    path = getattr(args, "rl_node_inventory", None)
+    if path is None:
+        args.rl_node_inventory_nodes = None
+        return
+    from .node_inventory import load_inventory
+
+    args.rl_node_inventory_nodes = load_inventory(path)
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -198,6 +211,8 @@ def _prepare_rl_args(
         if getattr(args, "codex_reasoning_effort", None) is not None:
             raise ValueError("--codex-reasoning-effort requires --training-mode rl")
         return
+
+    _prepare_node_inventory(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
 

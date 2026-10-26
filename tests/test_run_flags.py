@@ -267,6 +267,9 @@ _NON_RL_LITERALS = frozenset({
     "--release", "--require-profile-binding", "--resume", "--rl-eval", "--rl-test", "--rm", "--run",
     "--runtime", "--seed-column", "--shm-size", "--soft-deadline-s", "--syncer-epoch",
     "--temp-dir", "--ulimit", "--untracked-files", "--wandb-group", "--yes",
+    # torchrun, tail and the W4A8 re-quantizer CLI in the SSH trainer island (yeto/launch/ssh_trainer_island.py)
+    "--awq-scales", "--loop", "--master-addr", "--master-port", "--no-awq", "--node-rank", "--nproc-per-node",
+    "--pid", "--poll-seconds", "--recipe", "--store", "--template",
 })
 
 

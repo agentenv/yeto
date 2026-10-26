@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from ..gpu_spec import parse_gpu_spec
+from ..gpu_spec import DEVICE_FAMILIES, parse_gpu_spec
 from .rl_backend import _rl_backend_module
 
 
@@ -23,6 +23,64 @@ _DETECT_IFACE = (
     "[ \"$(cat \"$d/operstate\" 2>/dev/null)\" = up ] && { echo \"$n\"; break; }; done)}"
 )
 
+
+
+# rl-ssh-node-pool D5: collective-communication variables of an SSH-pool
+# island, from the inventory's device family and fabric instead of a cloud
+# name. The cloud path above is unchanged.
+#
+# Variable names per family:
+#  - cuda: NCCL/GLOO, as the cloud path already writes them.
+#  - npu: HCCL. HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME and HCCL_CONNECT_TIMEOUT
+#    are confirmed (task N1.4): the Ascend deployment guides in
+#    sglang/docs/hardware-platforms/ascend-npus export HCCL_SOCKET_IFNAME next
+#    to GLOO_SOCKET_IFNAME, and HCCL_CONNECT_TIMEOUT / HCCL_EXEC_TIMEOUT appear
+#    in the CANN collective-communication variable reference. ``HCCL_IF_IP``
+#    (named in design D5) is NOT confirmed, so this module does not write it.
+#  - ppu: ACCL-P keeps the NCCL names (T-PPU-gaps.md 2.3), so a PPU island
+#    exports NCCL/GLOO variables; a 16-card node uses interface hpn0.
+HCCL_CONNECT_TIMEOUT_S = 1800
+RDMA_FABRICS = frozenset({"roce", "ib"})
+
+
+def island_comm_env(device_family: str, fabric: str = "tcp", interface: str | None = None,
+                    *, num_nodes: int = 1) -> dict[str, str]:
+    """Collective-communication variables for one island node (pure function).
+
+    ``{}`` for a single-node island, as on the cloud path. A fabric the
+    inventory declares is never disabled: ``roce`` and ``ib`` keep NCCL's IB
+    transport on.
+    """
+    if device_family not in DEVICE_FAMILIES:
+        raise ValueError(f"unknown device family {device_family!r} "
+                         f"(known: {DEVICE_FAMILIES})")
+    if num_nodes <= 1:
+        return {}
+    if device_family == "npu":
+        env = {"HCCL_CONNECT_TIMEOUT": str(HCCL_CONNECT_TIMEOUT_S)}
+        if interface:
+            env["HCCL_SOCKET_IFNAME"] = interface
+            env["GLOO_SOCKET_IFNAME"] = interface
+        return env
+    env = {"NCCL_IB_DISABLE": "0" if fabric in RDMA_FABRICS else "1",
+           "NCCL_DEBUG": "WARN"}
+    if interface:
+        env["NCCL_SOCKET_IFNAME"] = interface
+        env["GLOO_SOCKET_IFNAME"] = interface
+    return env
+
+
+def island_comm_env_prelude(device_family: str, fabric: str = "tcp",
+                            interface: str | None = None, *, num_nodes: int = 1) -> str:
+    """:func:`island_comm_env` as shell exports; "" on a single node.
+
+    An existing value in the environment wins, as in the cloud prelude.
+    """
+    env = island_comm_env(device_family, fabric, interface, num_nodes=num_nodes)
+    if not env:
+        return ""
+    lines = [f"export {name}=${{{name}:-{value}}}" for name, value in sorted(env.items())]
+    return "\n".join(lines) + "\n"
 
 
 def multinode_env_prelude(cloud: str, num_nodes: int) -> str:

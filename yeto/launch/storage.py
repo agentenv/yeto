@@ -77,6 +77,11 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
 
         _name, prefix = parse_modal_volume_uri(value)
         return MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else ""), None
+    if value.startswith("oss://"):  # no mount: a local stage mirrored by object (yeto.cloud.oss_store)
+        from ..cloud.oss_store import DEFAULT_STAGE, parse_oss_uri
+
+        bucket, prefix = parse_oss_uri(value)
+        return f"{DEFAULT_STAGE}/{bucket}" + (f"/{prefix}" if prefix else ""), None
     if "://" in value:
         scheme, _, rest = value.partition("://")
         if not scheme.isalnum() or not rest.strip("/") or rest.startswith("/"):
@@ -94,19 +99,48 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
     and an ``s3://`` store: the sample buffer, the trainer commands and the policy
     release pointer then go through the store's object API, not the bucket mount
     (``yeto.cloud.s3_store``); on a one-node island the round cuts and policy
-    releases too (staged on local disk, uploaded by object). {} otherwise (Modal
-    Volume, shared path, no role).
+    releases too (staged on local disk, uploaded by object). An ``oss://`` store
+    has no mount: every island that uses it gets the OSS store settings
+    (``yeto.cloud.oss_store``). {} otherwise (Modal Volume, shared path, no role).
     Raises ValueError when the launcher has no store credentials."""
     from ..rl.engine import sample_roles
 
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
-    if cloud == "modal" or not store.startswith("s3://"):
+    if cloud == "modal":
+        return {}
+    if store.startswith("oss://"):
+        from ..cloud.oss_store import island_envs as oss_island_envs
+
+        return oss_island_envs(store)
+    if not store.startswith("s3://"):
         return {}
     if not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
         return {}
     from ..cloud.s3_store import island_envs
 
     return island_envs(store, stage=int(num_nodes) == 1)
+
+
+# --rl-checkpoint-store schemes the head reads and writes by object or volume API
+# (cuts, sample buffer, trainer commands): what a trainer scheduler needs
+HEAD_READABLE_STORE_SCHEMES = ("modal-volume", "s3", "oss")
+
+
+def store_unreachable_reason(store: str, cloud: str) -> str | None:
+    """Why an island on ``cloud`` cannot use the ``--rl-checkpoint-store`` URI
+    ``store``; None when it can. A static check on the store kind only: whether
+    the island's network reaches the endpoint is checked on the node (preflight),
+    not here."""
+    scheme = str(store).partition("://")[0] if "://" in str(store) else ""
+    if scheme == "modal-volume":
+        return None if cloud == "modal" else "a Modal Volume is mounted only into Modal containers"
+    if cloud == "modal":
+        return "Modal mounts neither buckets nor host paths here; use modal-volume://NAME[/PREFIX]"
+    if scheme in ("s3", "oss"):
+        return None
+    if not scheme:
+        return "a host path is shared only by the hosts that mount it"
+    return f"no object API for {scheme}:// stores"
 
 
 RL_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter"

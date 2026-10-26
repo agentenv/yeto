@@ -409,6 +409,12 @@ _PLACEMENT = (
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
              "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
              "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N"),
+    cli_flag("--rl-node-inventory", default=None, metavar="PATH",
+             help="rl-ssh-node-pool: YAML inventory of the nodes yeto reaches by SSH "
+             "(per node: ssh target, optional jump host, device family, card, card count, "
+             "HBM GiB, host memory GiB, fabric, mounts, image). The launcher validates the "
+             "file before any cloud or SSH work and refuses an unknown card or a missing "
+             "device family; the SSH harness consumes it"),
     cli_flag("--model-store", default=None, metavar="URI",
              help="RL island: cloud-local pinned HF snapshots (COLDSTART-PLAN #4). "
              "nebius-fs://<computefilesystem-id> attaches that Nebius shared filesystem "

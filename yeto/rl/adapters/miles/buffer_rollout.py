@@ -135,20 +135,33 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
 
 
 def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1,
-                shard: str | None = None, create_index: bool = True) -> Any:
+                shard: str | None = None, create_index: bool = True, sampler: bool = False,
+                reader: bool = False) -> Any:
     """The island's buffer, from :data:`BUFFER_ROOT_ENV` (store chosen by ``store_for``);
     with ``shard``, the writer of that shard of the index; ``create_index=False``
-    for a reader whose index another host writes."""
+    for a reader whose index another host writes.
+
+    On a store that needs one shard per sampler island (``sample_buffer.needs_shards``):
+    ``sampler`` opens the shard named by :data:`SAMPLER_ID_ENV`, and ``reader``
+    (the trainer) merges the shards into the index."""
     from yeto.rl.engine.resume import store_for
-    from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, shard_index
+    from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index
 
     env = os.environ if environ is None else environ
     root = env.get(BUFFER_ROOT_ENV)
     if not root:
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")
-    return FileSampleBuffer(store_for(root, environ=env), batch_size=batch_size,
+    store = store_for(root, environ=env)
+    merge = False
+    if needs_shards(store) and shard is None:
+        if sampler:
+            shard = env.get(SAMPLER_ID_ENV)
+            if not shard:
+                raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set (the sampler's buffer shard)")
+        merge = reader
+    return FileSampleBuffer(store, batch_size=batch_size,
                             index=INDEX if shard is None else shard_index(shard),
-                            create_index=create_index)
+                            create_index=create_index, merge_shards=merge)
 
 
 # ---------------------------------------------------------------------- payload
@@ -406,6 +419,15 @@ def executor_read_cursor(_executor: Any) -> int | None:
     selected group (None before the reader exists)."""
     reader = _ACTIVE.get(TRAINER)
     return None if reader is None else int(reader.buffer.read_cursor)
+
+
+def executor_read_shards(_executor: Any) -> dict[str, int] | None:
+    """Runs INSIDE the rollout executor actor: the read cursor per sampler shard
+    (None before the reader exists or when the buffer has no merged shards)."""
+    reader = _ACTIVE.get(TRAINER)
+    if reader is None:
+        return None
+    return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
 
 
 def executor_reset(_executor: Any, watermark: int) -> int:

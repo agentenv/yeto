@@ -40,17 +40,62 @@ _GPU_CANONICAL = {
     # launcher spells it like any other card: ``ssh:1x8x910b4``.
     "910b4": "910B4",
     "910b": "910B",
+    "910b2": "910B2",
+    "910b3": "910B3",
+    "910c": "910C",
+    # Alibaba T-Head PPU (rl-ssh-node-pool D2). 810E and M890 are different
+    # cards (infra-drafts/SESSION24/T-PPU-gaps.md 2.9).
+    "810e": "810E",
+    "m890": "M890",
 }
 
-# Accelerator families per canonical card name. A card absent from this map is
-# an NVIDIA GPU; only the cards listed here need the NPU launcher path
-# (ASCEND_RT_VISIBLE_DEVICES, hccl, npu-smi).
-_CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu"}
+# torch device type per canonical card name. A card absent from this map runs
+# on the CUDA device type; PPU cards are in that group on purpose, because
+# torch on a PPU reports ``cuda`` (T-PPU-gaps.md 2.1). Only the cards listed
+# here need the NPU path (ASCEND_RT_VISIBLE_DEVICES, hccl, npu-smi).
+_CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu", "910B2": "npu",
+                     "910B3": "npu", "910C": "npu"}
+
+# Device family per canonical card name: the launcher dimension that selects
+# the card tool (nvidia-smi / npu-smi / ppu-smi) and the collective-
+# communication variables. It is not the torch device type: a PPU card has
+# family ``ppu`` and device type ``cuda``.
+DEVICE_FAMILIES = ("cuda", "npu", "ppu")
+_CARD_DEVICE_FAMILY = {**{card: "npu" for card in _CARD_DEVICE_TYPE},
+                       "810E": "ppu", "M890": "ppu"}
+
+
+class UnknownCard(ValueError):
+    """The card name is not in :data:`_GPU_CANONICAL`; there is no default."""
+
+
+def canonical_card(card: str) -> str:
+    """The catalog spelling of ``card`` (case-insensitive); unknown -> error."""
+    if not isinstance(card, str) or not card.strip():
+        raise UnknownCard("card name is empty")
+    raw = card.strip()
+    name = _GPU_CANONICAL.get(raw.lower())
+    if name is None:
+        raise UnknownCard(f"card {card!r} is not in the yeto card catalog "
+                          f"(known: {sorted(_GPU_CANONICAL.values())})")
+    return name
 
 
 def device_type_of(card: str) -> str:
-    """``"cuda"`` or ``"npu"`` for a canonical card name (:data:`_GPU_CANONICAL`)."""
-    return _CARD_DEVICE_TYPE.get(card, "cuda")
+    """torch device type (``"cuda"`` or ``"npu"``) of a card name.
+
+    An unknown card is refused (T-NPU-gaps.md 1, recommendation 2): the old
+    silent fallback to ``cuda`` would have run an unknown Ascend or PPU card
+    down the NVIDIA path.
+    """
+    name = canonical_card(card)
+    return _CARD_DEVICE_TYPE.get(name, "cuda")
+
+
+def device_family_of(card: str) -> str:
+    """``"cuda"``, ``"npu"`` or ``"ppu"`` of a card name; unknown card -> error."""
+    name = canonical_card(card)
+    return _CARD_DEVICE_FAMILY.get(name, "cuda")
 
 
 _ENTRY_RE = re.compile(

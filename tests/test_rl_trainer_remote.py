@@ -412,7 +412,7 @@ def _args(tmp_path, monkeypatch, extra=()):
 def test_check_refuses_without_a_bound_trainer_island(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="needs --rl-trainer-island"):
         launch_loop.check(_args(tmp_path, monkeypatch))
-    with pytest.raises(SystemExit, match="nebius trainer island needs a s3://"):
+    with pytest.raises(SystemExit, match=r"trainer island 1 \(nebius\) does not reach"):
         launch_loop.check(_args(tmp_path, monkeypatch, ["--rl-trainer-island", "1"]))
     args = _args(tmp_path, monkeypatch, ["--rl-trainer-island", "0"])
     launch_loop.check(args)

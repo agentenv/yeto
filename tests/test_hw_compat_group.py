@@ -12,7 +12,7 @@ import struct
 
 import pytest
 
-from yeto.gpu_spec import _GPU_CANONICAL, device_type_of, parse_gpu_spec
+from yeto.gpu_spec import _GPU_CANONICAL, device_family_of, parse_gpu_spec
 from yeto.hw import catalog
 from yeto.hw.catalog import (CompatGroupMismatch, UnknownCardType, check_compat_group,
                              compat_group, compat_refusal, island_compat_group)
@@ -32,7 +32,7 @@ def test_compat_group_values_from_the_catalog():
     assert compat_group("910b4") == "ascend-910b4"
     # every card the launcher accepts has a group (no launch reaches the island without one)
     for card in _GPU_CANONICAL.values():
-        vendor = "ascend" if device_type_of(card) == "npu" else "nvidia"
+        vendor = catalog.VENDOR_BY_DEVICE_FAMILY[device_family_of(card)]
         assert compat_group(card).startswith(vendor + "-")
 
 

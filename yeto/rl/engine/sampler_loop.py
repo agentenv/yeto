@@ -55,10 +55,18 @@ class SamplerLoop:
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
-        (0 before any release: no trainer has read anything yet)."""
+        (0 before any release: no trainer has read anything yet). A sampler that
+        writes its own shard (``buffer.shard``) counts its shard only, from the
+        trainer's read position in that shard (``buffer_shards``)."""
         self.buffer.refresh()
         seen = self.follower.last_seen
-        read = 0 if seen is None or seen.buffer_selected is None else int(seen.buffer_selected)
+        shard = getattr(self.buffer, "shard", None)
+        if seen is None:
+            read = 0
+        elif shard is not None:
+            read = int((seen.buffer_shards or {}).get(shard, 0))
+        else:
+            read = 0 if seen.buffer_selected is None else int(seen.buffer_selected)
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self) -> None:
