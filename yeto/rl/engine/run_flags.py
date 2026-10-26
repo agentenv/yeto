@@ -530,15 +530,17 @@ _RESUME = (
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
     # rl-identity-tiering L9.4-L9.6
-    cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch"], default="auto",
+    cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch", "release"], default="auto",
              help="git-patch: pack the local git tree (commit + dirty patch with untracked "
              "files) once at the first start, store it in --rl-checkpoint-store and ship it "
              "as every island's workdir; resumed and replacement islands get the same pack. "
+             "release: --rl-image is a yeto release image (scripts/build_yeto_release_image.sh); "
+             "its digest is the pack, islands run its /opt/yeto/src and no local tree is shipped. "
              "auto (default): git-patch when --rl-checkpoint-store is a bucket or "
              "modal-volume:// URI, else off"),
     cli_flag("--rl-code-pack-upgrade", default=None, metavar="REASON",
-             help="with --rl-code-pack git-patch on an existing run: switch the run to a pack "
-             "of the current local tree; refused unless the algorithm semantic hash is "
+             help="with --rl-code-pack git-patch or release on an existing run: switch the run "
+             "to a pack of the current local tree (or to the release --rl-image); refused unless the algorithm semantic hash is "
              "unchanged; the manifest records the old -> new pack and REASON"),
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,

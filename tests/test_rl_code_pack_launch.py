@@ -160,3 +160,57 @@ def test_island_refuses_a_tree_that_is_not_the_pack(tmp_path):
     with pytest.raises(CodePackError, match="digest mismatch"):
         verify_island_code_pack("f" * 64, tree)
     assert any("--code-pack-digest" in a.option_strings for a in build_parser()._actions)
+
+
+RELEASE_IMAGE = "docker:ghcr.io/x/yeto-release@sha256:" + "d" * 64
+
+
+def test_release_mode_ships_no_local_tree(launch):
+    """L9.12: the image digest is the pack; no upload, no island workdir."""
+
+    args, manifest = launch("--rl-code-pack", "release", "--rl-image", RELEASE_IMAGE)
+    pack = manifest["code_pack"]
+    assert manifest["code_pack_mode"] == "release" == pack["mode"]
+    assert manifest["code_pack_digest"] == "d" * 64 == pack["digest"]
+    assert pack["pack_uri"] == RELEASE_IMAGE.removeprefix("docker:")
+    assert not (launch.store / "code_packs").exists()
+    assert code_pack.code_workdir(args) is None
+    assert code_pack.code_pack_island_flag(args) == f" --code-pack-digest {'d' * 64} --code-pack-mode release"
+    # a later start with another image is refused unless it is an explicit upgrade
+    with pytest.raises(ValueError, match="--rl-code-pack-upgrade"):
+        launch("--rl-code-pack", "release", "--rl-image", RELEASE_IMAGE.replace("d" * 64, "e" * 64))
+
+
+def test_release_mode_needs_the_miles_backend():
+    args = types.SimpleNamespace(training_mode="rl", rl_code_pack="release", rl_backend="verl",
+                                 rl_code_pack_upgrade=None, rl_image=RELEASE_IMAGE)
+    with pytest.raises(ValueError, match="miles backend"):
+        code_pack.prepare_run_code_pack(args)
+
+
+def test_modal_release_image_has_no_workdir_mount(monkeypatch):
+    from tests.test_modal_runner import _cfg, fake_modal
+    from yeto import modal_runner as mr
+
+    state = fake_modal(monkeypatch)
+    monkeypatch.setattr(mr, "registry_credentials", lambda *_a, **_k: None)
+    cfg = _cfg(training_mode="rl", image_ref=RELEASE_IMAGE.removeprefix("docker:"), workdir=None,
+               setup_script="true")
+    mr.ModalOps("yeto-run").define(cfg)
+    (img,) = state["images"]
+    assert "add_local_dir" not in [c[0] for c in img.calls]
+
+
+def test_island_checks_a_release_tree(tmp_path):
+    from test_codepack import _release_tree
+    from yeto.rl.adapters.miles.island_entry import build_parser, verify_island_code_pack
+
+    src, manifest = _release_tree(tmp_path)
+    got = verify_island_code_pack("d" * 64, src, mode="release", release_manifest=manifest,
+                                  log=lambda _m: None)
+    assert got["yeto_commit"] == "c" * 40
+    with pytest.raises(CodePackError, match="not the image source root"):
+        verify_island_code_pack("d" * 64, tmp_path, mode="release", release_manifest=manifest,
+                                log=lambda _m: None)
+    parsed = [a for a in build_parser()._actions if "--code-pack-mode" in a.option_strings]
+    assert parsed and parsed[0].choices == ["git-patch", "release"]

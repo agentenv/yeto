@@ -58,10 +58,8 @@ Registering a new advantage transform (P2)
    transform is covered. ``stage_plugin_refs()`` gives one PluginRef per such
    module (sorted by module name); a spec that uses the dispatcher must list
    exactly these in ``plugins`` (``grpo_knobs.with_pipeline_plugins(spec)``
-   adds them), so their source hashes enter the algorithm hash and are
-   re-verified by the learner. Their merged hash (``pipeline_sha256()``) is
-   shipped in ``args.yeto_algo_plugins`` and re-checked by ``post_process``
-   in the Miles process after ``load_extensions()``.
+   adds them). The run code pack pins their source (rl-identity-tiering
+   L9.11 removed the per-process source hash re-check).
 3. Select it from the spec: ``advantage.transform = "<name>"`` (and
    ``advantage.transform_params``) plus
    ``advantage.reward_postprocess = dispatcher_ref()``. Unknown names are
@@ -71,8 +69,8 @@ Registering a new advantage transform (P2)
 5. Add a CPU test: with degenerate parameters (if any) it equals
    ``grpo_default`` element-wise, and its numerics match a hand computation.
 
-Any edit to a covered module changes the identity: regenerate specs that pin
-it (``examples/rl_algorithms/*.json``).
+Specs reference these modules by path only; the run code pack pins their
+source, so an edit to a covered module needs no spec change.
 
 Import-light: no torch/miles at import time (torch is imported on use).
 """
@@ -217,23 +215,6 @@ def stage_plugin_refs():
     from yeto.rl.engine.algorithm import PluginRef
 
     return tuple(PluginRef.from_path(p) for p in stage_plugin_paths())
-
-
-def combined_sha256(refs) -> str:
-    """Merged identity: sha256 over ``module<TAB>source-sha256`` lines, sorted by module."""
-
-    lines = sorted(f"{r.path.rpartition('.')[0]}\t{r.sha256}\n" for r in refs)
-    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
-
-
-def plugin_sha(path: str) -> str:
-    from yeto.rl.engine.algorithm import plugin_source_sha256
-
-    return plugin_source_sha256(path)
-
-
-def pipeline_sha256() -> str:
-    return combined_sha256(stage_plugin_refs())
 
 
 def expected_algorithm_sha256(args: Any) -> str | None:
@@ -521,13 +502,6 @@ def post_process(args: Any, samples: list[Any]) -> tuple[list[float], list[float
     _check_multi_lora(args)
     _load_extensions()  # stages registered by other extension modules (e.g. P2)
     cfg = pipeline_config(args)
-    declared = cfg.get("pipeline_sha256")
-    actual = pipeline_sha256()
-    if declared != actual:
-        raise RewardPipelineError(
-            f"reward pipeline code identity {actual} differs from the spec's {declared} "
-            "(a shaper/transform module changed or is missing in this process)"
-        )
     raw = [sample.get_reward_value(args) for sample in samples]
     shaped = raw
     shapers = cfg.get("reward_shapers") or []

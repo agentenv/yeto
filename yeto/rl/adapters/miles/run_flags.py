@@ -281,6 +281,9 @@ _ISLAND = (
     # rl-identity-tiering L9.5: the run code pack digest; the island refuses to start
     # when its workdir is not that pack.
     island_flag("--code-pack-digest", default=None),
+    # L9.12: "release" -- the code is the island image's /opt/yeto/src (checked against
+    # the image's release manifest; the digest is the image digest).
+    island_flag("--code-pack-mode", choices=["git-patch", "release"], default=None),
     island_flag("--global-rounds", type=int, required=True),
     island_flag(
         "--parameter-mode",
