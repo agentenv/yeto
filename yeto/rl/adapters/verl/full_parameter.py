@@ -338,7 +338,19 @@ class FlatFragment:
     ``units`` are ``(name, flat start, flat stop)`` in the layout's order;
     :meth:`add` copies each unit of one whole parameter into its place and
     checks it finite on the parameter's device; :meth:`result` adds the hash
-    and the payload.  Off the reader (``reader`` False) nothing is kept."""
+    and the payload.  Off the reader (``reader`` False) nothing is kept.
+
+    S27 G-FT: :meth:`add_part` takes one *piece* of a parameter with its flat
+    element offset, so a layout tensor the HF loader stacks out of many
+    checkpoint tensors (NemotronH: 128 per-expert tensors along dim 0) is
+    assembled in this buffer, piece by piece, instead of as a whole tensor in a
+    worker (``megatron_hf_boundary.LayoutSink``).  A name counts as filled once
+    the pieces cover every element its units ask for, so a missing piece is
+    refused by :meth:`result` instead of leaving stale buffer contents.  Each
+    offset of a name counts once: a piece that claims an offset already written
+    is copied, the way one whole tensor twice always was, but adds nothing to
+    the coverage -- otherwise four copies of row 0 would count as four rows
+    (``tests/test_s27_megatron_export_b15.py``'s mutation test found this)."""
 
     def __init__(self, units: Sequence[Sequence], numel: int, *, reader: bool) -> None:
         import torch
@@ -354,11 +366,28 @@ class FlatFragment:
         self.reader = reader
         self.flat = torch.empty(int(numel), dtype=torch.float32) if reader else None
         self.finite = None
-        self.filled: set[str] = set()
+        self.needed: dict[str, int] = {}
+        for name, start, stop in self.units:
+            self.needed[name] = self.needed.get(name, 0) + (stop - start)
+        self.covered: dict[str, int] = dict.fromkeys(self.names, 0)
+        self.seen: dict[str, set[int]] = {name: set() for name in self.names}
         self.copy_s = 0.0
+
+    @property
+    def filled(self) -> set[str]:
+        """The names whose units are completely covered."""
+
+        return {name for name in self.names if self.covered[name] >= self.needed[name]}
 
     def add(self, name: str, whole) -> None:
         """Copy the units of parameter ``name`` (its whole tensor) into place."""
+
+        self.add_part(name, 0, whole)
+
+    def add_part(self, name: str, offset: int, part) -> None:
+        """Copy the elements of ``name`` that ``part`` holds into the units they
+        fall in; ``offset`` is ``part``'s first flat element of the whole
+        parameter (0 for the whole tensor)."""
 
         import time
 
@@ -367,15 +396,23 @@ class FlatFragment:
         if not self.reader:
             return
         mark = time.perf_counter()
-        values = whole.detach().reshape(-1)
+        values = part.detach().reshape(-1)
+        offset, size = int(offset), int(values.numel())
+        fresh = name in self.seen and offset not in self.seen[name]
         for (unit_name, start, stop), at in zip(self.units, self.offsets, strict=True):
             if unit_name != name:
                 continue
-            part = values[start:stop]
-            ok = torch.isfinite(part).all()
+            low, high = max(start, offset), min(stop, offset + size)
+            if high <= low:
+                continue
+            piece = values[low - offset:high - offset]
+            ok = torch.isfinite(piece).all()
             self.finite = ok if self.finite is None else self.finite & ok.to(self.finite.device)
-            self.flat[at:at + part.numel()].copy_(part)
-        self.filled.add(name)
+            self.flat[at + (low - start):at + (high - start)].copy_(piece)
+            if fresh:
+                self.covered[name] += high - low
+        if name in self.seen:
+            self.seen[name].add(offset)
         self.copy_s += time.perf_counter() - mark
 
     def result(self, timings: dict, *, want_payload: bool, want_hash: bool, started: float) -> dict:
@@ -386,9 +423,10 @@ class FlatFragment:
         if not self.reader:
             timings["total_s"] = time.perf_counter() - started
             return {"names": self.names, "timings": timings}
-        missing = [name for name in self.names if name not in self.filled]
+        missing = [f"{name} ({self.covered[name]}/{self.needed[name]} 个元素)"
+                   for name in self.names if self.covered[name] < self.needed[name]]
         if missing:
-            raise VerlFullParameterError(f"分片引用的参数没有导出: {missing[:4]}")
+            raise VerlFullParameterError(f"分片引用的参数没有完整导出: {missing[:4]}")
         result: dict = {"names": self.names, "finite": bool(self.finite.item()) if self.finite is not None else True}
         if want_hash:
             mark = time.perf_counter()
