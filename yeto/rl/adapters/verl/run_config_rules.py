@@ -37,3 +37,38 @@ def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) 
         raise ValueError(
             "verl 后端尚未实现多发截止（阶段 0，任务 6.2b）：--over-sampling-batch-size "
             f"{over_sampling_batch_size} 必须等于 --rollout-batch-size {rollout_batch_size}")
+
+
+# S25 N10.4: the Miles agentic wiring has no verl spelling.  The verl agentic
+# path is the yeto ``HarborAgentLoop`` (agent loop ``yeto_harbor``), selected per
+# data row, not these flags; passing them used to be ignored without a word.
+AGENTIC_FLAGS = (
+    ("custom_generate_function_path", "--custom-generate-function-path"),
+    ("custom_agent_function_path", "--custom-agent-function-path"),
+    ("use_session_server", "--use-session-server"),
+    ("tito_model", "--tito-model"),
+    ("agent_max_seq_len", "--agent-max-seq-len"),
+    ("codex_backend_profile", "--codex-backend-profile"),
+    ("tito_allowed_append_roles", "--tito-allowed-append-roles"),
+    ("session_server_ip", "--session-server-ip"),
+    ("session_server_port", "--session-server-port"),
+    ("session_server_workers", "--session-server-workers"),
+)
+
+
+def check_agentic(args) -> None:
+    """Refuse Miles agentic options on the verl backend instead of ignoring them."""
+    given = [flag for attr, flag in AGENTIC_FLAGS if getattr(args, attr, None) not in (None, False, [], "")]
+    if given:
+        raise ValueError(
+            "verl 后端不支持 Miles agentic 参数：" + ", ".join(given)
+            + "。verl 的 agentic 路径是 yeto HarborAgentLoop（agent loop 名 yeto_harbor，"
+            "由数据行 agent_name 选择）")
+
+
+def refuse_agentic_argv(ignored: list[str]) -> None:
+    """Island-entry side of ``check_agentic``: unknown argv the parser left over."""
+    flags = {flag for _, flag in AGENTIC_FLAGS}
+    given = sorted({token.split("=", 1)[0] for token in ignored} & flags)
+    if given:
+        raise ValueError("verl 后端不支持 Miles agentic 参数：" + ", ".join(given))

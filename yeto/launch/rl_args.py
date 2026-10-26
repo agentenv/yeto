@@ -336,6 +336,10 @@ def _prepare_rl_args(
         _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
     if callable(over_sampling_check):
         over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
+    # S25 N10.4: a backend without the Miles agentic wiring refuses its flags.
+    agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
+    if callable(agentic_check):
+        agentic_check(args)
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
