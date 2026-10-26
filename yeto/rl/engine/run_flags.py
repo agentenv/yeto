@@ -1168,16 +1168,18 @@ _ROLLOUT_ENGINE = (
 
 _AGENT = (
     shared_flag("--apply-chat-template-kwargs", type=json.loads, default=None),
-    # S27 G-FS (VERL-PARITY #33): the backend-neutral Harbor switch. Miles selects
-    # its Harbor agent with --custom-agent-function-path (that flag carries the
-    # callable); the verl backend selects the agent loop per data row
-    # (``agent_name: yeto_harbor``) and had no flag at all, so nothing turned the
-    # island's Harbor pieces on (image layer, boat token, tunnelled records proxy).
+    # S27 G-FS (VERL-PARITY #33): the backend-neutral Harbor switch. It says only
+    # that the rollout runs Harbor trials, so the island needs the Harbor image
+    # layer, the sandbox-provider environment and a tunnelled callback port. How a
+    # backend picks the agent stays with that backend: one selects it per data row
+    # (``agent_name: yeto_harbor``), another names a callable through
+    # --custom-agent-function-path. Before this flag existed, a backend of the
+    # first kind had no way to ask for the island pieces at all.
     shared_flag("--rl-agentic-harbor", action="store_true",
                 help="the rollout runs Harbor trials in sandboxes: the island gets the Harbor image "
-                     "layer, the sandbox-provider environment and a tunnelled callback port. On verl "
-                     "the data rows select the agent loop (agent_name: yeto_harbor); on Miles use "
-                     "--custom-agent-function-path instead"),
+                     "layer, the sandbox-provider environment and a tunnelled callback port. Which "
+                     "agent runs is chosen by the backend (per data row, or by "
+                     "--custom-agent-function-path where that flag applies)"),
     shared_flag("--custom-generate-function-path", default=None),
     cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
         "--codex-reasoning-effort",
