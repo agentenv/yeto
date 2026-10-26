@@ -109,6 +109,13 @@ KNOWN_VERL_DIFF = {
     "ray_kwargs.ray_init.num_cpus", "trainer.project_name", "trainer.use_v1", "trainer.v1.trainer_mode",
     "actor_rollout_ref.rollout.mode", "async_training.staleness_threshold", "data.return_raw_chat",
     "rollout.total_rollout_steps",
+    # S27 G-EQ2 (s27-verl-ascend, through s27-verl-pool-profile): yeto now states these
+    # three explicitly where the bare recipe leaves the key unset. Decided, not drift:
+    # yeto writes False and verl's own default is already false
+    # (engine/fsdp.yaml offload_policy, _generated_ppo_trainer.yaml trust_remote_code),
+    # so the two arms run the same configuration.
+    "actor_rollout_ref.model.trust_remote_code", "data.trust_remote_code",
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
 }
 
 
