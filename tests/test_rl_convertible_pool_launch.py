@@ -80,9 +80,13 @@ def test_pool_island_commands_carry_role_and_node_name_and_parse_on_the_island()
 def test_pool_miles_argv_selects_the_convertible_rollout_function():
     from yeto.rl.adapters.miles.config import sample_buffer_argv
 
+    from yeto.rl.adapters.miles.config import RELEASE_EXPORTER_SAVE_HF
+
     argv = sample_buffer_argv("convertible", max_policy_age=2)
+    # the node releases what it trains: the release exporter needs --save-hf
     assert argv == ("--rollout-function-path",
-                    "yeto.rl.adapters.miles.buffer_rollout_miles.ConvertibleRolloutFn")
+                    "yeto.rl.adapters.miles.buffer_rollout_miles.ConvertibleRolloutFn",
+                    "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
 def test_pool_refuses_an_island_that_is_not_convertible():

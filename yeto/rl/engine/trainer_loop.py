@@ -346,8 +346,14 @@ class TrainerLoopThread:
     def stop(self, *, close_reason: LeaveReason | None = LeaveReason.STOPPED,
              timeout: float | None = None) -> None:
         """End the ticks; then stop a running trainer with ``close_reason``
-        (None keeps it, e.g. for a head that hands over)."""
+        (None keeps it, e.g. for a head that hands over). A tick that waits for
+        trainer rounds is interrupted first when the lifecycle can be
+        (``RemoteTrainerLifecycle.interrupt``): its round may wait for samples
+        that no longer come, and the join would never return."""
         self._stop.set()
+        interrupt = getattr(getattr(self.loop, "lifecycle", None), "interrupt", None)
+        if close_reason is not None and callable(interrupt):
+            interrupt()
         self._thread.join(timeout)
         if close_reason is not None and not self._thread.is_alive():
             self.loop.close(close_reason)

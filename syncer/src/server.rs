@@ -211,6 +211,8 @@ impl std::fmt::Display for OutboundStreamClosed {
 impl std::error::Error for OutboundStreamClosed {}
 
 struct PartialMsg {
+    /// First chunk of this message (upload start, for PushTransfer).
+    started: Instant,
     buf: Vec<u8>,
     filled: usize,
     ranges: Vec<(usize, usize)>,
@@ -453,6 +455,18 @@ struct Push {
     /// Signed outer gradient `raw_anchor - local`, converted exactly once
     /// from the learner's wire delta `local - raw_anchor`.
     outer_gradient: Vec<f32>,
+    transfer: PushTransfer,
+}
+
+/// When and how fast one PUSH_FRAGMENT reached the syncer (D4 full-parameter
+/// timing): `recv_seconds` runs from the first byte of the push (its first
+/// chunk, or the frame header) to its last byte; `arrived_unix` is the wall
+/// clock at the last byte. Written per responder on the event tape so a round
+/// splits into upload, waiting for the slowest island, and merge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PushTransfer {
+    recv_seconds: f64,
+    arrived_unix: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1463,18 +1477,22 @@ async fn read_loop(
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     loop {
-        let frame = match read_frame_limited(rd, |msg_type| match msg_type {
-            MSG_INIT_PARAMS => Ok(group.max_init_payload),
-            MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
-            MSG_HEARTBEAT => Ok(12),
-            MSG_FINAL_ACK => Ok(10),
-            MSG_BUDGET_DONE => Ok(8),
-            MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
-            other => bail!(
-                "unexpected direct message type {other} from learner {} generation {}",
-                group.member.learner_id,
-                group.member.generation
-            ),
+        let mut header_at: Option<Instant> = None;
+        let frame = match read_frame_limited(rd, |msg_type| {
+            header_at = Some(Instant::now());
+            match msg_type {
+                MSG_INIT_PARAMS => Ok(group.max_init_payload),
+                MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
+                MSG_HEARTBEAT => Ok(12),
+                MSG_FINAL_ACK => Ok(10),
+                MSG_BUDGET_DONE => Ok(8),
+                MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
+                other => bail!(
+                    "unexpected direct message type {other} from learner {} generation {}",
+                    group.member.learner_id,
+                    group.member.generation
+                ),
+            }
         })
         .await
         {
@@ -1488,11 +1506,12 @@ async fn read_loop(
         };
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
-                Ok(Some(inner)) => {
+                Ok(Some((inner, recv_seconds))) => {
                     dispatch_inner(
                         group,
                         inner.msg_type,
                         &inner.payload,
+                        recv_seconds,
                         event_tx,
                         budget_cutoff,
                     )
@@ -1501,7 +1520,10 @@ async fn read_loop(
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             },
-            t => dispatch_inner(group, t, &frame.payload, event_tx, budget_cutoff).await,
+            t => {
+                let recv_seconds = header_at.map_or(0.0, |at| at.elapsed().as_secs_f64());
+                dispatch_inner(group, t, &frame.payload, recv_seconds, event_tx, budget_cutoff).await
+            }
         };
         if let Err(error) = dispatched {
             report_protocol_error(group, &error).await;
@@ -1516,7 +1538,9 @@ async fn report_protocol_error(group: &Arc<Group>, error: &anyhow::Error) {
         .await;
 }
 
-fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
+/// Adds one chunk; a completed message comes back with its receive time
+/// (first chunk to last chunk).
+fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>> {
     let mut r = Reader(payload);
     let msg_id = r.u64()?;
     let total_u64 = r.u64()?;
@@ -1550,6 +1574,7 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
         reasm.insert(
             msg_id,
             PartialMsg {
+                started: Instant::now(),
                 buf,
                 filled: 0,
                 ranges: Vec::new(),
@@ -1580,6 +1605,7 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
     }
     let msg = reasm.remove(&msg_id).unwrap();
     drop(reasm);
+    let recv_seconds = msg.started.elapsed().as_secs_f64();
     // The reassembled buffer is a complete inner frame.
     let buf = msg.buf;
     if buf.len() < 13 {
@@ -1596,16 +1622,20 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
     if payload.len() != len {
         bail!("inner frame length mismatch");
     }
-    Ok(Some(Frame {
-        msg_type,
-        payload: payload.to_vec(),
-    }))
+    Ok(Some((
+        Frame {
+            msg_type,
+            payload: payload.to_vec(),
+        },
+        recv_seconds,
+    )))
 }
 
 async fn dispatch_inner(
     group: &Arc<Group>,
     msg_type: u8,
     payload: &[u8],
+    recv_seconds: f64,
     event_tx: &mpsc::Sender<Event>,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
@@ -1706,6 +1736,10 @@ async fn dispatch_inner(
                         c_steps,
                         c_tokens,
                         outer_gradient,
+                        transfer: PushTransfer {
+                            recv_seconds,
+                            arrived_unix: unix_now(),
+                        },
                     },
                 })
                 .await
@@ -3875,7 +3909,7 @@ fn append_tape(
                 )
             });
             format!(
-                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{}{},\"weight\":{},\"contribution\":{}}}",
+                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{}{},\"weight\":{},\"contribution\":{},\"recv_seconds\":{},\"arrived_unix\":{:?}}}",
                 p.learner_id,
                 member.generation,
                 p.base_version,
@@ -3884,7 +3918,9 @@ fn append_tape(
                 p.c_tokens,
                 accounting_fields,
                 weight,
-                contribution
+                contribution,
+                p.transfer.recv_seconds,
+                p.transfer.arrived_unix
             )
         })
         .collect();
@@ -3898,7 +3934,7 @@ fn append_tape(
     let merge_seconds = sync_ms as f64 / 1000.0;
     let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"time_unix\":{:?},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -3906,6 +3942,7 @@ fn append_tape(
         json_members(&responded_members),
         json_ids(&missed_grace),
         json_members(&missed_members),
+        unix_now(),
         responders.join(",")
     );
     std::fs::OpenOptions::new()
@@ -3938,6 +3975,14 @@ fn json_members(members: &[Member]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("[{body}]")
+}
+
+/// Wall clock in seconds since the epoch for the event tape (0.0 if the clock
+/// is before 1970, so the tape stays valid JSON).
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 fn json_opt_u64(value: Option<u64>) -> String {
@@ -4740,6 +4785,7 @@ mod tests {
                 c_steps: 1,
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
+                transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
         }
@@ -4843,6 +4889,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
+                    transfer: PushTransfer::default(),
                 },
             )]),
         }
@@ -4919,6 +4966,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens,
                     outer_gradient: vec![0.25],
+                    transfer: PushTransfer::default(),
                 },
             )]),
         }
@@ -4944,6 +4992,7 @@ mod tests {
                         c_steps: 1,
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
+                        transfer: PushTransfer::default(),
                     },
                 )
             })
@@ -5764,6 +5813,7 @@ mod tests {
             c_steps: 2,
             c_tokens: 20,
             outer_gradient: vec![1.0],
+            transfer: PushTransfer::default(),
         }
     }
 
@@ -6080,6 +6130,7 @@ mod tests {
             c_steps: 1,
             c_tokens: 1,
             outer_gradient: vec![1.0],
+            transfer: PushTransfer::default(),
         }
     }
 
@@ -6159,6 +6210,10 @@ mod tests {
                 c_steps: 4,
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
+                transfer: PushTransfer {
+                    recv_seconds: 1.5,
+                    arrived_unix: 1792000000.25,
+                },
             },
         );
         append_tape(
@@ -6186,6 +6241,15 @@ mod tests {
         assert!(text.contains("\"missed_grace\":[1]"));
         assert!(text.contains("\"quorum_ms\":11"));
         assert!(text.contains("\"grace_ms\":22"));
+        assert!(text.contains("\"recv_seconds\":1.5,\"arrived_unix\":1792000000.25}"));
+        let time_unix: f64 = text
+            .split("\"time_unix\":")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(time_unix > 1.7e9);
         assert!(text.contains("\"sync_ms\":33"));
         assert!(text.contains("\"contribution\":1"));
         assert!(text.contains("\"protocol_version\":4"));
@@ -6316,6 +6380,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
+                    transfer: PushTransfer::default(),
                 },
             ),
             (
@@ -6330,6 +6395,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
+                    transfer: PushTransfer::default(),
                 },
             ),
         ]);

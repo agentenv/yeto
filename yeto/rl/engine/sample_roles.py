@@ -44,7 +44,8 @@ class SampleBufferConfig:
     """``role`` is sampler or trainer (``both`` resolves to no config).
 
     ``store``: the checkpoint store path that holds the buffer and the releases;
-    ``max_backlog_groups``: sampler admission cap (unconsumed groups);
+    ``max_backlog_groups``: sampler or convertible node admission cap (unconsumed
+    groups);
     ``wait_s``: trainer, max seconds to wait for one full round;
     ``min_round_s``: sampler, min seconds from one round start to the next (a
     throttle, so a test can make the sampler slower than the trainer)."""
@@ -125,7 +126,8 @@ def is_store_coupled(args: Any) -> bool:
 def island_args(args: Any, island: int, num_islands: int) -> Any:
     """``args`` as island ``island`` of a pair sees it: a copy with its
     ``rl_sample_role``, keeping only its own role's option (the sampler's backlog
-    cap, the trainer's wait); ``args`` itself outside a pair."""
+    cap, the trainer's wait; a convertible node keeps the backlog cap and the
+    wait); ``args`` itself outside a pair."""
     roles = island_roles(args, num_islands)
     if not roles:
         return args
@@ -133,8 +135,7 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     out.rl_sample_role = roles[island]
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
-        out.rl_sampler_max_backlog_rounds = None
-        out.rl_sampler_min_round_seconds = None
+        out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
     elif out.rl_sample_role == SAMPLER:
         out.rl_sample_wait_s = None
     else:
@@ -232,9 +233,14 @@ def check_launch(args: Any) -> None:
         raise ValueError(f"--rl-sample-role {role} trains on samples of earlier versions: "
                          "it needs --rl-max-policy-age >= 1")
     rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
-    if rounds is not None and (role != SAMPLER or int(rounds) < 1):
+    if rounds is not None and (role not in (SAMPLER, CONVERTIBLE) or int(rounds) < 1):
         raise ValueError("--rl-sampler-max-backlog-rounds needs --rl-sample-role sampler "
-                         "and a value >= 1")
+                         "(or a convertible pool) and a value >= 1")
+    if rounds is not None and role == CONVERTIBLE and \
+            int(rounds) < convertible_min_backlog_rounds(args):
+        raise ValueError(f"--rl-sampler-max-backlog-rounds {int(rounds)}: a convertible pool "
+                         "starts a trainer at up to --rl-max-policy-age + 1 rounds of backlog, "
+                         f"so the cap must be at least {convertible_min_backlog_rounds(args)}")
     min_round_s = getattr(args, "rl_sampler_min_round_seconds", None)
     if min_round_s is not None and (role != SAMPLER or not float(min_round_s) > 0):
         raise ValueError("--rl-sampler-min-round-seconds needs --rl-sample-role sampler "
@@ -246,6 +252,22 @@ def check_launch(args: Any) -> None:
         raise ValueError("--rl-sample-role convertible needs --rl-convertible-node NAME")
 
 
+def convertible_min_backlog_rounds(args: Any) -> int:
+    """The smallest backlog cap of a convertible node, in rounds: S1 starts a trainer
+    at a backlog of at most ``a_hard + 1`` batches (``a_hard`` = the max policy
+    age), so a lower cap would hold every node back before any trainer starts."""
+    return int(getattr(args, "rl_max_policy_age", 0) or 0) + 1
+
+
+def _max_backlog_rounds(args: Any, role: str) -> int | None:
+    rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
+    if role == SAMPLER:
+        return int(rounds or DEFAULT_MAX_BACKLOG_ROUNDS)
+    if role == CONVERTIBLE:
+        return int(rounds or max(DEFAULT_MAX_BACKLOG_ROUNDS, convertible_min_backlog_rounds(args) + 1))
+    return None
+
+
 def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
     """The island's buffer config (island side: the store is ``--rl-resume-store``)."""
     role = sample_role(args)
@@ -255,13 +277,12 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
     if not store:
         raise ValueError(f"--rl-sample-role {role} needs the checkpoint store "
                          "(--rl-resume-store on the island)")
-    rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
+    rounds = _max_backlog_rounds(args, role)
     wait_s = getattr(args, "rl_sample_wait_s", None)
     min_round_s = getattr(args, "rl_sampler_min_round_seconds", None)
     return SampleBufferConfig(
         role=role, store=str(store),
-        max_backlog_groups=(int(groups_per_round) * int(rounds or DEFAULT_MAX_BACKLOG_ROUNDS)
-                            if role == SAMPLER else None),
+        max_backlog_groups=None if rounds is None else int(groups_per_round) * rounds,
         wait_s=None if wait_s is None else float(wait_s),
         min_round_s=(float(min_round_s) if role == SAMPLER and min_round_s is not None
                      else None))

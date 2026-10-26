@@ -23,6 +23,18 @@ Channels, all in the run's checkpoint store (the store every island mounts;
 * ``status.json`` (node -> head, rewritten every few seconds): role, in-flight
   requests, measured rollout capacity, served version, generation done.
 
+One file for the whole pool, ``convertible/backlog.json`` (head -> nodes,
+rewritten at every backlog count): the groups the trainer can train that it has
+not read yet (the count S1 starts a trainer on). A node does not start a rollout
+round while this backlog is at its cap (:class:`PoolBacklogGate`), so the nodes
+do not run through their rounds ahead of the trainer: while one node trains, the
+others still have rounds left to generate.
+
+Weights: every trainer incarnation releases each published version into the
+store (``policy_release``); a node in rollout loads the newest release before
+each round (the ``follow`` hook), so a node that has not converted generates
+with the trained policy too, not with the version it last trained.
+
 Samples: each node appends to its own shard of the buffer
 (``sample_buffer.shard_index``); the head merges the shards into the index
 (``sample_buffer.merge_shards``) before it counts the backlog, so the index has
@@ -82,6 +94,10 @@ DEFAULT_STALE_S = 300.0
 DEFAULT_RELEASE_TIMEOUT_S = 600.0
 # a node whose generation is done exits on its own after this long without a command
 DEFAULT_IDLE_EXIT_S = 1800.0
+# a pool backlog record older than this does not hold a node back (the head may be
+# gone). Long: the head writes no record while its trainer loop waits for a round.
+DEFAULT_BACKLOG_STALE_S = 1800.0
+POOL_BACKLOG_PATH = f"{CONVERTIBLE_DIR}/backlog.json"
 
 
 def node_path(node: str, name: str) -> str:
@@ -179,6 +195,52 @@ def write_retrying(files: StoreFiles, rel: str, data: bytes, *,
             wait(WRITE_RETRY_DELAY_S * (attempt + 1))
 
 
+def write_pool_backlog(files: StoreFiles, *, groups: int, version: int, at: float,
+                       shards: Mapping[str, int]) -> None:
+    """Head side: the trainable groups not read yet (``groups``) at policy ``version``,
+    counted over ``shards`` (records per node shard when it counted)."""
+    files.write(POOL_BACKLOG_PATH, json.dumps(
+        {"groups": int(groups), "version": int(version), "at": round(float(at), 3),
+         "shards": {str(k): int(v) for k, v in shards.items()}}, sort_keys=True).encode())
+
+
+class PoolBacklogGate:
+    """Island side: may this node start a rollout round? Yes while the pool backlog
+    is below ``max_groups``. The backlog is the head's last count plus the groups
+    the nodes appended to their shards since that count: the head counts only
+    between trainer rounds, and a count from before the newest rounds let a fast
+    node run past the cap (GPU run s24-final-conv-20261019d). Groups the trainer
+    read since the count still count (the cap errs on the side of waiting). No
+    record (no count yet) or one older than ``stale_s`` (the head is gone) does
+    not hold the node. ``last`` is the record read by the last call; ``backlog``
+    the groups it gave."""
+
+    def __init__(self, files: StoreFiles, max_groups: int, *,
+                 stale_s: float = DEFAULT_BACKLOG_STALE_S,
+                 clock: Callable[[], float] = time.time) -> None:
+        if int(max_groups) < 1:
+            raise ValueError("max_groups must be >= 1")
+        self.files = files
+        self.max_groups = int(max_groups)
+        self.stale_s = float(stale_s)
+        self.clock = clock
+        self.last: dict[str, Any] | None = None
+        self.backlog: int | None = None
+
+    def __call__(self) -> bool:
+        from .sample_buffer import shard_lengths
+
+        raw = self.files.read(POOL_BACKLOG_PATH)
+        self.last = None if not raw else json.loads(raw)
+        self.backlog = None
+        if self.last is None or self.clock() - float(self.last.get("at", 0.0)) > self.stale_s:
+            return True
+        counted = {str(k): int(v) for k, v in (self.last.get("shards") or {}).items()}
+        now = shard_lengths(self.files, counted)
+        self.backlog = int(self.last["groups"]) + sum(max(0, now[k] - counted[k]) for k in counted)
+        return self.backlog < self.max_groups
+
+
 def append_trainer_command(files: StoreFiles, incarnation: int, verb: str, *,
                            rounds: int | None = None, reason: str | None = None) -> int:
     """Append one trainer command to an incarnation's file keeping the commands
@@ -223,6 +285,13 @@ class ConvertibleNodeAgent:
     checksum of the last publication of that stint; ``inflight()`` the requests on
     the engines (None: unknown); ``emit(event, **fields)`` writes the island tape.
 
+    Before each rollout round the node calls ``follow()`` (load the newest policy
+    release; returns the version it now serves, or None when nothing changed) and
+    ``admit()`` (False: the pool backlog is at its cap; the node waits ``poll_s``
+    and reads its commands again). ``after_stint()`` runs when the node is back
+    to rollout after a trainer incarnation, before its next round (its engines
+    serve the version it trained and released itself).
+
     The node takes a command at a rollout round boundary. It generates at most
     ``max_rounds`` rounds; after that it reports ``generation_done`` and still
     converts on command until ``end`` (or ``idle_exit_s`` without a command)."""
@@ -232,6 +301,9 @@ class ConvertibleNodeAgent:
                  published_checksum: Callable[[], str | None],
                  inflight: Callable[[], int | None] = lambda: None,
                  emit: Callable[..., None] = lambda event, **fields: None,
+                 follow: Callable[[], int | None] = lambda: None,
+                 admit: Callable[[], bool] = lambda: True,
+                 after_stint: Callable[[], None] = lambda: None,
                  max_rounds: int | None = None, poll_s: float = DEFAULT_POLL_S,
                  status_s: float = DEFAULT_STATUS_S, idle_exit_s: float = DEFAULT_IDLE_EXIT_S,
                  served_version: int = 0, clock: Callable[[], float] = time.time,
@@ -244,6 +316,9 @@ class ConvertibleNodeAgent:
         self.published_checksum = published_checksum
         self.inflight = inflight
         self.emit_tape = emit
+        self.follow = follow
+        self.admit = admit
+        self.after_stint = after_stint
         self.max_rounds = max_rounds
         self.poll_s = float(poll_s)
         self.status_s = float(status_s)
@@ -257,6 +332,7 @@ class ConvertibleNodeAgent:
         self.capacity: float | None = None  # groups per second of the last round
         self.role = ROLLOUT
         self.stints = 0
+        self.waiting_since: float | None = None  # held back by the pool backlog cap
         self._stop = threading.Event()
         self._wait = wait or self._stop.wait
         self._status_lock = threading.Lock()
@@ -286,6 +362,10 @@ class ConvertibleNodeAgent:
                         break
                     self._wait(self.poll_s)
                     continue
+                self._follow()
+                if not self._admitted():
+                    self._wait(self.poll_s)
+                    continue
                 self._rollout_round()
         except BaseException as error:
             self.role = FAILED
@@ -301,6 +381,25 @@ class ConvertibleNodeAgent:
     @property
     def generation_done(self) -> bool:
         return self.max_rounds is not None and self.rounds >= self.max_rounds
+
+    def _follow(self) -> None:
+        version = self.follow()
+        if version is not None and int(version) != self.served_version:
+            self.served_version = int(version)
+            self._write_status()
+
+    def _admitted(self) -> bool:
+        if self.admit():
+            if self.waiting_since is not None:
+                self._event("node_backlog_admitted",
+                            waited_s=round(self.clock() - self.waiting_since, 3))
+                self.waiting_since = None
+            return True
+        if self.waiting_since is None:
+            self.waiting_since = self.clock()
+            self._event("node_backlog_full", backlog=getattr(self.admit, "backlog", None))
+            self._write_status()
+        return False
 
     def _rollout_round(self) -> None:
         result = self.generate()
@@ -343,6 +442,7 @@ class ConvertibleNodeAgent:
         self._write_status()
         back = self.node.to_rollout(int(version), expected_checksum=self.published_checksum())
         self.served_version = int(version)
+        self.after_stint()
         self._receipt(back, incarnation)
         self.role = ROLLOUT
         self._write_status()
@@ -368,7 +468,8 @@ class ConvertibleNodeAgent:
         return {"node": self.name, "role": self.role, "at": round(self.clock(), 3),
                 "inflight": inflight, "capacity": capacity, "rounds": self.rounds,
                 "groups": self.groups, "served_version": self.served_version,
-                "generation_done": self.generation_done, "stints": self.stints}
+                "generation_done": self.generation_done, "stints": self.stints,
+                "backlog_wait": self.waiting_since is not None}
 
     def _write_status(self, **extra: Any) -> None:
         """Best effort: the status is an observation the head reads again; a write

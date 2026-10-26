@@ -1182,14 +1182,13 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     """L4.6: a sampler writes the buffer and builds no trainer model
     (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
     a trainer reads the buffer and can export HF snapshots for its releases; a
-    convertible node (L7.5) does both with one switchable rollout function."""
-    from .buffer_rollout import CONVERTIBLE, SAMPLER, rollout_argv
+    convertible node (L7.5) does both with one switchable rollout function, and
+    releases what it trains too (the other nodes load the releases)."""
+    from .buffer_rollout import SAMPLER, rollout_argv
 
     argv = rollout_argv(role, max_policy_age=max_policy_age)
     if role == SAMPLER:
         return (*argv, SAMPLER_ONLY_FLAG)
-    if role == CONVERTIBLE:  # L7.5: trainer and engines on the same GPUs, no release export
-        return argv
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 

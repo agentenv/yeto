@@ -663,6 +663,22 @@ def _peer_entries(files: list[Mapping[str, Any]], coord: Mapping[str, int]) -> l
     ]
 
 
+REWIND_SCHEDULER = f"{_MODULE}.rewind_scheduler"
+
+
+def rewind_scheduler(actor: Any) -> dict[str, Any]:
+    """Set the LR scheduler progress back to 0 before a cut restore into a trainer
+    that trained before in this process: a convertible node that converts again
+    (its earlier stint stepped the scheduler; :func:`check_scheduler` refuses a
+    scheduler past 0 because the load adds the saved progress). Everything else
+    the restore overwrites, and its digest check still compares the restored
+    adapter, optimizer, scheduler and counters with the cut."""
+    scheduler = actor.opt_param_scheduler
+    before = int(scheduler.num_steps)
+    scheduler.num_steps = 0
+    return {"rewound_from": before}
+
+
 def _scheduler_steps(state: Mapping[str, Any]) -> int:
     return int(state["num_iters"] if "num_iters" in state else state["num_steps"])
 

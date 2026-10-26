@@ -446,3 +446,39 @@ def test_keep_abandoned_leaves_failed_cluster_up(capsys):
     assert ops.down_calls == []
     assert "l0" not in ctl.downed_clusters
     assert "keeping abandoned cluster l0" in capsys.readouterr().out
+
+
+def test_stop_flag_ends_a_run_whose_islands_still_run(tmp_path):
+    """yeto stop-run on a healthy run: the controller ends at its next poll (the
+    launcher then stops the trainer and tears down) instead of supervising on."""
+    from yeto.launch.fleet import RunStopRequested
+
+    flag = tmp_path / "STOP"
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING]  # stays RUNNING forever
+    ctl = make_controller(ops, {"l0": 1}, stop_flag=flag)
+    polls = []
+    real_sleep = ops.sleep
+
+    def sleep(seconds):
+        polls.append(seconds)
+        if len(polls) == 2:
+            flag.write_text("stop\n")
+        real_sleep(seconds)
+
+    ops.sleep = sleep
+    with pytest.raises(RunStopRequested, match="STOP flag"):
+        ctl.run()
+    assert len(polls) == 2 and ops.relaunch_calls == [] and ops.down_calls == []
+    assert ctl.learners["l0"]["state"] == "running"  # the launcher's teardown downs it
+
+
+def test_launcher_returns_the_stopped_exit_on_the_stop_flag():
+    import inspect
+
+    from yeto import launcher
+    from yeto.launch.fleet import RUN_STOPPED_EXIT
+
+    source = inspect.getsource(launcher)
+    assert RUN_STOPPED_EXIT == 9
+    assert "except RunStopRequested as error:" in source and "return RUN_STOPPED_EXIT" in source

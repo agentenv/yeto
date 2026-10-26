@@ -5,7 +5,8 @@
   trainer GPU); the rollout function writes every group to the buffer
   (``BufferWriterRolloutFn``); :class:`~yeto.rl.engine.sampler_loop.SamplerLoop`
   runs the rounds and loads each policy release with :class:`EngineReleaseLoader`.
-* :func:`wire_policy_releases`: on a trainer island, every successful publish
+* :func:`wire_policy_releases`: on a trainer island (and on a convertible node
+  while it trains), every successful publish
   is also released into the store (:class:`ReleasingPublisher`): a full-parameter
   trainer exports an HF checkpoint (``actor.export_hf``), a LoRA trainer only its
   adapter (:mod:`.release_plugin`), into the release directory.
@@ -45,7 +46,7 @@ from yeto.rl.engine.policy_release import (
     PolicyReleaseStore,
 )
 from yeto.rl.engine.policy_versions import engine_weight_version
-from yeto.rl.engine.sample_roles import SAMPLER, TRAINER
+from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 
 from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, open_buffer
 from .publish import (
@@ -117,15 +118,18 @@ class EngineReleaseLoader:
 
     ``run`` drives a coroutine on the island's event loop (``LoopRunner.run``).
     ``lora``: the engines serve a LoRA adapter (the module docstring); a release
-    must then carry ``weights == "lora"``. ``warmup`` and ``flatten`` replace the
-    warm-up generate and the checksum flattening (tests)."""
+    must then carry ``weights == "lora"``. ``adapter_loaded``: the engines already
+    serve the adapter (a convertible node: its trainer pushed it at boot), so the
+    first load unloads it first. ``warmup`` and ``flatten`` replace the warm-up
+    generate and the checksum flattening (tests)."""
 
     def __init__(self, controller: Any, executor: Any, run: Callable[[Any], Any], *,
                  lora: bool = False, post: Callable[..., Any] = _post_engine,
                  warmup: Callable[[Any, str, float], Any] = default_lora_warmup,
                  flatten: Callable[[Any], list[dict[str, Any]]] | None = None,
                  probe: Callable[[Any, str], Any] | None = probe_generate,
-                 warmup_timeout_s: float = 120.0, staging_root: str | None = None) -> None:
+                 warmup_timeout_s: float = 120.0, staging_root: str | None = None,
+                 adapter_loaded: bool = False) -> None:
         self.controller = controller
         self.executor = executor
         self.run = run
@@ -137,7 +141,9 @@ class EngineReleaseLoader:
         self.last_probe: dict[str, Any] | None = None  # LoRA: the first engine's probe answer
         self.warmup_timeout_s = float(warmup_timeout_s)
         self.adapter = lora_adapter_name() if self.lora else None
-        self._adapter_loaded = False  # the engines hold the adapter of an earlier release
+        # the engines hold an adapter under ``self.adapter`` (an earlier release, or the
+        # adapter a colocated trainer pushed: a convertible node)
+        self._adapter_loaded = bool(adapter_loaded) and self.lora
         self.staging_root = staging_root  # local copies of loaded adapters (None: system temp)
         self._staged: Path | None = None  # the local copy the engines serve
         self.last_checksum: str | None = None  # LoRA: the engines' lora:* read-back digest
@@ -357,8 +363,9 @@ class ReleasingPublisher:
 
 def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runner: Any,
                          environ: Any = None) -> ReleasingPublisher | None:
-    """A trainer island (``--rl-sample-role trainer``) releases every publish."""
-    config = _buffer_config(miles_args, TRAINER)
+    """A trainer island (``--rl-sample-role trainer``) releases every publish; so does
+    the trainer of a convertible node (the other nodes follow the releases)."""
+    config = _buffer_config(miles_args, TRAINER) or _buffer_config(miles_args, CONVERTIBLE)
     if config is None:
         return None
     in_executor = getattr(driver.rollout, "_in_executor", None)

@@ -189,6 +189,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
     skipped_top = {
         "protocol_version", "delta_semantics",
         "expected_members", "responded_members", "missed_members",
+        "time_unix",  # wall clock of the line, for offline timing analysis
     }
     unhandled = top_level - consumed_top - skipped_top
     assert not unhandled, f"new syncer tape field(s) not routed to W&B: {unhandled}"
@@ -196,8 +197,10 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
     consumed_responder = {
         "id", "staleness", "contribution", "weight", "c_steps", "c_tokens",
         "accounted_c_steps", "accounted_c_tokens", "base_version",
+        "recv_seconds",
     }
-    skipped_responder = {"generation"}
+    # arrived_unix: wall clock of the push, for offline timing analysis.
+    skipped_responder = {"generation", "arrived_unix"}
     unhandled = responder_keys - consumed_responder - skipped_responder
     assert not unhandled, f"new responder field(s) not routed to W&B: {unhandled}"
 
@@ -460,3 +463,11 @@ def test_sigterm_flushes_the_offset_before_the_process_dies(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert int(offset_file.read_text()) == tape.stat().st_size
+
+
+def test_push_upload_seconds_are_logged_per_learner():
+    record = dict(REAL_RECORD)
+    record["responders"] = [dict(REAL_RECORD["responders"][0], recv_seconds=2.5, arrived_unix=1792000000.0)]
+    m = tape_metrics(record)
+    assert m["learner/0/push_recv_seconds"] == 2.5
+    assert "learner/1/push_recv_seconds" not in m
