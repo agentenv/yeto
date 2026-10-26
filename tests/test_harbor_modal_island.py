@@ -212,3 +212,76 @@ def test_abort_without_trials_is_a_no_op():
 def test_miles_finds_the_abort_hook_next_to_the_agent_function():
     module, _, _ = harbor_agent.AGENT_FUNCTION.rpartition(".")
     assert module == harbor_agent.__name__ and callable(getattr(harbor_agent, "abort"))
+
+
+# ------------------------------------------------- verl agentic islands (S27 G-FS)
+
+VERL_IMAGE_REF = "verl-build:" + "a" * 40
+
+
+def test_harbor_layer_is_allowed_on_the_verl_engine_image():
+    _cfg(harbor_layer=True, image_ref=VERL_IMAGE_REF, harbor_relay_port=31500).validate()
+
+
+def test_harbor_layer_is_refused_on_an_engine_image_without_a_recipe():
+    with pytest.raises(ValueError, match="no Harbor layer recipe"):
+        _cfg(harbor_layer=True, image_ref="miles-build:" + "b" * 40).validate()
+
+
+def test_build_image_adds_the_harbor_layer_on_the_verl_engine_image(monkeypatch):
+    calls = []
+    import yeto.rl.harness.harbor.image_layer as image_layer
+    from yeto.rl.adapters.verl import image as verl_image
+
+    def layer(image, backend, python):
+        calls.append((backend, python))
+        return _Image(image.steps + ["harbor_layer"])
+
+    monkeypatch.setattr(image_layer, "modal_harbor_layer", layer)
+    monkeypatch.setattr(verl_image, "modal_image", lambda modal, commit, **kw: _Image(["verl_image"]))
+    runner = modal_runner.ModalOps("yeto-x")
+    monkeypatch.setattr(runner, "_modal", lambda: SimpleNamespace())
+    image = runner.build_image(_cfg(harbor_layer=True, image_ref=VERL_IMAGE_REF))
+    assert image.steps[:2] == ["verl_image", "harbor_layer"]
+    # the layer installs into verl's own venv, not the image's /usr/local python
+    assert calls == [("verl", verl_image.HARBOR_LAYER_PYTHON)]
+    assert verl_image.HARBOR_LAYER_PYTHON.endswith("/.venv/bin/python")
+
+
+def test_verl_agentic_island_tunnels_the_records_proxy_port(tmp_path, monkeypatch):
+    """The verl islands have no gate relay: the records proxy itself holds a call,
+    so the tunnel must publish the proxy's names instead (VERL-PARITY #33)."""
+    from yeto.rl.harness.gateway import records_env
+
+    secret = tmp_path / "secret"
+    monkeypatch.setattr(modal_runner, "HARBOR_RELAY_SECRET_PATH", str(secret))
+    args = SimpleNamespace(rl_agentic_harbor=True, custom_agent_function_path=None)
+    opened, env = [], {}
+    cfg = _cfg(harbor_layer=True, image_ref=VERL_IMAGE_REF, harbor_relay_port=31500,
+               harbor_port_env=harness_env.harbor_callback_port_env(args),
+               harbor_base_env=harness_env.harbor_callback_base_env(args),
+               harbor_secret_env=harness_env.harbor_callback_secret_env(args))
+    cfg.validate()
+    with modal_runner.harbor_relay_tunnel(cfg, 0, env, forward=_forward(opened)):
+        assert opened == [31500]
+        assert env[records_env.PROXY_PORT_ENV] == "31500"
+        assert env[records_env.PROXY_PUBLIC_BASE_ENV] == _Tunnel.url
+        assert env[records_env.PROXY_SECRET_FILE_ENV] == str(secret)
+        # Miles' own relay names stay out of a verl island's environment
+        assert harbor_agent.RELAY_PORT_ENV not in env
+
+
+def test_the_harbor_switch_has_one_spelling_per_backend():
+    miles = SimpleNamespace(custom_agent_function_path=harness_env.HARBOR_AGENT_FUNCTION)
+    verl = SimpleNamespace(rl_agentic_harbor=True, custom_agent_function_path=None)
+    plain = SimpleNamespace(rl_agentic_harbor=False, custom_agent_function_path=None)
+    assert harness_env.is_harbor_agent(miles) and harness_env.is_harbor_agent(verl)
+    assert not harness_env.is_harbor_agent(plain)
+    assert harness_env.harbor_callback_port_env(miles) == harbor_agent.RELAY_PORT_ENV
+    # a verl island needs the boat token and a callback port just like a Miles one
+    out = harness_env.harbor_island_envs(
+        {"HARBOR_ENV_TYPE": "boat"}, load_boat_token=lambda: "tok",
+        port_env=harness_env.harbor_callback_port_env(verl),
+        base_env=harness_env.harbor_callback_base_env(verl))
+    assert out["BOAT_API_KEY"] == "tok"
+    assert out[harness_env.harbor_callback_port_env(verl)] == str(harness_env.DEFAULT_HARBOR_RELAY_PORT)

@@ -351,6 +351,8 @@ def make_miles_island_task(
             " --custom-agent-function-path "
             f"{shlex.quote(args.custom_agent_function_path)}"
         )
+    if getattr(args, "rl_agentic_harbor", False):  # S27 G-FS (VERL-PARITY #33)
+        flags += " --rl-agentic-harbor"
     if getattr(args, "agent_max_seq_len", None) is not None:
         flags += f" --agent-max-seq-len {args.agent_max_seq_len}"
     if args.use_session_server:

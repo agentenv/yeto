@@ -120,13 +120,42 @@ AGENTIC_FLAGS = (
 
 
 def check_agentic(args) -> None:
-    """Refuse Miles agentic options on the verl backend instead of ignoring them."""
+    """Refuse Miles agentic options on the verl backend instead of ignoring them,
+    and refuse a ``--rl-agentic-harbor`` shape the island cannot run (S27 G-FS)."""
     given = [flag for attr, flag in AGENTIC_FLAGS if getattr(args, attr, None) not in (None, False, [], "")]
     if given:
         raise ValueError(
             "verl 后端不支持 Miles agentic 参数：" + ", ".join(given)
             + "。verl 的 agentic 路径是 yeto HarborAgentLoop（agent loop 名 yeto_harbor，"
             "由数据行 agent_name 选择）")
+    if getattr(args, "rl_agentic_harbor", False):
+        problems = agentic_problems(args)
+        if problems:
+            raise ValueError("--rl-agentic-harbor 在 verl 后端只覆盖同步共置训练岛（S27 G-FS 第一次上卡的形状）；缺："
+                             + ", ".join(problems))
+
+
+def agentic_problems(args) -> list[str]:
+    """Why ``--rl-agentic-harbor`` cannot run on this verl shape ([] when it can).
+
+    Covered (S27 G-FS): the synchronous training island that both generates and
+    trains (``trainer.py`` + ``AgentLoopManagerTQ``, the records proxy over its
+    own rollout servers).  Not covered, and refused rather than ignored: the
+    Megatron engine island (its own round loop, ``megatron_ports``), the
+    fully_async rollouter (it replaces every row's ``agent_name``,
+    ``fully_async_round.py:213``), the sampler / buffer-trainer split, and
+    in-training evaluation (the held-out rows would need trials of their own).
+    """
+    problems = []
+    if megatron_run(args):
+        problems.append("TP=PP=EP=1（Megatron 引擎岛没有 agent loop 管理器）")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
+        problems.append("--rl-max-policy-age 0（fully_async 的 rollouter 会改写每行的 agent_name）")
+    if (getattr(args, "rl_sample_role", None) or "both") != "both" or getattr(args, "rl_island_sample_role", None):
+        problems.append("不分采样岛 / 缓冲训练岛")
+    if getattr(args, "rl_eval_interval", None) is not None:
+        problems.append("不开 --rl-eval-interval（评测集也要跑 trial，未接）")
+    return problems
 
 
 def refuse_agentic_argv(ignored: list[str]) -> None:

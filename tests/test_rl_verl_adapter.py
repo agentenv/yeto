@@ -544,3 +544,159 @@ def test_verl_expert_parallel_runs_on_the_megatron_engine():
     fsdp = argparse.Namespace(**{**vars(good), "expert_parallel": 1, "tuning": "lora"})
     rules.check_engine_shape(fsdp)  # FSDP2 runs are not this check's business
     assert not rules.megatron_run(fsdp) and not rules.hf_export_supported(fsdp)
+
+
+# ------------------------------------------- verl agentic island (S27 G-FS, VERL-PARITY #33)
+
+def _agentic_cfg(**kw) -> "vconf.VerlRunConfig":
+    base = dict(model_path="/snap/model", train_file="/t.parquet", val_file="/v.parquet", out_dir="/o",
+                parameter_mode="full", lora_rank=0, lora_alpha=0, groups_per_round=2, samples_per_group=4,
+                max_prompt_len=1024, max_response_len=2048, max_model_len=3072, total_rounds=2,
+                correction="none", reward_path="/r.py", reward_name="compute_score_gsm8k")
+    return vconf.VerlRunConfig(**{**base, **kw})
+
+
+def test_agentic_island_overrides_select_the_loop_and_the_estimator():
+    from yeto.rl.adapters.verl.run_config_rules import AGENTIC_ADV_ESTIMATOR
+
+    overrides = vconf.build_overrides(_agentic_cfg(agentic=True, agent_loop_config="/o/agent-loop.yaml"))
+    assert f"algorithm.adv_estimator={AGENTIC_ADV_ESTIMATOR}" in overrides
+    assert "actor_rollout_ref.rollout.agent.agent_loop_config_path=/o/agent-loop.yaml" in overrides
+    assert "actor_rollout_ref.rollout.agent.num_workers=1" in overrides
+    # a non-agentic island is unchanged
+    plain = vconf.build_overrides(_agentic_cfg())
+    assert "algorithm.adv_estimator=grpo" in plain
+    assert not [o for o in plain if "rollout.agent." in o]
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(agentic=True), "agent_loop_config"),
+    (dict(agent_loop_config="/x"), "只在 agentic 岛"),
+    (dict(agentic=True, agent_loop_config="/x", agent_loop_workers=0), "agent_loop_workers"),
+])
+def test_bad_agentic_config_is_refused(kw, match):
+    with pytest.raises(vconf.VerlConfigError, match=match):
+        vconf.validate(_agentic_cfg(**kw))
+
+
+def test_agentic_shapes_the_island_cannot_run_are_refused():
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    def args(**kw):
+        base = dict(rl_agentic_harbor=True, tensor_parallel=1, pipeline_parallel=1, expert_parallel=1,
+                    rl_max_policy_age=0, rl_rollout_ahead=0, rl_sample_role=None,
+                    rl_island_sample_role=None, rl_eval_interval=None)
+        return argparse.Namespace(**{**base, **kw})
+
+    rules.check_agentic(args())  # the covered shape passes
+    assert rules.agentic_problems(args()) == []
+    for kw, needle in ((dict(expert_parallel=8), "Megatron"), (dict(rl_max_policy_age=2), "policy-age"),
+                       (dict(rl_sample_role="sampler"), "采样岛"), (dict(rl_eval_interval=2), "eval-interval")):
+        with pytest.raises(ValueError, match="rl-agentic-harbor"):
+            rules.check_agentic(args(**kw))
+        assert any(needle in p for p in rules.agentic_problems(args(**kw))), (kw, rules.agentic_problems(args(**kw)))
+
+
+def test_agentic_rows_pass_through_prepare_data(tmp_path):
+    """``task_lists.verl_rows`` output must survive the island's data preparation:
+    before S27 G-FS it rewrote every row into the math schema and lost agent_name."""
+    import pandas as pd
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
+
+    rows = [{"data_source": "tb2", "agent_name": VERL_AGENT_LOOP,
+             "prompt": [{"role": "user", "content": f"TB2.1 task t{i}"}],
+             "reward_model": {"style": "rule", "ground_truth": ""},
+             "extra_info": {"index": i, "agent_task": {"task_id": f"t{i}", "agent": "codex"}}}
+            for i in range(3)]
+    data = tmp_path / "x-tasks.jsonl"
+    data.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    train, val = island_entry.prepare_data(str(data), None, tmp_path / "work", val_rows=1)
+    frame = pd.read_parquet(train)
+    assert list(frame["agent_name"]) == [VERL_AGENT_LOOP] * 3
+    assert [r["agent_task"]["task_id"] for r in frame["extra_info"]] == ["t0", "t1", "t2"]
+    assert [r["split"] for r in frame["extra_info"]] == ["train"] * 3
+    assert len(pd.read_parquet(val)) == 1
+
+
+def test_agent_loop_registry_file_is_read_the_way_verl_reads_it(tmp_path):
+    """verl loads the file and *iterates* it, taking ``.name`` off each entry
+    (fork acad9875, ``agent_loop.py:554-556``).  A top-level mapping iterates over
+    its keys and dies with "'str' object has no attribute 'name'", which is how
+    S27 G-FS run s27-fs-2 failed; so parse it here as verl does, not as text.
+    """
+    # OmegaConf is not in the CPU test environment; PyYAML parses the same file
+    # into the same Python structure, and what this test pins is the structure.
+    import yaml
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.harbor.task_lists import VERL_AGENT_LOOP
+
+    fields = island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=True), out_dir=str(tmp_path))
+    assert fields["agentic"] is True and fields["agent_loop_workers"] == 1
+    loaded = yaml.safe_load(Path(fields["agent_loop_config"]).read_text())
+    assert isinstance(loaded, list), f"verl iterates the file; a {type(loaded).__name__} iterates over its keys"
+    registry = {}
+    for entry in loaded:  # verl's own loop
+        registry[entry["name"]] = entry
+    assert set(registry) == {VERL_AGENT_LOOP}
+    assert registry[VERL_AGENT_LOOP]["_target_"] == island_entry.AGENT_LOOP_TARGET
+    assert island_entry.agentic_run_fields(argparse.Namespace(rl_agentic_harbor=False), out_dir=str(tmp_path)) == {}
+
+
+def test_records_proxy_environment_is_derived_from_the_island_config(monkeypatch):
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.harness.gateway import records_env
+
+    monkeypatch.setenv(records_env.TEMPLATE_ENV, "qwen3_2507")
+    run = _agentic_cfg(agentic=True, agent_loop_config="/o/agent-loop.yaml")
+    env = island_entry.agentic_records_env(run, model_path="/snap/model", card="H200")
+    assert env["YETO_AGENTIC_RECORDER"] == "yeto.rl.harness.gateway.recorder:recorder_from_env"
+    assert env[records_env.PROXY_ENV] == "yeto.rl.adapters.verl.rollout_engine:records_proxy_from_env"
+    assert env[records_env.TOKENIZER_ENV] == "/snap/model"
+    assert json.loads(env[records_env.SAMPLING_ENV]) == {
+        "temperature": run.temperature, "top_p": run.top_p, "top_k": run.top_k,
+        "max_tokens": run.max_response_len}
+    assert env[records_env.MAX_MODEL_LEN_ENV] == str(run.max_model_len)
+    # The gateway refuses any model name other than this one ("model is fixed by
+    # the gateway"), and the agent sends AgentTask.model_name. Pin the equality:
+    # a name taken from the checkpoint path would refuse every model call.
+    from dataclasses import fields
+
+    from yeto.rl.agentic import AgentTask
+
+    default_model = next(f for f in fields(AgentTask) if f.name == "model_name").default
+    assert env[records_env.MODEL_ENV] == default_model
+    assert "snap" not in env[records_env.MODEL_ENV] and "model_path" not in env[records_env.MODEL_ENV]
+    # the tunnel owns the port and the public base; the island must not pin them
+    assert records_env.PROXY_PORT_ENV not in env and records_env.PROXY_PUBLIC_BASE_ENV not in env
+    assert env[records_env.PROXY_HOST_ENV] == "0.0.0.0"  # the tunnel reaches it from outside
+    monkeypatch.delenv(records_env.TEMPLATE_ENV)
+    with pytest.raises(SystemExit, match=records_env.TEMPLATE_ENV):
+        island_entry.agentic_records_env(run, model_path="/snap/model", card="H200")
+
+
+def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
+    """On the agentic path the row's prompt is a label; the real prompt is the
+    joined agent conversation, so the 512-token cap of a single-turn data prompt
+    aborts every sample (S27 G-FS run s27-fs-3: 8 of 8 ABORTED with
+    prompt_exceeds_prompt_length, agent n_input_tokens 7585..64960, after which
+    verl refused the step -- "response_mask must contain at least one valid token").
+    """
+    from yeto.rl.adapters.verl import island_entry
+
+    source = Path(island_entry.__file__).read_text()
+    # the rule itself, read off the module: the agentic branch uses the budget
+    assert "if agentic_island(args) else 512" in source
+    agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
+    plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
+
+    def cap(args):  # the expression at island_entry.py's max_prompt
+        return (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
+                if island_entry.agentic_island(args) else 512)
+
+    assert cap(agentic) == 81920 - 8192
+    assert cap(plain) == 512  # a math run is unchanged
+    tiny = argparse.Namespace(rl_agentic_harbor=True, seq_len=1024, rollout_max_response_len=8192)
+    assert cap(tiny) == 512  # never below the floor
