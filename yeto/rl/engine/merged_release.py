@@ -67,6 +67,12 @@ The merged broadcasts reach the samplers inside those versions (a local version
 contains the fragments the syncer overwrote). The release guard still keeps
 the versions increasing (a restarted trainer continues the syncer's round).
 
+Relaunch (S27 G-EQ5, gap 22): a buffer trainer that counts its versions locally
+continues its version account above the releases its store already holds
+(:class:`ResumedReleases`), so it trains the groups a sampler wrote with those
+releases instead of discarding them, and its own releases keep every version
+number distinct.
+
 Failures:
 
 * the publisher island stops: no new release appears. The samplers keep the
@@ -192,6 +198,98 @@ class MergedReleaseGuard:
         return "release"
 
 
+@dataclass(frozen=True)
+class ResumedReleases:
+    """The version account a relaunched buffer trainer continues from its store
+    (S27 G-EQ5, gap 22; engine-neutral, the verl wiring is in
+    ``adapters.verl.buffer_ports``).
+
+    A buffer trainer counts its policy versions locally from 0 in every process
+    (``full_parameter_sync`` module doc), while the versions its releases carry
+    live in the store and the samplers stamp them on every group they write. A
+    relaunched trainer therefore called its first publication v0 although the
+    store already held v1..vK, and everything keyed by the version broke:
+
+    * every group a sampler wrote with a release above v0 was discarded -- as a
+      version from the future or as a version nothing published (npu1: 8 groups
+      of behavior v1 dropped with ``param_versions [None, None]``, so the island
+      waited for samples that never came, VERL-ASCEND-RL.md section 36.3);
+    * its next release re-used a version number the store already held with
+      other weights (npu1: r7-v1 and r8-v2 written beside r6-v3, and
+      ``LATEST.json`` moved *back* from v3 to v2).
+
+    The account continues above every release the store holds:
+
+    * :attr:`base_version` K is the **highest** release version in the store,
+      not the one ``LATEST.json`` names: a store written with the bug above
+      holds a higher version than LATEST, and a new release must not take a
+      number already used. With a store written without it the two are equal;
+    * the island's first publication is vK (:attr:`start_version`) and releases
+      nothing -- the store holds vK already (``BufferReleasePublisher``); the
+      first round it trains publishes and releases vK+1;
+    * :meth:`window` are the versions in ``[K - limit, K)`` with the policy hash
+      the store recorded, the published policies a relaunched island restores
+      (``IslandDriver._restore_published_policies``): a group inside the
+      policy-age window is trained instead of discarded;
+    * :meth:`known_versions` is every release version in the store, so a group
+      older than the window is discarded as over-age (with the age the gate
+      reports) instead of as an unknown version.
+
+    What this does **not** say is anything about the weights: the island holds
+    what its own process loaded (this run's base checkpoint, or its trainer
+    checkpoint), not release vK's weights. Naming its first publication vK
+    continues the *numbering*, so a buffered group's policy age is counted
+    against the newest release its sampler could have loaded. And a behavior
+    version names weights by number only: when the store holds two releases
+    with one version (the bug above), the hash restored for that version is the
+    newest record's, so a group written with the other one carries a label that
+    names weights it was not generated with."""
+
+    base_version: int
+    limit: int
+    releases: tuple[tuple[int, str], ...]  # (version, policy hash), ascending by version
+
+    @property
+    def start_version(self) -> int:
+        """The island's first policy version in this process (:attr:`base_version`)."""
+        return self.base_version
+
+    def known_versions(self) -> tuple[int, ...]:
+        """Every release version in the store, ascending."""
+        return tuple(version for version, _hash in self.releases)
+
+    def window(self) -> dict[int, str]:
+        """version -> policy hash of the releases inside the policy-age window below
+        the start version (``[K - limit, K)``): the publications of earlier processes
+        a group in the window may name."""
+        oldest = self.base_version - self.limit
+        return {version: policy_hash for version, policy_hash in self.releases
+                if oldest <= version < self.base_version}
+
+    def history(self) -> list[tuple[int, str]]:
+        """``IslandDriver.published_policy_history``: every release as
+        ``(version, policy hash)``. The driver keeps the ones in its own window."""
+        return [(version, policy_hash) for version, policy_hash in self.releases]
+
+
+def resumed_releases(releases: Any, limit: int) -> ResumedReleases | None:
+    """:class:`ResumedReleases` of the releases in the store
+    (``policy_release.PolicyReleaseStore``), or None when it holds none: a run
+    that starts here, whose island counts its versions from 0 as before.
+
+    A derived release (a re-quantization of another one) is not a policy version
+    this trainer published, so it is left out (as in the Miles wiring,
+    ``adapters.miles.sampler_island``). Of two records with one version the
+    newest (highest ``seq``) names that version."""
+    found: dict[int, str] = {}
+    for record in sorted(releases.records(), key=lambda r: int(r.seq)):
+        if record.derived_from is None and record.policy_hash:
+            found[int(record.version)] = str(record.policy_hash)
+    if not found:
+        return None
+    return ResumedReleases(max(found), int(limit), tuple(sorted(found.items())))
+
+
 class LaneCursorLog:
     """The lane cursor of one synced trainer, durable in a shared-directory store.
 
@@ -200,9 +298,12 @@ class LaneCursorLog:
     is where a restarted trainer continues. ``commit`` makes the line durable
     (the store's ``commit``; a Modal Volume commit)."""
 
-    def __init__(self, root: str | Path, lane: BufferLane,
+    def __init__(self, root: str | Path, lane: "BufferLane | str",
                  commit: Callable[[], None] = lambda: None) -> None:
-        self.path = Path(root) / LANES_DIR / lane.file_name()
+        """``lane``: the reader's lane, or a plain name for a reader without one
+        (S27 G-EQ3: a single buffer trainer keeps a cursor too)."""
+        name = lane if isinstance(lane, str) else lane.name()
+        self.path = Path(root) / LANES_DIR / f"{name}.jsonl"
         self.commit = commit
 
     def last_cursor(self) -> int:
@@ -237,9 +338,10 @@ class ObjectLaneCursorLog:
     lane, so the next sequence number is the count of the listed objects; the
     write is a plain put (no create-if-absent between hosts needed)."""
 
-    def __init__(self, objects: Any, prefix: str, lane: BufferLane) -> None:
+    def __init__(self, objects: Any, prefix: str, lane: "BufferLane | str") -> None:
         self.objects = objects
-        self.prefix = f"{prefix.rstrip('/')}/{LANES_DIR}/{lane.name()}/"
+        name = lane if isinstance(lane, str) else lane.name()
+        self.prefix = f"{prefix.rstrip('/')}/{LANES_DIR}/{name}/"
         self._keys: list[str] | None = None
 
     def _listed(self) -> list[str]:
@@ -263,13 +365,25 @@ class ObjectLaneCursorLog:
         keys.append(key)
 
 
-def lane_cursor_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
-    """The lane cursor log of a lane reader (``FileSampleBuffer`` with a lane; None
-    for a single reader): in the store's object API when it has one, else in the
-    store directory (committed after each line)."""
+SOLO_CURSOR = "solo{learner}"  # the cursor name of a buffer trainer without a lane
+
+
+def lane_cursor_log(buffer: Any, learner_id: int | None = None
+                    ) -> LaneCursorLog | ObjectLaneCursorLog | None:
+    """The cursor log of a buffer reader: in the store's object API when it has
+    one, else in the store directory (committed after each line).
+
+    A lane reader gets its lane's log. A reader **without** a lane gets
+    ``solo<learner_id>`` when ``learner_id`` is given (S27 G-EQ3: a single buffer
+    trainer that restarts then continues after the groups it already trained,
+    instead of reading the buffer from the first one again); None when it is not,
+    which is the behaviour every caller had before.
+    """
     lane = getattr(buffer, "lane", None)
     if lane is None:
-        return None
+        if learner_id is None:
+            return None
+        lane = SOLO_CURSOR.format(learner=int(learner_id))
     from .resume import CheckpointStore  # noqa: PLC0415
     from .sample_buffer import BUFFER_DIR  # noqa: PLC0415 - sample_buffer imports this module
 

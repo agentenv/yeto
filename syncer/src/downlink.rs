@@ -81,6 +81,12 @@ pub fn digest_f32(values: &[f32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// S27 G-FH: the header of a FULL that carries `params` exactly (no anchor
+/// at this version): what `resend` sends then, without copying the values.
+pub fn exact_full_prefix(fragment: usize, version: u64, params: &[f32]) -> Vec<u8> {
+    prefix(fragment, version, KIND_FULL, version, &digest_f32(params))
+}
+
 fn prefix(fragment: usize, version: u64, kind: u8, base_version: u64, digest: &[u8; 32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(PREFIX_LEN);
     out.extend_from_slice(&(fragment as u32).to_le_bytes());
@@ -160,17 +166,24 @@ impl DownlinkAnchors {
     /// FULL re-send for recovery (HELLO / reconnect): the anchor every other
     /// learner holds, when it is at `version`; otherwise the exact params.
     pub fn resend(&self, p: usize, version: u64, params: &[f32]) -> EncodedBcast {
+        self.anchored_full(p, version).unwrap_or_else(|| EncodedBcast {
+            prefix: exact_full_prefix(p, version, params),
+            dtype: DTYPE_F32,
+            values: Arc::new(params.to_vec()),
+        })
+    }
+
+    /// S27 G-FH: the FULL re-send of `version` when the shared anchor is at
+    /// that version (no copy, no hashing); None otherwise, and the exact
+    /// params then go out FULL under `exact_full_prefix`.
+    pub fn anchored_full(&self, p: usize, version: u64) -> Option<EncodedBcast> {
         match self.anchors.get(p).and_then(Option::as_ref) {
-            Some(anchor) if anchor.version == version => EncodedBcast {
+            Some(anchor) if anchor.version == version => Some(EncodedBcast {
                 prefix: prefix(p, version, KIND_FULL, version, &anchor.digest),
                 dtype: DTYPE_F32,
                 values: Arc::clone(&anchor.values),
-            },
-            _ => EncodedBcast {
-                prefix: prefix(p, version, KIND_FULL, version, &digest_f32(params)),
-                dtype: DTYPE_F32,
-                values: Arc::new(params.to_vec()),
-            },
+            }),
+            _ => None,
         }
     }
 

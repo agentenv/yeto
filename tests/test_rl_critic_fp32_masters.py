@@ -19,6 +19,7 @@ import torch
 from yeto.rl import critic_state as cs
 from yeto.rl.engine.algorithm import AlgorithmSpecError, check_unverified_allowance
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
+from yeto.rl import megatron_masters
 from yeto.rl.adapters.miles import state_plugin as sp
 
 
@@ -184,7 +185,7 @@ def test_dp2_sharded_masters_gather_and_write_back(monkeypatch):
         barrier.wait()
         flat.copy_(total)
 
-    monkeypatch.setattr(sp, "_dp_all_reduce_sum", all_reduce)
+    monkeypatch.setattr(megatron_masters, "_dp_all_reduce_sum", all_reduce)
     monkeypatch.setattr(sp, "_rank", lambda: local.rank)
     out = {}
 
@@ -361,7 +362,7 @@ def test_single_rank_dp_gathers_on_cpu_in_one_buffer(monkeypatch):
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: 1)
-    monkeypatch.setattr(sp, "_dp_all_reduce_sum", lambda leaf, flat: calls.append(flat))
+    monkeypatch.setattr(megatron_masters, "_dp_all_reduce_sum", lambda leaf, flat: calls.append(flat))
     monkeypatch.setattr(sp, "_rank", lambda: 0)
     params = sp._critic_parameters(actor)
     keys = sorted(params)

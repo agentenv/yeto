@@ -145,6 +145,159 @@ ZMQ_WAIT_HOOK = "        time.sleep(1.0)  # yeto S27 G-DC: let the subscription 
 ZMQ_SUB = ((ZMQ_TARGET, ZMQ_REUSE_ANCHOR, ZMQ_REUSE_HOOK, "replace"),
            (ZMQ_TARGET, ZMQ_WAIT_ANCHOR, ZMQ_WAIT_HOOK, "after"))
 
+# Seventh patch (S27 G-EQ2, local, not pushed; every profile): verl picks the HF auto
+# class by walking the checkpoint's ``auto_map`` and taking the FIRST key whose value
+# mentions ``architectures[0]``. Nemotron-3 Nano's auto_map is
+#   {"AutoConfig": ..., "AutoModel": "modeling_nemotron_h.NemotronHForCausalLM",
+#    "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"}
+# so the first match is "AutoModel" and verl builds NemotronHModel -- the base model.
+# The island then dies twice over: NemotronHModel refuses gradient checkpointing, and
+# its forward returns BaseModelOutputWithPast, so verl's
+# ``prepare_model_outputs`` raises "'BaseModelOutputWithPast' object has no attribute
+# 'logits'" on the first training step (npu1, 19:26Z). The patch prefers the auto_map
+# entry whose key matches the architecture suffix (``...ForCausalLM`` ->
+# "AutoModelForCausalLM") and only then falls back to the first match.
+AUTO_CLASS_TARGET = "verl/utils/model.py"
+AUTO_CLASS_ANCHOR = (
+    '        auto_class = next(k for k, v in hf_config.auto_map.items() '
+    'if hf_config.architectures[0] in v)\n'
+)
+AUTO_CLASS_HOOK = (
+    "        # yeto S27 G-EQ2: prefer the auto_map key that matches the architecture's\n"
+    "        # task suffix; a first-match walk picks AutoModel for Nemotron-H (base model).\n"
+    "        _yeto_matches = [k for k, v in hf_config.auto_map.items()\n"
+    "                         if hf_config.architectures[0] in v]\n"
+    "        _yeto_task = \"AutoModel\" + hf_config.architectures[0].split(\"For\", 1)[1] \\\n"
+    "            if \"For\" in hf_config.architectures[0] else None\n"
+    "        auto_class = (\"AutoModelFor\" + hf_config.architectures[0].split(\"For\", 1)[1]\n"
+    "                      if _yeto_task and (\"AutoModelFor\" + hf_config.architectures[0].split(\"For\", 1)[1])\n"
+    "                      in _yeto_matches else _yeto_matches[0])\n"
+)
+AUTO_CLASS = (AUTO_CLASS_TARGET, AUTO_CLASS_ANCHOR, AUTO_CLASS_HOOK, "replace")
+
+# Eighth patch (S27 G-EZ2, local, not pushed; fsdp profile): one host copy of the
+# weights, not one per rank. verl's FSDP engine builds the model on every rank with
+# ``from_pretrained`` inside ``accelerate.init_empty_weights`` on every rank but the
+# mesh's coordinate 0 (``fsdp_utils.get_init_weight_context_manager``), then
+# ``fsdp2_load_full_state_dict`` broadcasts rank 0's full state dict. With
+# transformers 5.x ``from_pretrained`` still reads the weights into host memory under
+# that context, so every rank holds a whole FP32 model: npu1 n2/n3, Nemotron 120B on
+# 16 ranks, the host's available memory fell from 1432 GiB to 125 GiB at 12 % of
+# loading (G-EQ3, Nano 31.6B on 8 ranks: 993 GiB peak on n1). The hook builds the
+# meta-context ranks from the config on the meta device instead: same class, same
+# dtype (``from_config`` defaults to ``config.dtype`` -- bf16 here -- so the dtype is
+# passed), no weights read. Rank 0 still loads, and the broadcast fills parameters
+# and persistent buffers as before. ``tie_word_embeddings`` models keep verl's path
+# (verl itself turns the meta init off for them).
+META_INIT_TARGET = "verl/workers/engine/fsdp/transformer_impl.py"
+META_INIT_ANCHOR = (
+    "                module = auto_class.from_pretrained(\n"
+    "                    pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                    torch_dtype=torch_dtype,\n"
+    "                    config=self.model_config.hf_config,\n"
+    "                    trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                )\n"
+)
+META_INIT_HOOK = (
+    "                # yeto S27 G-EZ2: a meta-context rank builds from the config (no weights read);\n"
+    "                # under init_empty_weights transformers 5.x from_pretrained still loads them.\n"
+    "                if getattr(init_context, \"__name__\", \"\") == \"init_empty_weights\":\n"
+    "                    with torch.device(\"meta\"):\n"
+    "                        module = auto_class.from_config(\n"
+    "                            self.model_config.hf_config,\n"
+    "                            torch_dtype=torch_dtype,\n"
+    "                            trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                        )\n"
+    "                else:\n"
+    "                    module = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=torch_dtype,\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+)
+META_INIT = (META_INIT_TARGET, META_INIT_ANCHOR, META_INIT_HOOK, "replace")
+
+# Ninth patch (S27 G-EZ2, local, not pushed; fsdp profile; opt-in by environment): rank 0
+# reads the weights in the checkpoint's own dtype, and the FSDP2 CPU offload can keep the
+# offloaded state pageable. After the eighth patch only rank 0 reads weights, but it reads
+# them as a whole FP32 model (``model_dtype=fp32``): on npu1 n2 its process held 864 GiB
+# after loading the 120B text model, and with the eight ranks' shards the node fell to
+# 13 % available memory. With ``YETO_VERL_RANK0_CHECKPOINT_DTYPE=1`` rank 0 loads with
+# ``torch_dtype="auto"`` (the checkpoint's bf16; ``_keep_in_fp32_modules_strict`` tensors
+# such as the router bias stay f32) only as the broadcast source, builds its training
+# module on the meta device like every other rank, and ``fsdp2_load_full_state_dict``
+# materializes rank 0 with ``to_empty`` when its module is on meta. torch's
+# ``_broadcast_state_dict`` sends the source dtype and ``load_state_dict`` copies it into
+# the FP32 shards, so the masters are the bf16 values exactly. Exact only when every
+# checkpoint tensor is stored in the config dtype or kept f32 by the model (the 120B
+# text checkpoint: 41603 BF16 + 40 F32 router biases, preflight); a model with
+# non-persistent buffers is refused (rank 0's would be uninitialized).
+# ``YETO_VERL_OFFLOAD_PIN_MEMORY=0`` builds ``CPUOffloadPolicy(pin_memory=False)``.
+RANK0_SOURCE_TARGET = META_INIT_TARGET
+RANK0_SOURCE_ANCHOR = (
+    "                else:\n"
+    "                    module = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=torch_dtype,\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+)
+RANK0_SOURCE_HOOK = (
+    "                elif (os.environ.get(\"YETO_VERL_RANK0_CHECKPOINT_DTYPE\") == \"1\"\n"
+    "                      and not self.model_config.hf_config.tie_word_embeddings):\n"
+    "                    # yeto S27 G-EZ2: rank 0 reads the checkpoint dtype as the broadcast source only\n"
+    "                    _yeto_source = auto_class.from_pretrained(\n"
+    "                        pretrained_model_name_or_path=self.model_config.local_path,\n"
+    "                        torch_dtype=\"auto\",\n"
+    "                        config=self.model_config.hf_config,\n"
+    "                        trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                    )\n"
+    "                    self._yeto_full_state = _yeto_source.state_dict()\n"
+    "                    _yeto_persistent = set(self._yeto_full_state)\n"
+    "                    _yeto_transient = [n for n, _b in _yeto_source.named_buffers() if n not in _yeto_persistent]\n"
+    "                    if _yeto_transient:\n"
+    "                        raise RuntimeError(\"YETO_VERL_RANK0_CHECKPOINT_DTYPE: non-persistent buffers \"\n"
+    "                                           f\"{_yeto_transient[:3]} would be uninitialized on rank 0\")\n"
+    "                    del _yeto_source\n"
+    "                    with torch.device(\"meta\"):\n"
+    "                        module = auto_class.from_config(\n"
+    "                            self.model_config.hf_config,\n"
+    "                            torch_dtype=torch_dtype,\n"
+    "                            trust_remote_code=self.model_config.trust_remote_code,\n"
+    "                        )\n"
+    + RANK0_SOURCE_ANCHOR
+)
+RANK0_STATE_ANCHOR = "            full_state = module.state_dict()\n"
+RANK0_STATE_HOOK = (
+    "            # yeto S27 G-EZ2: rank 0's broadcast source in the checkpoint dtype (ninth patch)\n"
+    "            full_state = getattr(self, \"_yeto_full_state\", None)\n"
+    "            self._yeto_full_state = None\n"
+    "            if full_state is None:\n"
+    "                full_state = module.state_dict()\n"
+)
+RANK0_LOAD_TARGET = "verl/utils/fsdp_utils.py"
+RANK0_LOAD_ANCHOR = (
+    "    if dist.get_rank() == 0:\n"
+    "        model = model.to(device=get_device_id(), non_blocking=True)\n"
+)
+RANK0_LOAD_HOOK = (
+    "    # yeto S27 G-EZ2: a rank 0 built on meta (ninth patch) is materialized like the others\n"
+    "    if dist.get_rank() == 0 and not any(t.is_meta for t in [*model.parameters(), *model.buffers()]):\n"
+    "        model = model.to(device=get_device_id(), non_blocking=True)\n"
+)
+PIN_ANCHOR = "                offload_policy = CPUOffloadPolicy(pin_memory=True)\n"
+PIN_HOOK = (
+    "                # yeto S27 G-EZ2: YETO_VERL_OFFLOAD_PIN_MEMORY=0 keeps the offloaded state pageable\n"
+    "                offload_policy = CPUOffloadPolicy(\n"
+    "                    pin_memory=os.environ.get(\"YETO_VERL_OFFLOAD_PIN_MEMORY\", \"1\") != \"0\")\n"
+)
+RANK0_SOURCE = ((RANK0_SOURCE_TARGET, RANK0_SOURCE_ANCHOR, RANK0_SOURCE_HOOK, "replace"),
+                (RANK0_SOURCE_TARGET, RANK0_STATE_ANCHOR, RANK0_STATE_HOOK, "replace"),
+                (RANK0_LOAD_TARGET, RANK0_LOAD_ANCHOR, RANK0_LOAD_HOOK, "replace"),
+                (RANK0_SOURCE_TARGET, PIN_ANCHOR, PIN_HOOK, "replace"))
+
 # (target, anchor, hook, mode): "after" inserts the hook after the anchor,
 # "before" in front of it, "replace" substitutes it.
 READBACK = (TARGET, ANCHOR, HOOK, "after")
@@ -154,11 +307,45 @@ LORA_RECV = (RECV_TARGET, RECV_ANCHOR, RECV_HOOK, "replace")
 SEQ_IDX = ((SEQ_IDX_TARGET, SEQ_IDX_HELPER_ANCHOR, SEQ_IDX_HELPER, "before"),
            (SEQ_IDX_TARGET, SEQ_IDX_PACKED_ANCHOR, SEQ_IDX_PACKED_HOOK, "replace"),
            (SEQ_IDX_TARGET, SEQ_IDX_ENGINE_ANCHOR, SEQ_IDX_ENGINE_HOOK, "replace"))
+# S27 G-EQ3: with no mamba kernels (Ascend NPU, CPU) transformers' NemotronH torch path
+# sums the inter-chunk SSM states over the wrong axis, which puts the response log-probs
+# 0.44 nats per token away from any kernel-based sampler (G-ES measured both sides; the
+# fix is yeto.rl.nemotron_h_torch_fix, verified on 910B3: 0.4413 -> 0.0178). The engine
+# builds the model in every worker process, so the fix is applied there, right before.
+NEMOTRON_FIX_TARGET = "verl/workers/engine/fsdp/transformer_impl.py"
+NEMOTRON_FIX_ANCHOR = (
+    "    def _build_module(self):\n"
+    "        from verl.utils.model import get_hf_auto_model_class\n"
+)
+NEMOTRON_FIX_HOOK = (
+    "    def _build_module(self):\n"
+    "        # yeto S27 G-EQ3: fix transformers' NemotronH torch path before the model is built\n"
+    "        try:\n"
+    "            from yeto.rl import nemotron_h_torch_fix as _yeto_nh_fix\n"
+    "\n"
+    "            _yeto_nh_result = _yeto_nh_fix.apply()\n"
+    "            print(f'[yeto] nemotron_h_torch_fix: {_yeto_nh_result}', flush=True)\n"
+    "        except Exception as _yeto_nh_error:  # a build without yeto, or another model family\n"
+    "            print(f'[yeto] nemotron_h_torch_fix not applied: {_yeto_nh_error!r}', flush=True)\n"
+    "        # yeto S27 G-EQ4: this implementation has no recompute hook, so an Ascend node\n"
+    "        # installs one (64 GiB card; yeto.rl.nemotron_h_recompute decides by device family)\n"
+    "        try:\n"
+    "            from yeto.rl import nemotron_h_recompute as _yeto_nh_rc\n"
+    "\n"
+    "            _yeto_nh_rc_result = _yeto_nh_rc.apply()\n"
+    "            print(f'[yeto] nemotron_h_recompute: {_yeto_nh_rc_result}', flush=True)\n"
+    "        except Exception as _yeto_nh_rc_error:  # a build without yeto, or another family\n"
+    "            print(f'[yeto] nemotron_h_recompute not applied: {_yeto_nh_rc_error!r}', flush=True)\n"
+    "        from verl.utils.model import get_hf_auto_model_class\n"
+)
+NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")
+
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
-PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB), "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB)}
+PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
+            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
@@ -169,6 +356,16 @@ def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
     return text.replace(anchor, hook)
 
 
+def _applied(text: str, hook: str) -> bool:
+    """The hook is already in ``text``: verbatim, or -- for a hook that opens with its
+    own ``# yeto`` comment line -- that line is (a later patch may edit the rest of the
+    hook: the ninth patch extends the eighth's ``else`` branch, S27 G-EZ2)."""
+    if hook in text:
+        return True
+    first = hook.splitlines(keepends=True)[0] if hook else ""
+    return first.strip().startswith("# yeto") and first in text
+
+
 def apply(root: Path, profile: str = "fsdp") -> None:
     try:
         patches = PROFILES[profile]
@@ -177,7 +374,7 @@ def apply(root: Path, profile: str = "fsdp") -> None:
     for target, anchor, hook, mode in patches:
         path = root / target
         text = path.read_text()
-        if hook in text:
+        if _applied(text, hook):
             continue
         if text.count(anchor) != 1:
             raise SystemExit(f"patch_verl: anchor occurs {text.count(anchor)} times in {target}")

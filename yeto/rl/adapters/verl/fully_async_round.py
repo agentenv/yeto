@@ -60,7 +60,7 @@ DISCARD_MECHANISM = "yeto policy-age discard (verl fully_async queue)"
 # round is ``ppo_mini_batch_size * require_batches``.
 AGENT_LOOP_CONFIG_KEY = "actor_rollout_ref.rollout.agent.agent_loop_config_path="
 _SYNC_ONLY_PREFIXES = ("trainer.use_v1=", "trainer.v1.trainer_mode=", "trainer.n_gpus_per_node=",
-                       "data.train_batch_size=")
+                       "trainer.nnodes=", "data.train_batch_size=")
 
 # Overrides the island re-reads from the resolved config (initialisation assertions).
 FULLY_ASYNC_ASSERTED_KEYS = (
@@ -72,6 +72,7 @@ FULLY_ASYNC_ASSERTED_KEYS = (
     "async_training.use_dynamic_resource_scheduling",
     "rollout.n_gpus_per_node",
     "trainer.n_gpus_per_node",
+    "trainer.nnodes",
     "data.gen_batch_size",
     "data.train_batch_size",
     "actor_rollout_ref.hybrid_engine",
@@ -143,13 +144,47 @@ def total_rollout_steps(limit: int, *, groups_per_round: int, rounds: int) -> in
     return groups_per_round * (2 * rounds + limit + 1)
 
 
+def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None) -> tuple[int, int]:
+    """``(nodes, cards per node)`` of a buffer trainer island (S27 G-EZ2).
+
+    A buffer trainer has no rollout pool, so its trainer gets every card the
+    island's Ray reports (``cards``), over ``--actor-num-nodes`` nodes. Before
+    this, the fully_async overrides gave the trainer ``1 x 1`` card whatever the
+    island held (npu1: one WorkerDict on a 16-card, two-node island). Refused:
+    a card count the nodes do not divide, and a ``--actor-num-gpus-per-node``
+    that does not match it."""
+    nodes = int(nodes or 1)
+    if nodes < 1 or cards < nodes or cards % nodes:
+        raise VerlTranslationError(f"buffer trainer: {cards} cards do not split over {nodes} node(s)")
+    each = cards // nodes
+    if per_node is not None and int(per_node) != each:
+        raise VerlTranslationError(
+            f"buffer trainer: --actor-num-gpus-per-node {per_node} != {cards} cards / {nodes} node(s)")
+    return nodes, each
+
+
 def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, groups_per_round: int,
-                              rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1) -> list[str]:
+                              rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1,
+                              trainer_nodes: int = 1, rollouter: bool = True) -> list[str]:
     """Hydra overrides for ``fully_async_ppo_trainer.yaml`` (fork acad9875).
 
     One yeto round = one verl parameter version (prompt-level samples:
-    ``ppo_mini_batch_size = groups_per_round``, ``require_batches = 1``)."""
-    if rollout_gpus < 1 or trainer_gpus < 1:
+    ``ppo_mini_batch_size = groups_per_round``, ``require_batches = 1``).
+
+    ``trainer_gpus`` is per node and ``trainer_nodes`` the node count: verl's
+    trainer pool is ``[trainer.n_gpus_per_node] * trainer.nnodes``
+    (``separation/utils.create_resource_pool_manager``). A buffer trainer
+    passes its island's shape (:func:`buffer_trainer_shape`).
+
+    ``rollouter`` False (S27 G-FN): a buffer trainer island. It starts no rollouter and
+    no checkpoint engine (``buffer_trainer_runner``), so it asks for the always-present
+    ``naive`` weight transport instead of nccl. This is not cosmetic: every trainer
+    worker validates the configured backend while it builds its model, and the
+    fully_async yaml's own default is nccl, so leaving the key alone is not enough.
+    Runs fn-7 and fn-8 on npu1 died in every worker with ``Checkpoint engine nccl not
+    registered, registered backends: ['naive']`` -- on that build every real transport
+    failed to import (nccl and nixl want cupy, hccl and delta want zmq)."""
+    if rollout_gpus < 1 or trainer_gpus < 1 or trainer_nodes < 1:
         raise VerlTranslationError("fully_async needs at least one rollout GPU and one trainer GPU")
     async_keys = fully_async_overrides(limit, samples_per_round=groups_per_round,
                                        ppo_mini_batch_size=groups_per_round)
@@ -163,7 +198,8 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         f"rollout.n_gpus_per_node={rollout_gpus}",
         f"rollout.total_rollout_steps={total_rollout_steps(limit, groups_per_round=groups_per_round, rounds=rounds)}",
         f"trainer.n_gpus_per_node={trainer_gpus}",
-        "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        f"trainer.nnodes={trainer_nodes}",
+        "actor_rollout_ref.rollout.checkpoint_engine.backend=" + ("nccl" if rollouter else "naive"),
         # FullyAsyncTrainer/FullyAsyncRollouter assert not hybrid_engine
         # (fork acad9875, fully_async_trainer.py:76); the sync path never sets
         # this key, so without this override the config default True kills the
@@ -359,7 +395,7 @@ def execution_profile_for(spec: Any, limit: int, *, groups_per_round: int, sampl
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.policy_age import BOUNDED_STALENESS_CONTRACT
 
-    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg"}[sync]
+    protocol = {"none": "none", "strict": "strict-avg", "elastic": "strict-avg", "pool": "strict-avg"}[sync]
     return ExecutionProfile(
         name="verl-fully-async", execution_mode=FULLY_ASYNC_MODE, outer_protocol=protocol,
         algorithm_contract=BOUNDED_STALENESS_CONTRACT, max_policy_age=limit,

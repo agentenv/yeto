@@ -25,6 +25,20 @@ def test_parse_args_maps_backend_and_parallelism():
     assert a.seed == 0
 
 
+def test_the_gradient_nan_check_default_is_shared_with_the_verl_island():
+    """S27 G-FL: this learner has no hardware verification, so the flag is here only to
+    keep our two Megatron paths from disagreeing; the value comes from the neutral
+    module, not from a second hand-written default."""
+    from yeto.rl import megatron_grad_checks
+
+    base = ["--model", "org/model", "--data", "org/data"]
+    assert ml.parse_args(base).rl_no_grad_nan_check is False
+    assert ml.parse_args(base + ["--rl-no-grad-nan-check"]).rl_no_grad_nan_check is True
+    assert megatron_grad_checks.ddp_overrides() == {"check_for_nan_in_grad": True}
+    source = (Path(ml.__file__)).read_text()
+    assert "ddp_overrides(check_for_nan_in_grad=not getattr(args, \"rl_no_grad_nan_check\", False))" in source
+
+
 def test_parse_args_accepts_shared_initialization_seed():
     a = ml.parse_args(["--model", "org/model", "--data", "org/data", "--seed", "29"])
     assert a.seed == 29

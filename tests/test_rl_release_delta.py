@@ -297,13 +297,25 @@ def test_delta_flag_reaches_the_trainer_config_and_command():
     ({"rl_release_inline": True}, "staged releases"),
     ({"tuning": "lora"}, "full-weight releases"),
     ({"rl_rollout_quant_tier": 2}, "quant-tier"),
-    ({"rl_backend": "verl"}, "--rl-backend miles"),
+    # S27 G-EQ3: verl is allowed, but only for a full-parameter island
+    ({"rl_backend": "verl", "parameter_mode": "lora"}, "--parameter-mode full on a verl island"),
+    ({"rl_backend": "torchtitan"}, "--rl-backend miles or verl"),
 ])
 def test_delta_flag_refusals(kw, message):
     from yeto.rl.engine import sample_roles
 
     with pytest.raises(ValueError, match=message):
         sample_roles.check_launch(_trainer_args(**kw))
+
+
+def test_a_verl_full_parameter_trainer_takes_the_delta_flag():
+    """S27 G-EQ3: its export writes the base checkpoint's own files, so the first
+    delta against the base stays small (adapters/verl/hf_export)."""
+    from yeto.rl.engine import sample_roles
+
+    args = _trainer_args(rl_backend="verl", parameter_mode="full", rl_resume_store="/s")
+    sample_roles.check_launch(args)
+    assert sample_roles.resolve(args, groups_per_round=4).release_delta_full_every == 8
 
 
 def test_delta_flag_on_a_both_role_island_is_refused():

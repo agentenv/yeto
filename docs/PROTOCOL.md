@@ -266,6 +266,34 @@ may have skipped deltas; once inline again, the next delta applies on that
 anchor. `--inline-broadcast` restores the old behavior (each broadcast waits
 for every learner's queue; one slow link stalls every merge and PULL).
 
+The other bulk sends do not wait on one learner's link either (S27 G-FH):
+
+- Initial cut: a learner whose send queues cannot take a fragment of the
+  initial (or resumed) cut gets that fragment and the rest of the cut from its
+  forwarder, in order and exactly (version 0 is never replaced by a newer
+  version: an island outside a pool refuses any other initial version), then
+  the versions merged meanwhile. The rounds start at once; as before, a
+  learner answers PULLs once its initial cut is in.
+- Catch-up on a bf16-downlink session goes out on the forwarder as well
+  (before, always inline): each fragment is a FULL with the shared anchor, or
+  the exact params when the fragment has no anchor at that version.
+- Final cut: each learner's FINAL fragments and manifest go out on its own
+  task, after its forwarder (stopped at the end of the rounds) has handed over
+  the fragment it was sending, so a learner never has two senders and never
+  gets half a message. All learners get the same frozen cut. The scheduler
+  meanwhile takes acknowledgements, heartbeats and HELLOs; the acknowledgement
+  wait (`--final-ack-timeout-s`, or the final grace) starts once the cut is in
+  every learner's send queues, as it did when the scheduler sent them in turn.
+- A forwarder that has handed everything over leaves only once its learner's
+  send queues could take the largest broadcast (or are empty), so the next
+  broadcast does not spill again at once. A fragment with more chunks per
+  stream than a send queue holds (larger than streams x 512 MiB) never fits:
+  the syncer warns once per learner and fragment, and every broadcast of it
+  goes through the forwarder.
+
+`--inline-broadcast` restores the in-turn initial and final cuts too;
+`--inline-resend` keeps catch-ups inline on every session.
+
 With any membership option the fragment-round server starts its first round
 once the launch quorum (K, or `q_min` of a capacity quorum) is connected and
 initialized; without one it waits for all `--learners`.

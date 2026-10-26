@@ -362,29 +362,53 @@ def _pool_plan(learner_id, port, profile, *, rounds, fragments):
     return plan
 
 
-def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, max_rounds=4000):
+class _Fsdp2Harness:
+    """One FSDP2 island process's trainer (the fake of test_s27_verl_full_parameter_sync).
+    S27 G-FG: the catch-up case runs over any harness with this interface
+    (``tests/test_s27_verl_megatron_sync.py`` passes the Megatron one)."""
+
+    names = tuple(SHAPES)
+
+    def __init__(self):
+        self.model = _Model(seed=0)
+        self.island = _Island(self.model)
+        self.island.full_group = vfs.VerlFullParameterGroup(self.island)
+
+    def values(self) -> dict:
+        return self.model.values()
+
+    @staticmethod
+    def checkpoint_values() -> dict:
+        return _Model(seed=0).values()
+
+    def train(self, learner_id: int, round_id: int) -> None:
+        with torch.no_grad():
+            for name, parameter in self.model.named_parameters():
+                parameter.add_(_step(learner_id, round_id)[name])
+
+
+def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, max_rounds=4000,
+                  harness=_Fsdp2Harness):
     """One verl island process: train and sync until the final cut, or die
     (close its links, no LEAVE) after ``stop_after`` rounds. ``pace_s`` per
     local round: quorum 1 lets an island run far ahead of the syncer's steps."""
-    model = _Model(seed=0)
-    island = _Island(model)
-    island.full_group = vfs.VerlFullParameterGroup(island)
+    trainer = harness()
+    island = trainer.island
     sync, _policy_state, stream = vfs.build_full_parameter_sync(island, plan, backend_identity_sha256="c" * 64)
     driver = _Driver()
-    record = {"model": model, "events": driver.events, "stream": stream}
+    record = {"model": trainer, "events": driver.events, "stream": stream}
     try:
         state = sync.start(driver).state
         record["joined"] = sync.joined_running_pool
         record["versions_at_start"] = list(stream.fragment_versions)
+        now = trainer.values()
         record["anchors_equal_checkpoint"] = all(
-            torch.equal(model.values()[name], value) for name, value in _Model(seed=0).values().items())
+            torch.equal(now[name], value) for name, value in trainer.checkpoint_values().items())
         for round_id in range(max_rounds):
             if stop_after is not None and round_id == stop_after:
                 record["died"] = True
                 return
-            with torch.no_grad():
-                for name, parameter in model.named_parameters():
-                    parameter.add_(_step(learner_id, round_id)[name])
+            trainer.train(learner_id, round_id)
             ids = (f"l{learner_id}-p{id(record)}-r{round_id}",)
             batch_hash = hashlib.sha256(ids[0].encode()).hexdigest()
             policy_hash = state.policy_tensor_hash()
@@ -403,7 +427,7 @@ def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, ma
             if pace_s:
                 time.sleep(pace_s)
         sync.finish(driver)
-        record["values"] = model.values()
+        record["values"] = trainer.values()
         record["final_ack"] = [f for e, f in driver.events if e == "rl_full_parameter_final_ack"]
     except BaseException as error:  # noqa: BLE001 - reported by the test
         record["error"] = error
@@ -415,9 +439,20 @@ def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, ma
 @needs_cargo
 def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(syncer_binary, tmp_path,
                                                                                monkeypatch):
+    run_catch_up_case(syncer_binary, tmp_path, monkeypatch)
+
+
+def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Harness, layout=None,
+                      plan_fn=None):
+    """Island 1 dies after 3 rounds and a new process of it joins the running
+    pool (catch-up, no peer recovery) and finishes with island 0. ``harness``,
+    ``layout`` and ``plan_fn`` (S27 G-FG) give the island's trainer, its layout
+    and its pool plan; the defaults are the FSDP2 island's."""
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-parity-catch-up-key")
     monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
-    rounds, fragments = 12, len(_layout(matrix_merge="rda").fragments.fragments)
+    layout = layout or _layout(matrix_merge="rda")
+    plan_fn = plan_fn or _pool_plan
+    rounds, fragments = 12, len(layout.fragments.fragments)
     process, port, profile = _start_syncer(syncer_binary, tmp_path, fragments=fragments, rounds=rounds, extra=(
         "--rl-sync-full-parameter-rounds", "async", "--rl-sync-final-cut", "download",
         "--rl-sync-quorum", "1", "--rl-sync-island-lease-s", "3"))
@@ -464,14 +499,15 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
     monkeypatch.setattr(engine_stream, "SyncerClient", client_factory)
     results: dict = {}
     try:
-        plans = [_pool_plan(i, port, profile, rounds=rounds, fragments=fragments) for i in range(2)]
-        steady = threading.Thread(target=_train_rounds, args=(0, plans[0], results))
+        plans = [plan_fn(i, port, profile, rounds=rounds, fragments=fragments) for i in range(2)]
+        steady = threading.Thread(target=_train_rounds, args=(0, plans[0], results), kwargs={"harness": harness})
         steady.start()
-        first = threading.Thread(target=_train_rounds, args=(1, plans[1], results), kwargs={"stop_after": 3})
+        first = threading.Thread(target=_train_rounds, args=(1, plans[1], results),
+                                 kwargs={"stop_after": 3, "harness": harness})
         first.start()
         first.join(timeout=60)
         assert results[1][0].get("died") and "error" not in results[1][0], results[1][0].get("error")
-        again = threading.Thread(target=_train_rounds, args=(1, plans[1], results))
+        again = threading.Thread(target=_train_rounds, args=(1, plans[1], results), kwargs={"harness": harness})
         again.start()
         for thread in (steady, again):
             thread.join(timeout=120)
@@ -488,7 +524,7 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
     assert restarted["joined"] is True and max(restarted["versions_at_start"]) >= 1, restarted["versions_at_start"]
     assert restarted["anchors_equal_checkpoint"] is False
     assert restarted["final_ack"] == [{"acknowledged": True}] == results[0][0]["final_ack"]
-    for name in SHAPES:  # both downloaded the same final cut
+    for name in harness.names:  # both downloaded the same final cut
         assert torch.equal(restarted["values"][name], results[0][0]["values"][name]), name
     records = [json.loads(line) for line in (tmp_path / "tape.jsonl").read_text().splitlines() if line]
     island_1 = [r for r in records if r.get("island_id") == 1]

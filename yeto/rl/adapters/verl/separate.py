@@ -102,6 +102,33 @@ def pools_from_args(args: Any, total_gpus: int, *, what: str = "verl 分离岛")
         gpu_memory_utilization=float(getattr(args, "sglang_mem_fraction_static", None) or 0.8))
 
 
+def trainer_only_pools(args: Any, total_gpus: int, *, what: str = "verl 缓冲训练岛") -> SeparatePools:
+    """S27 G-FN: the pools of an island whose every card is a training card.
+
+    A buffer trainer island (``--rl-sample-role trainer``) holds no rollout engine, so
+    there is no rollout pool to place: ``trainer_nodes`` x ``trainer_gpus_per_node``
+    must cover every card the island-local Ray reports. The returned
+    :class:`SeparatePools` keeps the rollout fields at their defaults; the caller
+    records that there is no rollout pool (``megatron_engine.MegatronShape.rollout_pool``)
+    and never asks this object for them. ``--rollout-num-gpus`` is refused here: on this
+    role the launcher would be reserving cards nothing runs on."""
+    rollout_gpus = int(getattr(args, "rollout_num_gpus", None) or 0)
+    if rollout_gpus:
+        raise SystemExit(f"{what}：--rollout-num-gpus {rollout_gpus} 不接（这个角色没有 rollout 引擎，"
+                         "采样在采样岛上做）")
+    nodes = int(getattr(args, "actor_num_nodes", 1) or 1)
+    per_node = int(getattr(args, "actor_num_gpus_per_node", None) or getattr(args, "rl_island_gpus_per_node", None)
+                   or (total_gpus // nodes if nodes else total_gpus))
+    if nodes < 1 or per_node < 1:
+        raise SystemExit(f"{what}：--actor-num-nodes {nodes} 与每节点 {per_node} 卡都必须 >= 1")
+    if nodes * per_node != total_gpus:
+        raise SystemExit(f"{what}：训练 {nodes} x {per_node} = {nodes * per_node} 卡 != 岛内 Ray 的 "
+                         f"{total_gpus} 卡（这个角色的全部卡都是训练卡）")
+    return SeparatePools(
+        trainer_nodes=nodes, trainer_gpus_per_node=per_node,
+        gpu_memory_utilization=float(getattr(args, "sglang_mem_fraction_static", None) or 0.8))
+
+
 # Keys of ``config.build_overrides`` (the colocated FSDP2 island) that the separate
 # mode replaces: the trainer mode and the shape of the two pools.
 POOL_PREFIXES = (

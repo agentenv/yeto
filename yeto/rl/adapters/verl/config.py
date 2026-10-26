@@ -81,6 +81,36 @@ class VerlRunConfig:
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
+    # S27 G-EQ2 (npu1): keep the parameters and the optimizer state in host
+    # memory, the card holding only what a step computes with. Both default off,
+    # as before. param_offload is what lets a card smaller than the NVIDIA
+    # reference hold a large full-parameter island at all: without it verl puts
+    # the whole model on the card before FSDP2 shards it, and an 8x64 GiB
+    # Ascend node dies inside fully_shard for a 30B model (the sharded copy no
+    # longer fits next to the unsharded one). The parameters stay FP32, so the
+    # full-parameter boundary still reads masters (full_parameter.MASTER_DTYPE).
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    # FSDP2's own CPU offload (torch CPUOffloadPolicy). This is the key that
+    # actually offloads an fsdp2 island: verl reads param_offload /
+    # optimizer_offload only on the FSDP1 path, and forces both off when
+    # offload_policy is set (fork acad9875,
+    # workers/engine/fsdp/transformer_impl.py:459-463).
+    offload_policy: bool = False
+    # S27 G-EQ2: activation recomputation, when the model's implementation
+    # supports it (``island_entry.gradient_checkpointing_for``). The HF
+    # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
+    # FSDP2 engine dies on it right after building the model.
+    gradient_checkpointing: bool = True
+    # S27 G-EQ2: load the model and tokenizer with the checkpoint's own code
+    # (``--trust-remote-code``, the launcher's flag the Miles islands already
+    # take). Needed for an architecture whose support lives in the repository
+    # rather than in the installed transformers: the official Ascend verl
+    # image's transformers 5.3 has nemotron_h, but its NemotronHModel sets
+    # supports_gradient_checkpointing = False, while the checkpoint's own
+    # modeling_nemotron_h.py sets it True. Default off: an NVIDIA island is
+    # unchanged, and remote code is only run when the launch asks for it.
+    trust_remote_code: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -164,9 +194,11 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         f"data.seed={cfg.seed}",
+        f"data.trust_remote_code={cfg.trust_remote_code}",
+        f"actor_rollout_ref.model.trust_remote_code={cfg.trust_remote_code}",
         f"actor_rollout_ref.model.path={cfg.model_path}",
         "actor_rollout_ref.model.use_remove_padding=True",
-        "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        f"actor_rollout_ref.model.enable_gradient_checkpointing={cfg.gradient_checkpointing}",
         *(["actor_rollout_ref.model.lora_rank=0"] if full_parameter(cfg) else [
             f"actor_rollout_ref.model.lora_rank={cfg.lora_rank}",
             f"actor_rollout_ref.model.lora_alpha={cfg.lora_alpha}",
@@ -181,8 +213,9 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384",
         "actor_rollout_ref.actor.use_kl_loss=False",
         "actor_rollout_ref.actor.entropy_coeff=0",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=False",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload={cfg.param_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={cfg.optimizer_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.offload_policy={cfg.offload_policy}",
         f"actor_rollout_ref.actor.data_loader_seed={cfg.seed}",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
@@ -236,4 +269,7 @@ ASSERTED_KEYS = (
     "algorithm.rollout_correction.bypass_mode",
     "actor_rollout_ref.rollout.full_determinism",
     "actor_rollout_ref.actor.strategy",
+    # S27 G-EZ: a silently dropped offload_policy would only show up as an
+    # out-of-memory failure deep into the first step, so assert it resolved.
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
 )

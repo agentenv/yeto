@@ -111,6 +111,9 @@ def parse_args(argv=None):
     p.add_argument("--expert-parallel", type=int, default=1)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
+    # S27 G-FL: same default and same off-switch as the verl Megatron island
+    # (yeto.rl.megatron_grad_checks). NOT hardware-verified on this path.
+    p.add_argument("--rl-no-grad-nan-check", action="store_true")
     from ..wandb_logger import add_arguments as add_wandb_arguments
 
     add_wandb_arguments(p)
@@ -394,8 +397,16 @@ def main(argv=None):
     adapter_init = {n: p.detach().clone() for n, p in _adapter_params(model).items()}
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
+    # S27 G-FL: check every gradient bucket for non-finite values (on by default);
+    # without it a NaN gradient is scaled into every parameter by clip_grads instead
+    # of raising (yeto.rl.megatron_grad_checks). This learner has no hardware
+    # verification at all, so the setting is for consistency with the verl Megatron
+    # island and is itself unverified here.
+    from yeto.rl.megatron_grad_checks import ddp_overrides
+
     ddp_cfg = DistributedDataParallelConfig(
-        use_distributed_optimizer=True, overlap_grad_reduce=True, grad_reduce_in_fp32=True
+        use_distributed_optimizer=True, overlap_grad_reduce=True, grad_reduce_in_fp32=True,
+        **ddp_overrides(check_for_nan_in_grad=not getattr(args, "rl_no_grad_nan_check", False)),
     )
     cfg = getattr(model[0], "config", None) or getattr(getattr(model[0], "module", None), "config")
     cfg.finalize_model_grads_func = finalize_model_grads

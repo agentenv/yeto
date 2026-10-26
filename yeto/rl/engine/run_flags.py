@@ -522,6 +522,32 @@ _PLACEMENT = (
 )
 
 _RUNTIME = (
+    # S27 G-FL: pipeline parallelism in a full-parameter session is gated because the
+    # stage-1 trainer rank segfaults at start on a GPU island; this retries it anyway.
+    shared_flag("--rl-allow-pipeline-parallel-sync", action="store_true", default=False,
+                help="island with model parallelism in a full-parameter session: allow "
+                "--pipeline-parallel > 1, which is refused by default because the trainer rank of "
+                "the second pipeline stage segfaults while the island reads its parameter boundary "
+                "(run s27-fl-1). The boundary code itself is verified on CPU; pass this to retry "
+                "the shape on cards, for example after the upstream behaviour changes"),
+    # S27 G-FL: islands with model parallelism check every gradient bucket for
+    # non-finite values by default (the trainer's own bucket check); this turns it off.
+    shared_flag("--rl-no-grad-nan-check", action="store_true", default=False,
+                help="island with model parallelism (TP/PP/EP > 1): do NOT check each gradient "
+                "bucket for non-finite values before the data-parallel collective. The check is "
+                "on by default because without it a NaN gradient is scaled into every parameter "
+                "and written into the weights with no error; turning it off buys back one L2 norm "
+                "per bucket per step and restores that silent-corruption path"),
+    # S27 G-FL: the Ascend SFT recipe's plugin stack, opt-in and off by default
+    # (yeto.rl.ascend_plugin_stack). Only an island with model parallelism honours it.
+    shared_flag("--rl-ascend-plugin-stack", default=None, metavar="ISLAND_DIR",
+                help="Ascend island with model parallelism (TP/PP/EP > 1): install the SFT "
+                "recipe's plugin stack from ISLAND_DIR (the recipe's plugins directory ON THE "
+                "ISLAND) in every trainer worker, with the recipe's ASCEND_* switches. Off by "
+                "default. The clamp rewrite is never enabled (STACK_REWRITES=cumsum,squeeze, as "
+                "the recipe); the recipe's per-stage recompute policy and HCCL_BUFFSIZE stay "
+                "unset (they belong to its three-stage pipeline layout). The island log lists "
+                "every switch and every plugin it did or did not install"),
     shared_flag("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                 help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                 "persistent volume mount); default ~/yeto-rl/elastic-state"),
@@ -853,12 +879,15 @@ _SCHEDULING = (
              help="S27 G-EL: the syncer sends a rejoin catch-up and a recovery replay from its "
              "scheduler, waiting on the island's link for each fragment (the behavior before "
              "G-EL; a whole-model resend then stalls every round and lease). Default: a "
-             "forwarder task per island sends them while rounds, heartbeats and leases go on"),
+             "forwarder task per island sends them while rounds, heartbeats and leases go on "
+             "(S27 G-FH: on bf16-downlink sessions too)"),
     cli_flag("--rl-sync-inline-broadcast", action="store_true", default=False,
-             help="S27 G-FD: the syncer sends every merged fragment to each island from its "
-             "scheduler, waiting on each island's link (the behavior before G-FD; one slow "
-             "downlink then stalls every merge and PULL). Default: a broadcast that does not "
-             "fit in an island's send queues goes to that island's forwarder task"),
+             help="S27 G-FD/G-FH: the syncer sends every broadcast (the initial cut, each merged "
+             "fragment, the final cut) to each island from its scheduler, in turn, waiting on "
+             "each island's link (the behavior before G-FD and G-FH; one slow downlink then "
+             "stalls every merge, PULL and the other islands' cuts). Default: a broadcast that "
+             "does not fit in an island's send queues goes to that island's forwarder task, and "
+             "each island's final cut goes out on its own task"),
     cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
              help="membership: after the last step the syncer waits this long for the "
              "islands still connected to take the final cut, then finishes without the "

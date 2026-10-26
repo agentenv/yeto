@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
+from yeto.rl.engine.host_memory import host_memory_mode
 from yeto.rl.engine.offpolicy_source import OFFPOLICY_SOURCE_EVENT
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult, RolloutBatchHandle
 
@@ -83,6 +84,12 @@ class FullyAsyncIsland:
         self.start_rollouter = start_rollouter
         self.rollouter_started = False
         self.vmap = VersionMap()
+        # The map a round judges the queued groups' behavior versions with. On this
+        # path the queue reports verl's param versions, so it is the param <-> outer
+        # map itself; a buffer trainer replaces it with an outer <-> outer map
+        # (``buffer_ports.install_buffer_ports``): a buffered group's behavior version
+        # is a store release version, which is an outer version, never a param version.
+        self.consume_map = self.vmap
         self.hashes: dict[int, str] = {}       # outer version -> published policy hash
         self.published: tuple[int, str] | None = None
         self.last_metrics: dict = {}
@@ -181,7 +188,10 @@ class FullyAsyncRolloutPool:
                   "gen_seconds": time.monotonic() - started, "carry_over": carry,
                   "versions": {g.group_id: list(g.policy_versions or (rollout_id,)) for g in groups},
                   "rewards": [g.reward_mean for g in groups], "queue": queue,
-                  "version_map": isl.vmap.to_dict()}
+                  "version_map": isl.vmap.to_dict(),
+                  # a buffer trainer judges behavior versions with its own map (S27 G-EQ5)
+                  **({} if isl.consume_map is isl.vmap
+                     else {"behavior_map": isl.consume_map.to_dict()})}
         isl.append_jsonl(f"verl-fa-rollout-{isl.learner_id}.jsonl", record)
         isl.emit("rl_verl_fa_round", rollout_id=rollout_id, pulled=pulled, kept=len(groups),
                  discarded=len(collector.discarded), queue_size_after=queue.get("queue_size"))
@@ -201,10 +211,10 @@ class FullyAsyncRolloutPool:
         )
 
     def _collector(self, rollout_id: int) -> RoundCollector:
-        """The round's collector: ages in the island's policy versions (a relay
+        """The round's collector: ages in the island's behavior-version map (a relay
         trainer counts merged versions, ``relay_trainer.RelayRolloutPool``)."""
         isl = self.island
-        return RoundCollector(isl.vmap, rollout_id, isl.limit, isl.required)
+        return RoundCollector(isl.consume_map, rollout_id, isl.limit, isl.required)
 
     def _group_metadata(self, collector: RoundCollector, rollout_id: int):
         return group_metadata(collector, rollout_id, self.island.hashes)
@@ -243,7 +253,12 @@ class FullyAsyncTrainerGroup(CutPorts):
         from yeto.rl.engine.driver import TrainStepMetrics
 
         isl = self.island
+        memory_mode = host_memory_mode()
+        if memory_mode is not None:
+            self._host_memory("before_step", batch.rollout_id, release=False)
         out = isl.call("yeto_train_step")
+        if memory_mode is not None:
+            self._host_memory("after_step", batch.rollout_id, release=memory_mode == "trim")
         metrics = out.get("metrics") or {}
         isl.last_metrics = metrics
         isl.last_criteria = out.get("criteria") or {}
@@ -287,6 +302,27 @@ class FullyAsyncTrainerGroup(CutPorts):
                 input_batch_hash=receipt.input_batch_hash, trained_tokens=receipt.trained_tokens,
                 trajectory_ids=ids))
         return receipt
+
+    def _host_memory(self, phase: str, rollout_id: int, *, release: bool) -> None:
+        """Every worker's host memory around a step (``YETO_HOST_MEMORY``, S27
+        G-EZ3; :func:`.full_parameter.remote_host_memory`): one jsonl record and
+        one ``rl_host_memory`` event with the per-node summary. A failed read is
+        recorded and training goes on."""
+        from yeto.rl.engine.host_memory import process_memory, summarize_by_node
+
+        from .full_parameter import remote_host_memory
+
+        isl = self.island
+        started = time.monotonic()
+        try:
+            summary = summarize_by_node(list(isl.call_workers(remote_host_memory, release)))
+        except Exception as exc:  # noqa: BLE001 - a report, not a check
+            summary = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        record = {"phase": phase, "rollout_id": int(rollout_id), "release": bool(release),
+                  "driver": process_memory(), "seconds": round(time.monotonic() - started, 3), **summary}
+        isl.append_jsonl(f"verl-host-memory-{isl.learner_id}.jsonl", record)
+        isl.emit("rl_host_memory", phase=phase, rollout_id=int(rollout_id), release=bool(release),
+                 nodes=record.get("nodes"), error=record.get("error"), seconds=record["seconds"])
 
     def step_metrics(self):
         return self._metrics
