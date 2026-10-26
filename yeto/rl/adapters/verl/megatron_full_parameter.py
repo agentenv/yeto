@@ -64,6 +64,7 @@ def _rank() -> int:
 
 
 _TRACED = False
+_EXPORTS = 0
 
 
 def _trace(step: str) -> None:
@@ -184,6 +185,8 @@ def remote_megatron_export_flat(worker_dict, indices: Sequence[int], units: Sequ
 
     import torch
 
+    global _EXPORTS
+
     started = time.perf_counter()
     fragment = fp.FlatFragment(units, numel, reader=fp._is_reader())
     bridge, chunks, optimizer = _engine(worker_dict)
@@ -192,6 +195,15 @@ def remote_megatron_export_flat(worker_dict, indices: Sequence[int], units: Sequ
     with torch.no_grad():
         boundary.export_hf(bridge, chunks, optimizer, [int(i) for i in indices], sink)
     gather_s = time.perf_counter() - started - fragment.copy_s
+    _EXPORTS += 1
+    if _EXPORTS == 1 or _EXPORTS % 50 == 0:
+        # S27 G-FT: "export_hf was called" is a criterion of its own, and a
+        # publication that only records the base weights' identity reaches the
+        # tape looking the same as one that read them (run ft-1 took 3.6 ms over
+        # a 126.3 GB payload).  One line per worker says which happened.
+        print(f"[yeto-megatron-boundary] rank {_rank()} export {_EXPORTS}: {len(indices)} task(s), "
+              f"{sink.kept} kept, {sink.dropped} dropped, {fragment.copy_s:.2f} s copy, "
+              f"{gather_s:.2f} s gather", flush=True)
     return fragment.result({"gather_s": gather_s, "kept": sink.kept, "dropped": sink.dropped},
                            want_payload=want_payload, want_hash=want_hash, started=started)
 
