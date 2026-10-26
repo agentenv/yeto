@@ -879,12 +879,15 @@ _SCHEDULING = (
              help="S27 G-EL: the syncer sends a rejoin catch-up and a recovery replay from its "
              "scheduler, waiting on the island's link for each fragment (the behavior before "
              "G-EL; a whole-model resend then stalls every round and lease). Default: a "
-             "forwarder task per island sends them while rounds, heartbeats and leases go on"),
+             "forwarder task per island sends them while rounds, heartbeats and leases go on "
+             "(S27 G-FH: on bf16-downlink sessions too)"),
     cli_flag("--rl-sync-inline-broadcast", action="store_true", default=False,
-             help="S27 G-FD: the syncer sends every merged fragment to each island from its "
-             "scheduler, waiting on each island's link (the behavior before G-FD; one slow "
-             "downlink then stalls every merge and PULL). Default: a broadcast that does not "
-             "fit in an island's send queues goes to that island's forwarder task"),
+             help="S27 G-FD/G-FH: the syncer sends every broadcast (the initial cut, each merged "
+             "fragment, the final cut) to each island from its scheduler, in turn, waiting on "
+             "each island's link (the behavior before G-FD and G-FH; one slow downlink then "
+             "stalls every merge, PULL and the other islands' cuts). Default: a broadcast that "
+             "does not fit in an island's send queues goes to that island's forwarder task, and "
+             "each island's final cut goes out on its own task"),
     cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
              help="membership: after the last step the syncer waits this long for the "
              "islands still connected to take the final cut, then finishes without the "
