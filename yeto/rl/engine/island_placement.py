@@ -17,9 +17,13 @@ key                       run-wide flag (args dest)        values
 ``max-tokens-per-gpu``    ``--rl-max-tokens-per-gpu``      integer >= 1
 ========================  ===============================  =================
 
-The four parallel-shape keys need ``--rl-sync-layout shape-free``: only a
-shape-free full-parameter layout lets islands of different TP/EP/PP shapes
-share one syncer session (``yeto.rl.engine.shape_free_layout``).
+The four parallel-shape keys need ``--rl-sync-layout shape-free`` on a Miles
+run: only a shape-free full-parameter layout lets Miles islands of different
+TP/EP/PP shapes share one syncer session (``yeto.rl.engine.shape_free_layout``).
+A verl run does not need it (S28 G-MEG): a verl island's full-parameter layout
+is planned from the HF model's parameter shapes (``full_parameter_plan``), the
+same for every FSDP2 or Megatron shape, and a Megatron island checks at start
+that Bridge exports exactly those names (``HfTaskIndex.from_manifests``).
 
 Mixed placement (islands with different placements) is allowed only in an
 island pool (any island pool option, e.g. ``--rl-sync-island-lease-s``): a fixed
@@ -184,6 +188,14 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     return out
 
 
+def shape_free_by_construction(args: Any) -> bool:
+    """True when the run's full-parameter layout does not depend on an island's
+    parallel shape without ``--rl-sync-layout shape-free``: a verl run, whose
+    layout is the HF model's own parameter names and shapes (module doc)."""
+
+    return getattr(args, "rl_backend", None) == "verl"
+
+
 def check(args: Any, num_islands: int, *, island_scheduling: str) -> tuple[IslandPlacement, ...]:
     """Launch checks of per-island placement, before any cloud work.
 
@@ -195,7 +207,8 @@ def check(args: Any, num_islands: int, *, island_scheduling: str) -> tuple[Islan
 
     overrides, placements = _overrides_and_placements(args, num_islands)
     shaped = [p.island for p in placements if p.parallel]
-    if shaped and getattr(args, "rl_sync_layout", "shape-bound") != "shape-free":
+    if (shaped and getattr(args, "rl_sync_layout", "shape-bound") != "shape-free"
+            and not shape_free_by_construction(args)):
         raise ValueError(
             f"--rl-island-placement gives island(s) {shaped} their own parallel shape; islands of "
             "different shapes share a syncer session only with --rl-sync-layout shape-free"
