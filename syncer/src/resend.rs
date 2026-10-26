@@ -130,6 +130,15 @@ impl Pending {
         Some((p, version, values))
     }
 
+    /// S27 G-FH: version `version` of fragment `p` was handed over outside
+    /// this map (an initial-cut frame the forwarder sent first): an older or
+    /// equal offer is then ignored, as for a popped entry.
+    pub fn mark_sent(&mut self, p: usize, version: u64) {
+        if let Some(sent) = self.sent.get_mut(p) {
+            *sent = Some(sent.map_or(version, |sent| sent.max(version)));
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

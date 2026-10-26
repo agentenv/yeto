@@ -237,15 +237,18 @@ struct Args {
     recovery_donor_timeout_s: u64,
     /// Send a rejoin catch-up and a recovery replay from the scheduler
     /// itself, waiting for each fragment on the learner's link (the behavior
-    /// before S27 G-EL). Default: a forwarder task per learner sends them
-    /// while rounds, heartbeats and leases are served.
+    /// before S27 G-EL; before S27 G-FH bf16-downlink sessions always did).
+    /// Default: a forwarder task per learner sends them while rounds,
+    /// heartbeats and leases are served.
     #[arg(long, default_value_t = false)]
     inline_resend: bool,
-    /// Send every merged fragment to each learner from the scheduler itself,
-    /// waiting on a slow learner's link (the behavior before S27 G-FD).
-    /// Default: a learner whose send queues cannot take the broadcast now
-    /// gets it, and later versions, from a forwarder task, while the other
-    /// learners' rounds and PULLs go on.
+    /// Send every broadcast (the initial cut, each merged fragment, the
+    /// final cut) to each learner from the scheduler itself, in turn,
+    /// waiting on a slow learner's link (the behavior before S27 G-FD and
+    /// G-FH). Default: a learner whose send queues cannot take a broadcast
+    /// now gets it, and later versions, from a forwarder task, and each
+    /// learner's final cut goes out on its own task, while the other
+    /// learners' rounds, PULLs and acknowledgements go on.
     #[arg(long, default_value_t = false)]
     inline_broadcast: bool,
     /// Dynamic membership: after total_steps wait this many seconds for the
