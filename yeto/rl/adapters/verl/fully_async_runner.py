@@ -96,7 +96,11 @@ class _YetoTrainerMixin:
         self._collect_metrics_from_samples(batch, self.metrics)
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         self._yeto_batch = batch
-        return {"samples": len(kept), "queue_size": int(await self.message_queue_client.get_queue_size())}
+        return {"samples": len(kept), "queue_size": await self._yeto_queue_size()}
+
+    async def _yeto_queue_size(self):
+        """Samples left in verl's MessageQueue (a buffer trainer has none: None)."""
+        return int(await self.message_queue_client.get_queue_size())
 
     def _yeto_criteria(self, batch) -> dict:
         from yeto.rl.engine import mismatch_criteria
@@ -196,7 +200,11 @@ _TaskRunnerBase = getattr(fa_main.FullyAsyncTaskRunner, "__ray_actor_class__", f
 
 class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     """verl's component set-up (trainer, rollouter, MessageQueue, initial weight
-    sync); then the yeto driver instead of ``_run_training_loop``."""
+    sync); then the yeto driver instead of ``_run_training_loop``.
+
+    ``trainer_actor``: the Ray actor class :meth:`_create_trainer` builds."""
+
+    trainer_actor = YetoFullyAsyncTrainer
 
     def run(self, config, plan: dict):
         from yeto.island_credential_guard import check_island_credentials
@@ -240,7 +248,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
 
     def _create_trainer(self, config) -> None:
         """verl's ``_create_trainer`` (fork acad9875, fully_async_main.py:138), building
-        :data:`YetoFullyAsyncTrainer`.  Setting ``fa_main.FullyAsyncTrainer`` did not
+        :attr:`trainer_actor`.  Setting ``fa_main.FullyAsyncTrainer`` did not
         reach verl's method inside the Ray actor (s19-verl64b-async7-20261010a: the
         trainer was verl's own class, "no attribute yeto_configure"), so the method is
         overridden here instead of relying on that module global."""
@@ -250,7 +258,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         print("[ASYNC MAIN] Starting create trainer (yeto)...")
         mapping = {role: cls for role, cls in self.components["role_worker_mapping"].items()
                    if role != Role.Rollout}
-        trainer = YetoFullyAsyncTrainer.remote(
+        trainer = self.trainer_actor.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=mapping,
@@ -261,4 +269,4 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         trainer.yeto_configure  # noqa: B018 - fail fast (AttributeError) if this is not our class
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
-        print("[ASYNC MAIN] YetoFullyAsyncTrainer created and initialized successfully")
+        print("[ASYNC MAIN] yeto trainer actor created and initialized successfully")

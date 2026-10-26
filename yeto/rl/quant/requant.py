@@ -203,6 +203,11 @@ class CheckpointLayout:
 
     @classmethod
     def load(cls, template_dir: Path) -> "CheckpointLayout":
+        """The layout of a template directory (``layout.json``) or, when it has
+        none, of a reference checkpoint itself (index + shard headers; stage 1
+        passes the round-0 MXFP4 export as the template)."""
+        if not (Path(template_dir) / LAYOUT_FILE).is_file() and (Path(template_dir) / INDEX_FILE).is_file():
+            return cls.from_checkpoint(Path(template_dir))
         raw = json.loads((Path(template_dir) / LAYOUT_FILE).read_text())
         if raw.get("schema") != LAYOUT_SCHEMA:
             raise LayoutError(f"{template_dir}: unknown layout schema {raw.get('schema')!r}")
@@ -377,14 +382,24 @@ class _SourceReader:
         self._open.clear()
 
 
+_COMPOSITE_PREFIX, _TEXT_PREFIX = "model.language_model.", "model."
+
+
 def requantize_checkpoint(
     source_dir: Path,
     template_dir: Path,
     out_dir: Path,
     smoothing: AwqSmoothing,
     shards: Iterable[str] | None = None,
+    frozen: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Write the target checkpoint (or the given output shards of it) into ``out_dir``.
+
+    ``frozen``: ``(base_dir, pattern)``. A layout tensor that the source lacks and
+    whose source name matches the regular expression ``pattern`` is read from the
+    BF16 checkpoint ``base_dir`` (weights the trainer does not train and does not
+    export, e.g. the vision tower of a text-only Miles run). Every other missing
+    tensor still fails; ``stats["frozen_from_base"]`` counts the filled ones.
 
     ``template_dir`` holds ``layout.json`` and the metadata files
     (:meth:`CheckpointLayout.save_template`). Without ``shards`` the whole
@@ -398,6 +413,21 @@ def requantize_checkpoint(
     source = _SourceReader(source_dir)
     expected = layout.source_names()
     missing, extra = expected - set(source.weight_map), set(source.weight_map) - expected
+    # Miles' raw glm5_next export names the text model "model.layers..."; the HF
+    # composite checkpoint (and so the layout) has "model.language_model.layers..."
+    # (Modal run-14). Only an exact one-to-one prefix match is taken as the same tensor.
+    alias = {n: n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) for n in missing
+             if n.startswith(_COMPOSITE_PREFIX) and n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) in extra}
+    missing, extra = missing - set(alias), extra - set(alias.values())
+    base, filled = None, set()
+    if frozen is not None and missing:
+        matcher = re.compile(frozen[1])
+        filled = {n for n in missing if matcher.search(n)}
+        if filled:
+            base = _SourceReader(Path(frozen[0]))
+            if absent := filled - set(base.weight_map):
+                raise LayoutError(f"frozen base {frozen[0]} lacks {len(absent)} tensors, e.g. {sorted(absent)[:3]}")
+            missing = missing - filled
     if missing or extra:
         raise LayoutError(
             f"source tensors differ from the target layout: {len(missing)} missing (e.g. {sorted(missing)[:3]}), "
@@ -410,7 +440,12 @@ def requantize_checkpoint(
     quantized = set(layout.quantized_weights())
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats = {"shards": 0, "tensors": 0, "quantized": 0}
+    stats = {"shards": 0, "tensors": 0, "quantized": 0, "frozen_from_base": len(filled),
+             "renamed_from_text_prefix": len(alias)}
+
+    def read(name: str) -> torch.Tensor:
+        return base.get(name) if name in filled else source.get(alias.get(name, name))
+
     try:
         for shard in selected:
             produced: dict[str, torch.Tensor] = {}
@@ -419,7 +454,7 @@ def requantize_checkpoint(
             for name in all_shards[shard]:
                 if name not in produced:
                     src = layout.source_of(name)
-                    produced.update(transform_tensor(src, source.get(src), layout, smoothing))
+                    produced.update(transform_tensor(src, read(src), layout, smoothing))
             tensors = {n: produced[n] for n in all_shards[shard]}
             write_output_shard(out_dir, shard, tensors, layout)
             stats["shards"] += 1
@@ -427,6 +462,8 @@ def requantize_checkpoint(
             stats["tensors"] += len(tensors)
     finally:
         source.close()
+        if base is not None:
+            base.close()
     if shards is None:
         finalize_checkpoint(template_dir, out_dir)
     return stats

@@ -925,7 +925,9 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
 
     sig = signal_mod or _signal
     if not _is_droppable(env):
-        if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR"):
+        # in-flight save (4.1) and sampler islands (S25 C1, the launcher sets the marker
+        # path) both turn the reclaim signal into the marker file
+        if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR") or env.get("YETO_SPOT_RECLAIM_MARKER"):
             return _run_forwarding_to_learner(cmd, env, popen=popen, sig=sig)
         return subprocess.call(cmd, env=env) if popen is subprocess.Popen else popen(cmd, env=env).wait()
     killpg = killpg or os.killpg

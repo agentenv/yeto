@@ -262,7 +262,7 @@ def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
             result = await super().get(rollout_id)
             nonzero = counts[rollout_id]  # computed during reward post-processing
             hook.record_round_metadata(self.args, self.kept, sink=self.sink,
-                                       nonzero_advantages=nonzero)
+                                       nonzero_advantages=nonzero, buffer_stale_groups=nonzero % 5)
             return result
 
     kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
@@ -278,7 +278,9 @@ def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
     seen = {}
     for rid in (3, 4, 5):
         current["v"] = next(versions)
-        seen[rid] = p.generate(rid).nonzero_advantages
+        batch = p.generate(rid)
+        seen[rid] = batch.nonzero_advantages
+        assert batch.buffer_stale_groups == counts[rid] % 5
     assert seen == counts
 
 

@@ -28,6 +28,11 @@ Environment of :func:`recorder_from_env`:
   YETO_RECORDS_PROXY_HOST         bind address (default 127.0.0.1)
   YETO_RECORDS_PROXY_PORT         bind port (default 0: a free port)
   YETO_RECORDS_PROXY_PUBLIC_HOST  host the sandbox dials (default: the bind address)
+  YETO_RECORDS_PROXY_PUBLIC_BASE  full URL the sandbox dials instead (a tunnel, e.g.
+                                  ``https://<id>.modal.host``); overrides PUBLIC_HOST and the port
+  YETO_RECORDS_PROXY_SECRET_FILE  file holding a path secret: the proxy is served only under
+                                  ``/k/<secret>/`` (a public tunnel never exposes the
+                                  unauthenticated root); the secret is never logged
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -47,6 +53,9 @@ PROXY_ENV = "YETO_RECORDS_PROXY"
 HOST_ENV = "YETO_RECORDS_PROXY_HOST"
 PORT_ENV = "YETO_RECORDS_PROXY_PORT"
 PUBLIC_HOST_ENV = "YETO_RECORDS_PROXY_PUBLIC_HOST"
+PUBLIC_BASE_ENV = "YETO_RECORDS_PROXY_PUBLIC_BASE"
+SECRET_FILE_ENV = "YETO_RECORDS_PROXY_SECRET_FILE"
+MIN_SECRET_CHARS = 24
 
 # verl sampling keys -> SamplingParams fields; other keys (``logprobs``) do not change sampling.
 CHECKED_SAMPLING = ("temperature", "top_p", "top_k", "repetition_penalty")
@@ -74,7 +83,9 @@ def turns_from_records(records: Mapping[str, Any]) -> list[TokenTurn]:
                 turns.append(TokenTurn(prompt_ids=tuple(ids[:cursor]), completion_ids=completion,
                                        completion_logprobs=tuple(float(x) for x in turn["logprobs"]),
                                        policy_version=turn.get("policy_version"),
-                                       provenance=turn.get("provenance")))
+                                       provenance=turn.get("provenance"),
+                                       finish_reason=turn.get("finish_reason"),
+                                       policy_error=turn.get("parse_error")))
                 cursor, pending_stop = end, len(turn.get("stop_added") or ())
             if cursor + pending_stop != len(ids):
                 raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
@@ -86,11 +97,16 @@ class ProxyTokenRecorder:
     """:class:`~yeto.rl.agentic.TokenRecorder` over one in-process :class:`RecordsProxy` (module doc)."""
 
     def __init__(self, proxy: RecordsProxy, *, host: str = "127.0.0.1", port: int = 0,
-                 public_host: str | None = None) -> None:
+                 public_host: str | None = None, public_base: str | None = None,
+                 path_secret: str | None = None) -> None:
+        if path_secret is not None and len(path_secret) < MIN_SECRET_CHARS:
+            raise HarnessConfigError(f"the path secret must have at least {MIN_SECRET_CHARS} characters")
         self.proxy = proxy
         self.host = host
         self.port = int(port)
         self.public_host = public_host or host
+        self.public_base = public_base.rstrip("/") if public_base else None
+        self._prefix = f"/k/{path_secret}" if path_secret else ""
         self._signed = sampling_params(proxy.gateway.config.signed_sampling)
         self._runner: Any = None
         self._base_url: str | None = None
@@ -102,13 +118,19 @@ class ProxyTokenRecorder:
             if self._base_url is None:
                 from aiohttp import web
 
-                runner = web.AppRunner(self.proxy.app())
+                app = self.proxy.app()
+                if self._prefix:
+                    outer = web.Application()
+                    outer.add_subapp(f"{self._prefix}/", app)
+                    app = outer
+                runner = web.AppRunner(app)
                 await runner.setup()
                 site = web.TCPSite(runner, self.host, self.port)
                 await site.start()
                 port = runner.addresses[0][1]
                 self._runner = runner
-                self._base_url = f"http://{self.public_host}:{port}"
+                base = self.public_base or f"http://{self.public_host}:{port}"
+                self._base_url = f"{base}{self._prefix}"
             return self._base_url
 
     def check_sampling(self, sampling: Mapping[str, Any]) -> None:
@@ -159,5 +181,8 @@ def recorder_from_env() -> ProxyTokenRecorder:
     if not isinstance(proxy, RecordsProxy):
         raise HarnessConfigError(f"{spec} returned {type(proxy).__name__}, not a RecordsProxy")
     host = os.environ.get(HOST_ENV, "127.0.0.1")
+    secret_file = os.environ.get(SECRET_FILE_ENV, "").strip()
+    secret = Path(secret_file).read_text().strip() if secret_file else None
     return ProxyTokenRecorder(proxy, host=host, port=int(os.environ.get(PORT_ENV, "0")),
-                              public_host=os.environ.get(PUBLIC_HOST_ENV) or host)
+                              public_host=os.environ.get(PUBLIC_HOST_ENV) or host,
+                              public_base=os.environ.get(PUBLIC_BASE_ENV) or None, path_secret=secret)

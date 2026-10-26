@@ -103,6 +103,9 @@ class RolloutBatchHandle:
     # (rl-algo-seq-and-adv R2); None = not reported. Read by per-algorithm
     # gradient expectations (``gradient_expectation(batch, metrics)``).
     nonzero_advantages: int | None = None
+    # Groups a sample-buffer reader passed over this round as older than
+    # max_policy_age (consumed, never trained); None = not a buffer reader.
+    buffer_stale_groups: int | None = None
     # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None

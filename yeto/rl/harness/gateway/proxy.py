@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from contextvars import ContextVar
 from typing import Any
 
 from yeto.rl.compaction import CompactionConfig
@@ -27,18 +28,26 @@ from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError
 
 from .core import AdmissionClosed, Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid
 from .records import RecordingBackend
-from .translate import UnsupportedShape
+from .translate import OMITTED_TOOL_TYPES, UnsupportedShape
+
+# The trajectory whose request is being served.  Engine calls run in a thread
+# started by ``asyncio.to_thread``, which copies this context: an engine that
+# owns no version of its own (verl's rollout) can tag what it saw per trajectory.
+CURRENT_TRAJECTORY: ContextVar[str | None] = ContextVar("records_proxy_trajectory", default=None)
 
 Message = dict[str, Any]
 
 
 def chat_tools(entry: str, body: dict[str, Any]) -> list[Message]:
-    """The request's tool schemas in Chat form (Responses tools are flat)."""
+    """The request's tool schemas in Chat form (Responses tools are flat).
+    Types in :data:`OMITTED_TOOL_TYPES` are left out of the prompt."""
     tools = body.get("tools") or []
     if entry != "responses":
         return list(tools)
     out = []
     for tool in tools:
+        if isinstance(tool, dict) and tool.get("type") in OMITTED_TOOL_TYPES:
+            continue
         if not isinstance(tool, dict) or tool.get("type") != "function":
             raise UnsupportedShape(f"unsupported tool {tool!r}")
         function = {k: tool[k] for k in ("name", "description", "parameters") if k in tool}
@@ -65,7 +74,11 @@ class RecordsProxy:
 
     async def handle(self, entry: str, body: dict[str, Any], *, trajectory_id: str) -> dict[str, Any]:
         self.backend.declare_tools(trajectory_id, chat_tools(entry, body))
-        return await self.gateway.handle(entry, body, trajectory_id=trajectory_id)
+        token = CURRENT_TRAJECTORY.set(trajectory_id)
+        try:
+            return await self.gateway.handle(entry, body, trajectory_id=trajectory_id)
+        finally:
+            CURRENT_TRAJECTORY.reset(token)
 
     def records(self, trajectory_id: str) -> dict[str, Any]:
         out = self.backend.records(trajectory_id)

@@ -179,6 +179,46 @@ class Expanded:
         }
 
 
+# Where the run store lives: Alibaba OSS (stage 1 on PPU), or a Modal Volume
+# mounted at the store path in every container (the Modal rehearsal, S25 T-G1),
+# reached through the yeto store hook (resume.STORE_IMPL_ENV).
+STORE_BACKENDS = {"oss": None, "modal-volume": "yeto.cloud.modal_ckpt_store:store_from_env"}
+
+
+# GRPO + token-level TIS, execution.max_policy_staleness 2 (relative to the yeto workdir).
+DEFAULT_ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"
+
+
+def expected_algorithm_sha256(island_argv: Sequence[str]) -> str:
+    """The AlgorithmSpec hash the island computes from this argv (the launcher's
+    ``resolve_ports_algorithm(args).sha256()``). The spec path is resolved against
+    the yeto tree, where the island runs."""
+    from yeto.launch import REPO_ROOT  # noqa: PLC0415
+    from yeto.rl.adapters.miles.island_entry import parse_args  # noqa: PLC0415
+    from yeto.rl.engine.algorithm import resolve_ports_algorithm  # noqa: PLC0415
+
+    argv = list(island_argv[3:])
+    i = argv.index("--rl-algorithm-spec") + 1
+    if not Path(argv[i]).is_absolute():
+        argv[i] = str(Path(REPO_ROOT) / argv[i])
+    return resolve_ports_algorithm(parse_args(argv)).sha256()
+
+
+def store_env(plan: Stage1Plan) -> dict[str, str]:
+    """Environment every node needs for the store backend (none for OSS here: the
+    nodes' ossutil/OSS configuration is set up on the node, runbook S4)."""
+    backend = str(plan.doc.get("store_backend") or "oss")
+    if STORE_BACKENDS.get(backend) is None:
+        return {}
+    from yeto.cloud.modal_ckpt_store import MODAL_VOLUME_ENV  # noqa: PLC0415
+    from yeto.rl.engine.resume import STORE_IMPL_ENV  # noqa: PLC0415
+
+    volume = str(plan.doc.get("store_volume") or "")
+    if not volume:
+        raise Stage1Error("plan: store_backend modal-volume needs store_volume (the Volume name)")
+    return {STORE_IMPL_ENV: STORE_BACKENDS[backend], MODAL_VOLUME_ENV: volume}
+
+
 def run_store(plan: Stage1Plan) -> str:
     """The run directory on the store: ``<store>/<run_id>``."""
     return f"{str(_get(plan.doc, 'store', 'plan')).rstrip('/')}/{plan.run_id}"
@@ -236,12 +276,13 @@ def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: 
     if hf_config is not None:
         hf = shape_from_hf_config(json.loads(Path(hf_config).read_text()))
         shape = dataclasses.replace(hf, params=params, expert_params=experts,
-                                    num_experts=hf.num_experts or glm5_next.NUM_EXPERTS)
+                                    num_experts=hf.num_experts or int(model.get("num_experts", glm5_next.NUM_EXPERTS)))
     else:
         shape = ModelShape(params=params, largest_layer_params=params // int(model["num_layers"]),
                            num_layers=int(model["num_layers"]), hidden_size=glm5_next.HIDDEN_SIZE,
                            vocab_size=glm5_next.VOCAB_SIZE, expert_params=experts,
-                           num_experts=glm5_next.NUM_EXPERTS, source="stage-1 plan + glm5_next recipe")
+                           num_experts=int(model.get("num_experts", glm5_next.NUM_EXPERTS)),
+                           source="stage-1 plan + glm5_next recipe")
     node = trainers[0]
     base = TrainPlan(framework="megatron", cards=sum(n.cards_per_node for n in trainers),
                      cards_per_node=node.cards_per_node, hbm_gib=node.hbm_gib,
@@ -319,6 +360,7 @@ def _sampler_engine(plan: Stage1Plan, node: Node):
     extra = ["--moe-runner-backend", str(s["moe_runner_backend"])]
     if s.get("hierarchical_cache"):
         extra.append("--enable-hierarchical-cache")
+    extra += [str(a) for a in s.get("extra_args") or ()]  # further engine flags of the plan
     config = ServerConfig(
         base_dir=Path(plan.section("model")["sampler_initial"]["local_dir"]),
         card_model=node.card, device_family=node.device_family,
@@ -326,9 +368,12 @@ def _sampler_engine(plan: Stage1Plan, node: Node):
         quant_scheme=str(q["scheme"]), topology=str(s["topology"]),
         max_model_len=int(s["max_model_len"]), host="0.0.0.0", port=int(s["port"]),
         extra_args=tuple(extra), expected_format=str(q["format"]),
-        in_place_reload=bool(s.get("in_place_reload")))
+        in_place_reload=bool(s.get("in_place_reload")), python=str(s.get("python") or "python"),
+        extra_env={str(k): str(v) for k, v in (s.get("extra_env") or {}).items()})
     options = SGLangOptions(tp=int(s["tp"]), nextn=bool(s.get("nextn")),
-                            renames_weight_packed=bool(s.get("renames_weight_packed")))
+                            renames_weight_packed=bool(s.get("renames_weight_packed")),
+                            load_report_dir=(f"{state_dir_of(plan)}/sampler-{node.name}/load-report"
+                                             if s.get("load_report") else None))
     return SGLangServerEngine(config, options)
 
 
@@ -378,20 +423,26 @@ class _ParseError(Exception):
 
 
 def _check_island_argv(argv: Sequence[str]) -> str | None:
-    """Parse the Miles island argv with the island's own parser."""
-    from yeto.rl.adapters.miles.island_entry import build_parser  # noqa: PLC0415
+    """Parse the Miles island argv with the island's own ``parse_args``: the parser
+    plus its combination checks (e.g. the ports placement rules; Modal run-1 failed
+    on one that the bare parser accepted)."""
+    import argparse  # noqa: PLC0415
+    from unittest import mock  # noqa: PLC0415
 
-    parser = build_parser()
+    from yeto.rl.adapters.miles.island_entry import build_parser, parse_args  # noqa: PLC0415
 
-    def fail(message: str) -> None:
+    def fail(_parser: Any, message: str) -> None:
         raise _ParseError(message)
 
-    parser.error = fail  # type: ignore[method-assign] - no usage dump, no exit
-    try:
-        _, unknown = parser.parse_known_args(list(argv[3:]))
-    except _ParseError as exc:
-        return f"Miles island argv does not parse: {exc}"
-    return f"Miles island argv: flags unknown to island_entry: {unknown}" if unknown else None
+    with mock.patch.object(argparse.ArgumentParser, "error", fail):  # no usage dump, no exit
+        try:
+            _, unknown = build_parser().parse_known_args(list(argv[3:]))
+            if unknown:
+                return f"Miles island argv: flags unknown to island_entry: {unknown}"
+            parse_args(list(argv[3:]))
+        except _ParseError as exc:
+            return f"Miles island argv does not parse: {exc}"
+    return None
 
 
 def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded:
@@ -415,15 +466,20 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     miles = _section(trainer_cfg, "miles")
     layout = megatron_layout(miles, cards, per_node)
     common_env = {DEVICE_FAMILY_ENV: trainers[0].device_family, "YETO_RUN_ID": plan.run_id,
-                  "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1"}
-    trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1"}
+                  "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1", **store_env(plan)}
+    trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1",
+                   # trainer.miles.extra_env: image-specific settings (e.g. PYTHONPATH)
+                   **{str(k): str(v) for k, v in (_section(trainer_cfg, "miles").get("extra_env") or {}).items()}}
     model_dir = str(model["bf16_source"]["local_dir"])
     state_dir = state_dir_of(plan)
     impl = str(miles["transformer_impl"])
     offload = float(miles.get("optimizer_offload_fraction") or 0.0)
     island_argv = ["python3", "-m", "yeto.rl.adapters.miles.island_entry",
                    "--model", model_dir, "--model-revision", str(model["bf16_source"]["revision"]),
-                   "--data", str(task["data"]), "--data-revision", str(task["data_revision"]),
+                   # task.data_local: the dataset staged on the node (the nodes run with HF_HUB_OFFLINE=1,
+                   # where a Hub id does not load; Modal run-2); a local path takes no revision
+                   *(("--data", str(task["data_local"])) if task.get("data_local") else
+                     ("--data", str(task["data"]), "--data-revision", str(task["data_revision"]))),
                    "--reward-function", str(task["reward"]),
                    "--samples-per-group", str(int(task["n_samples_per_prompt"])),
                    "--rollout-max-response-len", str(int(sampling["max_tokens"])),
@@ -435,25 +491,52 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--tensor-parallel", str(layout["tp"]), "--pipeline-parallel", str(layout["pp"]),
                    "--expert-parallel", str(layout["ep"]),
                    "--miles-root", str(miles["workdir"]),
+                   *(("--megatron-ref-load", str(model["bf16_source"]["torch_dist"]))
+                     if model["bf16_source"].get("torch_dist") else ()),
+                   *(("--miles-commit", str(miles["commit"])) if len(str(miles["commit"])) == 40 else ()),
                    "--trust-remote-code",
                    "--learner-id", "0", "--num-learners", "1", "--rl-single-island-no-sync",
+                   # samples come from the buffer, one round ahead at most (sampler max_backlog_groups);
+                   # a policy age >= 1 needs an algorithm spec that tolerates it (TIS correction)
+                   "--rl-max-policy-age", "1",
+                   "--rl-algorithm-spec", str(miles.get("algorithm_spec") or DEFAULT_ALGORITHM_SPEC),
                    "--global-rounds", str(int(plan.doc["rounds"])),
                    "--groups-per-round", str(int(task["rollout_batch_size"])),
                    "--over-sampling-batch-size", str(int(task["rollout_batch_size"])),
                    "--optimizer-steps", "1",
+                   # trainer-only island: no --rollout-num-gpus (the ports check refuses any value,
+                   # 0 included, without --rl-placement fixed-partition; Modal run-1)
                    "--actor-num-nodes", str(len(trainers)), "--actor-num-gpus-per-node", str(per_node),
-                   "--rollout-num-gpus", "0",
                    "--rl-activation-recompute", "--rl-max-tokens-per-gpu", str(int(miles["max_tokens_per_gpu"])),
                    *(("--rl-optimizer-offload-fraction", repr(offload)) if offload > 0 else ()),
                    "--completed-groups-path", f"{state_dir}/island-checkpoint.pt",
                    "--event-tape", f"{state_dir}/events.jsonl", "--audit-dir", f"{state_dir}/audit",
                    *_provenance_args(str(task["reward"]))]
+    # The launcher pins the island's AlgorithmSpec hash (--rl-expected-algorithm-sha256);
+    # the trainer-only island refuses to start without it (Modal run-5).
+    island_argv += ["--rl-expected-algorithm-sha256", expected_algorithm_sha256(island_argv)]
     try:
-        model_args = glm5_next.model_argv(num_layers=int(model["num_layers"]), transformer_impl=impl)
+        model_args = glm5_next.model_argv(
+            num_layers=int(model["num_layers"]),
+            first_k_dense_replace=int(model.get("first_k_dense_replace", glm5_next.FIRST_K_DENSE_REPLACE)),
+            num_experts=int(model.get("num_experts", glm5_next.NUM_EXPERTS)), transformer_impl=impl)
     except ValueError as error:
         raise Stage1Error(f"plan: trainer.miles.transformer_impl: {error}") from None
+    torch_dist = model["bf16_source"].get("torch_dist")
+    convert_argv = None if not torch_dist else [
+        "torchrun", "--nproc-per-node", str(per_node), f"{miles['workdir']}/tools/convert_hf_to_torch_dist.py",
+        # model arguments only: the converter's parser has no run flags (--qkv-format; Modal run-8)
+        *glm5_next.model_argv_without_run_flags(model_args), "--hf-checkpoint", model_dir, "--save", str(torch_dist),
+        "--tensor-model-parallel-size", str(layout["tp"]), "--pipeline-model-parallel-size", str(layout["pp"]),
+        "--expert-model-parallel-size", str(min(layout["ep"], per_node))]
     out.trainer = {
         "backend": backend, "nodes": [n.name for n in trainers], "cards": cards,
+        # Miles trains glm5_next from a Megatron torch_dist checkpoint (raw mode); converted once
+        # on trainer node 0 (one node's cards; not run for the 45-layer model)
+        "torch_dist": torch_dist, "convert_argv": convert_argv,
+        # the converter imports megatron.post_training, which the editable megatron_core
+        # install does not expose; Miles' own converter call puts the checkout first (run-9)
+        "convert_env": {"PYTHONPATH": f"{miles.get('megatron_path', '/root/Megatron-LM')}:{miles['workdir']}"},
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
                   "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config,
@@ -490,7 +573,11 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
 
     # The release directory follows the template's scheme (quant.schemes); the
     # plan's release_dir is checked against it, not passed to the re-quantizer.
-    argv = requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3")
+    # quant.frozen_pattern: tensors the trainer does not export (read from the bf16 source)
+    frozen = quant.get("frozen_pattern")
+    argv = requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3",
+                        frozen_base=str(model["bf16_source"]["local_dir"]) if frozen else None,
+                        frozen_pattern=str(frozen) if frozen else None)
     out.requant = {"node": trainers[0].name if trainers else None, "scheme": quant["scheme"],
                    "format": quant["format"], "argv": argv, "loop_argv": [*argv, "--loop"]}
 
@@ -537,7 +624,10 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
                     "groups_per_round": int(task["rollout_batch_size"]),
                     "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True},
         "reward": str(task["reward"]), "reward_kind": "miles",
-        "checks": {"expected_expert_matrices": int(quant["expected_expert_matrices"])},
+        # sampler.checks: further PostLoadChecks overrides (e.g. require_fixed_answers for a
+        # cut-down rehearsal model); the expected expert count always comes from quant
+        "checks": {**dict(plan.section("sampler").get("checks") or {}),
+                   "expected_expert_matrices": int(quant["expected_expert_matrices"])},
         "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
     }
 
@@ -582,6 +672,9 @@ def trainer_island_spec(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node
         "if [ \"$SKYPILOT_NODE_RANK\" = 0 ]; then\n"
         f"  ray start --head --port={RAY_PORT} --node-ip-address=\"$me\" --num-gpus=\"$SKYPILOT_NUM_GPUS_PER_NODE\"\n"
         f"  {join}\n"
+        # the island forwards its own environment (sample buffer, store) to the Ray
+        # actors only when RAY_ADDRESS names the cluster (entry.connect_island_ray)
+        f"  export RAY_ADDRESS=\"$me:{RAY_PORT}\"\n"
         f"  exec {island}\n"
         "fi\n"
         f"exec ray start --address=\"$head:{RAY_PORT}\" --node-ip-address=\"$me\" "
@@ -645,6 +738,14 @@ def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: 
                               f"ossutil cp -r -u {shlex.quote(src['staged'])} {shlex.quote(src['local_dir'])}/\n"
                               f"test -f {shlex.quote(src['local_dir'])}/model.safetensors.index.json\n",
                               f"{key} weights on the node's /data (revision {src['revision']})"))
+    if out.trainer.get("convert_argv") and trainers:
+        node, dst = trainers[0], str(out.trainer["torch_dist"])
+        convert = _docker(plan, node, "convert", out.trainer["image"], out.trainer["convert_argv"],
+                          {**out.trainer["env"], **out.trainer["convert_env"]})
+        steps.append(Step(f"convert-torch-dist-{node.name}", node.name,
+                          f"set -eu\nif [ \"$(cat {shlex.quote(dst)}/latest_checkpointed_iteration.txt 2>/dev/null)\" "
+                          f"!= release ]; then\n{convert}\nfi\n",
+                          "bf16 source -> Megatron torch_dist (Miles converter; the island's --megatron-ref-load)"))
     for run in out.sampler["engines"]:
         node = next(n for n in samplers if n.name == run["node"])
         spec_json = json.dumps(run["spec"], indent=1, sort_keys=True)
@@ -729,7 +830,8 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if f"tp{int(sampler_cfg['tp'])}" != sampler_cfg["topology"]:
         errors.append(f"sampler topology {sampler_cfg['topology']} does not match TP {sampler_cfg['tp']}")
     image = str(plan.section("images").get("sampler") or "")
-    if not image.endswith(f":v{sampler_cfg['engine_version']}"):
+    # a tag must name the engine version; a digest pins the image itself (the version is recorded in the plan)
+    if not image.endswith(f":v{sampler_cfg['engine_version']}") and "@sha256:" not in image:
         errors.append(f"sampler image {image!r} does not carry engine version v{sampler_cfg['engine_version']}")
     if int(sampler_cfg["max_model_len"]) < int(sampling["max_prompt_len"]) + int(sampling["max_tokens"]):
         errors.append("sampler max_model_len is shorter than max_prompt_len + max_tokens")
@@ -749,8 +851,13 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
 
     # Store.
     store = out.store["run"]
-    if not store.startswith("oss://"):
+    backend = str(plan.doc.get("store_backend") or "oss")
+    if backend not in STORE_BACKENDS:
+        errors.append(f"store_backend {backend!r} is not one of {sorted(STORE_BACKENDS)}")
+    elif backend == "oss" and not store.startswith("oss://"):
         errors.append(f"store {store!r} is not an oss:// URI (stage 1: Alibaba OSS)")
+    elif backend == "modal-volume" and not store.startswith("/"):
+        errors.append(f"store {store!r}: a modal-volume store is the absolute mount path in the containers")
     if not store.endswith("/" + plan.run_id):
         errors.append("store run directory does not end with the run id")
     bucket = store.split("/")[2] if store.startswith("oss://") else None
@@ -830,6 +937,9 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
         if gap := _module_gap(module, what):
             found.append(gap)
     if out.trainer["backend"] == "miles":
+        if not out.trainer.get("torch_dist"):
+            found.append("model.bf16_source.torch_dist is unset: Miles trains glm5_next only from a "
+                         "Megatron torch_dist checkpoint (Megatron-Bridge cannot load glm5_next)")
         if gap := _check_island_argv(out.trainer["miles"]["island_argv"]):
             found.append(gap)
         recipes = _miles_recipes()
@@ -858,7 +968,7 @@ def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
     problem = full_parameter_layout_problem(
         data_parallel=out.trainer["miles"]["layout"]["dp"],
         actor_num_nodes=int(argv[argv.index("--actor-num-nodes") + 1]),
-        rollout_gpus=int(argv[argv.index("--rollout-num-gpus") + 1]),
+        rollout_gpus=(int(argv[argv.index("--rollout-num-gpus") + 1]) if "--rollout-num-gpus" in argv else None),
         rollout_gpus_per_engine=1,  # the island's default; it gives no engine
         sample_role=argv[argv.index("--rl-sample-role") + 1])
     if problem is None:

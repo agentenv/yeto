@@ -533,6 +533,13 @@ class MilesPublisher:
     async def _publish(
         self, version: int, token: str
     ) -> tuple[frozenset[str], dict[str, Any] | None]:
+        if getattr(self._args, "debug_train_only", False):
+            # Trainer-only island (Miles --debug-train-only, samples from the store):
+            # there is no engine to update or stamp. The release written by the
+            # wrapping ReleasingPublisher is the publication (Modal run-11 stopped at
+            # the engine stamp: "no rollout engines are eligible").
+            self._published_once = True
+            return frozenset(), None
         update_weights = self._update_weights_to(version)
         offload_rollout = bool(getattr(self._args, "offload_rollout", False))
         try:

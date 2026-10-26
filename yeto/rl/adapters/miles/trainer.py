@@ -44,6 +44,44 @@ class TrainStepError(RuntimeError):
     pass
 
 
+
+def _is_expert_tensor(name: str) -> bool:
+    """A routed-expert tensor (Megatron ``mlp.experts.*``; not ``shared_experts``)."""
+    return ".mlp.experts." in name
+
+def optimizer_coverage_problems(summaries: list[dict[str, Any]]) -> list[str]:
+    """Check that every adapter tensor has optimizer state on at least one rank of
+    the group that shards it (DistOpt ranges); marks ``has_optimizer_state`` False on
+    the ranks of a group that fails. Expert tensors are sharded over the expert-DP
+    ranks of one (tp, pp, ep); every other tensor over all DP ranks of its (tp, pp),
+    which with EP>1 spans the EP ranks too (Modal run-16: the dense tensors were
+    checked per EP rank and found missing)."""
+    problems: list[str] = []
+    covered: dict[tuple[int, ...], tuple[set[str], set[str]]] = {}
+    for s in summaries:
+        tp, pp, ep = s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)
+        optimized = set(s.get("optimizer_names") or ())
+        for name in s.get("adapter_names") or ():
+            key = (tp, pp, ep) if _is_expert_tensor(name) else (tp, pp)
+            names, owned = covered.setdefault(key, (set(), set()))
+            names.add(name)
+            if name in optimized:
+                owned.add(name)
+    if not covered:
+        problems.append("no rank reported any adapter tensor")
+    for key, (adapters, optimized) in sorted(covered.items()):
+        if not adapters <= optimized:
+            missing = sorted(adapters - optimized)[:4]
+            for s in summaries:
+                if (s["coord"]["tp"], s["coord"]["pp"]) == key[:2] and (
+                        len(key) == 2 or s["coord"].get("ep", 0) == key[2]):
+                    s["has_optimizer_state"] = False
+            where = f"tp{key[0]}/pp{key[1]}" + (f"/ep{key[2]}" if len(key) == 3 else " (dense)")
+            problems.append(f"{where}: no optimizer state for {missing}")
+    return problems
+
+
+
 def batch_hash(batch: RolloutBatchHandle) -> str:
     """Content identity of the trained batch, computed from metadata only."""
 
@@ -801,21 +839,7 @@ class MilesTrainerGroup:
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
-        # has_optimizer_state means: every adapter tensor of each (tp, pp) has
-        # optimizer state on at least one of its DP ranks (DistOpt ranges).
-        covered: dict[tuple[int, int], tuple[set[str], set[str]]] = {}
-        for s in summaries:
-            key = (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0))
-            adapters, optimized = covered.setdefault(key, (set(), set()))
-            adapters.update(s.get("adapter_names") or ())
-            optimized.update(s.get("optimizer_names") or ())
-        for key, (adapters, optimized) in sorted(covered.items()):
-            if not adapters or not adapters <= optimized:
-                missing = sorted(adapters - optimized)[:4]
-                for s in summaries:
-                    if (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)) == key:
-                        s["has_optimizer_state"] = False
-                problems.append(f"tp{key[0]}/pp{key[1]}/ep{key[2]}: no optimizer state for {missing or 'any adapter'}")
+        problems += optimizer_coverage_problems(summaries)
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
         resume = self._resume_manifest(context, summaries)

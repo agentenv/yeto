@@ -134,7 +134,7 @@ NO_SCHEDULER = _replace(PAIR, ("--rl-trainer-scheduler", "s1", "--rl-trainer-isl
     (("--rl-single-island-no-sync",), (), "no-sync|single-island"),
     (("--tuning", "full"), ("--tuning", "full", "--rl-sample-role", "trainer"),
      "replaces --rl-sample-role"),
-    (("1:trainer",), ("1:sampler",), "one sampler and one trainer"),
+    (("1:trainer",), ("1:sampler",), "exactly one trainer"),
     (("--rl-max-policy-age", "2"), ("--rl-max-policy-age", "0"), "max-policy-age"),
     (("--rl-checkpoint-store", STORE, "--rl-cut-every", "1"), (), "checkpoint-store"),
 ])

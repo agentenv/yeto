@@ -73,6 +73,14 @@ def completion_to_chat(completion: dict[str, Any]) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ /v1/responses (Codex)
 
+# Responses tool types the policy is not offered: ``namespace`` (Codex 0.145
+# sends its sub-agent tools so; a sub-agent would open a second token stream)
+# and OpenAI hosted tools (the served model cannot call them).  Other
+# non-function tool types are refused.
+OMITTED_TOOL_TYPES = frozenset({"namespace", "web_search", "web_search_preview", "image_generation",
+                                "file_search", "code_interpreter"})
+
+
 def responses_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
     if body.get("store") is not False:
         raise UnsupportedShape("Responses requests must use store:false (full replay)")
@@ -82,6 +90,8 @@ def responses_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
     if summary not in ("none", None):
         raise UnsupportedShape("reasoning.summary must be none")
     for tool in body.get("tools") or []:
+        if isinstance(tool, dict) and tool.get("type") in OMITTED_TOOL_TYPES:
+            continue
         if not isinstance(tool, dict) or tool.get("type") != "function":
             raise UnsupportedShape(f"unsupported tool type {tool.get('type') if isinstance(tool, dict) else tool!r}")
     messages: list[dict[str, Any]] = []

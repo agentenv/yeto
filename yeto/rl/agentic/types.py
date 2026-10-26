@@ -122,7 +122,12 @@ class TokenTurn:
 
     ``policy_version`` and ``provenance`` (the sampler source record,
     ``Provenance.to_record()``) are what the recorder knows about the call;
-    None when it does not record them.
+    None when it does not record them.  ``finish_reason``: the engine's reason
+    (``stop`` / ``length``; ``length`` = the call hit its token cap).
+    ``policy_error``: the policy's own failure the recorder saw after this
+    call: a malformed reply (e.g. a tool call that is not valid JSON) or a
+    conversation that no longer fits the context (``context_full: ...``).
+    The tokens were sampled and are kept; the agent got an error.
     """
 
     prompt_ids: tuple[int, ...]
@@ -130,6 +135,8 @@ class TokenTurn:
     completion_logprobs: tuple[float, ...]
     policy_version: int | None = None
     provenance: Mapping[str, str] | None = None
+    finish_reason: str | None = None
+    policy_error: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.completion_ids) != len(self.completion_logprobs):

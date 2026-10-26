@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from typing import Any
 
 from miles.rollout.base_types import (
@@ -23,11 +22,13 @@ from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
 from yeto.rl.engine.buffer_payload import complete_prompt_tokens
+from yeto.rl.engine.sampler_resume import new_incarnation, reclaim_requested
 from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event, payload_source_sample
 
 from .buffer_rollout import (
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
+    INCARNATION_ENV,
     MAX_POLICY_AGE_ENV,
     POLL_ENV,
     SAMPLER_ID_ENV,
@@ -35,13 +36,15 @@ from .buffer_rollout import (
     TRAINER,
     WAIT_ENV,
     BatchReader,
-    GroupWriter,
     SampleBufferRolloutError,
+    SamplerRoundWriter,
     convertible_mode,
     open_buffer,
+    open_lane_log,
     register_reader,
     renumber_group,
 )
+from .rollout_meta_hook import data_cursor, record_round_metadata
 
 
 def _flat(group: Any) -> list[Any]:
@@ -52,32 +55,47 @@ def _flat(group: Any) -> list[Any]:
 
 
 class BufferWriterRolloutFn(InferenceRolloutFn):
-    """Sampler: Miles' rollout; every finished group is also written to the buffer."""
+    """Sampler: Miles' rollout; every finished group is also written to the buffer.
+
+    A replacement incarnation of the island continues where the buffer says the
+    earlier ones stopped (:class:`.buffer_rollout.SamplerRoundWriter`): the data
+    source is put at the saved cursor before the first round, and a round
+    already in the buffer is refused."""
+
+    resumable = True  # a convertible node keeps its own rollout numbering (no resume)
 
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)
         sampler_id = os.environ.get(SAMPLER_ID_ENV)
         if not sampler_id:
             raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
-        # a per-process suffix: a restarted sampler repeats Miles group indexes, so the
-        # sample ids stay unique; the trainer renumbers groups by buffer position
-        self._writer = GroupWriter(self._open_writer_buffer(), f"{sampler_id}-{uuid.uuid4().hex[:8]}")
+        # the incarnation suffix keeps the sample ids unique: a restarted sampler repeats
+        # Miles group indexes; the trainer renumbers groups by buffer position
+        incarnation = os.environ.get(INCARNATION_ENV) or new_incarnation()
+        self._rounds = SamplerRoundWriter(self._open_writer_buffer(), sampler_id,
+                                          incarnation=incarnation, resume=self.resumable,
+                                          reclaimed=lambda: reclaim_requested(os.environ))
+        self._shuffle = bool(getattr(input.args, "rollout_shuffle", False))  # the seek re-shuffles
 
     def _open_writer_buffer(self) -> Any:
         return open_buffer(sampler=True)
 
     async def _call_train(self, input: Any) -> Any:
+        self._rounds.seek(self.data_source, shuffle=self._shuffle)
         output = await super()._call_train(input)
-        await asyncio.to_thread(self._write, input.rollout_id, output.samples)
+        cursor, _ = data_cursor(self.data_source)
+        await asyncio.to_thread(self._write, input.rollout_id, output.samples, cursor)
         return output
 
-    def _write(self, rollout_id: int, groups: list[Any]) -> None:
+    def _write(self, rollout_id: int, groups: list[Any], cursor: dict[str, int] | None) -> None:
+        finished = []
         for group in groups:
             samples = _flat(group)
             if any(s.status == Sample.Status.ABORTED for s in samples):
                 continue  # an aborted group is regenerated, never trained
-            key = f"r{int(rollout_id)}-g{samples[0].group_index}"
-            self._writer.write([s.to_dict() for s in samples], group_key=key)
+            finished.append((f"r{int(rollout_id)}-g{samples[0].group_index}",
+                             [s.to_dict() for s in samples]))
+        self._rounds.write_round(rollout_id, finished, cursor)
 
 
 class _BufferRound:
@@ -94,8 +112,9 @@ class _BufferRound:
         self.args = args
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
+        buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
         self.reader = BatchReader(
-            open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards),
+            buffer, cursor_log=open_lane_log(buffer),
             max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)))
@@ -117,6 +136,8 @@ class _BufferRound:
         samples = [[Sample.from_dict(d) for d in renumber_group(
             group, position=position, samples_per_group=self.samples_per_group)]
             for position, group in groups]
+        record_round_metadata(self.args, int(input.rollout_id),
+                              buffer_stale_groups=int(report.stale_groups))
         self._run_round_hooks(samples)
         return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
 
@@ -157,6 +178,8 @@ class ConvertibleRolloutFn(BufferWriterRolloutFn):
     in ``trainer`` mode the round is read from the buffer like
     :class:`BufferReaderRolloutFn`. The node switches the mode in this process
     (``buffer_rollout.executor_set_mode``) when it converts."""
+
+    resumable = False
 
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)

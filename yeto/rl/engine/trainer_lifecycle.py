@@ -139,7 +139,13 @@ class SampleIndexEntry:
     record: device family, card, engine and version, precision, quantization
     scheme, topology); None for entries written before it existed or by a
     sampler that does not set it (read as ``unknown``). Data only: it never
-    enters a hash or the version gate (rl-hetero-sampler-engines D3)."""
+    enters a hash or the version gate (rl-hetero-sampler-engines D3).
+
+    ``sampler_round``: which sampler round wrote the entry
+    (``sampler_resume.SamplerRound`` record: sampler, incarnation, rollout id,
+    last group of the round, data cursor after the round); None for entries
+    written before it existed. A replacement sampler island reads it to resume
+    after the last complete round (S25 C1)."""
 
     sample_id: str
     behavior_version: int
@@ -147,6 +153,7 @@ class SampleIndexEntry:
     tokens: int = 0
     appended_at: float = 0.0
     provenance: Mapping[str, str] | None = field(default=None, compare=False, hash=False)
+    sampler_round: Mapping[str, Any] | None = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)

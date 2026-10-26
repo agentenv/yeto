@@ -370,3 +370,29 @@ def test_full_parameter_trainer_stops_at_a_scheduled_cut_and_continues_without_r
     assert trained == list(range(2 * rounds))  # every group once, in order: none trained twice
     for name, value in params(reference).items():
         assert torch.equal(value, params(rank_b)[name]), name
+
+
+def test_reader_round_reports_its_stale_groups_as_round_metadata(monkeypatch):
+    """T-EVAL E4: the groups the reader passed over this round reach the driver as
+    per-round metadata (driver event rl_buffer_stale_skipped), before the
+    end-of-round hooks put the round's main record."""
+    from types import SimpleNamespace
+
+    calls = []
+    registry = {"all": lambda args, samples, source: calls.append(("all",))}
+    plugin = _import_plugin_with_stub_miles(monkeypatch, registry)
+    monkeypatch.setattr(plugin, "record_round_metadata",
+                        lambda args, rid, **counts: calls.append(("meta", rid, counts)))
+    monkeypatch.setattr(plugin, "Sample", SimpleNamespace(from_dict=lambda d: d))
+    monkeypatch.setattr(plugin, "RolloutFnTrainOutput", lambda **kw: kw)
+    monkeypatch.setattr(plugin, "offpolicy_source_event", lambda *a, **kw: {})
+    monkeypatch.setattr(plugin, "flat_metrics", lambda source: {})
+    group = [sample(0, 0, 4), sample(1, 0, 4)]
+    report = br.TakeReport(rollout_id=2, groups=1, stale_groups=3, start=0, end=4)
+    reader = plugin._BufferRound.__new__(plugin._BufferRound)
+    reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
+    reader.groups, reader.samples_per_group = 1, 2
+    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: ([(3, group)], report))
+    out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
+    assert calls == [("meta", 2, {"buffer_stale_groups": 3}), ("all",)]
+    assert out["metrics"]["sample_buffer/stale_groups"] == 3.0

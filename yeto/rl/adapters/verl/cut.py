@@ -19,7 +19,8 @@ Rank file ``rank<NNNNN>.pt`` (``torch.save``):
 Restore needs the same world size (FSDP2 shards are per rank; a DP change is
 refused before any rank writes). Each rank checks its file checksum, loads it
 into the freshly built module/optimizer (DTensors rebuilt with the fresh
-module's mesh and placements), and reports a digest of the loaded local state
+module's mesh and placements), and reports a digest of the state its optimizer
+now steps (N7.6c: read from ``optimizer.param_groups``, not the module copy)
 (must equal the one recorded at save) plus its resume state.
 
 Units (verl differs from Miles here): the run step is one trainer round (one
@@ -89,21 +90,27 @@ def layout_for(world: int) -> dict[str, int]:
 # --------------------------------------------------------------------------
 
 
-def _state_options() -> Any:
+def _state_options(*, load: bool = False) -> Any:
+    """Local shards of the trainable state. A load is not strict: the cut holds no
+    frozen base weights (LoRA), which a strict load reports as missing (GPU T-C4).
+    ``restore_rank`` checks the trainable names against the cut before loading."""
     from torch.distributed.checkpoint.state_dict import StateDictOptions
 
-    return StateDictOptions(full_state_dict=False, ignore_frozen_params=True)
+    return StateDictOptions(full_state_dict=False, ignore_frozen_params=True, strict=not load)
 
 
 def _is_dtensor(value: Any) -> bool:
     return hasattr(value, "to_local") and hasattr(value, "placements")
 
 
+def _local_tensor(value: Any) -> Any:
+    return value.to_local() if _is_dtensor(value) else value
+
+
 def _to_local(value: Any) -> Any:
     import torch
 
-    if _is_dtensor(value):
-        value = value.to_local()
+    value = _local_tensor(value)
     return value.detach().to("cpu").clone() if isinstance(value, torch.Tensor) else value
 
 
@@ -122,26 +129,45 @@ def _local_state(handles: TrainHandles) -> tuple[dict[str, Any], dict[str, Any],
     return model, optim, dtensors
 
 
-def _digest(model: Mapping[str, Any], optim: Mapping[str, Any]) -> str:
-    """sha256 over the local trainable state (names, dtypes, shapes, bytes; group hyper-parameters)."""
+def _stepped_state(handles: TrainHandles) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """The tensors the optimizer actually steps on this rank, keyed by parameter name.
+
+    Read from ``optimizer.param_groups`` and ``optimizer.state`` (local shards), not
+    from the module's state dict: a digest over the module copy cannot see an
+    optimizer that steps another tensor (S25 N7.6c; on Miles the CPU-offload host
+    master went stale after a restore while the cut digest matched, GPU T-G3). A
+    stepped tensor that is no module parameter is named by its group position."""
+    names = {id(p): n for n, p in handles.module.named_parameters()}
+    state: dict[str, dict[str, Any]] = {}
+    groups = []
+    for gi, group in enumerate(handles.optimizer.param_groups):
+        groups.append({k: v for k, v in group.items() if k != "params"})
+        for pi, param in enumerate(group["params"]):
+            name = names.get(id(param), f"<group{gi}/param{pi}>")
+            entry = {"param": param}
+            entry.update({k: v for k, v in handles.optimizer.state.get(param, {}).items()})
+            state[name] = entry
+    return state, groups
+
+
+def _digest(handles: TrainHandles) -> str:
+    """sha256 over the stepped state (names, dtypes, shapes, local bytes) and the group
+    hyper-parameters; see :func:`_stepped_state`."""
     import torch
 
     h = hashlib.sha256()
-
-    def tensor(name: str, t: Any) -> None:
-        if not isinstance(t, torch.Tensor):
-            h.update(f"{name}={t!r};".encode())
-            return
-        flat = t.detach().to("cpu").contiguous().reshape(-1)
-        h.update(f"{name}|{flat.dtype}|{tuple(t.shape)}|".encode())
-        h.update(flat.view(torch.uint8).numpy().tobytes())
-
-    for name in sorted(model):
-        tensor(f"model/{name}", model[name])
-    for name in sorted(optim["state"]):
-        for key in sorted(optim["state"][name]):
-            tensor(f"optim/{name}/{key}", optim["state"][name][key])
-    h.update(json.dumps(optim["param_groups"], sort_keys=True, default=repr).encode())
+    state, groups = _stepped_state(handles)
+    for name in sorted(state):
+        for key in sorted(state[name]):
+            value = state[name][key]
+            label = f"{name}/{key}"
+            if not isinstance(value, torch.Tensor):
+                h.update(f"{label}={value!r};".encode())
+                continue
+            flat = _local_tensor(value).detach().to("cpu").contiguous().reshape(-1)
+            h.update(f"{label}|{flat.dtype}|{tuple(value.shape)}|".encode())
+            h.update(flat.view(torch.uint8).numpy().tobytes())
+    h.update(json.dumps(groups, sort_keys=True, default=repr).encode())
     return h.hexdigest()
 
 
@@ -200,7 +226,7 @@ def save_rank(handles: TrainHandles, *, directory: str, cut_id: str) -> dict[str
     fsync_file(tmp)
     os.replace(tmp, path)
     fsync_dir(path.parent)
-    summary = _rank_summary(handles, rank=rank, world=world, digest=_digest(model, optim))
+    summary = _rank_summary(handles, rank=rank, world=world, digest=_digest(handles))
     return {"path": name, "sha256": sha256_file(path), "bytes": path.stat().st_size, **summary}
 
 
@@ -255,11 +281,10 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
         "param_groups": saved["optim"]["param_groups"],
     }
     set_state_dict(handles.module, handles.optimizer, model_state_dict=model_sd, optim_state_dict=optim_sd,
-                   options=_state_options())
+                   options=_state_options(load=True))
     handles.scheduler.load_state_dict(saved["scheduler"])
     _set_rng_state(saved["rng"])
-    model, optim, _ = _local_state(handles)
-    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(model, optim))}
+    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles))}
 
 
 def resume_rank(handles: TrainHandles) -> dict[str, Any]:

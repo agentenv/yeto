@@ -25,6 +25,7 @@ import dataclasses
 import json
 import os
 import sys
+from pathlib import Path
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -869,7 +870,9 @@ def translate_run_config(
         "--train-backend", "megatron",
         "--hf-checkpoint", config.hf_checkpoint,
         "--ref-load", config.ref_load,
-        "--megatron-to-hf-mode", "bridge",
+        # glm5_next: Megatron-Bridge has no glm5_next bridge; Miles loads the torch_dist
+        # checkpoint and exports through its own converters (raw)
+        "--megatron-to-hf-mode", "raw" if recipe.name == RECIPE_GLM5_NEXT else "bridge",
         "--model-name", model_name,
         *model_recipe_values,
         "--num-layers", str(geometry.num_layers),
@@ -1150,8 +1153,13 @@ def translate_run_config(
                 values.extend((flag, engine))
     if recipe.name == RECIPE_GLM5_NEXT:
         # the plugin spec replaces the Bridge-geometry model flags
+        # experts and dense-layer count from the checkpoint (a cut-down model differs from GLM5.3-Flash)
+        hf_config = Path(config.hf_checkpoint) / "config.json"
+        shape = (glm5_next.checkpoint_geometry(json.loads(hf_config.read_text()))
+                 if hf_config.is_file() else {})
+        shape["num_layers"] = geometry.num_layers
         values = glm5_next.apply_recipe(values, glm5_next.model_argv(
-            num_layers=geometry.num_layers, transformer_impl=recipe.transformer_impl))
+            **shape, transformer_impl=recipe.transformer_impl))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag

@@ -355,6 +355,19 @@ def test_image_recipe_is_pinned():
         image.build_commands("c" * 40)
 
 
+def test_image_adds_the_store_client_at_the_yeto_pin():
+    import tomllib
+    from pathlib import Path
+
+    from yeto.rl.adapters.verl import image
+    from yeto.rl.adapters.verl.pins import STORE_CLIENT_REQUIREMENTS
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
+    pins = set(project["dependencies"]).union(*project["optional-dependencies"].values())
+    assert set(STORE_CLIENT_REQUIREMENTS) <= pins
+    assert image.store_client_commands()[0].endswith(" ".join(STORE_CLIENT_REQUIREMENTS))
+
+
 def test_verl_capabilities_accept_default_and_tis_specs_only():
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.capabilities import CapabilityMismatch

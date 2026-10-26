@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import sys
 import types
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -286,6 +287,7 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
         @classmethod
         async def create(cls, config):
             seen["version"] = config.agent.kwargs["version"]
+            seen["summary"] = config.agent.kwargs["reasoning_summary"]
             return cls(config)
 
     Trial.result = _result({"reward": 1.0})
@@ -295,6 +297,7 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
     out = _run(mod.run("http://ss:30000/sessions/s1", metadata={"instance_id": "fix-git"}))
     assert example.calls == ["key", ("codex", "http://ss:30000/sessions/s1/v1")]
     assert seen["version"] == "0.145.0"  # Harbor's default would be @latest
+    assert seen["summary"] == "none"  # the gateway refuses reasoning summaries
     assert (out[OUTCOME_KEY], out["reward"]) == ("ok", 1.0)
 
     Trial.result = _result(None, "EnvironmentStartTimeoutError")
@@ -422,7 +425,7 @@ def test_verl_loop_token_mask_alignment_with_fake_trial(verl_loop):
     loop_mod, _ = verl_loop
     from yeto.rl.harness.harbor import HarborHarness
 
-    turns = [_turn([5, 6, 7], [40, 41, 42], [-0.1, -0.2, -0.3]),
+    turns = [replace(_turn([5, 6, 7], [40, 41, 42], [-0.1, -0.2, -0.3]), finish_reason="length"),
              _turn([5, 6, 7, 40, 41, 42, 90, 91], [43, 2], [-0.4, -0.5])]
     recorder = _Recorder(turns)
     _FakeTrial.result, _FakeTrial.configs = _result({"reward": 1.0}), []
@@ -443,6 +446,7 @@ def test_verl_loop_token_mask_alignment_with_fake_trial(verl_loop):
     assert out.prompt_ids + out.response_ids == list(turns[-1].prompt_ids + turns[-1].completion_ids)
     assert out.reward_score == 1.0 and out.num_turns == 4
     assert out.extra_fields[OUTCOME_KEY] == "ok" and out.extra_fields["truncated"] is False
+    assert out.extra_fields["length_capped_turns"] == 1  # the first call hit its token cap
 
 
 def test_verl_loop_aborts_on_misaligned_tokens_and_infra_errors(verl_loop):

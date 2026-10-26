@@ -588,6 +588,14 @@ _RESUME = (
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),
+    shared_flag("--rl-sampler-node", default=None, metavar="NAME",
+                help="--rl-sample-role sampler: this island's node name (set by the launcher "
+                "per island of --rl-island-sample-role; the sampler id that a replacement "
+                "incarnation of the island resumes under)"),
+    shared_flag("--rl-buffer-shards", default=None, metavar="A,B",
+                type=lambda text: [s for s in text.split(",") if s],
+                help="--rl-island-sample-role with several samplers: the sampler shards of the "
+                "buffer (set by the launcher); each sampler writes its own, the trainer merges them"),
 )
 
 _SCHEDULING = (

@@ -102,6 +102,7 @@ def test_recorder_feeds_the_verl_loop_the_tokens_the_engine_sampled(verl_loop, q
     assert sum(out.response_mask) > 0 and out.response_mask[-1] == 1
     assert all(lp == 0.0 for lp, m in zip(out.response_logprobs, out.response_mask) if m == 0)
     assert out.extra_fields["provenance"]["engine"] == "fake"
+    assert out.extra_fields["length_capped_turns"] == 0
     assert proxy.backend.sessions == {} and proxy.gateway.registries == {}  # forgotten after close
 
 

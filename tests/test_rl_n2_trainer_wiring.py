@@ -68,7 +68,8 @@ def test_miles_reader_rebuilds_prompts_and_reports_per_source_metrics(monkeypatc
     reader.args = types.SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path=None)
     reader.samples_per_group = 2
     reader._tokenizer = lambda text, add_special_tokens: {"input_ids": [7, 8]}
-    report = types.SimpleNamespace(metrics=lambda: {"sample_buffer/groups": 1.0})
+    report = types.SimpleNamespace(metrics=lambda: {"sample_buffer/groups": 1.0}, stale_groups=0)
+    monkeypatch.setattr(plugin, "record_round_metadata", lambda args, rid, **counts: None)
     group = [_record(index=0), _record(finish=FINISH_LENGTH, index=1)]
     reader.reader = types.SimpleNamespace(take=lambda rollout_id, groups, current_version: ([(5, group)], report))
     reader.groups = 1
@@ -116,3 +117,32 @@ def test_masked_source_samples_checks_row_counts():
         masked_source_samples([[0.0]], [[0.0]], [[1], [1]])
     with pytest.raises(ValueError, match="provenances"):
         masked_source_samples([[0.0]], [[0.0]], [[1]], provenances=[None, None])
+
+
+def test_verl_tq_provenance_is_read_from_the_extra_fields_record(monkeypatch):
+    """verl's TQ agent loop stores ``AgentLoopOutput.as_dict()``: provenance sits in
+    ``extra_fields``, not under its own name (S25 T-G4)."""
+    import sys
+    import types
+
+    from yeto.rl.adapters.verl import ports_impl
+
+    class Wrapped:  # a TransferQueue read can wrap each record (NonTensorData)
+        def __init__(self, data):
+            self.data = data
+
+    seen = {}
+
+    def kv_batch_get(*, keys, partition_id, select_fields):
+        seen["fields"] = select_fields
+        return {"extra_fields": [Wrapped({"provenance": SOURCE}), {"other": 1}]}
+
+    monkeypatch.setitem(sys.modules, "transfer_queue", types.SimpleNamespace(kv_batch_get=kv_batch_get))
+    batch = types.SimpleNamespace(keys=["a", "b"], partition_id="train")
+    assert ports_impl._row_field(batch, "provenance") == ([SOURCE, None], "ok")
+    assert seen["fields"] == ["extra_fields"]
+
+    monkeypatch.setitem(sys.modules, "transfer_queue", types.SimpleNamespace(
+        kv_batch_get=lambda **_: {"extra_fields": [{}, {}]}))
+    rows, read = ports_impl._row_field(batch, "provenance")
+    assert rows is None and read.startswith("missing")
