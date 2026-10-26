@@ -188,14 +188,20 @@ SINGLE_FILE = "model.safetensors"
 FLOAT_TAGS = {"BF16": "bfloat16", "F16": "float16", "F32": "float32", "F64": "float64"}
 
 
-def model_conversion(model_path: str | Path) -> tuple[list[Any], str | None]:
-    """``(rules, base_model_prefix)`` that ``from_pretrained`` uses for the
-    checkpoint at ``model_path``: the model is built on the meta device from its
-    ``config.json`` (no weights read), with the class its ``architectures`` names
-    when ``transformers`` has it, else ``AutoModelForCausalLM``.  Native classes
-    only: a ``trust_remote_code`` class gets no registered conversion from the
-    loader either, so its checkpoint names are its state names (the identity
-    case of :func:`base_export`)."""
+def model_state_conversion(model_path: str | Path) -> tuple[list[Any], str | None, tuple[str, ...]]:
+    """``(rules, base_model_prefix, state_dict names)`` that ``from_pretrained``
+    uses for the checkpoint at ``model_path``: the model is built on the meta
+    device from its ``config.json`` (no weights read), with the class its
+    ``architectures`` names when ``transformers`` has it, else
+    ``AutoModelForCausalLM``.  Native classes only: a ``trust_remote_code``
+    class gets no registered conversion from the loader either, so its
+    checkpoint names are its state names (the identity case of
+    :func:`base_export`).
+
+    The state names are the model's own ``state_dict`` keys: parameters *and*
+    persistent buffers (module doc), which is what :func:`checkpoint_key_map`
+    must be given -- a checkpoint tensor that loads into a buffer has a target
+    there and none in a trainable-parameter list (S27 G-FT)."""
     import torch
     import transformers
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -205,7 +211,14 @@ def model_conversion(model_path: str | Path) -> tuple[list[Any], str | None]:
     cls = getattr(transformers, architecture, None) if architecture else None
     with torch.device("meta"):
         model = cls._from_config(config) if cls is not None else AutoModelForCausalLM.from_config(config)
-    return conversion_rules(model), getattr(model, "base_model_prefix", None)
+    return (conversion_rules(model), getattr(model, "base_model_prefix", None),
+            tuple(str(name) for name in model.state_dict()))
+
+
+def model_conversion(model_path: str | Path) -> tuple[list[Any], str | None]:
+    """``(rules, base_model_prefix)`` of :func:`model_state_conversion`."""
+    rules, prefix, _state = model_state_conversion(model_path)
+    return rules, prefix
 
 
 def read_safetensors_header(path: str | Path) -> tuple[bytes, dict[str, Any]]:

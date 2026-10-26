@@ -31,8 +31,16 @@ PLAN_ENV = "YETO_VERL_PLAN"
 # cloud credential (secret-handling-hardening: the credential names are
 # AWS_, OSS_, MODAL_, NEBIUS_, HF_TOKEN; HF_ was already here and HF_TOKEN is
 # refused by the island credential guard).
+# S27 G-FS: HARBOR_ and BOAT_API_KEY join the list on the agentic path. The
+# agent-loop worker reads the Harbor task directory, the sandbox provider and
+# the boat account from its own environment (``harbor_agent_loop`` module doc);
+# without forwarding it starts with none of them. BOAT_API_KEY is a credential,
+# so it travels by exact name and only when the plan says the island is agentic
+# (``_runtime_env(agentic=...)``), never through a prefix.
 FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR",
                         "HCCL_", "ASCEND_")
+AGENTIC_ENV_PREFIXES = ("HARBOR_",)
+AGENTIC_ENV_NAMES = ("BOAT_API_KEY",)
 
 
 @ray.remote(num_cpus=1)
@@ -89,7 +97,8 @@ CUMEM_HOST_ENV = "NCCL_CUMEM_HOST_ENABLE"
 NEVER_FORWARD_ENV = ("ASCEND_RT_VISIBLE_DEVICES",)
 
 
-def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None) -> dict:
+def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
+                 agentic: bool = False) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     env = get_ppo_ray_runtime_env(None)
@@ -102,6 +111,16 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None) -> 
 
         os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
         env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
+    if agentic:  # S27 G-FS: register yeto_grpo in every Ray worker (agentic_main's hook)
+        from .agentic_main import SETUP_HOOK
+
+        if env.get("worker_process_setup_hook"):
+            raise RuntimeError("an agentic verl island cannot also install the Ascend plugin hook "
+                               "(Ray takes one worker_process_setup_hook)")
+        env["worker_process_setup_hook"] = SETUP_HOOK
+        for key, value in os.environ.items():
+            if key.startswith(AGENTIC_ENV_PREFIXES) or key in AGENTIC_ENV_NAMES:
+                env["env_vars"][key] = value
     for key, value in os.environ.items():
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
@@ -147,7 +166,9 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
-        ray.init(address=address, runtime_env=_runtime_env(disaggregated, ascend_stack=stack),
+        ray.init(address=address,
+                 runtime_env=_runtime_env(disaggregated, ascend_stack=stack,
+                                          agentic=bool(plan.get("agentic"))),
                  namespace="yeto-verl")
     return plan
 
@@ -156,6 +177,8 @@ def main(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
 
     plan = _plan_and_ray()
+    if plan.get("agentic"):  # S27 G-FS: the driver validates algorithm.adv_estimator too
+        import yeto.rl.adapters.verl.advantage  # noqa: F401  (registers yeto_grpo)
 
     def run_ppo(config, task_runner_class=None):  # replaces verl's: our runner, our plan
         result = ray.get(YetoTaskRunner.remote().run.remote(config, plan))

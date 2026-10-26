@@ -18,6 +18,9 @@ from .pins import (STORE_CLIENT_REQUIREMENTS, VERL_BASE_IMAGE, VERL_COMMIT, VERL
                    VERL_ROOT, VERL_UV_VERSION)
 
 VENV_BIN = f"{VERL_ROOT}/.venv/bin"
+# S27 G-FS: the interpreter the Harbor layer installs into (``image_layer``):
+# verl runs out of its own venv, not the image's /usr/local python.
+HARBOR_LAYER_PYTHON = f"{VENV_BIN}/python"
 
 
 def build_commands(commit: str = VERL_COMMIT) -> list[str]:
