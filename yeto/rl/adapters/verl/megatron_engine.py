@@ -188,6 +188,15 @@ class MegatronShape:
     # S27 G-FL: Megatron's per-bucket non-finite gradient check
     # (yeto.rl.megatron_grad_checks); off only through --rl-no-grad-nan-check
     grad_nan_check: bool = True
+    # S28 G-120: Megatron's weight-gradient accumulation fusion calls Apex's
+    # fused_weight_gradient_mlp_cuda, which does not exist on Ascend (no Apex there).
+    # Megatron's own default is True, so the key has to be written: a plugin-stack
+    # island died in the linear backward with "NameError: name
+    # 'fused_weight_gradient_mlp_cuda' is not defined" (tensor_parallel/layers.py:602,
+    # 120B run mfu-a1d on npu1). False is also what the recipe runs (args.json), and
+    # it matches yeto's neutral default (engine/run_config.py) and the Miles adapter's
+    # --no-gradient-accumulation-fusion.
+    gradient_accumulation_fusion: bool = False
     # S27 G-FN (B3, ruled by the main agent): False on a buffer trainer island
     # (--rl-sample-role trainer). It has no rollout engine, so there is nothing to
     # keep apart from the training cards: every card the island's Ray reports is a
@@ -387,6 +396,17 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         # RL keeps the routing statistics fixed (as the Miles recipe, nemotron_h.py)
         f"{tcfg}.moe_router_bias_update_rate=0.0",
         f"{tcfg}.moe_aux_loss_coeff=0.0",
+        # S28 G-120: Megatron's weight-gradient accumulation fusion calls Apex's
+        # fused_weight_gradient_mlp_cuda, a CUDA extension that does not exist on Ascend
+        # (Apex is not installed there at all). Megatron's own default is True, and this
+        # engine never wrote the key, so a plugin-stack island died in the linear backward
+        # with "NameError: name 'fused_weight_gradient_mlp_cuda' is not defined"
+        # (tensor_parallel/layers.py:602; 120B run mfu-a1d on npu1, 24 cards). The recipe
+        # sets gradient_accumulation_fusion False as well (args.json), so this is the
+        # recipe-aligned value, not a workaround. yeto's neutral default is already False
+        # (engine/run_config.py) and the Miles adapter passes
+        # --no-gradient-accumulation-fusion; this is the verl side of the same switch.
+        f"{tcfg}.gradient_accumulation_fusion={shape.gradient_accumulation_fusion}",
     ]
     if shape.first_stage_layers is not None:  # S28 G-120
         out.append(f"{tcfg}.num_layers_in_first_pipeline_stage={int(shape.first_stage_layers)}")
@@ -444,6 +464,11 @@ ASSERTED_KEYS = (
     "actor_rollout_ref.actor.megatron.use_distributed_optimizer",
     "actor_rollout_ref.actor.megatron.param_offload",
     "actor_rollout_ref.actor.megatron.optimizer_offload",
+    # S28 G-120: assert Megatron really received it. Writing the override is not proof
+    # that the consumer took it: TORCHDYNAMO_DISABLE was exported on the driver and
+    # never reached the Ray workers (run mfu-a1c), and this key's own default (True)
+    # had been silently in force because the engine never wrote it (run mfu-a1d).
+    "actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion",
 )
 
 # Keys of ``separate.ASSERTED_KEYS`` that only verl's separate mode writes. A buffer

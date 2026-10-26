@@ -492,3 +492,29 @@ def test_s28_default_shape_writes_no_stage_keys_and_keeps_selective_recompute(tm
 def test_s28_stage_layers_need_pp():
     with pytest.raises(me.MegatronShapeError, match="PP >= 2"):
         me.validate(me.MegatronShape(rollout_pool=False, pp=1, first_stage_layers=29))
+
+
+def test_megatron_overrides_disable_gradient_accumulation_fusion():
+    """S28 G-120: the engine must WRITE gradient_accumulation_fusion=False and assert it.
+
+    Megatron's own default is True and that path calls Apex's
+    fused_weight_gradient_mlp_cuda, which does not exist on Ascend, so a plugin-stack
+    island died in the linear backward with ``NameError: name
+    'fused_weight_gradient_mlp_cuda' is not defined`` (tensor_parallel/layers.py:602;
+    120B run mfu-a1d on npu1, 24 cards).  The recipe runs False as well (args.json),
+    so this is the aligned value.  The key is asserted because writing an override is
+    not proof that the consumer took it -- the same session had TORCHDYNAMO_DISABLE
+    exported on the driver and never delivered to the Ray workers.
+    """
+    from yeto.rl.adapters.verl import megatron_engine as me
+
+    shape = me.MegatronShape(trainer_nodes=3, trainer_gpus_per_node=8, tp=4, pp=3, ep=8)
+    assert shape.gradient_accumulation_fusion is False  # as yeto's neutral default
+
+    key = ("actor_rollout_ref.actor.megatron.override_transformer_config"
+           ".gradient_accumulation_fusion")
+    assert key in me.asserted_keys(shape)
+
+    written = [o for o in me.build_overrides(_run_config(), shape)
+               if "gradient_accumulation_fusion" in o]
+    assert written == [f"++{key}=False"], written
