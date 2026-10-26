@@ -10,7 +10,7 @@ import time
 
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
-from . import REPO_ROOT
+from .code_pack import code_pack_island_flag, code_workdir
 from .rl_backend import _miles_overlay, _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
@@ -118,7 +118,8 @@ def make_miles_island_task(
         f" --reward-function {shlex.quote(args.reward_function)}"
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
         f" --source-sha256 {shlex.quote(args.source_sha256)}"
-        f" --global-rounds {args.total_steps}"
+        + code_pack_island_flag(args)
+        + f" --global-rounds {args.total_steps}"
         f" --sync-preset {args.rl_sync_preset}"
         f" --fragments {args.fragments}"
         f" --pipeline {args.pipeline}"
@@ -525,7 +526,7 @@ def make_miles_island_task(
         run=run_script,
         envs=envs,
         num_nodes=spec.num_nodes,
-        workdir=str(REPO_ROOT),
+        workdir=code_workdir(args),
         file_mounts=file_mounts or None,
     )
     resources = {

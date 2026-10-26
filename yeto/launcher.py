@@ -78,6 +78,7 @@ from .launch.manifest import (
 
 # Re-exported: callers and tests reach these as ``yeto.launcher.<name>``.
 from .launch import REPO_ROOT  # noqa: F401
+from .launch.code_pack import prepare_run_code_pack
 from .launch.rl_backend import _rl_backend_image_ok, resolve_default_rl_image  # noqa: F401
 from .launch.remote_setup import (  # noqa: F401
     HF_TOKEN_ENV, HF_TOKEN_PATH, ISLAND_PRE_RUN_DONE, ISLAND_PRE_RUN_FAILED, ISLAND_PRE_RUN_START,
@@ -232,6 +233,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     args._launch_preflight_manifest = {"preflight": {"threads": launch_preflight.thread_preflight(args)}}
     sky_patches.install()
     prepare_launch_args(args)
+    # rl-identity-tiering L9.4: the run code pack (first start makes it; later starts reuse it).
+    prepare_run_code_pack(args)
     # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
     launch_preflight.pre_cloud_checks(args, threads=False)
     _write_run_manifest(args)

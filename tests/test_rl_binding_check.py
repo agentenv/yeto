@@ -67,7 +67,7 @@ def test_checkpoint_cut_with_old_hash_does_not_match_the_run():
     build, old_name, old_hash, new_hash = SPECS["v1_bounded_r2"]
     cut = AlgorithmIdentity(algorithm_spec_sha256=old_hash)
     run = AlgorithmIdentity(algorithm_spec_sha256=build(old_name).sha256())
-    assert cut != run  # verify_cut reports "algorithm identity differs" and refuses the resume
+    assert cut.mismatch(run) is not None  # verify_cut refuses the resume (old cut: whole hash)
 
 
 # ---------------------------------------------------------------- 4.4a

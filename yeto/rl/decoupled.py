@@ -44,9 +44,11 @@ class DecoupledBridgeConfig:
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
-    # rl-code-quality-cleanup 4.8: AlgorithmSpec.sha256() of the island, the
-    # third part of that identity.  None = not declared.
-    algorithm_spec_sha256: str | None = None
+    # rl-identity-tiering L9.7 (island contract v3): AlgorithmSpec.semantic_sha256()
+    # of the island and the run code pack digest, the third and fourth parts of
+    # that identity.  None = not declared.
+    algorithm_semantic_sha256: str | None = None
+    code_pack_digest: str | None = None
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None

@@ -1,4 +1,5 @@
 {
+ "algorithm_semantic_sha256": "1e843db7fd7e17df813ae42634f2b1f724082cbc29b2a475104e793a820d7eca",
  "algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "algorithm_sha256_launcher_expected": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "algorithm_sha256_learner_ports_spec": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
@@ -14,10 +15,8 @@
   "compat_group": "nvidia-h100",
   "device_family": "nvidia",
   "engine": "miles",
-  "engine_commit": "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
-  "schema": "yeto-backend-identity-v2",
-  "sha256": "aeee22abefe0a1e756fe8e23e5f2af3931a3eee946b355bc0044cace2a365ea6"
+  "schema": "yeto-backend-identity-v2"
  },
  "execution_profile": {
   "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
@@ -212,25 +211,21 @@
  "plugins": [
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "a4fa982bd6d6dfebbe69657b40e260091e738babc3f711ee12688f49c20731b9"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "a4fa982bd6d6dfebbe69657b40e260091e738babc3f711ee12688f49c20731b9"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
-   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "a4fa982bd6d6dfebbe69657b40e260091e738babc3f711ee12688f49c20731b9"
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups"
   }
  ],
- "ports_runtime_fingerprint": "sha256:d0fbe08d5197c39dd2faf2852dd863cf427697a3cb4362df7e1dfab5751cceb4",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定（yeto.rl.engine.backend_identity），离线不可得",
  "title": "GRPO 默认（ports，固定分区，strict-avg）"
 }

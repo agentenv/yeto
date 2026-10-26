@@ -9,11 +9,19 @@ drive the real ``IslandDriver`` with the fake engine and the fake syncers.
 
 Recorded per configuration:
   * ``miles_argv``: the full Miles command line (temporary paths -> ``<TMP>``);
-  * ``algorithm_sha256`` (launcher-side expected hash and learner-side recompute);
+  * ``algorithm_sha256`` (launcher-side expected hash and learner-side recompute)
+    and ``algorithm_semantic_sha256``;
   * ``execution_profile`` + ``contract_hash`` (see ``_execution_profile``);
   * ``plugins``: every plugin reference in the spec and every ``yeto.*`` dotted
-    path in the argv, with module file (repo-relative) and source sha256;
-  * ``runtime_attrs`` / ``placement`` of the translated launch.
+    path in the argv, with its module file (repo-relative);
+  * ``runtime_attrs`` / ``placement`` of the translated launch;
+  * ``backend_identity`` without the engine commit.
+
+No code hash is recorded (rl-identity-tiering D5, L9.10): no plugin source
+hash, no ``ports_runtime_fingerprint``, no engine commit, and the code-derived
+hashes in ``runtime_attrs`` (:data:`CODE_HASH_KEYS`) are masked. The run code
+pack pins code; a plugin-only change needs no re-record. Specs built here carry
+plugin references without a source hash, so their hashes do not depend on code.
 
 ``session_contract_hash`` is NOT recorded: it is the syncer layout fingerprint of
 the live LoRA tensors (``yeto.protocol.layout_fingerprint``), only known once the
@@ -45,10 +53,6 @@ for _p in (str(REPO), str(REPO / "tests"), str(REPO / "tests" / "multinode_gpu")
 
 
 # ---------------------------------------------------------------- helpers
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _module_file(dotted: str) -> Path | None:
     module = dotted.split(":", 1)[0]
     candidates = [module] if ":" in dotted else [module, module.rsplit(".", 1)[0]]
@@ -69,20 +73,46 @@ def _plugin_entry(path: str, recorded_sha: str | None) -> dict[str, Any]:
         entry["spec_sha256"] = recorded_sha
     if file is None:
         entry["module_file"] = None
-        entry["source_sha256"] = None
     else:
         try:
             entry["module_file"] = str(file.resolve().relative_to(REPO))
         except ValueError:
             entry["module_file"] = "<outside-repo>/" + file.name
-        entry["source_sha256"] = _sha256_file(file)
     return entry
+
+
+# Hashes in the translated runtime attrs that change with plugin source code
+# (L9.10 masks them): the reward pipeline's merged stage source hash, and the
+# yeto_algo_plugins digest taken over a config that contains it.
+CODE_HASH_KEYS = ("pipeline_sha256",)
+CODE_HASH_MASK = "<CODE-HASH>"
+
+
+def _mask_code_hashes(attrs: dict[str, Any]) -> dict[str, Any]:
+    def walk(value: Any) -> tuple[Any, bool]:
+        if isinstance(value, dict):
+            out, masked = {}, False
+            for key, item in value.items():
+                if key in CODE_HASH_KEYS and item is not None:
+                    out[key], hit = CODE_HASH_MASK, True
+                else:
+                    out[key], hit = walk(item)
+                masked = masked or hit
+            if masked and isinstance(out.get("sha256"), str):  # digest over masked content
+                out["sha256"] = CODE_HASH_MASK
+            return out, masked
+        if isinstance(value, list):
+            items = [walk(v) for v in value]
+            return [v for v, _ in items], any(hit for _, hit in items)
+        return value, False
+
+    return walk(attrs)[0]
 
 
 def _spec_plugins(node: Any, out: dict[str, str | None]) -> None:
     if isinstance(node, dict):
-        if set(node) == {"path", "sha256"} and isinstance(node["path"], str):
-            out[node["path"]] = node["sha256"]
+        if "path" in node and set(node) <= {"path", "sha256"} and isinstance(node["path"], str):
+            out[node["path"]] = node.get("sha256")  # a plugin ref (PluginRef.to_dict)
             return
         for value in node.values():
             _spec_plugins(value, out)
@@ -208,7 +238,15 @@ def _maxrl_spec():
                                     "reward_binary": True,
                                     "reward_postprocess": rp.dispatcher_ref().to_dict(),
                                     "reward_shapers": []})
-    return grpo_knobs.with_pipeline_plugins(spec)
+    return _without_plugin_hashes(grpo_knobs.with_pipeline_plugins(spec))
+
+
+def _without_plugin_hashes(spec):
+    """The spec with plugin references by path only (rl-identity-tiering L9.2), so
+    the recorded hashes do not change with plugin source code (L9.10)."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec, _strip_plugin_hashes
+
+    return AlgorithmSpec.from_dict(_strip_plugin_hashes(json.loads(spec.canonical_json())))
 
 
 def _elastic(tmp: Path) -> tuple[str, ...]:
@@ -290,7 +328,6 @@ def record_config(config: Config) -> dict[str, Any]:
     from rl_e2e_launch import island_run, learner_from_run
     from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config
-    from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     tmp = Path(tempfile.mkdtemp(prefix="yeto-golden-"))
@@ -340,21 +377,22 @@ def record_config(config: Config) -> dict[str, Any]:
         "miles_argv_sha256": hashlib.sha256(shlex.join(argv).encode()).hexdigest(),
         "algorithm_spec": json.loads(spec.canonical_json()),
         "algorithm_sha256": spec.sha256(),
+        "algorithm_semantic_sha256": spec.semantic_sha256(),
         "algorithm_sha256_launcher_expected": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_sha256_learner_ports_spec": learner_spec.sha256(),
         "launch_algorithm_sha256": launch.algorithm_sha256,
         "execution_profile": _execution_profile(args, launch, spec,
                                                 yeto_policy_sync=yeto_policy_sync),
-        "ports_runtime_fingerprint": ports_runtime_fingerprint(launch),
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
-        "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
+        "runtime_attrs": _mask_code_hashes(
+            json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs)))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
-        # Phase 5 (design D7): parallel identity hash; the two hashes above are unchanged.
+        # Phase 5 (design D7); without the engine commit (L9.10, design D5).
         "backend_identity": _backend_identity(),
         "session_contract_hash": None,
         "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），"
-                                      "阶段 5 起再与 backend_identity.sha256 绑定"
-                                      "（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
+                                      "再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定"
+                                      "（yeto.rl.engine.backend_identity），离线不可得",
     }
 
 
@@ -362,7 +400,7 @@ def _backend_identity() -> dict:
     from yeto.rl.adapters.miles.identity import backend_identity
 
     identity = backend_identity(compat_group="nvidia-h100")  # 7.7b: fixed sample card type
-    return {**identity.to_dict(), "sha256": identity.sha256()}
+    return {k: v for k, v in identity.to_dict().items() if k != "engine_commit"}
 
 
 # ---------------------------------------------------------------- fake-engine tapes / progress
