@@ -145,6 +145,8 @@ _PROFILES: dict[str, dict[str, Any]] = {
     },
     "qwen38": {
         "model": "qwen38",
+        # The Miles fork's Qwen3.8 family (Qwen38SmallTITOTokenizer); "qwen38" is not a TITO type there.
+        "tito_model": "qwen38small",
         "rl_model_recipe": "generic",
         "backend_reasoning_effort": "xhigh",
         "thinking": {"type": "enabled"},
@@ -158,6 +160,9 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_identifier": QWEN38_MODEL,
         "model_revision": QWEN38_REVISION,
         "identity_label": "Qwen3.8",
+        # S24 T-TB2 baseline: 49% of 27B episodes ended on one line of prose
+        # before the tool call; keep it instead of failing the episode.
+        "allow_prose_with_tool_call": True,
         "keeps_history_reasoning": True,
         "reasoning_markers": _QWEN_REASONING_MARKERS,
     },

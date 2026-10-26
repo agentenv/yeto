@@ -295,6 +295,11 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - `MILES_NEXT_COMMIT` 17aeb5cb5 → 44d41efd0 (michaellchung/miles `s24-miles-import2`: the `megatron_utils` package `__init__` no longer imports deep_ep and the Megatron-Bridge plugins; they moved to `megatron_utils.runtime_patches`, imported by the modules that need them. RayWorkerManager unpickles placement-group and worker-spec objects whose modules import `megatron_config`, so it loaded `megatron.bridge`. rl-trainer-cold-start-cost L2.2). No loss path change; appended to `MILES_FORK_LINEAGE`. `MILES_NEXT_IMAGE` `@sha256:b304f857…` → `@sha256:5b9dc2a9…` (tag 44d41ef-2fa8801; the layer also patches Megatron-LM a84b105 so `megatron.training` imports modelopt only where a model uses it, `docker/miles-ports/megatron_lm_lazy_modelopt.patch`; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-44d41ef-2fa8801/`).
 - Golden: in all 8 samples only `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit. Algorithm hashes, contract hashes, plugins, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`.
 
+## S24 TB2 infrastructure-as-abort (branch s24p2-tb2, 2026-10-15)
+
+- `codex_openenv_subprocess_agent_function.py`: a non-harness worker exception or a verifier exception (sandbox shut down) now returns infrastructure metadata instead of raising. The golden `codex_harness.json` plugin `source_sha256` changes (6055fcc8… → 8a78b597…). Algorithm hashes, contract hashes, Miles argv and the other 7 samples are unchanged. Regenerated with `python tests/decoupling_golden.py --write`.
+- `CODEX_HARNESS_AGENT_SHA256` 7b84b034… → 459855e8… (qwen38 profile may keep prose before its tool call; earlier commit on the same branch).
+
 ## S24 phase 2 version boundary: L6b + island contract v3 + golden without code hashes (branch s24p2-hash, 2026-10-15)
 
 One version boundary for rl-offpolicy-correction-passthrough L6b and rl-identity-tiering L9.7–L9.8 and L9.10. Per design D5 this is the last entry for a code-only change; from now on an entry is written only when a semantic hash (`AlgorithmSpec.semantic_sha256()`) changes.

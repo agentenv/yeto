@@ -292,12 +292,8 @@ def test_subprocess_run_cleans_up_or_hands_off_segment_sessions(monkeypatch, whe
     async def scenario():
         async with _SessionServer() as server:
             md = _metadata(max_seq_len=8000)
-            if where == "harness_error":
-                result = await subprocess_agent.run(f"{server.url}/sessions/S0", "p", {}, md)
-            else:
-                result = None
-                with pytest.raises(RuntimeError, match="worker crashed"):
-                    await subprocess_agent.run(f"{server.url}/sessions/S0", "p", {}, md)
+            # S24 T-TB2: a worker or verifier failure is infrastructure (no reward), not a crash
+            result = await subprocess_agent.run(f"{server.url}/sessions/S0", "p", {}, md)
             return server, result
 
     try:
@@ -308,6 +304,8 @@ def test_subprocess_run_cleans_up_or_hands_off_segment_sessions(monkeypatch, whe
     if where == "harness_error":  # metadata returned -> the generate wrapper drains them
         assert result[cb.SESSIONS_METADATA_KEY] == ["seg1", "seg2", "seg3"] and server.deleted == []
     else:
+        assert "worker crashed" in result["tbench_infrastructure_error"]
+        assert cb.SESSIONS_METADATA_KEY not in result
         assert sorted(server.deleted) == ["seg1", "seg2", "seg3"] and server.live == set()
 
 

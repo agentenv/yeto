@@ -97,6 +97,9 @@ def _synthetic_contract(args) -> dict:
 @pytest.fixture
 def bundle(tmp_path, monkeypatch):
     """A fake bundle dir + the contract attestation stubbed to the pin values."""
+    # An empty HOME keeps machine state (e.g. a cached HF token, which the
+    # launcher mounts when present) out of the mount lists these tests pin.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
         Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
     root = tmp_path / "codex-bundle" / "codex"

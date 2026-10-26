@@ -657,11 +657,11 @@ def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
     env = dict(adapter._OPENENV_IDENTITY_ENV)
     preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", env)
     with pytest.raises(ValueError, match="requires backend profile"):
-        preflight.forward_legacy_openenv_preflight(None, "qwen38", env)
+        preflight.forward_legacy_openenv_preflight(None, "deepseekv4", env)
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
     pins = preflight.required_pin_updates()
-    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "7b84b034601abebc0a9424ee14c100d6cf1e413c326065bde1ad26c716516f1d"
+    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "459855e8845ab3b3cc1a4e2f47e5a9e8cc6cad79197208e43aa1d822a7c300ad"
     assert pins["CODEX_OPENENV_AGENT"].endswith("codex_openenv_subprocess_agent_function.run")
 
 
@@ -772,14 +772,13 @@ def test_openenv_profile_pin_relaxed_to_allowlist(monkeypatch):
     from yeto.rl.harness.codex import pins
 
     assert adapter.IMAGE_BACKEND_PROFILE_NAME == pins.OPENENV_BACKEND_PROFILE == "qwen35_08b"
-    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer", "qwen3_30b_a3b"}  # rlf-codex-rl 5.6
+    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38", "qwen38_next", "qwen38_next_4layer", "qwen3_30b_a3b"}  # rlf-codex-rl 5.6; S24 27B
     # the identity derives from the selected profile (codex_backend allowlist), per profile
     assert adapter.profile_identity("qwen35_08b") == (cb.QWEN35_08B_MODEL, cb.QWEN35_08B_REVISION)
     assert adapter.profile_identity("qwen38_next_4layer") == (cb.QWEN38_NEXT_4LAYER_MODEL, cb.QWEN38_NEXT_4LAYER_REVISION)
     assert adapter.profile_identity("qwen38_next") == (cb.QWEN38_NEXT_MODEL, cb.QWEN38_NEXT_REVISION)
     assert adapter.profile_identity("qwen35") == (cb.QWEN35_MODEL, cb.QWEN35_REVISION)  # S17 M1: 4B allowlisted
-    with pytest.raises(ValueError, match="requires backend profile"):
-        adapter.profile_identity("qwen38")
+    assert adapter.profile_identity("qwen38") == (cb.QWEN38_MODEL, cb.QWEN38_REVISION)  # S24: 27B allowlisted
     with pytest.raises(ValueError, match="requires backend profile"):
         adapter.profile_identity("deepseekv4")
     # drift of an allowlisted profile is still refused
@@ -800,7 +799,7 @@ def test_openenv_runtime_profile_resolution():
     assert adapter.resolve_backend_profile(env={}) == "qwen35_08b"
     assert adapter.resolve_backend_profile(env={adapter.RUNTIME_PROFILE_ENV: "deepseekv4"}) == "qwen35_08b"
     with pytest.raises(ValueError, match="requires backend profile"):
-        adapter.resolve_backend_profile("qwen38", env={})
+        adapter.resolve_backend_profile("deepseekv4", env={})
     # the image record is independent of the runtime profile
     assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_BACKEND_PROFILE"] == "qwen35_08b"
     assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_MODEL_ID"] == "Qwen/Qwen3.5-0.8B"
@@ -811,7 +810,7 @@ def test_legacy_preflight_accepts_fn_profiles_against_image_env():
     for name in ("qwen38_next_4layer", "qwen38_next", "qwen35_08b"):
         preflight.forward_legacy_openenv_preflight(None, name, env)
     with pytest.raises(ValueError, match="requires backend profile"):
-        preflight.forward_legacy_openenv_preflight(None, "qwen38", env)
+        preflight.forward_legacy_openenv_preflight(None, "deepseekv4", env)
     # the image record is still enforced for the FN profile
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(
@@ -838,3 +837,99 @@ def test_subprocess_run_records_phase_timing(monkeypatch):
     assert totals["judge_seconds"] is not None and totals["judge_seconds"] >= 0
     assert record["sandbox_start_seconds"] >= 0
     assert record["trajectory_started_at"] <= record["trajectory_ended_at"]
+
+
+# ---------------------------------------------------------------- S24 T-TB2: infrastructure never reaches reward or advantage
+
+class ConflictError(Exception):
+    """Stand-in for ``modal.exception.ConflictError`` ("Modal Sandbox is shutting down")."""
+
+
+class NotFoundError(Exception):
+    """Stand-in for ``modal.exception.NotFoundError`` (sandbox already shut down)."""
+
+
+def _assert_infrastructure(result: dict[str, Any], reason: str) -> None:
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
+    assert reason in result[tbench_reward.INFRASTRUCTURE_KEY]
+    sample = SimpleNamespace(metadata=result, status=None)
+    assert _run(tbench_reward.reward_func(None, sample)) == 0.0 and sample.status == "ABORTED"
+    assert "success" not in result
+
+
+def test_sandbox_shutdown_at_acquire_is_infrastructure(monkeypatch):
+    provider, _ = _configure(monkeypatch, FakeTerminalEnvironment(passed=True))
+
+    async def gone(task_id, trajectory_id):
+        raise ConflictError("Modal Sandbox is shutting down.")
+
+    monkeypatch.setattr(provider, "acquire", gone)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), "ConflictError")
+
+
+@pytest.mark.parametrize("exc,reason", [
+    (lambda: subprocess_agent.adapter.harness.CodexHarnessError(
+        "terminal_exec output exceeded its signed boundary"), "exceeded its signed boundary"),
+    (lambda: NotFoundError("Modal Sandbox with container ID ta-x not found"), "worker: NotFoundError"),
+])
+def test_worker_failures_are_infrastructure_and_release_the_sandbox(monkeypatch, exc, reason):
+    provider, board = _configure(monkeypatch, FakeTerminalEnvironment(passed=True))
+
+    async def fail(*_a, **_k):
+        raise exc()
+
+    monkeypatch.setattr(subprocess_agent, "_drive_worker", fail)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), reason)
+    assert provider.destroyed == 1 and board.open == 0
+
+
+def test_verifier_sandbox_gone_is_infrastructure_not_a_crash(monkeypatch):
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env)
+
+    async def gone(*_a, **_k):
+        raise NotFoundError("Modal Sandbox with container ID ta-x not found")
+
+    monkeypatch.setattr(subprocess_agent.adapter, "finish_trusted", gone)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), "verify: NotFoundError")
+    assert provider.destroyed == 1 and board.open == 0
+
+
+def test_a_group_with_an_infrastructure_member_never_reaches_the_advantage():
+    """The TB2 group filter (``--dynamic-sampling-filter-path ...tbench_reward.check_group``) drops the
+    whole group before Miles computes rewards-to-advantages; Miles itself does not mask ABORTED samples."""
+    from yeto.rl.harness.codex.codex_openenv_agent_function import infrastructure_metadata
+
+    def passed(i):
+        env = FakeTerminalEnvironment(passed=bool(i % 2))
+        return dict(_run(subprocess_agent.adapter.finish_trusted(
+            {"status": "completed", "metrics": {}, "episode_id": f"e{i}"}, env, task_id="fix-git",
+            sample_id=f"s{i}")))
+
+    good = [SimpleNamespace(metadata={**passed(i), "trajectory_id": f"t{i}"}, status=None, rollout_id=None)
+            for i in range(3)]
+    infra = SimpleNamespace(metadata={**infrastructure_metadata("verify: NotFoundError: gone", episode_id="e9"),
+                                      "trajectory_id": "t9"}, status=None, rollout_id=None)
+    assert tbench_reward.check_group(None, good).keep is True  # mixed rewards: kept
+    out = tbench_reward.check_group(None, [*good, infra])
+    assert out.keep is False and out.reason == "group_has_aborted" and infra.status == "ABORTED"
+
+
+def test_tb2_group_check_is_a_bound_neutral_filter():
+    import json as _json
+
+    from yeto.rl.adapters.miles import binding
+    from yeto.rl.engine.algorithm import TBENCH_GROUP_CHECK_FILTER, AlgorithmSpec, normalize_filter_name
+
+    assert normalize_filter_name("yeto.rl.harness.codex.tbench_reward.check_group") == TBENCH_GROUP_CHECK_FILTER
+    assert binding.filter_argv(TBENCH_GROUP_CHECK_FILTER) == [
+        "--dynamic-sampling-filter-path", "yeto.rl.harness.codex.tbench_reward.check_group"]
+    from importlib import import_module
+
+    module, _, name = binding.filter_path(TBENCH_GROUP_CHECK_FILTER).rpartition(".")
+    assert getattr(import_module(module), name) is tbench_reward.check_group
+    raw = _json.loads((Path(__file__).resolve().parents[1]
+                       / "examples/rl_algorithms/decoupled-ppo-c2-agentic-tb2.json").read_text())
+    spec = AlgorithmSpec.from_json(_json.dumps(raw)) if hasattr(AlgorithmSpec, "from_json") else AlgorithmSpec.from_dict(raw)
+    assert spec.sampling.filter == TBENCH_GROUP_CHECK_FILTER and spec.sampling.over_sampling_batch_size == 8
+    assert spec.correction.upper == 2.0 and spec.execution.max_policy_staleness == 4

@@ -487,6 +487,25 @@ def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[An
             module._parameters[attr] = param
 
 
+def refresh_actor_backup(actor: Any) -> None:
+    """Refresh Miles' pinned host copy of the actor weights after an in-place write.
+
+    Only an *existing* "actor" backup is refreshed.  Miles skips that backup when it is
+    not needed (fixed partition; colocated LoRA, where the memory saver's host copy of
+    the frozen base serves weight sync), and ``backup("actor")`` on a backuper that
+    never took one allocates a fresh pinned copy of every weight -- the whole frozen
+    base per rank (S24 T-27B: +133 GB host on Qwen3.8-27B, Ray OOM-killed the island).
+    A backuper without ``backup_tags`` (older Miles) keeps the unconditional refresh.
+    """
+    backuper = getattr(actor, "weights_backuper", None)
+    if backuper is None:
+        return
+    tags = getattr(backuper, "backup_tags", None)
+    if tags is not None and "actor" not in tags:
+        return
+    backuper.backup("actor")
+
+
 def assert_grad_flow_intact(modules: Sequence[Any], parameters: Sequence[Any]) -> None:
     owners = parameter_owners(modules, parameters)
     for param in parameters:
@@ -1119,9 +1138,7 @@ def _apply_state(
     _barrier()
     if optimizer == "reset":
         reset_optimizer_moments(actor.optimizer)
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:  # colocated update_weights reads the CPU backup
-        backuper.backup("actor")
+    refresh_actor_backup(actor)
     assert_grad_flow_intact(actor.model, params)
     return {
         "policy_version": int(policy_version),
