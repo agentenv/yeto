@@ -43,6 +43,19 @@ def compute_score_rlf(data_source, solution_str, ground_truth=None, extra_info=N
 
 REWARDS["yeto.rlf"] = "compute_score_rlf"
 
+# S28 G-M2: engine health checks with a checkpoint that cannot solve any task
+# (yeto.rl.bringup_reward). Never a training reward.
+BRINGUP_REWARD = "yeto.rl.bringup_reward:score"
+
+
+def compute_score_bringup(data_source, solution_str, ground_truth=None, extra_info=None, **_kwargs):
+    from yeto.rl.bringup_reward import score
+
+    return score(solution_str)
+
+
+REWARDS[BRINGUP_REWARD] = "compute_score_bringup"
+
 # S27 G-FS (VERL-PARITY #33): the agentic path's reward is the Harbor verdict the
 # agent loop already put on the sample (``AgentLoopOutput.reward_score`` ->
 # ``rm_scores``); verl's reward manager then returns that tensor and never calls a

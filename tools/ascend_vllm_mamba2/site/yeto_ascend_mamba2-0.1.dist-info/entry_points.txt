@@ -1,0 +1,2 @@
+[vllm.general_plugins]
+yeto_ascend_mamba2 = yeto.rl.ascend_vllm_mamba2:register

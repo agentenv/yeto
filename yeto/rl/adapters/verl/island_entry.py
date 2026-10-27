@@ -35,7 +35,7 @@ from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 from . import config as vconf
 from . import megatron_engine
 from . import run_config_rules
-from .pins import VERL_COMMIT, expected_versions_for_engine, verl_root
+from .pins import VERL_COMMIT, expected_versions_for_engine, known_version_sets, verl_root
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -245,8 +245,9 @@ def runtime_manifest(learner_id: int, device_family: str | None = None, engine: 
     family = device_family if device_family is not None else detect_device_family()
     # S27 G-DC: the Megatron engine island also asserts the Megatron stack (pins)
     expected = expected_versions_for_engine(engine, family)
+    version_sets = known_version_sets(engine, family)  # S28 G-M2 (W1): primary first
     versions = {}
-    for name in expected:
+    for name in sorted({n for vs in version_sets.values() for n in vs}):
         try:
             versions[name] = md.version(name.replace("_", "-"))
         except md.PackageNotFoundError:
@@ -280,9 +281,17 @@ def runtime_manifest(learner_id: int, device_family: str | None = None, engine: 
     problems = []
     if commit != VERL_COMMIT:
         problems.append(f"verl commit {commit} != pin {VERL_COMMIT}")
-    for name, want in expected.items():
-        if versions.get(name) != want:
-            problems.append(f"{name} {versions.get(name)} != {want}")
+    matched = [label for label, vs in version_sets.items()
+               if all(versions.get(name) == want for name, want in vs.items())]
+    manifest["version_set"] = matched[0] if matched else None
+    if matched:
+        manifest["expected_versions"] = version_sets[matched[0]]
+    else:  # report against the primary set, and say which other sets were tried
+        for name, want in expected.items():
+            if versions.get(name) != want:
+                problems.append(f"{name} {versions.get(name)} != {want}")
+        if len(version_sets) > 1:
+            problems.append(f"no known version set matches: {sorted(version_sets)}")
     manifest["problems"] = problems
     return manifest
 
@@ -567,6 +576,11 @@ def main(argv=None) -> int:
     buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
     spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    from .ascend_env import safe_cwd
+
+    moved = safe_cwd(OUTPUT)  # S28 G-M2 (W2): never import vllm from cwd /
+    if moved:
+        print(f"[yeto-verl] cwd was /, moved to {moved}", flush=True)
     lid = args.learner_id
     t0 = time.time()
     engine = megatron_engine.engine_for(tensor_parallel=args.tensor_parallel,
@@ -797,6 +811,14 @@ def main(argv=None) -> int:
     plan_path.write_text(json.dumps(plan, indent=1, default=str))
     (OUTPUT / f"verl-plan-{lid}.json").write_text(json.dumps(plan, indent=1, default=str))
     env = dict(os.environ)
+    if manifest.get("device_family") == "ascend":  # S28 G-M2: W3 (vLLM engine settings on Ascend)
+        from . import ascend_env
+
+        for note in ascend_env.island_env(env, mamba2=ascend_env.is_mamba2_model(model_path),
+                                          plugin_dir=work / "vllm-plugins",
+                                          rollout=buffer_section is None):
+            print(f"[yeto-verl] island {lid} ascend env {note}", flush=True)
+        os.environ.update({k: env[k] for k in (*ascend_env.FORWARD_NAMES, "PYTHONPATH") if k in env})
     workdir = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = workdir + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["YETO_VERL_PLAN"] = str(plan_path)
@@ -990,6 +1012,11 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         experiment_name=f"yeto-verl-{args.learner_id}",
         **agentic_run_fields(args, out_dir=out_dir))
     overrides = vconf.build_overrides(run)
+    from yeto.hw.catalog import device_family as _device_family
+
+    from .ascend_env import rollout_overrides  # S28 G-M2: Mamba2 on Ascend has no prefix caching
+
+    overrides += rollout_overrides(model_path, _device_family())
     if pools is not None and not limit:  # limit > 0: the fully_async pools (fully_async_plan)
         from .separate import with_separate_pools
 
