@@ -9,7 +9,7 @@ runs on this engine. The engine is chosen by the parallel shape
 Shape of the island (the Miles shape of S27 D0, ``s27-ch-d0a``):
 
 * trainer pool: ``trainer_nodes`` x ``trainer_gpus_per_node`` cards, Megatron
-  TP x PP x EP (ETP 1, CP 1), the distributed optimizer, no offload (the
+  TP x PP x EP x CP (ETP 1), the distributed optimizer, no offload (the
   trainer cards hold weights, gradients and the optimizer state all the time);
 * rollout pool: its own ``rollout_nodes`` x ``rollout_gpus_per_node`` cards,
   vLLM servers of ``rollout_tp`` cards each (verl's "standalone" replicas);
@@ -117,6 +117,120 @@ class MegatronShapeError(ValueError):
     """The verl Megatron island cannot run this shape."""
 
 
+# S28 G-CPW: Mamba layers in verl's THD packing. verl packs several samples into one
+# micro-batch, and a Mamba layer restarts its conv and SSM state at a sample boundary
+# only when ``PackedSeqParams`` carries ``seq_idx``. verl never sets it; the fifth
+# patch of ``patch_verl.py`` (``--profile megatron``) adds ``_yeto_seq_idx_args`` to
+# ``verl/models/mcore/util.py``, which passes the pack's ``total_tokens`` so Megatron
+# derives it. That patch lives in this repository, but whether it is in effect is a
+# property of the verl tree the island actually imports: npu1's tree never got it
+# (S28 G-CPW, 10-27 03:1xZ: util.py there is the unpatched acad9875 file), so the
+# island probes the imported module itself (:func:`probe_seq_idx`) instead of trusting
+# the repository. The S27 helper passed ``total_tokens`` at CP=1 only; Megatron-Core's
+# Mamba CP all-to-alls each rank back to the whole sequence, so the right ``seq_idx``
+# is the global pack's at every CP size (S28 CP2, report/CP2-PLAN.md section 2.2),
+# which the S28 helper passes. The probe asks the helper at the island's own CP.
+SEQ_IDX_MODULE = "verl.models.mcore.util"
+SEQ_IDX_HELPER = "_yeto_seq_idx_args"
+SEQ_IDX_REMEDY = ("apply patch_verl.py --profile megatron (fifth patch, seq_idx; CP>1 needs the S28 "
+                  "version that passes total_tokens at every CP size) to the verl tree the island imports, "
+                  "then restart Ray")
+# A pack of two samples (3 and 5 padded tokens) that the probe hands to the helper
+_PROBE_SEQLENS = (3, 5)
+
+
+@dataclass(frozen=True)
+class SeqIdxPatch:
+    """What verl's THD packing in one process does for a Mamba layer at CP ``cp``.
+
+    ``ready``: the helper gives ``PackedSeqParams`` the whole pack's ``total_tokens``
+    at that CP size (so Megatron derives ``seq_idx``); ``error`` names what is missing."""
+
+    source: str | None
+    cp: int
+    ready: bool
+    error: str | None = None
+
+
+def probe_seq_idx(cp: int = 1, module=None) -> SeqIdxPatch:
+    """Probe the seq_idx patch in ``module`` (default: the imported ``SEQ_IDX_MODULE``).
+
+    Behavioural, not textual: the helper is called on a two-sample pack at ``cp`` and
+    must return that pack's ``total_tokens``. That also proves this Megatron-Core's
+    ``PackedSeqParams`` takes the field (the helper returns ``{}`` otherwise)."""
+    cp = int(cp)
+    if module is None:
+        import importlib
+
+        try:
+            module = importlib.import_module(SEQ_IDX_MODULE)
+        except Exception as error:  # noqa: BLE001 - reported, the caller refuses
+            return SeqIdxPatch(None, cp, False, f"cannot import {SEQ_IDX_MODULE}: {error!r}")
+    source = getattr(module, "__file__", None) or getattr(module, "__name__", None)
+    helper = getattr(module, SEQ_IDX_HELPER, None)
+    if not callable(helper):
+        return SeqIdxPatch(source, cp, False, f"{source} has no {SEQ_IDX_HELPER} (unpatched verl)")
+    pack, want = list(_PROBE_SEQLENS), sum(_PROBE_SEQLENS)
+    try:
+        got = helper(cp, pack)
+    except Exception as error:  # noqa: BLE001 - a changed signature is reported, not raised
+        return SeqIdxPatch(source, cp, False, f"{SEQ_IDX_HELPER}({cp}, {pack}) raised {error!r}")
+    if isinstance(got, dict) and got.get("total_tokens") == want:
+        return SeqIdxPatch(source, cp, True)
+    why = ("this Megatron-Core's PackedSeqParams may lack total_tokens" if cp == 1 else
+           "the helper passes total_tokens at CP=1 only (the S27 version)")
+    return SeqIdxPatch(source, cp, False, f"{SEQ_IDX_HELPER}({cp}, {pack}) returned {got!r}, "
+                                          f"not total_tokens={want}: {why}")
+
+
+def seq_idx_problem(*, mamba: bool, cp: int, patch: SeqIdxPatch | None) -> str | None:
+    """Why a model cannot train on this verl tree at context parallelism ``cp``
+    (None when it can). Only a model with Mamba layers needs ``seq_idx``."""
+    if not mamba:
+        return None
+    if patch is None:
+        return "含 Mamba 层的模型：没有查过实际运行的 verl 是否带 seq_idx 补丁（MegatronShape.seq_idx 为空）"
+    if int(patch.cp) != int(cp):
+        return f"含 Mamba 层的模型：seq_idx 补丁是按 CP={patch.cp} 查的，本岛是 CP={int(cp)}"
+    if not patch.ready:
+        return (f"含 Mamba 层的模型在 CP={int(cp)} 下需要 seq_idx 补丁，实际运行的 verl 里它没有生效："
+                f"{patch.error}。不补的话一个 micro-batch 里的多条样本会串 Mamba 状态。补法：{SEQ_IDX_REMEDY}")
+    return None
+
+
+def has_mamba(model_config) -> bool:
+    """The model's ``config.json`` has Mamba layers (Nemotron-H ``hybrid_override_pattern``
+    or ``layers_block_type``; :func:`yeto.rl.hybrid_params.hybrid_pattern`)."""
+    from yeto.rl import hybrid_params
+
+    try:
+        return "M" in hybrid_params.hybrid_pattern(model_config)
+    except hybrid_params.HybridParamError:
+        return False
+
+
+def runtime_problems(shape: dict, reports: list[dict]) -> list[str]:
+    """What the trainer workers really run, against the plan's shape (S28 G-CPW).
+
+    ``reports`` come from ``megatron_ports.remote_megatron_runtime``: the Megatron
+    parallel world sizes of each rank and its own probe of the seq_idx patch. Writing
+    ``context_parallel_size`` into the overrides is not proof that Megatron built CP
+    groups of that size, and the driver's verl tree is not proof of the workers'."""
+    problems = []
+    for report in sorted(reports, key=lambda row: int(row.get("rank", 0))):
+        rank = report.get("rank")
+        for name in ("tp", "pp", "ep", "cp"):
+            got = (report.get("sizes") or {}).get(name)
+            if got is None or int(got) != int(shape[name]):
+                problems.append(f"rank {rank}: {name} world size {got}, the plan has {shape[name]}")
+        seq_idx = report.get("seq_idx")
+        problem = seq_idx_problem(mamba=bool(shape.get("mamba")), cp=int(shape["cp"]),
+                                  patch=SeqIdxPatch(**seq_idx) if seq_idx else None)
+        if problem:
+            problems.append(f"rank {rank}: {problem}")
+    return problems
+
+
 def sync_problems(args) -> list[str]:
     """S27 G-FG: what a Megatron island with the full-parameter outer sync cannot
     run ([] when it can). Read from launcher arguments and from island arguments
@@ -156,10 +270,13 @@ def sync_problems(args) -> list[str]:
     return problems
 
 
-def engine_for(*, tensor_parallel: int = 1, pipeline_parallel: int = 1, expert_parallel: int = 1) -> str:
+def engine_for(*, tensor_parallel: int = 1, pipeline_parallel: int = 1, expert_parallel: int = 1,
+               context_parallel: int = 1) -> str:
     """The verl training engine of a run: Megatron when any model parallel size is
-    above 1 (the FSDP2 island has none), FSDP2 otherwise."""
-    if max(int(tensor_parallel or 1), int(pipeline_parallel or 1), int(expert_parallel or 1)) > 1:
+    above 1 (the FSDP2 island has none), FSDP2 otherwise. S28 G-CPW: context
+    parallelism counts, so ``--context-parallel 2`` alone does not land on FSDP2."""
+    sizes = (tensor_parallel, pipeline_parallel, expert_parallel, context_parallel)
+    if max(int(size or 1) for size in sizes) > 1:
         return ENGINE_MEGATRON
     return ENGINE_FSDP2
 
@@ -232,6 +349,11 @@ class MegatronShape:
     # fused forward only patches a GPTModel, while NemotronH loads as a MambaModel, and
     # the Triton kernel asserts .is_cuda and calls torch.cuda.nvtx.
     fused_logprob_kernels: bool = False
+    # S28 G-CPW: the model has Mamba layers, and what the island's verl tree does for
+    # their seq_idx at this shape's CP (probe_seq_idx; None = not probed). validate
+    # refuses a Mamba model whose verl does not generate it.
+    mamba: bool = False
+    seq_idx: SeqIdxPatch | None = None
 
     @property
     def trainer_gpus(self) -> int:
@@ -276,8 +398,12 @@ def validate(shape: MegatronShape) -> None:
     for name in names:
         if int(getattr(s, name)) < 1:
             raise MegatronShapeError(f"{name} 必须 >= 1，得到 {getattr(s, name)}")
-    if s.cp != 1:
-        raise MegatronShapeError("verl Megatron 岛暂不接 CP>1：Mamba 打包的 seq_idx 补丁只在 CP=1 下核对过")
+    # S28 G-CPW: was a refusal of every CP>1. A Mamba model now needs the seq_idx patch
+    # in effect in the verl it imports, at CP=1 and, CP-aware, at CP>1; a model without
+    # Mamba layers needs no seq_idx.
+    problem = seq_idx_problem(mamba=s.mamba, cp=s.cp, patch=s.seq_idx)
+    if problem:
+        raise MegatronShapeError(problem)
     if s.etp != 1:
         raise MegatronShapeError("verl Megatron 岛只接 ETP=1（专家不做张量并行）")
     model_parallel = s.tp * s.pp * s.cp
@@ -342,6 +468,23 @@ _FSDP_ONLY_PREFIXES = (
 )
 
 
+def check_token_budget(cfg: vconf.VerlRunConfig, shape: MegatronShape) -> None:
+    """One whole row must fit in one micro-batch (S28 G-CPW).
+
+    verl's dynamic batching packs at most ``max_token_len_per_gpu x CP`` tokens into a
+    micro-batch (``workers/engine/utils.py`` ``prepare_micro_batches``: the Megatron
+    engine sets ``sp_size`` to ``context_parallel_size``) and asserts that the longest
+    sequence fits (``utils/seqlen_balancing.py`` ``rearrange_micro_batches``). That
+    assertion fires in the first step, after the model has loaded; this is the same
+    rule at plan time, and the rule of the neutral ``run_config._train_memory``
+    (``--rl-max-tokens-per-gpu x CP >= --seq-len``)."""
+    row = int(cfg.max_prompt_len) + int(cfg.max_response_len)
+    budget = int(shape.max_tokens_per_gpu) * int(shape.cp)
+    if budget < row:
+        raise MegatronShapeError(f"max_tokens_per_gpu {shape.max_tokens_per_gpu} x CP {shape.cp} = {budget} "
+                                 f"放不下一行（max_prompt_len + max_response_len = {row}）")
+
+
 def recompute_overrides(tcfg: str, shape: MegatronShape) -> list[str]:
     """Megatron recompute keys: selective over ``recompute_modules`` (default), or
     full-layer uniform recompute of ``recompute_full_layers`` layers (S28 G-120)."""
@@ -370,6 +513,7 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     engine backend."""
     validate_run(cfg)
     validate(shape)
+    check_token_budget(cfg, shape)
     base = [o for o in vconf.build_overrides(cfg) if not o.startswith(_FSDP_ONLY_PREFIXES)]
     meg = "actor_rollout_ref.actor.megatron"
     tcfg = f"++{meg}.override_transformer_config"
@@ -473,6 +617,10 @@ ASSERTED_KEYS = (
     *separate.ASSERTED_KEYS,
     "actor_rollout_ref.actor.megatron.expert_model_parallel_size",
     "actor_rollout_ref.actor.megatron.tensor_model_parallel_size",
+    # S28 G-CPW: written without "++", so the plan's want is the value and a resolved
+    # config that disagrees fails the island (trainer.check_asserted). The workers'
+    # Megatron CP groups are checked on top (runtime_problems).
+    "actor_rollout_ref.actor.megatron.context_parallel_size",
     "actor_rollout_ref.actor.megatron.use_distributed_optimizer",
     "actor_rollout_ref.actor.megatron.param_offload",
     "actor_rollout_ref.actor.megatron.optimizer_offload",

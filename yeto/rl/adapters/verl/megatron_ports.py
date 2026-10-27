@@ -33,6 +33,7 @@ the engine-neutral role stream over the Megatron trainer group of
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -122,6 +123,24 @@ def remote_megatron_grad_checks(worker_dict) -> dict:
     record = megatron_grad_checks.report(_chunks(_inner_worker(worker_dict)))
     record["rank"] = int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0
     return record
+
+
+def remote_megatron_runtime(worker_dict) -> dict:
+    """S28 G-CPW: what this rank really runs -- its Megatron parallel world sizes and
+    its own probe of verl's seq_idx patch (``megatron_engine.probe_seq_idx``: the verl
+    module this worker process imported, not the repository's patch). Checked against
+    the plan by ``megatron_engine.runtime_problems``."""
+    import torch.distributed as dist
+    from megatron.core import parallel_state as mpu
+
+    from .megatron_engine import probe_seq_idx
+
+    del worker_dict  # the parallel state and the module are per process
+    sizes = {"tp": mpu.get_tensor_model_parallel_world_size(), "pp": mpu.get_pipeline_model_parallel_world_size(),
+             "ep": mpu.get_expert_model_parallel_world_size(), "cp": mpu.get_context_parallel_world_size()}
+    sizes = {name: int(size) for name, size in sizes.items()}
+    return {"rank": int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0,
+            "sizes": sizes, "seq_idx": dataclasses.asdict(probe_seq_idx(sizes["cp"]))}
 
 
 def remote_ascend_plugin_report(worker_dict) -> dict:
@@ -539,6 +558,27 @@ def _check_grad_checks(on_workers, shape: dict, tape) -> None:
     megatron_grad_checks.check_reports(reports, wanted=wanted)
 
 
+class MegatronRuntimeShapeError(RuntimeError):
+    """A trainer rank does not run the shape the plan asked for (S28 G-CPW)."""
+
+
+def _check_runtime_shape(on_workers, shape: dict, tape) -> None:
+    """S28 G-CPW: every trainer rank must run the plan's TP/PP/EP/CP, and a Mamba model
+    must have verl's seq_idx patch in effect in every worker process, CP-aware at CP>1.
+    Refuses the island before its first step otherwise. ``on_workers`` is as in
+    :func:`_check_grad_checks`."""
+    from .megatron_engine import runtime_problems
+
+    reports = on_workers(remote_megatron_runtime)
+    tape.append({"event": "rl_megatron_runtime_shape", "ranks": reports})
+    problems = runtime_problems(shape, reports)
+    print(f"[yeto-verl] runtime shape cp={shape.get('cp')} mamba={shape.get('mamba')} ranks={len(reports)} "
+          f"problems={len(problems)}", flush=True)
+    if problems:
+        raise MegatronRuntimeShapeError("verl Megatron 岛的训练 rank 与计划不符：" + "; ".join(problems[:8])
+                                        + (f" ... and {len(problems) - 8} more" if len(problems) > 8 else ""))
+
+
 def _log_ascend_plugin_stack(on_workers, section: dict, tape) -> None:
     """S27 G-FL: print what every trainer worker installed, and put it on the tape.
 
@@ -582,7 +622,9 @@ def island_megatron_checks(island, plan: dict, tape) -> None:
        when a rank does not carry it);
     2. one line per Ascend plugin-stack switch and plugin (a log, never a refusal).
 
-    The calls go to the trainer workers through ``island.call_workers``."""
+    The calls go to the trainer workers through ``island.call_workers``. S28 G-CPW:
+    the runtime shape (parallel sizes, seq_idx patch) is checked first."""
+    _check_runtime_shape(island.call_workers, dict(plan["megatron"]), tape)
     _check_grad_checks(island.call_workers, dict(plan["megatron"]), tape)
     if plan.get("ascend_plugin_stack"):
         _log_ascend_plugin_stack(island.call_workers, plan["ascend_plugin_stack"], tape)
@@ -626,6 +668,8 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
     shape = dict(plan["megatron"])
     tape = EventTape(plan["event_tape"], learner_id)
+    on_workers = functools.partial(call_workers, trainer)
+    _check_runtime_shape(on_workers, shape, tape)  # S28 G-CPW: before any sync or layout work
     identity = backend_identity(train_backend="megatron", compat_group=plan.get("compat_group"))
     if synced:  # S27 G-FG: the FSDP2 island's HF-named layout, identity and policy-age binding
         from yeto.rl.engine.policy_age import bind_policy_age
@@ -648,7 +692,6 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         thresholds_key=plan["thresholds_key"], emit=lambda event, **f: tape.append({"event": event, **f}))
     sync, policy_state = sync_ports(island, plan, identity_sha)
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
-    on_workers = functools.partial(call_workers, trainer)
     _check_grad_checks(on_workers, shape, tape)  # S27 G-FL: refuses a trainer without the NaN check
     if plan.get("ascend_plugin_stack"):  # S27 G-FL: one line per switch and per plugin
         _log_ascend_plugin_stack(on_workers, plan["ascend_plugin_stack"], tape)

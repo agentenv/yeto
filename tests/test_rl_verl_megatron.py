@@ -51,7 +51,7 @@ def test_engine_is_megatron_exactly_when_a_model_parallel_size_is_above_one():
 
 
 @pytest.mark.parametrize("change,match", [
-    (dict(cp=2), "CP>1"),
+    (dict(cp=2, mamba=True), "没有查过"),  # S28 G-CPW: was a blanket CP>1 refusal
     (dict(etp=2), "ETP=1"),
     (dict(tp=3), "TP\\*PP\\*CP=3"),
     (dict(tp=16, trainer_nodes=2), "跨节点"),

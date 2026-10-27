@@ -306,10 +306,14 @@ class _Tape:
         self.events.append(event)
 
 
+SIZES = {"tp": 1, "pp": 1, "ep": 8, "cp": 1}
+
+
 def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
     """B4: ``run_megatron_island`` is the synchronous driver, which this path never
-    calls, so its two readbacks are wired here instead: the gradient non-finite check
-    (a refusal) and the Ascend plugin stack (a log)."""
+    calls, so its readbacks are wired here instead: the runtime shape (S28 G-CPW, a
+    refusal), the gradient non-finite check (a refusal) and the Ascend plugin stack
+    (a log)."""
     from yeto.rl.adapters.verl import megatron_ports
 
     class _OneRank(_Island):
@@ -319,18 +323,20 @@ def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
 
         def call_workers(self, fn, *args):
             self.calls.append(fn.__name__)
+            if fn is megatron_ports.remote_megatron_runtime:
+                return [{"rank": 0, "sizes": dict(SIZES), "seq_idx": None}]
             if fn is megatron_ports.remote_megatron_grad_checks:
                 return [{"rank": 0, "wrapped": True, "check_for_nan_in_grad": self.flag}]
             return [{"rank": 0, "ran": True, "installed": ["a"], "failed": {}}]
 
-    plan = {"megatron": {"grad_nan_check": True},
+    plan = {"megatron": {"grad_nan_check": True, **SIZES},
             "ascend_plugin_stack": {"root": "/p", "env": {"X": "1"}, "plugins": ["a"]}}
     tape = _Tape()
     island = _OneRank(True)
     megatron_ports.island_megatron_checks(island, plan, tape)
-    assert island.calls == ["remote_megatron_grad_checks", "remote_ascend_plugin_report"]
+    assert island.calls == ["remote_megatron_runtime", "remote_megatron_grad_checks", "remote_ascend_plugin_report"]
     events = [event["event"] for event in tape.events]
-    assert events == ["rl_megatron_grad_checks", "rl_ascend_plugin_stack"]
+    assert events == ["rl_megatron_runtime_shape", "rl_megatron_grad_checks", "rl_ascend_plugin_stack"]
     assert "gradient NaN check wanted=True" in capsys.readouterr().out
 
     # a rank without the check stops the island
@@ -339,8 +345,8 @@ def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
 
     # no plugin stack section: only the gradient check runs
     quiet = _OneRank(True)
-    megatron_ports.island_megatron_checks(quiet, {"megatron": {"grad_nan_check": True}}, _Tape())
-    assert quiet.calls == ["remote_megatron_grad_checks"]
+    megatron_ports.island_megatron_checks(quiet, {"megatron": {"grad_nan_check": True, **SIZES}}, _Tape())
+    assert quiet.calls == ["remote_megatron_runtime", "remote_megatron_grad_checks"]
 
 
 # ----------------------------------------------------------------------------- the optimizer-state memory
@@ -382,7 +388,7 @@ def test_the_optimizer_offload_fraction_writes_the_engine_keys_and_is_off_by_def
                                      optimizer_offload_fraction=1.5))
 
 
-def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path):
+def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path, monkeypatch):
     """S27 G-FN (B12): a three-way interaction, not an Ascend quirk (G-FJ2 traced it,
     VERL-ASCEND-MEGATRON.md conclusion C item 2). The bridge enters its MTP branch
     whenever mtp_hybrid_override_pattern is truthy and then multiplies the pattern by
@@ -391,6 +397,9 @@ def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path
     pattern as null so the branch stays closed -- which is what the checkpoint asked
     for. A model that really has MTP layers keeps the bridge's own handling."""
     key = "++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_hybrid_override_pattern"
+    # S28 G-CPW: a hybrid (Mamba) model is planned only over a verl with the seq_idx
+    # patch in effect; this CPU test has no verl, so the probe reports a patched one
+    monkeypatch.setattr(me, "probe_seq_idx", lambda cp=1, module=None: me.SeqIdxPatch("stub", int(cp), True))
 
     # a model that is not hybrid at all: nothing is written
     plain = _plan(tmp_path)

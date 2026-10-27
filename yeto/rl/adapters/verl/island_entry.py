@@ -138,6 +138,9 @@ def parse_args(argv):
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
     p.add_argument("--expert-parallel", type=int, default=None)
+    # S28 G-CPW: the launcher's neutral --context-parallel (rl_island_task forwards it
+    # when > 1); parse_known_args used to drop it, so the island trained at CP=1
+    p.add_argument("--context-parallel", type=int, default=1)
     p.add_argument("--actor-num-nodes", type=int, default=1)
     p.add_argument("--actor-num-gpus-per-node", type=int, default=None)
     p.add_argument("--rl-island-gpus-per-node", type=int, default=None)
@@ -558,7 +561,8 @@ def main(argv=None) -> int:
     t0 = time.time()
     engine = megatron_engine.engine_for(tensor_parallel=args.tensor_parallel,
                                         pipeline_parallel=args.pipeline_parallel,
-                                        expert_parallel=args.expert_parallel or 1)
+                                        expert_parallel=args.expert_parallel or 1,
+                                        context_parallel=args.context_parallel)
     manifest = runtime_manifest(lid, engine=engine)
     manifest["ignored_flags"] = ignored
     (OUTPUT / f"verl-runtime-{lid}.json").write_text(json.dumps(manifest, indent=1))
@@ -1149,11 +1153,16 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     # (megatron_engine.MTP_OFF_PATTERN)
     close_mtp = bool(model_config.get("hybrid_override_pattern")) and not any(
         key in model_config for key in megatron_engine.MTP_CONFIG_KEYS)
+    # S28 G-CPW: a Mamba model needs seq_idx in verl's THD packing; probe the verl this
+    # process imports (the workers probe their own at start, megatron_ports)
+    mamba = megatron_engine.has_mamba(model_config)
     shape = MegatronShape(
         trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
         rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
         rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
+        cp=int(args.context_parallel or 1), mamba=mamba,
+        seq_idx=megatron_engine.probe_seq_idx(int(args.context_parallel or 1)) if mamba else None,
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
         gpu_memory_utilization=pools.gpu_memory_utilization,
