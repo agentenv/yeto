@@ -162,8 +162,18 @@ image = modal_harbor_layer(
 
 # G-ES's stop rules and sampler wait (tools/probes/s27_xcloud/sampler_app.py), copied:
 # that module builds its own Modal app at import, so it cannot be imported here.
+ROUND_EVENTS = ("rl_sampler_engine_round", "rl_sampler_round")
+
+
 class StopRules:
-    """Reads the tape lines and decides when to write the reclaim marker (module doc)."""
+    """Reads the tape lines and decides when to write the reclaim marker (module doc).
+
+    The round event of an engine sampler is ``rl_sampler_engine_round``
+    (``engine_sampler.ROUND_EVENT``), not the ``rl_sampler_round`` this class was
+    copied with: watching only the latter made --stop-groups dead, so a run that
+    had its groups started another round instead of stopping (S28 G-120B burned
+    about 17 GPU-minutes that way). Both names are accepted.
+    """
 
     def __init__(self, cfg: dict, began: float) -> None:
         self.cfg, self.began = cfg, began
@@ -175,9 +185,9 @@ class StopRules:
         event = record.get("event")
         if event == "rl_sampler_backlog_full":
             self.full_since = time.time()
-        elif event in ("rl_sampler_admitted", "rl_sampler_round"):
+        elif event in ("rl_sampler_admitted",) or event in ROUND_EVENTS:
             self.full_since = None
-        if event == "rl_sampler_round" and int(record.get("policy_version", -1)) >= int(self.cfg["stop_version"]):
+        if event in ROUND_EVENTS and int(record.get("policy_version", -1)) >= int(self.cfg["stop_version"]):
             self.version_groups += int(record.get("groups") or 0)
 
     def check(self) -> str | None:
@@ -337,12 +347,21 @@ def sampler(tag: str, cfg: dict) -> int:
 @app.local_entrypoint()
 def main(tag: str, store: str = DEFAULTS["store"], base_dir: str = DEFAULTS["base_dir"],
          groups_per_round: int = 8, samples_per_group: int = 4, max_in_flight: int = 32,
-         stop_version: int = -1, stop_groups: int = 0, idle_s: float = 600.0, max_s: float = 10800.0) -> None:
+         stop_version: int = -1, stop_groups: int = 0, idle_s: float = 600.0, max_s: float = 10800.0,
+         max_model_len: int = DEFAULTS["max_model_len"],
+         max_response_len: int = DEFAULTS["max_response_len"]) -> None:
+    # G-120C: the trainer's row width is max_prompt + max_response_len, and
+    # max_prompt is seq_len - max_response_len (island_entry.py:1165), so a
+    # trajectory longer than the trainer's row is refused outright
+    # (buffer_feed.py:178). Round 1 produced three 37k-58k responses that the
+    # 32768-token trainer shape cannot take, so these two are now overridable
+    # and the sampler is held to the trainer's shape.
     for path in (store, base_dir):
         if not path.startswith(STORE_MOUNT + "/"):
             raise SystemExit(f"{path} must lie under {STORE_MOUNT}")
     cfg = {**DEFAULTS, "store": store, "base_dir": base_dir, "groups_per_round": groups_per_round,
            "samples_per_group": samples_per_group, "max_in_flight": max_in_flight, "stop_version": stop_version,
-           "stop_groups": stop_groups, "idle_s": idle_s, "max_s": max_s}
+           "stop_groups": stop_groups, "idle_s": idle_s, "max_s": max_s,
+           "max_model_len": max_model_len, "max_response_len": max_response_len}
     call = sampler.spawn(tag, cfg)
     print(f"spawned sampler {call.object_id}")
