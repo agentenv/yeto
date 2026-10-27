@@ -65,7 +65,8 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
 
     from yeto.rl.adapters.verl.chunked_logprob import ChunkedNpuLogprob, ChunkedVocabParallelLogprob
 
-    function = ChunkedNpuLogprob if impl == "npu" else ChunkedVocabParallelLogprob
+    function = ChunkedNpuLogprob if impl.startswith("npu") else ChunkedVocabParallelLogprob
+    want_entropy = impl != "npu_noent"
 
     torch.set_num_threads(1)
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
@@ -76,8 +77,14 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
     shard = V // tp
     h = hidden.clone().requires_grad_()
     w = weight[rank * shard:(rank + 1) * shard].clone().requires_grad_()
-    lp, ent = function.apply(h, w, labels, TEMPERATURE, CHUNK, group)
-    (lp * d_lp.to(lp.dtype)).sum().add((ent * d_ent.to(ent.dtype)).sum()).backward()
+    if want_entropy:
+        lp, ent = function.apply(h, w, labels, TEMPERATURE, CHUNK, group)
+        (lp * d_lp.to(lp.dtype)).sum().add((ent * d_ent.to(ent.dtype)).sum()).backward()
+    else:
+        # verl's calculate_entropy=False: the entropy output is NaN and untouched, so
+        # only the log-prob and its gradients can be compared
+        lp, ent = function.apply(h, w, labels, TEMPERATURE, CHUNK, group, False)
+        (lp * d_lp.to(lp.dtype)).sum().backward()
     partial_dh = h.grad.clone()
     dist.all_reduce(h.grad, group=group)
     outs = [torch.empty_like(lp) for _ in range(tp)]
@@ -87,18 +94,22 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
     dws = [torch.empty_like(w.grad) for _ in range(tp)]
     dist.all_gather(dws, w.grad, group=group)
     if rank == 0:
-        ref_lp, ref_ent, ref_dh, ref_dw = _reference(hidden, weight, labels, d_lp, d_ent)
+        ref_lp, ref_ent, ref_dh, ref_dw = _reference(
+            hidden, weight, labels, d_lp, d_ent if want_entropy else torch.zeros_like(d_ent))
 
         def gap(a, b):
             return float((a.detach().double() - b.detach().double()).abs().max())
 
         result = {
             "tp": tp, "dtype": dtype_name, "impl": impl, "T": T, "H": H, "V": V, "chunk": CHUNK, "temperature": TEMPERATURE,
-            "max_abs": {"logprob": gap(lp, ref_lp), "entropy": gap(ent, ref_ent), "d_hidden": gap(h.grad, ref_dh),
-                        "d_weight": gap(torch.cat(dws), ref_dw)},
+            "max_abs": {"logprob": gap(lp, ref_lp), "d_hidden": gap(h.grad, ref_dh),
+                        "d_weight": gap(torch.cat(dws), ref_dw),
+                        **({"entropy": gap(ent, ref_ent)} if want_entropy else {})},
             "ref_max_abs": {"logprob": float(ref_lp.abs().max()), "entropy": float(ref_ent.abs().max()),
                             "d_hidden": float(ref_dh.abs().max()), "d_weight": float(ref_dw.abs().max())},
-            "ranks_identical": all(torch.equal(o, lp) for o in outs) and all(torch.equal(e, ent) for e in ents),
+            "entropy_is_nan": bool(torch.isnan(ent).all()) if not want_entropy else None,
+            "ranks_identical": all(torch.equal(o, lp) for o in outs)
+            and (all(torch.equal(e, ent) for e in ents) if want_entropy else True),
             "partial_d_hidden_differs_from_full": gap(partial_dh, ref_dh) > 0 if tp > 1 else True,
         }
         Path(out_path).write_text(json.dumps(result))

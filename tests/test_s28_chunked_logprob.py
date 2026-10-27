@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import types
 import weakref
 from pathlib import Path
 
@@ -131,7 +132,7 @@ def test_bf16_is_no_worse_than_the_current_path(T, H, V, scale, temperature):
 
 @pytest.mark.parametrize("tp", [2, 4])
 @pytest.mark.parametrize("dtype,bound", [("float32", FP32_ABS), ("float64", 1e-12)])
-@pytest.mark.parametrize("impl", ["torch", "npu"])
+@pytest.mark.parametrize("impl", ["torch", "npu", "npu_noent"])
 def test_tensor_parallel_gloo(tp, dtype, bound, impl, tmp_path):
     out = tmp_path / f"tp{tp}-{dtype}-{impl}.json"
     proc = subprocess.run([sys.executable, "-I", str(REPO / "tests/chunked_logprob_tp_worker.py"), str(tp), dtype,
@@ -140,8 +141,72 @@ def test_tensor_parallel_gloo(tp, dtype, bound, impl, tmp_path):
     assert proc.returncode == 0, proc.stderr[-3000:]
     result = json.loads(out.read_text())
     assert result["ranks_identical"] and result["partial_d_hidden_differs_from_full"]
+    if impl == "npu_noent":
+        assert result["entropy_is_nan"] and "entropy" not in result["max_abs"]
     for key, gap in result["max_abs"].items():
         assert gap <= bound * max(1.0, result["ref_max_abs"][key]), (key, gap)
+
+
+@pytest.mark.parametrize("temperature", [1.0, 0.7])
+@pytest.mark.parametrize("chunk", [64, 300])
+def test_the_ascend_log_prob_only_path_matches_the_reference(temperature, chunk):
+    """``want_entropy=False`` (verl's calculate_entropy) must change the speed, not the
+    numbers. Only the temperature branch runs here: at temperature 1.0 the Ascend forward
+    calls a CANN operator, so that one is checked on the cards (``s1-runs/s28-fck``)."""
+    if temperature == 1.0:
+        pytest.skip("the temperature-1.0 forward needs the CANN operator, i.e. an Ascend card")
+    hidden, weight, labels = _inputs(300, 32, 512, dtype=torch.float64, seed=4)
+    a = torch.randn(300, generator=torch.Generator().manual_seed(9), dtype=torch.float64)
+    zero = torch.zeros(300, dtype=torch.float64)
+
+    def no_entropy(h, w, y, t):
+        return cl.ChunkedNpuLogprob.apply(h, w, y, t, chunk, None, False)
+
+    h = hidden.detach().clone().requires_grad_()
+    w = weight.detach().clone().requires_grad_()
+    lp, ent = no_entropy(h, w, labels, temperature)
+    (lp * a).sum().backward()   # the entropy output is left alone, as verl leaves it
+    dh, dw = h.grad, w.grad
+    rlp, rent, rdh, rdw = _grads(_full, hidden, weight, labels, temperature, a, zero)
+    assert torch.isnan(ent).all(), "the entropy output must be NaN, not a silent zero"
+    assert _gap(lp, rlp) <= 1e-12
+    assert _gap(dh, rdh) <= 1e-12 * max(1.0, float(rdh.abs().max()))
+    assert _gap(dw, rdw) <= 1e-12 * max(1.0, float(rdw.abs().max()))
+
+
+def test_the_ascend_path_refuses_to_differentiate_an_entropy_it_did_not_compute():
+    hidden, weight, labels = _inputs(64, 16, 128, dtype=torch.float64, seed=6)
+    hidden.requires_grad_()
+    weight.requires_grad_()
+    _lp, ent = cl.ChunkedNpuLogprob.apply(hidden, weight, labels, 0.7, 32, None, False)
+    with pytest.raises(RuntimeError, match="calculate_entropy"):
+        ent.sum().backward()
+
+
+def test_entropy_wanted_follows_verls_calculate_entropy(monkeypatch):
+    """:func:`install` wraps verl's fused forward engine; the flag has to follow it."""
+    seen = []
+
+    def engine_factory(vision_model=False):
+        def inner(*, calculate_entropy, **kwargs):
+            seen.append((vision_model, calculate_entropy, cl.entropy_wanted()))
+            return "out"
+
+        return inner
+
+    stub = types.SimpleNamespace(fused_forward_model_engine=engine_factory)
+    assert cl._wrap_fused_forward_engine(stub) is True
+    assert cl._wrap_fused_forward_engine(stub) is False, "wiring must be idempotent"
+    for flag in (False, True):
+        assert stub.fused_forward_model_engine(False)(calculate_entropy=flag) == "out"
+    assert seen == [(False, False, False), (False, True, True)]
+    assert cl.entropy_wanted() is True, "the flag must be restored after the call"
+    # a renamed verl argument costs speed, never the entropy
+    stub.fused_forward_model_engine(False)(calculate_entropy=True)
+    monkeypatch.setenv(cl.ENTROPY_ENV, "0")
+    assert cl.entropy_wanted() is False
+    monkeypatch.setenv(cl.ENTROPY_ENV, "1")
+    assert cl.entropy_wanted() is True
 
 
 def test_the_ascend_path_is_not_picked_off_ascend():
