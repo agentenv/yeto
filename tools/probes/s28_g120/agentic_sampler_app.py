@@ -134,6 +134,13 @@ if os.environ.get("PLAN_ONLY") == "1" and __name__ == "__main__":
 
 import modal  # noqa: E402 - PLAN_ONLY runs without the Modal client
 
+# The module-scope import below runs in the container too (Modal imports this
+# file to find the function). There the repo is the mounted WORKDIR, and the
+# image's own `yeto` package has no `rl`, so WORKDIR must come first on the path.
+for _root in (WORKDIR, str(REPO)):
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+
 from yeto.rl.harness.harbor.image_layer import modal_harbor_layer  # noqa: E402
 
 app = modal.App(os.environ.get("YETO_G120_APP", "yeto-s28-g120-sampler"))
@@ -142,7 +149,15 @@ logs = modal.Volume.from_name("yeto-s28-g120-logs", create_if_missing=True, vers
 image = modal_harbor_layer(
     modal.Image.from_registry(IMAGE).env({"HOME": "/root", "PYTHONUNBUFFERED": "1"}),
     "miles", "$(command -v python)",
-).add_local_dir(str(REPO / "yeto"), f"{WORKDIR}/yeto", copy=False, ignore=["**/__pycache__", "**/*.pyc"])
+).add_local_dir(str(REPO / "yeto"), f"{WORKDIR}/yeto", copy=False, ignore=["**/__pycache__", "**/*.pyc"]
+).add_local_dir(str(REPO / "docker" / "harbor-layer"), f"{WORKDIR}/docker/harbor-layer", copy=False,
+                ignore=["**/__pycache__", "**/*.pyc"]
+).add_local_file(str(REPO / "docker" / "image-assert" / "assert_image_versions.py"),
+                 f"{WORKDIR}/docker/image-assert/assert_image_versions.py", copy=False)
+# modal_harbor_layer reads docker/harbor-layer/versions.json relative to the yeto
+# package it is imported from. In the container that package is the mounted
+# WORKDIR, so those two paths have to be mounted there as well or the container's
+# own import of this file fails before the function is reached.
 
 
 # G-ES's stop rules and sampler wait (tools/probes/s27_xcloud/sampler_app.py), copied:
