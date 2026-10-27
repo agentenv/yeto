@@ -358,6 +358,17 @@ class MegatronFullParameterGroup(VerlFullParameterGroup):
         return self.island.call_workers_shared(remote_megatron_apply, arrays, write, read,
                                                index.layout_for([*write, *read]))
 
+    async def light_digest(self) -> dict:
+        """S28 G-LHASH: the light policy digest (:mod:`.local_digest`): every rank hashes
+        its own FP32 master shards on the host, no collective; the rows are combined
+        here into one global digest."""
+
+        from . import local_digest
+
+        records = await asyncio.to_thread(self.island.call_workers, local_digest.remote_light_digest,
+                                          local_digest.thread_count())
+        return local_digest.combine(records)
+
     async def export_parameters(self, names: Sequence[str]):
         raise VerlMegatronSyncError("the Megatron island exports HF files with Megatron-Bridge "
                                     "(megatron_ports.remote_hf_export) and has no peer recovery")
