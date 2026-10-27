@@ -576,7 +576,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     from yeto.rl.adapters.verl import patch_verl
 
     for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB
-                + (patch_verl.AUTO_CLASS,)}:
+                + (patch_verl.AUTO_CLASS,) + patch_verl.PINNED_COPY}:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(VERL_FORK / rel, tmp_path / rel)
     patch_verl.apply(tmp_path, "megatron")
@@ -585,6 +585,11 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     assert util.count("**_yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu)") == 2
     assert util.count("def _yeto_seq_idx_args(") == 1
     compile(util, "util.py", "exec")
+    # S28 G-120D: one pinned host copy in copy_megatron_model_to_cpu, applied once
+    utils = (tmp_path / patch_verl.PINNED_COPY_TARGET).read_text()
+    assert utils.count("def _yeto_pinned_host_copy(") == 1
+    assert utils.count("_yeto_pinned_host_copy(") == 4
+    compile(utils, "megatron_utils.py", "exec")
     assert patch_verl.SEND_HOOK not in (tmp_path / patch_verl.SEND_TARGET).read_text()
     engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
     assert engine.count("_yeto_sub_key") == 2 and engine.count("time.sleep(1.0)  # yeto") == 1
