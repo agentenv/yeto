@@ -353,10 +353,14 @@ class BufferReleasePublisher:
         return release
 
     def _origin(self, state: Any) -> dict[str, Any] | None:
+        # S28 G-120C: a release whose policy hash is an identity label (an unverified round
+        # under --rl-verify-every N) says so in the release record itself, the one thing a
+        # sampler or a later trainer reads; a verified release keeps the record unchanged.
+        unverified = {"policy_hash": "unverified-identity"} if not bool(getattr(state, "verified", True)) else {}
         if self.lane is None:
-            return None
+            return ({"kind": "single", **unverified} if unverified else None)
         return {"kind": "merged", "learner_id": self.lane.index, "num_learners": self.lane.count,
-                "local_version": int(state.policy_version)}
+                "local_version": int(state.policy_version), **unverified}
 
     def publish(self, state: Any) -> PublicationResult:
         isl = self.island
@@ -385,7 +389,12 @@ class BufferReleasePublisher:
                 release = self.releases.release(released, digest, write, buffer_selected=position,
                                                 buffer_shards=shards, weights=FULL,
                                                 origin=self._origin(state))
+        # S28 G-120C: under --rl-verify-every N a round the driver does not verify carries
+        # an identity label (policy_digest.unverified_identity), not a content hash. Say
+        # which one this is, so nothing downstream takes the label for the weights' hash.
+        verified = bool(getattr(state, "verified", True))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
+                  "policy_hash_verified": verified,
                   "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
                   "version_map": isl.vmap.to_dict()}
@@ -398,6 +407,7 @@ class BufferReleasePublisher:
             isl.emit(RELEASE_EVENT, seq=release.seq, policy_version=release.version,
                      local_version=version, origin=release.origin, policy_hash=digest,
                      buffer_selected=position, weights=FULL, sha256=release.sha256,
+                     policy_hash_verified=verified,
                      engine_checksum=None, merged_modules=merge.get("merged_modules"),
                      max_relative_change=merge.get("max_relative_change"),
                      seconds=record["seconds"])
