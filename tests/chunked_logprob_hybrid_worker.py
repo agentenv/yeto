@@ -46,7 +46,7 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")  # verl's entropy wraps a help
 S, H, V = 64, 64, 256
 
 
-def _model(tp: int, dtype):
+def _model(tp: int, dtype, pre_process: bool = True, post_process: bool = True):
     from dataclasses import replace
     from functools import partial
 
@@ -60,7 +60,6 @@ def _model(tp: int, dtype):
     from megatron.core.transformer import TransformerConfig
     from megatron.core.transformer.mlp import MLP, MLPSubmodules
     from megatron.core.transformer.spec_utils import ModuleSpec
-    from megatron.core.transformer.torch_norm import WrappedTorchNorm
     from megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
 
     class _Norm:
@@ -71,7 +70,6 @@ def _model(tp: int, dtype):
         def __new__(cls, config, hidden_size, eps=1e-5, **_ignored):
             return torch.nn.RMSNorm(normalized_shape=hidden_size, eps=eps)
 
-    del WrappedTorchNorm
     hybrid_block.TENorm = _Norm
     mlp_layer = ModuleSpec(module=MLPLayer, submodules=TransformerLayerSubmodules(
         pre_mlp_layernorm=_Norm,
@@ -87,7 +85,8 @@ def _model(tp: int, dtype):
     torch.manual_seed(0)
     return HybridModel(config=config, hybrid_stack_spec=spec, vocab_size=V, max_sequence_length=S,
                        hybrid_layer_pattern="--", position_embedding_type="none",
-                       share_embeddings_and_output_weights=False)
+                       share_embeddings_and_output_weights=False, pre_process=pre_process,
+                       post_process=post_process)
 
 
 def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str) -> None:
@@ -172,10 +171,48 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str) ->
     def gap(x, y):
         return float((x.detach().double() - y.detach().double()).abs().max())
 
+    # pipeline stages (the 120B runs PP3): a first stage has no output layer, so the hook
+    # call must give back exactly the plain call's hidden states; a last stage has no
+    # embedding and takes its input from set_input_tensor, whose gradient must match too
+    first = _model(tp, dtype, post_process=False)
+    mff.patch_fused_forward(first)
+    first_plain = first(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
+    first_hook = first(input_ids=input_ids, position_ids=position_ids, attention_mask=None, labels=labels,
+                       output_processor=mff.fused_output_processor,
+                       output_processor_context=mff.FusedOutputProcessorContext(temperature=1.0))
+    first_stage_same = bool(torch.equal(first_plain, first_hook))
+    last = _model(tp, dtype, pre_process=False)
+    stage_gen = torch.Generator().manual_seed(7 + rank)
+    stage_input = torch.randn(S // tp if tp > 1 else S, 1, H, generator=stage_gen).to(dtype)
+    x_ref = stage_input.clone().requires_grad_()
+    last.set_input_tensor(x_ref)
+    stage_logits = last(input_ids=input_ids, position_ids=position_ids, attention_mask=None)
+    stage_logits_bak = stage_logits.clone()
+    stage_ref_ent = vocab_parallel_entropy(stage_logits)
+    stage_ref_lp = vocab_parallel_log_probs_from_logits(stage_logits_bak, labels)
+    (stage_ref_lp.double() * a).sum().add((stage_ref_ent.double() * b).sum()).backward()
+    stage_ref_grads = {name: p.grad.detach().clone() for name, p in last.named_parameters()}
+    last.zero_grad(set_to_none=True)
+    mff.patch_fused_forward(last)
+    x_hook = stage_input.clone().requires_grad_()
+    last.set_input_tensor(x_hook)
+    stage_out = last(input_ids=input_ids, position_ids=position_ids, attention_mask=None, labels=labels,
+                     output_processor=mff.fused_output_processor,
+                     output_processor_context=mff.FusedOutputProcessorContext(temperature=1.0))
+    stage_lp, stage_ent = stage_out.log_probs.view(1, S), stage_out.entropy.view(1, S)
+    (stage_lp.double() * a).sum().add((stage_ent.double() * b).sum()).backward()
+    stage_grads = {name: [gap(p.grad, stage_ref_grads[name]), float(stage_ref_grads[name].abs().max())]
+                   for name, p in last.named_parameters()}
+    stage_grads["input_tensor"] = [gap(x_hook.grad, x_ref.grad), float(x_ref.grad.abs().max())]
+    last_stage = {"logprob": [gap(stage_lp, stage_ref_lp), float(stage_ref_lp.abs().max())],
+                  "entropy": [gap(stage_ent, stage_ref_ent), float(stage_ref_ent.abs().max())],
+                  "grads": stage_grads, "checked": cl.check_installed([first, last])}
+
     grad_gaps = {name: [gap(fused_grads[name], ref_grads[name]), float(ref_grads[name].abs().max())]
                  for name in ref_grads}
     local = {"logprob": [gap(lp, ref_lp), float(ref_lp.abs().max())],
-             "entropy": [gap(ent, ref_ent), float(ref_ent.abs().max())], "grads": grad_gaps}
+             "entropy": [gap(ent, ref_ent), float(ref_ent.abs().max())], "grads": grad_gaps,
+             "first_stage_same": first_stage_same, "last_stage": last_stage}
     gathered = [None] * tp
     dist.all_gather_object(gathered, local)
     if rank == 0:

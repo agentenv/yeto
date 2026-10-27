@@ -279,3 +279,12 @@ def test_hybrid_model_through_verls_fused_forward(tp, dtype, tmp_path):
         assert len(rank["grads"]) == 9  # embedding, 2 x (norm, fc1, fc2), final norm, output layer
         for name, (gap, scale) in rank["grads"].items():
             assert gap <= grad_bound * max(1.0, scale), (name, gap)
+        # pipeline stages: a first stage hands back the plain hidden states bit for bit; a
+        # last stage (input from set_input_tensor) matches, its input gradient included
+        assert rank["first_stage_same"]
+        stage = rank["last_stage"]
+        assert stage["checked"].endswith("HybridModel:hook:mid,HybridModel:hook:last")
+        assert stage["logprob"][0] <= lp_bound and stage["entropy"][0] <= ent_bound
+        assert "input_tensor" in stage["grads"] and "embedding.word_embeddings.weight" not in stage["grads"]
+        for name, (gap, scale) in stage["grads"].items():
+            assert gap <= grad_bound * max(1.0, scale), ("last stage", name, gap)
