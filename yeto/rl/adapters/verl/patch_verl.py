@@ -29,9 +29,14 @@ train/rollout log-prob gap 0.0885 -> 0.0179 once ``seq_idx`` is set). The
 patch passes the global pack length at every context-parallel size (S28 CP2;
 it used to pass it only at CP=1).
 
+Last patch (S28 FCE, local, not pushed; ``--profile megatron`` only): with
+``use_fused_kernels`` on, verl's Megatron engine calls yeto's chunked vocab-parallel
+log-probs (``chunked_logprob``) instead of its Triton kernel, and Megatron's HybridModel
+gets the ``output_processor`` hook verl's fused forward needs.
+
 Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4 and,
 since S27 G-EK, the sixth (zmq SUB, below: the FSDP2 separate mode and the LoRA
-fully_async path use the same NCCL checkpoint engine); ``megatron`` (the image ``verl-megatron-build``) applies 1, 2 and 5 -- the
+fully_async path use the same NCCL checkpoint engine); ``megatron`` (the image ``verl-megatron-build``) applies 1, 2, 5 and the last (S28 FCE) -- the
 Megatron island trains full parameters, so the LoRA wire patches 3 and 4
 (which replace the checkpoint-engine sender) are left out.
 
@@ -359,12 +364,36 @@ NEMOTRON_FIX_HOOK = (
 )
 NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")
 
+# S28 FCE (megatron profile): verl's fused log-prob path (use_fused_kernels=True) only
+# knows GPTModel and a Triton/CUDA kernel. Inside _maybe_enable_fused_kernels -- reached
+# only with use_fused_kernels on -- yeto.rl.adapters.verl.chunked_logprob swaps in its
+# plain-torch chunked kernel and gives Megatron's HybridModel (NemotronH) the
+# output_processor hook before verl patches the model, then checks every model chunk.
+# Errors propagate: with the switch on there is no working fallback on Ascend.
+CHUNKED_LOGPROB_TARGET = "verl/workers/engine/megatron/transformer_impl.py"
+CHUNKED_LOGPROB_ANCHOR = (
+    "        from verl.models.mcore.model_forward_fused import patch_fused_forward\n"
+    "\n"
+    "        for model in self.module:\n"
+    "            patch_fused_forward(model)\n"
+)
+CHUNKED_LOGPROB_HOOK = (
+    "        # yeto S28 FCE: chunked vocab-parallel log-probs (no [T, V] logits, no Triton)\n"
+    "        from yeto.rl.adapters.verl import chunked_logprob as _yeto_chunked_logprob\n"
+    "\n"
+    "        print(f'[yeto] chunked_logprob install: {_yeto_chunked_logprob.install()}', flush=True)\n"
+    + CHUNKED_LOGPROB_ANCHOR +
+    "        print(f'[yeto] chunked_logprob check: {_yeto_chunked_logprob.check_installed(self.module)}',\n"
+    "              flush=True)\n"
+)
+CHUNKED_LOGPROB = (CHUNKED_LOGPROB_TARGET, CHUNKED_LOGPROB_ANCHOR, CHUNKED_LOGPROB_HOOK, "replace")
+
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
 PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
-            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
+            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS, CHUNKED_LOGPROB)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:
