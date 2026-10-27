@@ -79,12 +79,13 @@ def check_engine_shape(args) -> None:
 
 
 def megatron_run(args) -> bool:
-    """The run trains on the verl Megatron island (TP/PP/EP > 1)."""
+    """The run trains on the verl Megatron island (TP/PP/EP/CP > 1)."""
     from .megatron_engine import ENGINE_MEGATRON, engine_for
 
     return engine_for(tensor_parallel=getattr(args, "tensor_parallel", 1) or 1,
                       pipeline_parallel=getattr(args, "pipeline_parallel", 1) or 1,
-                      expert_parallel=getattr(args, "expert_parallel", 1) or 1) == ENGINE_MEGATRON
+                      expert_parallel=getattr(args, "expert_parallel", 1) or 1,
+                      context_parallel=getattr(args, "context_parallel", 1) or 1) == ENGINE_MEGATRON
 
 
 def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) -> None:
