@@ -288,3 +288,35 @@ def test_hybrid_model_through_verls_fused_forward(tp, dtype, tmp_path):
         assert "input_tensor" in stage["grads"] and "embedding.word_embeddings.weight" not in stage["grads"]
         for name, (gap, scale) in stage["grads"].items():
             assert gap <= grad_bound * max(1.0, scale), ("last stage", name, gap)
+
+
+@pytest.mark.skipif(not all(_HYBRID.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / YETO_VERL_FORK_PATH")
+def test_bytes_per_token_saved_matches_the_estimate(tmp_path):
+    """``tests/chunked_logprob_bytes_per_token.py``: how much activation per token the
+    chunked path removes, at the 120B island's real shape (V/TP = 32768, H = 4096, bf16),
+    against verl's own non-fused functions run for real at TP=1.
+
+    The estimate is 32768 * (2 + 2 + 4) = 262144 bytes per token: verl's bf16 logits, the
+    bf16 ``logits.clone()`` it makes to compute entropy, and the fp32 copy Megatron's
+    cross entropy keeps for its backward. The slope is taken against the token count, so
+    every term that does not grow with the sequence drops out; it is matched to within one
+    hidden row (the per-token rows the chunked path does keep)."""
+    import os
+
+    out = tmp_path / "bytes.json"
+    env = {**os.environ, "OMP_NUM_THREADS": "1"}
+    proc = subprocess.run([_HYBRID["YETO_MEGATRON_PYTHON"], "-I",
+                           str(REPO / "tests/chunked_logprob_bytes_per_token.py"), str(out)],
+                          env=env, capture_output=True, text=True, timeout=1800, check=False)
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    result = json.loads(out.read_text())
+    estimate = result["retained_per_token_estimate"]
+    assert estimate == 32768 * (2 + 2 + 4)
+    saved = result["retained_per_token_saved"]
+    # one 4096-wide bf16 hidden row is what the chunked path still keeps per token
+    assert abs(saved - estimate) <= 4096 * 2, (saved, estimate)
+    # verl keeps the whole [T, V/TP] rows; the chunked path keeps no V term per token
+    assert result["retained_per_token_chunked"] <= 4096 * 2
+    assert result["retained_per_token_verl_unfused"] >= estimate
+    # the high-water mark over forward and backward drops too, by most of the same amount
+    assert result["peak_per_token_saved"] >= 0.8 * estimate
