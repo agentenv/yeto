@@ -26,7 +26,8 @@ without ``total_tokens``, so Megatron never derives ``seq_idx`` and a Mamba
 layer runs the whole pack as one sequence: the conv and SSM state of one
 sample flow into the next (S27 G-AL found the same in Miles, GAL-REPORT.md:
 train/rollout log-prob gap 0.0885 -> 0.0179 once ``seq_idx`` is set). The
-patch passes the pack length when context parallelism is off.
+patch passes the global pack length at every context-parallel size (S28 CP2;
+it used to pass it only at CP=1).
 
 Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4 and,
 since S27 G-EK, the sixth (zmq SUB, below: the FSDP2 separate mode and the LoRA
@@ -92,9 +93,27 @@ SEQ_IDX_TARGET = "verl/models/mcore/util.py"
 SEQ_IDX_HELPER_ANCHOR = "def _compute_fp8_thd_align_size("
 SEQ_IDX_HELPER = (
     "def _yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu):\n"
-    "    \"\"\"yeto S27 G-DC: ``total_tokens`` of the THD pack, so ``PackedSeqParams`` derives\n"
-    "    ``seq_idx`` and a Mamba layer restarts its state at every packed sample (CP off only).\"\"\"\n"
-    "    if cp_size != 1 or not _packed_seq_params_supports(\"total_tokens\"):\n"
+    "    \"\"\"yeto S27 G-DC, S28 CP2: ``total_tokens`` of the *global* THD pack, so\n"
+    "    ``PackedSeqParams`` derives ``seq_idx`` and a Mamba layer restarts its conv and\n"
+    "    SSM state at every packed sample.\n"
+    "\n"
+    "    The pack length stays the global one at every ``cp_size``. Megatron-core's Mamba\n"
+    "    context parallel is all-to-all, not a sequence split: ``pre_conv_ssm``\n"
+    "    (``megatron/core/ssm/mamba_context_parallel.py``) gathers the whole global\n"
+    "    sequence onto every CP rank and shards the heads instead, so the convolution and\n"
+    "    the SSM scan see every token of the pack and ``seq_idx`` has to span it. verl\n"
+    "    already passes the global ``cu_seqlens_q_padded``, and\n"
+    "    ``sum(seqlens_in_batch_padded_cpu) == cu_seqlens_padded[-1]`` on both preprocess\n"
+    "    paths (every pad bump raises the last entry of both).\n"
+    "\n"
+    "    S28 CP2 measured this on CPU (``s1-runs/s28-g120/cp_seqidx_check.py``, 2 and 4\n"
+    "    gloo ranks, megatron's own ``MambaContextParallel``): with the global pack length\n"
+    "    the CP>1 output is bit-exact against the CP=1 reference; without it (the earlier\n"
+    "    ``cp_size != 1`` bail-out) the relative error is 0.377, because one sample's state\n"
+    "    flows into the next.\n"
+    "    \"\"\"\n"
+    "    del cp_size  # the pack length is global at every CP size; see the docstring\n"
+    "    if not _packed_seq_params_supports(\"total_tokens\"):\n"
     "        return {}\n"
     "    return {\"total_tokens\": int(sum(seqlens_in_batch_padded_cpu))}\n"
     "\n"
