@@ -219,8 +219,15 @@ class BufferReleasePublisher:
                  lane: BufferLane | None = None,
                  weights: Callable[[Any], ReleaseWeights] | None = None,
                  staging: str | Path | None = None, delta: Any = None,
-                 resumed: ResumedReleases | None = None) -> None:
-        """``staging``: publish each release from a directory under it instead of
+                 resumed: ResumedReleases | None = None, no_release: bool = False) -> None:
+        """``no_release`` (S28 G-120C, ``--rl-measure-no-release``): a measurement run
+        (memory, MFU) writes no policy release at all. One release of the 120B is about
+        225 GB written and a dozen minutes per round, which answers nothing such a run
+        asks; every skipped round is logged as ``rl_policy_release_skipped`` with reason
+        ``measurement_no_release``, so a sampler never silently misses a release it
+        was meant to get. Refused on a synced trainer (its peers wait for the release).
+
+        ``staging``: publish each release from a directory under it instead of
         writing it into the store (module doc, delta releases); ``delta``: the
         :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
         follow (:func:`delta_chain_for`), which needs ``staging``; ``resumed``: the
@@ -241,6 +248,10 @@ class BufferReleasePublisher:
         self.driver: Any = None
         self.guard = MergedReleaseGuard(self._on_gap)
         self.releasing = lane is None or is_publisher(lane.index, lane.count)
+        if no_release and lane is not None:
+            raise ValueError("--rl-measure-no-release is for a single trainer: a synced trainer's "
+                             "peers wait for its releases")
+        self.no_release = bool(no_release)
 
     def bind(self, driver: Any) -> None:
         """The island's driver (synced trainers read its outer version; a resumed
@@ -270,6 +281,10 @@ class BufferReleasePublisher:
         the first time this island applies it (module doc)."""
         local = int(state.policy_version)
         if self.lane is None:
+            if self.no_release:  # S28 G-120C: a measurement run (see __init__)
+                self.island.emit("rl_policy_release_skipped", policy_version=local,
+                                 reason="measurement_no_release")
+                return None
             if self.resumed is not None and local <= self.resumed.base_version:
                 # S27 G-EQ5 (gap 22): the first publication of a relaunched trainer is
                 # the version its store already holds and nothing is trained yet, so
@@ -401,7 +416,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
                          weights: Callable[[Any], ReleaseWeights] | None = None,
                          staging: str | Path | None = None, delta_full_every: int = 0,
-                         resume_versions: bool = False,
+                         resume_versions: bool = False, no_release: bool = False,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -455,5 +470,5 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane,
                                        weights=weights,
                                        staging=staging if int(delta_full_every) > 0 else None,
-                                       delta=delta, resumed=resumed)
+                                       delta=delta, resumed=resumed, no_release=no_release)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

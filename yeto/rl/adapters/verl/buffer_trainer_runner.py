@@ -186,6 +186,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),
                                         delta_full_every=int(section.get("release_delta_full_every") or 0),
+                                        # S28 G-120C: a measurement run writes no release
+                                        no_release=bool(section.get("no_release")),
                                         # S27 G-EQ5 (gap 22): this island counts its own
                                         # versions, so a new process of it continues the
                                         # account above the store's newest release

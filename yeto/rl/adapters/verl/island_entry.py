@@ -92,6 +92,9 @@ def parse_args(argv):
     # S27 G-EQ3: staged bf16 delta releases on a full-parameter buffer trainer
     # (sample_roles._check_release_delta; 0 turns them off)
     p.add_argument("--rl-release-delta-full-every", type=int, default=0)
+    # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
+    # release (one 120B release is about 225 GB and a dozen minutes per round)
+    p.add_argument("--rl-measure-no-release", action="store_true")
     # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
     # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
     p.add_argument("--rl-sampler-node", default=None)
@@ -1281,6 +1284,7 @@ def sample_buffer_section(args) -> dict | None:
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
             # S27 G-EQ3: staged bf16 delta releases (0: the release goes into the store whole)
             "release_delta_full_every": int(config.release_delta_full_every or 0),
+            **({"no_release": True} if getattr(args, "rl_measure_no_release", False) else {}),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
