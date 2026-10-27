@@ -131,16 +131,40 @@ def test_bf16_is_no_worse_than_the_current_path(T, H, V, scale, temperature):
 
 @pytest.mark.parametrize("tp", [2, 4])
 @pytest.mark.parametrize("dtype,bound", [("float32", FP32_ABS), ("float64", 1e-12)])
-def test_tensor_parallel_gloo(tp, dtype, bound, tmp_path):
-    out = tmp_path / f"tp{tp}-{dtype}.json"
+@pytest.mark.parametrize("impl", ["torch", "npu"])
+def test_tensor_parallel_gloo(tp, dtype, bound, impl, tmp_path):
+    out = tmp_path / f"tp{tp}-{dtype}-{impl}.json"
     proc = subprocess.run([sys.executable, "-I", str(REPO / "tests/chunked_logprob_tp_worker.py"), str(tp), dtype,
-                           str(out)], capture_output=True, text=True, timeout=600,
+                           str(out), impl], capture_output=True, text=True, timeout=600,
                           env={"OMP_NUM_THREADS": "1", "PATH": "/usr/bin:/bin"}, check=False)
     assert proc.returncode == 0, proc.stderr[-3000:]
     result = json.loads(out.read_text())
     assert result["ranks_identical"] and result["partial_d_hidden_differs_from_full"]
     for key, gap in result["max_abs"].items():
         assert gap <= bound * max(1.0, result["ref_max_abs"][key]), (key, gap)
+
+
+def test_the_ascend_path_is_not_picked_off_ascend():
+    """The dispatcher must keep CPU (and CUDA) calls on the plain torch implementation."""
+    hidden, weight, labels = _inputs(64, 32, 256, dtype=torch.bfloat16, scale=1.0, seed=3)
+    assert cl.npu_fast_path_usable(hidden, weight) is False
+    calls = []
+    original = cl.ChunkedVocabParallelLogprob.apply
+    try:
+        cl.ChunkedVocabParallelLogprob.apply = lambda *a, **k: (calls.append(a) or original(*a, **k))
+        cl.linear_cross_entropy(hidden, weight, labels, temperature=0.8)
+    finally:
+        cl.ChunkedVocabParallelLogprob.apply = original
+    assert len(calls) == 1
+
+
+def test_the_ascend_chunk_size_comes_from_the_environment(monkeypatch):
+    assert cl.npu_chunk_tokens() == cl.DEFAULT_NPU_CHUNK_TOKENS
+    monkeypatch.setenv(cl.NPU_CHUNK_ENV, "1024")
+    assert cl.npu_chunk_tokens() == 1024
+    monkeypatch.setenv(cl.NPU_CHUNK_ENV, "0")
+    with pytest.raises(ValueError):
+        cl.npu_chunk_tokens()
 
 
 class _LiveBytes(TorchDispatchMode):

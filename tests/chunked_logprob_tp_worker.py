@@ -11,6 +11,12 @@ whole-vocabulary reference (full logits, ``log_softmax``):
   the sequence-parallel gather's reduce-scatter forms) against the full gradient;
 * the weight gradient: each rank's shard against the matching rows of the full one.
 
+A fourth argument picks the implementation: ``torch`` (the default,
+:class:`ChunkedVocabParallelLogprob`) or ``npu`` (:class:`ChunkedNpuLogprob`). The Ascend
+class runs here because its temperature path is plain torch -- only its temperature-1.0
+forward calls a CANN operator -- so this worker covers its shard combination and its
+backward on the CPU, where an fp64 reference is available. (S28 G-FCK.)
+
 Prints nothing; writes ``{"ok": ..., "max_abs": {...}}`` from rank 0.
 """
 
@@ -52,11 +58,14 @@ def _reference(hidden, weight, labels, d_lp, d_ent):
     return lp.detach(), ent.detach(), h.grad, w.grad
 
 
-def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str) -> None:
+def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
+               impl: str = "torch") -> None:
     import torch
     import torch.distributed as dist
 
-    from yeto.rl.adapters.verl.chunked_logprob import ChunkedVocabParallelLogprob
+    from yeto.rl.adapters.verl.chunked_logprob import ChunkedNpuLogprob, ChunkedVocabParallelLogprob
+
+    function = ChunkedNpuLogprob if impl == "npu" else ChunkedVocabParallelLogprob
 
     torch.set_num_threads(1)
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
@@ -67,7 +76,7 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str) ->
     shard = V // tp
     h = hidden.clone().requires_grad_()
     w = weight[rank * shard:(rank + 1) * shard].clone().requires_grad_()
-    lp, ent = ChunkedVocabParallelLogprob.apply(h, w, labels, TEMPERATURE, CHUNK, group)
+    lp, ent = function.apply(h, w, labels, TEMPERATURE, CHUNK, group)
     (lp * d_lp.to(lp.dtype)).sum().add((ent * d_ent.to(ent.dtype)).sum()).backward()
     partial_dh = h.grad.clone()
     dist.all_reduce(h.grad, group=group)
@@ -84,7 +93,7 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str) ->
             return float((a.detach().double() - b.detach().double()).abs().max())
 
         result = {
-            "tp": tp, "dtype": dtype_name, "T": T, "H": H, "V": V, "chunk": CHUNK, "temperature": TEMPERATURE,
+            "tp": tp, "dtype": dtype_name, "impl": impl, "T": T, "H": H, "V": V, "chunk": CHUNK, "temperature": TEMPERATURE,
             "max_abs": {"logprob": gap(lp, ref_lp), "entropy": gap(ent, ref_ent), "d_hidden": gap(h.grad, ref_dh),
                         "d_weight": gap(torch.cat(dws), ref_dw)},
             "ref_max_abs": {"logprob": float(ref_lp.abs().max()), "entropy": float(ref_ent.abs().max()),
@@ -103,10 +112,11 @@ def main(argv: list[str]) -> int:
     import torch.multiprocessing as mp
 
     tp, dtype_name, out_path = int(argv[0]), argv[1], argv[2]
+    impl = argv[3] if len(argv) > 3 else "torch"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    mp.spawn(_rank_main, args=(tp, port, dtype_name, out_path), nprocs=tp)
+    mp.spawn(_rank_main, args=(tp, port, dtype_name, out_path, impl), nprocs=tp)
     return 0
 
 
