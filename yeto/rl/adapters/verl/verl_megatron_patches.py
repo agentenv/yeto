@@ -51,6 +51,64 @@ MFU_KEY = "mfu"
 METRICS_KEY = "metrics"
 _INSTALLED = False
 
+# S28 G-120C: the old-log-prob entropy switch (megatron_engine.MegatronShape
+# .old_logprob_entropy, written as the top-level key OLD_LOGPROB_ENTROPY_KEY).
+#
+# verl hard codes calculate_entropy=True in RayPPOTrainer._compute_old_log_prob
+# (trainer/ppo/ray_trainer.py:1300). Read at the two places that use it:
+#   * the Megatron engine computes it in _lm_head_logits_processor only when asked,
+#     and only then clones the logits first (engine/megatron/transformer_impl.py:1156);
+#     the log-probs are computed from the same logits either way;
+#   * the result feeds "actor/entropy" alone: experimental/separation/ray_trainer.py
+#     :522-536 averages "entropys" into that metric and pops it before anything else
+#     reads the batch. The loss never sees it (the update_actor pass decides its own
+#     calculate_entropy from actor.calculate_entropy / entropy_coeff, :1336).
+# So with the switch off the patch (1) turns calculate_entropy off in that one call's
+# assign_non_tensor and (2) hands verl a zero tensor shaped like the log-probs where
+# it reads "entropy", so its padding and the metric run unchanged. "actor/entropy"
+# then reads 0.0: it is not a measured entropy, and a reader must not take it as one.
+ENTROPY_KEY = "entropy"
+LOG_PROBS_KEY = "log_probs"
+CALCULATE_ENTROPY_KEY = "calculate_entropy"
+_ENTROPY_OFF_CALLS = 0
+
+
+def old_logprob_entropy(config: Any) -> bool:
+    """The switch as the trainer's resolved config says (True when the key is absent:
+    a config yeto did not write keeps verl's behaviour)."""
+    from .megatron_engine import OLD_LOGPROB_ENTROPY_KEY
+
+    node = config
+    for part in OLD_LOGPROB_ENTROPY_KEY.split("."):
+        getter = getattr(node, "get", None)
+        if not callable(getter):
+            return True
+        node = getter(part, None)
+        if node is None:
+            return True
+    return bool(node) if not isinstance(node, str) else node.strip().lower() not in ("false", "0", "no")
+
+
+def entropy_placeholder(log_probs: Any) -> Any:
+    """Zeros shaped like ``log_probs`` (verl pads and averages it; see above)."""
+    if log_probs is None:
+        raise RuntimeError("old-log-prob entropy is off, but the engine returned no log_probs either")
+    import torch
+
+    if getattr(log_probs, "is_nested", False):
+        return torch.nested.nested_tensor([torch.zeros_like(t) for t in log_probs.unbind()],
+                                          layout=torch.jagged)
+    return torch.zeros_like(log_probs)
+
+
+def _note_entropy_off() -> None:
+    global _ENTROPY_OFF_CALLS
+    _ENTROPY_OFF_CALLS += 1
+    if _ENTROPY_OFF_CALLS == 1:
+        print("[yeto-verl-patch] old-log-prob pass: calculate_entropy forced False "
+              "(yeto_trainer.old_logprob_entropy=False); actor/entropy reads 0.0 and is not "
+              "a measured value", flush=True)
+
 
 class _MfuOptional(dict):
     """A metrics mapping whose missing ``mfu`` reads as None instead of raising."""
@@ -107,16 +165,37 @@ def install() -> bool:
     @functools.wraps(original)
     def _compute_old_log_prob(self, *args, **kwargs):
         plain_get = tensordict_utils.get
+        plain_assign = getattr(tensordict_utils, "assign_non_tensor", None)
+        entropy = old_logprob_entropy(getattr(self, "config", None))
+        if not entropy and plain_assign is None:
+            raise RuntimeError("yeto_trainer.old_logprob_entropy=False, but this verl has no "
+                               "tensordict_utils.assign_non_tensor to turn calculate_entropy off with")
 
         def patched_get(tensordict, key, default=None):
             value = plain_get(tensordict, key, default)
-            return normalize_metrics(value) if key == METRICS_KEY else value
+            if key == METRICS_KEY:
+                return normalize_metrics(value)
+            if key == ENTROPY_KEY and value is None and not entropy:
+                # S28 G-120C: the engine computed no entropy; verl's next line pads it, and
+                # the separation trainer averages it into "actor/entropy" and pops it
+                return entropy_placeholder(plain_get(tensordict, LOG_PROBS_KEY, None))
+            return value
+
+        def patched_assign(tensordict, **fields):
+            if not entropy and fields.get(CALCULATE_ENTROPY_KEY):
+                fields[CALCULATE_ENTROPY_KEY] = False
+                _note_entropy_off()
+            return plain_assign(tensordict, **fields)
 
         tensordict_utils.get = patched_get
+        if not entropy:
+            tensordict_utils.assign_non_tensor = patched_assign
         try:
             return original(self, *args, **kwargs)
         finally:
             tensordict_utils.get = plain_get
+            if plain_assign is not None:
+                tensordict_utils.assign_non_tensor = plain_assign
 
     trainer._compute_old_log_prob = _compute_old_log_prob
     _INSTALLED = True

@@ -173,6 +173,9 @@ def parse_args(argv):
     # they are 47.8% of the activation per token, and the Ascend blockers are in
     # infra-drafts/SESSION28/report/FCE-PLAN.md.
     p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
+    # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
+    # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
+    p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -1182,6 +1185,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
         recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
         fused_logprob_kernels=bool(getattr(args, "rl_megatron_fused_logprob_kernels", False)),
+        old_logprob_entropy=not bool(getattr(args, "rl_no_old_logprob_entropy", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
