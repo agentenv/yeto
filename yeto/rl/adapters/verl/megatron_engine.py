@@ -220,6 +220,18 @@ class MegatronShape:
     # S28 G-120: full-layer recompute of this many layers per stage (uniform); None
     # keeps the selective recompute of recompute_modules
     recompute_full_layers: int | None = None
+    # S28 G-120C: verl's fused log-prob kernels (actor_rollout_ref.model.use_fused_kernels).
+    # They replace the materialised [tokens, vocab] logits and their gradient with a
+    # fused linear-cross-entropy, which on this model is 131 072 of the 273 984 bytes
+    # of activation per token (47.8%), so they decide how long one sequence can be.
+    # The engine used to write False with no comment, which only restated verl's own
+    # default (trainer/config/model/hf_model.yaml), so nothing recorded a decision.
+    # It stays False by default, and this field exists so that turning it on is an
+    # explicit, asserted choice rather than an unwritten default. Measured blockers on
+    # the Ascend 120B path are in infra-drafts/SESSION28/report/FCE-PLAN.md: verl's
+    # fused forward only patches a GPTModel, while NemotronH loads as a MambaModel, and
+    # the Triton kernel asserts .is_cuda and calls torch.cuda.nvtx.
+    fused_logprob_kernels: bool = False
 
     @property
     def trainer_gpus(self) -> int:
@@ -372,7 +384,7 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         "++actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_ssm_cache_dtype=float32",
         f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={tokens}",
         "actor_rollout_ref.model.trust_remote_code=False",
-        "actor_rollout_ref.model.use_fused_kernels=False",
+        f"actor_rollout_ref.model.use_fused_kernels={shape.fused_logprob_kernels}",
         # trainer: Megatron, distributed optimizer, nothing offloaded (dynamic batching:
         # use_dynamic_bsz=True comes from the shared overrides)
         f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={tokens}",
@@ -469,6 +481,11 @@ ASSERTED_KEYS = (
     # never reached the Ray workers (run mfu-a1c), and this key's own default (True)
     # had been silently in force because the engine never wrote it (run mfu-a1d).
     "actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion",
+    # S28 G-120C: the fused log-prob kernels decide whether the [tokens, vocab] logits
+    # are materialised, which is 47.8% of this model's activation per token. Assert it
+    # for the same reason as the key above: the engine wrote it for months without
+    # anything checking that verl took the value.
+    "actor_rollout_ref.model.use_fused_kernels",
 )
 
 # Keys of ``separate.ASSERTED_KEYS`` that only verl's separate mode writes. A buffer

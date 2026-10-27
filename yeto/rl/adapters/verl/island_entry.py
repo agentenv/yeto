@@ -159,6 +159,10 @@ def parse_args(argv):
     p.add_argument("--rl-megatron-first-stage-layers", type=int, default=None)
     p.add_argument("--rl-megatron-last-stage-layers", type=int, default=None)
     p.add_argument("--rl-megatron-recompute-full-layers", type=int, default=None)
+    # S28 G-120C: verl's fused log-prob kernels. Off unless asked for: on this model
+    # they are 47.8% of the activation per token, and the Ascend blockers are in
+    # infra-drafts/SESSION28/report/FCE-PLAN.md.
+    p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -1161,6 +1165,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         first_stage_layers=getattr(args, "rl_megatron_first_stage_layers", None),
         last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
         recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
+        fused_logprob_kernels=bool(getattr(args, "rl_megatron_fused_logprob_kernels", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
@@ -1389,8 +1394,19 @@ def append_correction_record(args, spec_dict: dict | None) -> None:
 
 
 def _override_value(overrides, key):
+    """The value yeto wrote for ``key``, or None when it wrote no override for it.
+
+    S28 G-120C: Hydra's "add this key" prefixes (``+``, ``++``) are part of the
+    override string but not part of the config path, so a plain ``startswith``
+    never matched an asserted key written through one. Every asserted key under
+    ``override_transformer_config`` therefore read back with ``want: null``, and
+    ``check_asserted`` skips a None -- the key was re-read but never compared
+    (S28 G-120 handoff section 6 item 12 saw this on
+    ``gradient_accumulation_fusion`` and called it "a read-back, not an
+    assertion"). Strip the prefix before comparing so those keys assert.
+    """
     for item in overrides:
-        if item.startswith(key + "="):
+        if item.lstrip("+").startswith(key + "="):
             return item.split("=", 1)[1]
     return None
 
