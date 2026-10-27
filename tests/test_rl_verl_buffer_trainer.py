@@ -235,7 +235,7 @@ class FakeBufferActor:
 
 
 def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None, limit=1,
-             releases=None, resume_versions=False, no_release=False):
+             releases=None, resume_versions=False, no_release=False, release_only=None):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -258,7 +258,7 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None,
         island, buffer=buffer,
         releases=releases or PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
         tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, resume_versions=resume_versions,
-        no_release=no_release)
+        no_release=no_release, release_only=release_only)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
     driver = IslandDriver(
         learner_id=0, rollout=rollout, trainer=FullyAsyncTrainerGroup(island), policy_state=VerlPolicyState(island),
@@ -711,7 +711,7 @@ def test_a_measurement_run_trains_every_round_and_writes_no_release(tmp_path):
     actor = FakeBufferActor()
     driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=2, required=2, base=base,
                                           buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
-                                          releases=releases, limit=4, no_release=True)
+                                          releases=releases, no_release=True)
     state = driver.run()
 
     assert driver.rounds_completed == 2 and state.policy_version == 2
@@ -737,3 +737,37 @@ def test_measurement_no_release_is_planned_from_the_flag_and_refused_on_a_synced
     with pytest.raises(ValueError, match="single trainer"):
         BufferReleasePublisher(island, PolicyReleaseStore(CheckpointStore(tmp_path / "s")), feed=None,
                                base_dir=tmp_path, lane=BufferLane.parse("0/2"), no_release=True)
+
+
+def test_a_run_releases_only_the_listed_versions(tmp_path):
+    """S28 G-120C (--rl-release-only-versions 2): two trained rounds publish v1 and v2;
+    only v2 is released."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i in range(4):
+        writer.write([_sample(0, index=0), _sample(0, index=1)], group_key=f"g{i}")
+    actor = FakeBufferActor()
+    driver, island, _publisher = _trainer(tmp_path, store_dir, actor, rounds=2, required=2, base=base,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                          releases=releases, release_only=[2])
+    state = driver.run()
+
+    assert driver.rounds_completed == 2 and state.policy_version == 2
+    assert releases.latest() is not None and releases.latest().version == 2
+    events = _lines(tmp_path / "tape.jsonl")
+    assert [e["policy_version"] for e in events if e["event"] == "rl_policy_released"] == [2]
+    skipped = [e for e in events if e["event"] == "rl_policy_release_skipped"]
+    assert {e["policy_version"] for e in skipped} == {1}
+    assert all(e["reason"] == "not_a_release_version" for e in skipped)
+
+
+def test_release_only_versions_is_planned_from_the_flag():
+    from yeto.rl.adapters.verl.island_entry import sample_buffer_section
+
+    common = ("--rl-sample-role", "trainer", "--rl-resume-store", "/s", "--rl-single-island-no-sync",
+              "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60")
+    assert "release_only" not in sample_buffer_section(_entry_args(*common))
+    assert sample_buffer_section(_entry_args(*common, "--rl-release-only-versions", "2,4"))["release_only"] == [2, 4]
