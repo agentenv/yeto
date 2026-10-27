@@ -278,9 +278,13 @@ def test_a_megatron_buffer_trainer_installs_the_megatron_trainer_group(tmp_path,
 
 
 def test_the_release_weights_of_a_megatron_buffer_trainer_read_that_group(tmp_path, monkeypatch):
-    """The publication path: ``buffer_ports.release_weights_for`` writes with the HF
-    writer over ``island.full_group``, so the group decided above is the one each
-    release reads (``hf_export.VerlHfWriter`` -> ``group.manifests``)."""
+    """The publication path: ``buffer_ports.release_weights_for`` gives the island
+    release weights, and the group decided above is the one installed.
+
+    S28 G-120: which writer fills those releases is the engine's own -- a Megatron
+    island writes through its trainer ranks (``megatron_ports.MegatronReleaseWriter``),
+    not through ``hf_export.VerlHfWriter``, whose ``group.export_parameters`` the
+    Megatron group does not implement. See ``tests/test_s28_megatron_release.py``."""
     from yeto.rl.adapters.verl import buffer_ports, fully_async_full
     from yeto.rl.adapters.verl.megatron_full_parameter import MegatronFullParameterGroup
 
