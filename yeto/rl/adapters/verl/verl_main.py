@@ -42,6 +42,9 @@ FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCE
 # S28 G-120: torch.compile switch the Ascend plugin stack needs off in every Ray worker
 # (see _runtime_env); not covered by FORWARD_ENV_PREFIXES, so it travels explicitly.
 DYNAMO_DISABLE_ENV = "TORCHDYNAMO_DISABLE"
+# S28 G-M2 (W3): the vLLM engine settings of an Ascend island (ascend_env.FORWARD_NAMES), by
+# exact name -- a VLLM_ prefix could carry a server API key.
+FORWARD_ENV_NAMES = ("VLLM_WORKER_MULTIPROC_METHOD", "VLLM_PLUGINS", "TASK_QUEUE_ENABLE", "PYTORCH_NPU_ALLOC_CONF")
 AGENTIC_ENV_PREFIXES = ("HARBOR_",)
 AGENTIC_ENV_NAMES = ("BOAT_API_KEY",)
 
@@ -139,7 +142,7 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
         # credential matches these prefixes (secret-handling-hardening).
-        if key.startswith(FORWARD_ENV_PREFIXES) and key not in NEVER_FORWARD_ENV:
+        if (key.startswith(FORWARD_ENV_PREFIXES) or key in FORWARD_ENV_NAMES) and key not in NEVER_FORWARD_ENV:
             env["env_vars"][key] = value
     # S27 G-EQ2: the Ascend NOSET switch is set on the driver by
     # _keep_npu_visible_in_cpu_actors, but a Ray worker of an already-running

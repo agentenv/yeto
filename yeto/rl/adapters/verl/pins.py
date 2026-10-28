@@ -62,6 +62,27 @@ EXPECTED_VERSIONS_NPU = {
 }
 EXPECTED_VERSIONS_BY_FAMILY = {"nvidia": EXPECTED_VERSIONS, "ascend": EXPECTED_VERSIONS_NPU}
 
+# S28 G-M2 (W1 of SESSION27 ASCEND-ROLLOUT.md): a second known-good NPU set, the one npu1's
+# image ``q38/verl-loop:8.5.2`` actually carries (vLLM 0.18.0 + vllm_ascend 0.17.0rc2, CANN
+# 8.5). The strings are what the island's manifest reads there (``importlib.metadata`` for the
+# packages, ``torch.__version__`` / ``torch_npu.__version__``), measured 10-26 on n4. vLLM
+# generation of Nano and dense Qwen3 ran on this set. The build plan above stays the primary
+# set: this one is added beside it, neither replaces nor relaxes it.
+EXPECTED_VERSIONS_NPU_NPU1 = {
+    "torch": "2.9.0+cpu",
+    "torch_npu": "2.9.0",
+    "vllm": "0.18.0+empty",
+    "vllm_ascend": "0.17.0rc2.dev109+g54879467c",
+    "transformers": "5.3.0.dev0",
+    "peft": "0.19.1",
+}
+# label -> versions; the first entry of a family is its primary set (expected_versions()).
+KNOWN_VERSION_SETS_BY_FAMILY = {
+    "nvidia": {"cuda-build": EXPECTED_VERSIONS},
+    "ascend": {"vllm-ascend-0.23-build": EXPECTED_VERSIONS_NPU,
+               "npu1-q38-verl-loop-8.5.2": EXPECTED_VERSIONS_NPU_NPU1},
+}
+
 
 def expected_versions(device_family: str = "nvidia") -> dict:
     """Versions the island asserts for this device family.
@@ -171,3 +192,19 @@ def expected_versions_for_engine(engine: str, device_family: str = "nvidia") -> 
                 f"no verl Megatron stack pins for device family {device_family!r}; known: "
                 f"{sorted(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY)}") from None
     return expected
+
+
+def known_version_sets(engine: str, device_family: str = "nvidia") -> dict:
+    """Every version set an island of this engine and family accepts, label -> versions.
+
+    The primary set (:func:`expected_versions_for_engine`) comes first. A run is pinned when
+    its versions equal ONE of these sets in full; a mix of two sets is not a known set.
+    """
+    expected_versions_for_engine(engine, device_family)  # same errors for an unknown family
+    sets = {}
+    for label, versions in KNOWN_VERSION_SETS_BY_FAMILY[device_family].items():
+        merged = dict(versions)
+        if engine == "megatron":
+            merged.update(EXPECTED_VERSIONS_MEGATRON_BY_FAMILY[device_family])
+        sets[label] = merged
+    return sets

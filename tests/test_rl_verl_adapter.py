@@ -319,6 +319,9 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     for other, anchor, *_ in patch_verl.PATCHES[1:]:
         (tmp_path / other).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / other).write_text("def g(self):\n" + anchor + "            return 1\n")
+    # S28 G-M2: the checkpoint-names patch, in engine_workers.py next to the LoRA sender
+    workers = tmp_path / patch_verl.CKPT_NAMES_TARGET
+    workers.write_text(workers.read_text() + "def h(self):\n" + patch_verl.CKPT_NAMES_ANCHOR)
     # S27 G-EK: the fsdp profile also takes the two zmq SUB patches (one file, both anchors)
     zmq = tmp_path / patch_verl.ZMQ_TARGET
     zmq.parent.mkdir(parents=True, exist_ok=True)
@@ -348,6 +351,7 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     assert meta.read_text().count("nemotron_h_recompute: ") == 1  # S27 G-EQ4: and the recompute hook
     assert meta.read_text().count("YETO_VERL_RANK0_CHECKPOINT_DTYPE") == 2  # the hook and its error text
     assert load.read_text().count("t.is_meta") == 1
+    assert workers.read_text().count("_yeto_worker_stream(self, per_tensor_param, peft_config)") == 1
     target.write_text("nothing here\n")
     with pytest.raises(SystemExit):
         patch_verl.apply(tmp_path)
