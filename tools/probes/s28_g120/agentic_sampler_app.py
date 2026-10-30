@@ -54,7 +54,11 @@ IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
 XC_VOLUME = "yeto-s27-xc"
 STORE_MOUNT = "/root/yeto-checkpoint-store"
 SHARD = "modal-0"
-GPU_NAME = "NVIDIA H200"
+# S28 G-120D: the GPU kind is overridable because Modal ran out of H200 capacity
+# (the v2 sampler sat unscheduled). YETO_G120_GPU takes a Modal GPU name such as
+# "H200", "B200" or "H100"; the nvidia-smi self-check and the engine spec follow it.
+GPU_KIND = os.environ.get("YETO_G120_GPU", "H200").upper()
+GPU_NAME = f"NVIDIA {GPU_KIND}"
 TP = 8
 PROXY_PORT = 31600
 SECRET_PATH = "/root/.yeto-records-proxy-secret"
@@ -74,7 +78,7 @@ PROBE_PAIRS = [["The capital of France is", " Paris. It is known for the Eiffel 
 
 def spec(store: str, out: str, *, engine_version: str, cfg: dict) -> dict:
     base = str(cfg["base_dir"])
-    server = {"base_dir": base, "card_model": "H200", "device_family": "cuda", "engine_version": engine_version,
+    server = {"base_dir": base, "card_model": GPU_KIND, "device_family": "cuda", "engine_version": engine_version,
               "precision": "bf16", "quant_scheme": "bf16", "topology": f"tp{TP}",
               "max_model_len": int(cfg["max_model_len"]), "python": sys.executable, "in_place_reload": True,
               "start_timeout_s": 2400.0, "request_timeout_s": 3600.0,
@@ -122,7 +126,7 @@ def harbor_env(cfg: dict) -> dict[str, str]:
 
 def plan(**overrides: object) -> dict:
     cfg = {**DEFAULTS, **overrides}
-    return {"image": IMAGE, "gpu": f"H200:{TP}", "memory_mib": MEMORY_MIB, "timeout_s": TIMEOUT_S,
+    return {"image": IMAGE, "gpu": f"{GPU_KIND}:{TP}", "memory_mib": MEMORY_MIB, "timeout_s": TIMEOUT_S,
             "volume": XC_VOLUME, "proxy_port": PROXY_PORT, "harbor_env": harbor_env(cfg),
             "spec": spec(str(cfg["store"]), "/data/logs/<tag>", engine_version="<sglang>", cfg=cfg),
             "stop": {k: cfg[k] for k in ("idle_s", "stop_version", "stop_groups", "max_s")}}
@@ -285,7 +289,7 @@ def _boat_secret() -> modal.Secret:
     return modal.Secret.from_dict({"BOAT_API_KEY": load_token()})
 
 
-@app.function(image=image, gpu=f"H200:{TP}", memory=MEMORY_MIB, cpu=64, timeout=TIMEOUT_S,
+@app.function(image=image, gpu=f"{GPU_KIND}:{TP}", memory=MEMORY_MIB, cpu=64, timeout=TIMEOUT_S,
               volumes={STORE_MOUNT: xc, "/data/logs": logs}, secrets=[_boat_secret()])
 def sampler(tag: str, cfg: dict) -> int:
     began = time.time()
@@ -349,7 +353,9 @@ def main(tag: str, store: str = DEFAULTS["store"], base_dir: str = DEFAULTS["bas
          groups_per_round: int = 8, samples_per_group: int = 4, max_in_flight: int = 32,
          stop_version: int = -1, stop_groups: int = 0, idle_s: float = 600.0, max_s: float = 10800.0,
          max_model_len: int = DEFAULTS["max_model_len"],
-         max_response_len: int = DEFAULTS["max_response_len"]) -> None:
+         max_response_len: int = DEFAULTS["max_response_len"],
+         max_backlog_groups: int = DEFAULTS["max_backlog_groups"],
+         num_rollouts: int = DEFAULTS["num_rollouts"]) -> None:
     # G-120C: the trainer's row width is max_prompt + max_response_len, and
     # max_prompt is seq_len - max_response_len (island_entry.py:1165), so a
     # trajectory longer than the trainer's row is refused outright
@@ -362,6 +368,9 @@ def main(tag: str, store: str = DEFAULTS["store"], base_dir: str = DEFAULTS["bas
     cfg = {**DEFAULTS, "store": store, "base_dir": base_dir, "groups_per_round": groups_per_round,
            "samples_per_group": samples_per_group, "max_in_flight": max_in_flight, "stop_version": stop_version,
            "stop_groups": stop_groups, "idle_s": idle_s, "max_s": max_s,
-           "max_model_len": max_model_len, "max_response_len": max_response_len}
+           "max_model_len": max_model_len, "max_response_len": max_response_len,
+           # S28 G-120D: kept up as a long-lived rollout service, so the backlog cap and
+           # the round count are overridable (the defaults stop it after 16 groups).
+           "max_backlog_groups": max_backlog_groups, "num_rollouts": num_rollouts}
     call = sampler.spawn(tag, cfg)
     print(f"spawned sampler {call.object_id}")
