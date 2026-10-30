@@ -70,7 +70,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -188,11 +188,20 @@ def release_weights_for(island: FullyAsyncIsland, plan: Mapping[str, Any]):
     ``fully_async_full.full_parameter_ports`` before the ports are installed)."""
     if plan.get("parameter_mode") != "full":
         return None
+    from . import megatron_engine
     from .full_parameter_stream import _LoopRunner
     from .hf_export import VerlHfWriter
 
     if island.full_group is None:
         raise RuntimeError("a full-parameter buffer trainer installs its ports after its policy state")
+    if plan.get("engine") == megatron_engine.ENGINE_MEGATRON:
+        # S28 G-120: a Megatron island's weights are written by its trainer ranks through
+        # Megatron-Bridge (the HF boundary exports whole files and serves no single HF
+        # tensor to the driver, so VerlHfWriter's export_parameters raises there). Same
+        # ReleaseWeights contract, so the store, the delta chain and staging are unchanged.
+        from .megatron_ports import MegatronReleaseWriter
+
+        return full_release_weights(MegatronReleaseWriter(island, plan["model_path"]))
     return full_release_weights(VerlHfWriter(island.full_group, plan["model_path"], run=_LoopRunner().run))
 
 
@@ -210,8 +219,22 @@ class BufferReleasePublisher:
                  lane: BufferLane | None = None,
                  weights: Callable[[Any], ReleaseWeights] | None = None,
                  staging: str | Path | None = None, delta: Any = None,
-                 resumed: ResumedReleases | None = None) -> None:
-        """``staging``: publish each release from a directory under it instead of
+                 resumed: ResumedReleases | None = None, no_release: bool = False,
+                 release_only: Iterable[int] | None = None) -> None:
+        """``no_release`` (S28 G-120C, ``--rl-measure-no-release``): a measurement run
+        (memory, MFU) writes no policy release at all. One release of the 120B is about
+        225 GB written and a dozen minutes per round, which answers nothing such a run
+        asks; every skipped round is logged as ``rl_policy_release_skipped`` with reason
+        ``measurement_no_release``, so a sampler never silently misses a release it
+        was meant to get. Refused on a synced trainer (its peers wait for the release).
+
+        ``release_only`` (S28 G-120C, ``--rl-release-only-versions``): release only these
+        policy versions and skip the others the same way (reason ``not_a_release_version``).
+        A multi-step run then trains several rounds on the samples it has and releases once,
+        so the samplers load one new policy -- each 120B release costs about an hour of
+        transfer on npu1's uplink. Refused on a synced trainer, like ``no_release``.
+
+        ``staging``: publish each release from a directory under it instead of
         writing it into the store (module doc, delta releases); ``delta``: the
         :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
         follow (:func:`delta_chain_for`), which needs ``staging``; ``resumed``: the
@@ -232,6 +255,11 @@ class BufferReleasePublisher:
         self.driver: Any = None
         self.guard = MergedReleaseGuard(self._on_gap)
         self.releasing = lane is None or is_publisher(lane.index, lane.count)
+        if (no_release or release_only is not None) and lane is not None:
+            raise ValueError("--rl-measure-no-release is for a single trainer: a synced trainer's "
+                             "peers wait for its releases")
+        self.no_release = bool(no_release)
+        self.release_only = None if release_only is None else frozenset(int(v) for v in release_only)
 
     def bind(self, driver: Any) -> None:
         """The island's driver (synced trainers read its outer version; a resumed
@@ -261,6 +289,15 @@ class BufferReleasePublisher:
         the first time this island applies it (module doc)."""
         local = int(state.policy_version)
         if self.lane is None:
+            if self.no_release:  # S28 G-120C: a measurement run (see __init__)
+                self.island.emit("rl_policy_release_skipped", policy_version=local,
+                                 reason="measurement_no_release")
+                return None
+            if self.release_only is not None and local not in self.release_only and local > 0:
+                # S28 G-120C: only the listed versions are released (see __init__)
+                self.island.emit("rl_policy_release_skipped", policy_version=local,
+                                 reason="not_a_release_version", release_versions=sorted(self.release_only))
+                return None
             if self.resumed is not None and local <= self.resumed.base_version:
                 # S27 G-EQ5 (gap 22): the first publication of a relaunched trainer is
                 # the version its store already holds and nothing is trained yet, so
@@ -316,10 +353,14 @@ class BufferReleasePublisher:
         return release
 
     def _origin(self, state: Any) -> dict[str, Any] | None:
+        # S28 G-120C: a release whose policy hash is an identity label (an unverified round
+        # under --rl-verify-every N) says so in the release record itself, the one thing a
+        # sampler or a later trainer reads; a verified release keeps the record unchanged.
+        unverified = {"policy_hash": "unverified-identity"} if not bool(getattr(state, "verified", True)) else {}
         if self.lane is None:
-            return None
+            return ({"kind": "single", **unverified} if unverified else None)
         return {"kind": "merged", "learner_id": self.lane.index, "num_learners": self.lane.count,
-                "local_version": int(state.policy_version)}
+                "local_version": int(state.policy_version), **unverified}
 
     def publish(self, state: Any) -> PublicationResult:
         isl = self.island
@@ -348,7 +389,12 @@ class BufferReleasePublisher:
                 release = self.releases.release(released, digest, write, buffer_selected=position,
                                                 buffer_shards=shards, weights=FULL,
                                                 origin=self._origin(state))
+        # S28 G-120C: under --rl-verify-every N a round the driver does not verify carries
+        # an identity label (policy_digest.unverified_identity), not a content hash. Say
+        # which one this is, so nothing downstream takes the label for the weights' hash.
+        verified = bool(getattr(state, "verified", True))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
+                  "policy_hash_verified": verified,
                   "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
                   "version_map": isl.vmap.to_dict()}
@@ -361,6 +407,7 @@ class BufferReleasePublisher:
             isl.emit(RELEASE_EVENT, seq=release.seq, policy_version=release.version,
                      local_version=version, origin=release.origin, policy_hash=digest,
                      buffer_selected=position, weights=FULL, sha256=release.sha256,
+                     policy_hash_verified=verified,
                      engine_checksum=None, merged_modules=merge.get("merged_modules"),
                      max_relative_change=merge.get("max_relative_change"),
                      seconds=record["seconds"])
@@ -392,7 +439,8 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          wait_s: float = 3600.0, poll_s: float = 2.0, cursor_log: Any = None,
                          weights: Callable[[Any], ReleaseWeights] | None = None,
                          staging: str | Path | None = None, delta_full_every: int = 0,
-                         resume_versions: bool = False,
+                         resume_versions: bool = False, no_release: bool = False,
+                         release_only: Iterable[int] | None = None,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -446,5 +494,6 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane,
                                        weights=weights,
                                        staging=staging if int(delta_full_every) > 0 else None,
-                                       delta=delta, resumed=resumed)
+                                       delta=delta, resumed=resumed, no_release=no_release,
+                                       release_only=release_only)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

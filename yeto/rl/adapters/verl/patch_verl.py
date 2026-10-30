@@ -26,7 +26,8 @@ without ``total_tokens``, so Megatron never derives ``seq_idx`` and a Mamba
 layer runs the whole pack as one sequence: the conv and SSM state of one
 sample flow into the next (S27 G-AL found the same in Miles, GAL-REPORT.md:
 train/rollout log-prob gap 0.0885 -> 0.0179 once ``seq_idx`` is set). The
-patch passes the pack length when context parallelism is off.
+patch passes the global pack length at every context-parallel size (S28 CP2;
+it used to pass it only at CP=1).
 
 Profiles: ``fsdp`` (default; the image ``verl-build``) applies patches 1-4 and,
 since S27 G-EK, the sixth (zmq SUB, below: the FSDP2 separate mode and the LoRA
@@ -92,9 +93,27 @@ SEQ_IDX_TARGET = "verl/models/mcore/util.py"
 SEQ_IDX_HELPER_ANCHOR = "def _compute_fp8_thd_align_size("
 SEQ_IDX_HELPER = (
     "def _yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu):\n"
-    "    \"\"\"yeto S27 G-DC: ``total_tokens`` of the THD pack, so ``PackedSeqParams`` derives\n"
-    "    ``seq_idx`` and a Mamba layer restarts its state at every packed sample (CP off only).\"\"\"\n"
-    "    if cp_size != 1 or not _packed_seq_params_supports(\"total_tokens\"):\n"
+    "    \"\"\"yeto S27 G-DC, S28 CP2: ``total_tokens`` of the *global* THD pack, so\n"
+    "    ``PackedSeqParams`` derives ``seq_idx`` and a Mamba layer restarts its conv and\n"
+    "    SSM state at every packed sample.\n"
+    "\n"
+    "    The pack length stays the global one at every ``cp_size``. Megatron-core's Mamba\n"
+    "    context parallel is all-to-all, not a sequence split: ``pre_conv_ssm``\n"
+    "    (``megatron/core/ssm/mamba_context_parallel.py``) gathers the whole global\n"
+    "    sequence onto every CP rank and shards the heads instead, so the convolution and\n"
+    "    the SSM scan see every token of the pack and ``seq_idx`` has to span it. verl\n"
+    "    already passes the global ``cu_seqlens_q_padded``, and\n"
+    "    ``sum(seqlens_in_batch_padded_cpu) == cu_seqlens_padded[-1]`` on both preprocess\n"
+    "    paths (every pad bump raises the last entry of both).\n"
+    "\n"
+    "    S28 CP2 measured this on CPU (``s1-runs/s28-g120/cp_seqidx_check.py``, 2 and 4\n"
+    "    gloo ranks, megatron's own ``MambaContextParallel``): with the global pack length\n"
+    "    the CP>1 output is bit-exact against the CP=1 reference; without it (the earlier\n"
+    "    ``cp_size != 1`` bail-out) the relative error is 0.377, because one sample's state\n"
+    "    flows into the next.\n"
+    "    \"\"\"\n"
+    "    del cp_size  # the pack length is global at every CP size; see the docstring\n"
+    "    if not _packed_seq_params_supports(\"total_tokens\"):\n"
     "        return {}\n"
     "    return {\"total_tokens\": int(sum(seqlens_in_batch_padded_cpu))}\n"
     "\n"
@@ -340,12 +359,86 @@ NEMOTRON_FIX_HOOK = (
 )
 NEMOTRON_FIX = (NEMOTRON_FIX_TARGET, NEMOTRON_FIX_ANCHOR, NEMOTRON_FIX_HOOK, "replace")
 
+# S28 G-120D: verl fully_async saves the model to the host for the old_log_prob
+# recompute (``save_model_to_cpu`` -> ``copy_megatron_model_to_cpu``). Two costs:
+#  1. the stock copy is ``.cpu().clone().pin_memory()``: three host copies of every
+#     buffer at once (about 3 x 80 GB per node on the 120B island);
+#  2. with trigger_parameter_sync_step=1 every round saves under key 1 again, and
+#     ``self.cpu_saved_models[n] = copy(...)`` builds the new copy while the old one is
+#     still referenced.
+# Run g120d-lh1 lost about 230 GB at the start of each round and the host-memory
+# guard stopped it (py-spy stack: copy_megatron_model_to_cpu <- save_model_to_cpu).
+# The patch allocates ONE pinned host tensor per buffer, and a later save under the
+# same key refills the earlier save's pinned tensors in place (same traversal order,
+# same shape and dtype; anything else gets a fresh tensor). The bytes are identical.
+PINNED_COPY_TARGET = "verl/utils/megatron_utils.py"
+PINNED_COPY_HELPER_ANCHOR = "@torch.no_grad()\ndef copy_megatron_model_to_cpu(models):\n"
+PINNED_COPY_HELPER = (
+    "# yeto S28 G-120D: one pinned host allocation per copy, not .cpu().clone().pin_memory()\n"
+    "def _yeto_spare_tensors(reuse):\n"
+    "    \"\"\"The host tensors of an earlier copy_megatron_model_to_cpu result, in the order\n"
+    "    the copy visits buffers and parameters.\"\"\"\n"
+    "    if not reuse:\n"
+    "        return iter(())\n"
+    "    out = []\n"
+    "    for key in sorted(reuse, key=lambda k: int(k.rsplit(\"_\", 1)[-1])):\n"
+    "        chunk = reuse[key]\n"
+    "        if chunk.get(\"is_ddp\"):\n"
+    "            out += [b.get(\"param_data\") for group in chunk[\"buffer_states\"] for b in group]\n"
+    "        else:\n"
+    "            out += [v.get(\"data\") for v in chunk[\"model_state\"].values()]\n"
+    "    return iter(out)\n"
+    "\n\n"
+    "def _yeto_pinned_host_copy(src, spare=None):\n"
+    "    old = next(spare, None) if spare is not None else None\n"
+    "    if (isinstance(old, torch.Tensor) and old.device.type == \"cpu\" and old.shape == src.shape\n"
+    "            and old.dtype == src.dtype and old.is_contiguous()):\n"
+    "        out = old\n"
+    "    else:\n"
+    "        try:\n"
+    "            out = torch.empty(src.shape, dtype=src.dtype, device=\"cpu\", pin_memory=True)\n"
+    "        except RuntimeError:  # no accelerator runtime to pin with (CPU-only tests)\n"
+    "            out = torch.empty(src.shape, dtype=src.dtype, device=\"cpu\")\n"
+    "    out.copy_(src)\n"
+    "    return out\n"
+    "\n\n"
+    "@torch.no_grad()\n"
+    "def copy_megatron_model_to_cpu(models, reuse=None):\n"
+    "    _yeto_spare = _yeto_spare_tensors(reuse)\n"
+)
+PINNED_COPY_DATA_ANCHOR = (
+    "                        buffer_state[\"param_data\"] = buffer.param_data.data.cpu().clone().pin_memory()\n")
+PINNED_COPY_DATA_HOOK = (
+    "                        buffer_state[\"param_data\"] = _yeto_pinned_host_copy(buffer.param_data.data, _yeto_spare)\n")
+PINNED_COPY_CPU_ANCHOR = (
+    "                        buffer_state[\"param_data\"] = buffer.param_data.cpu_data.clone().pin_memory()\n")
+PINNED_COPY_CPU_HOOK = (
+    "                        buffer_state[\"param_data\"] = _yeto_pinned_host_copy(buffer.param_data.cpu_data, _yeto_spare)\n")
+PINNED_COPY_PARAM_ANCHOR = "                param_state = {\"data\": param.data.cpu().clone().pin_memory()}\n"
+PINNED_COPY_PARAM_HOOK = "                param_state = {\"data\": _yeto_pinned_host_copy(param.data, _yeto_spare)}\n"
+PINNED_SAVE_TARGET = "verl/experimental/separation/engine_workers.py"
+PINNED_SAVE_ANCHOR = "        self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module)\n"
+PINNED_SAVE_HOOK = (
+    "        # yeto S28 G-120D: a save under an existing key refills that save's pinned host\n"
+    "        # tensors (Megatron copy only) instead of allocating a second copy beside it.\n"
+    "        previous = self.cpu_saved_models.get(n)\n"
+    "        if previous is not None and getattr(self.copy_handler, \"__name__\", \"\") == \"copy_megatron_model_to_cpu\":\n"
+    "            self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module, reuse=previous)\n"
+    "        else:\n"
+    "            self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module)\n"
+)
+PINNED_COPY = ((PINNED_COPY_TARGET, PINNED_COPY_HELPER_ANCHOR, PINNED_COPY_HELPER, "replace"),
+               (PINNED_COPY_TARGET, PINNED_COPY_DATA_ANCHOR, PINNED_COPY_DATA_HOOK, "replace"),
+               (PINNED_COPY_TARGET, PINNED_COPY_CPU_ANCHOR, PINNED_COPY_CPU_HOOK, "replace"),
+               (PINNED_COPY_TARGET, PINNED_COPY_PARAM_ANCHOR, PINNED_COPY_PARAM_HOOK, "replace"),
+               (PINNED_SAVE_TARGET, PINNED_SAVE_ANCHOR, PINNED_SAVE_HOOK, "replace"))
+
 PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
 PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
-            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS)}
+            "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS, *PINNED_COPY)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:

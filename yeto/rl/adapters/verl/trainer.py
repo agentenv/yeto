@@ -476,6 +476,24 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
+    # S28 G-120C: --rl-verify-every N on the fully_async path. island_entry has always
+    # planned it (train_options.verify_plan), but only the synchronous (:340) and the
+    # Megatron engine (megatron_ports.py) drivers wired it, so on a buffer trainer the
+    # flag was planned and then silently ignored: every round hashed the whole 120B
+    # trainer (449 GiB of FP32 masters, about 27 min on 24 Ascend 910B3, run g120c-rl2).
+    from .train_options import wire_verify
+
+    wire_verify(driver, policy_state, plan)
+    if plan.get("verify_every") is not None:
+        # read back what the driver and the policy state now hold, not what was planned
+        tape.append({"event": "rl_verify_every_wired", "planned": int(plan["verify_every"]),
+                     "driver_verify_every": getattr(driver, "verify_every", None),
+                     "policy_state": type(policy_state).__name__,
+                     "supports_unverified_rounds": bool(getattr(policy_state, "supports_unverified_rounds",
+                                                                False))})
+        if getattr(driver, "verify_every", None) != int(plan["verify_every"]) or not getattr(
+                policy_state, "supports_unverified_rounds", False):
+            raise ValueError("--rl-verify-every was planned but the driver or policy state did not take it")
     state = round_cuts.run_driver(driver, resume)
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,

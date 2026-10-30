@@ -39,6 +39,9 @@ PLAN_ENV = "YETO_VERL_PLAN"
 # (``_runtime_env(agentic=...)``), never through a prefix.
 FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR",
                         "HCCL_", "ASCEND_")
+# S28 G-120: torch.compile switch the Ascend plugin stack needs off in every Ray worker
+# (see _runtime_env); not covered by FORWARD_ENV_PREFIXES, so it travels explicitly.
+DYNAMO_DISABLE_ENV = "TORCHDYNAMO_DISABLE"
 AGENTIC_ENV_PREFIXES = ("HARBOR_",)
 AGENTIC_ENV_NAMES = ("BOAT_API_KEY",)
 
@@ -111,6 +114,17 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
 
         os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
         env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
+        # S28 G-120: the stack pulls in paths that go through mcore's @jit_fuser, which IS
+        # torch.compile (megatron/core/jit.py, unconditional on torch>=2.2), and inductor
+        # has no NPU backend: a worker dies with
+        #   torch._inductor.exc.InductorError: AssertionError: Device npu not supported
+        # (run mfu-a1-160-mt28k, in actor_compute_log_prob). The recipe's own launcher
+        # exports TORCHDYNAMO_DISABLE=1 for this (sft_nemotron.sh:35), which makes
+        # torch.compile a frame-level no-op. Exporting it on the driver is NOT enough:
+        # a Ray worker only receives FORWARD_ENV_PREFIXES, which TORCHDYNAMO_ does not
+        # match (run mfu-a1c died the same way with it exported). The caller's own value
+        # still wins, so a deliberate TORCHDYNAMO_DISABLE=0 is preserved.
+        env["env_vars"].setdefault(DYNAMO_DISABLE_ENV, os.environ.get(DYNAMO_DISABLE_ENV, "1"))
     if agentic:  # S27 G-FS: register yeto_grpo in every Ray worker (agentic_main's hook)
         from .agentic_main import SETUP_HOOK
 

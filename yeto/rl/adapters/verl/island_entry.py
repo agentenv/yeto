@@ -92,6 +92,13 @@ def parse_args(argv):
     # S27 G-EQ3: staged bf16 delta releases on a full-parameter buffer trainer
     # (sample_roles._check_release_delta; 0 turns them off)
     p.add_argument("--rl-release-delta-full-every", type=int, default=0)
+    # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
+    # release (one 120B release is about 225 GB and a dozen minutes per round)
+    p.add_argument("--rl-measure-no-release", action="store_true")
+    # S28 G-120C: release only these policy versions (comma-separated), e.g. "2": a
+    # multi-step run trains on the samples it has and releases once for the samplers
+    p.add_argument("--rl-release-only-versions", default=None,
+                   type=lambda text: [int(v) for v in text.split(",") if v.strip()])
     # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
     # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
     p.add_argument("--rl-sampler-node", default=None)
@@ -138,6 +145,9 @@ def parse_args(argv):
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
     p.add_argument("--expert-parallel", type=int, default=None)
+    # S28 G-CPW: the launcher's neutral --context-parallel (rl_island_task forwards it
+    # when > 1); parse_known_args used to drop it, so the island trained at CP=1
+    p.add_argument("--context-parallel", type=int, default=1)
     p.add_argument("--actor-num-nodes", type=int, default=1)
     p.add_argument("--actor-num-gpus-per-node", type=int, default=None)
     p.add_argument("--rl-island-gpus-per-node", type=int, default=None)
@@ -153,6 +163,19 @@ def parse_args(argv):
     # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
     # launcher already forwards; megatron_engine.optimizer_memory_overrides maps it)
     p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
+    # S28 G-RCP: precision-aware optimizer on the card, bf16 Adam moments, FP32 master
+    p.add_argument("--rl-megatron-bf16-moments", action="store_true")
+    # S28 G-120: uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
+    p.add_argument("--rl-megatron-first-stage-layers", type=int, default=None)
+    p.add_argument("--rl-megatron-last-stage-layers", type=int, default=None)
+    p.add_argument("--rl-megatron-recompute-full-layers", type=int, default=None)
+    # S28 G-120C: verl's fused log-prob kernels. Off unless asked for: on this model
+    # they are 47.8% of the activation per token, and the Ascend blockers are in
+    # infra-drafts/SESSION28/report/FCE-PLAN.md.
+    p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
+    # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
+    # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
+    p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -548,7 +571,8 @@ def main(argv=None) -> int:
     t0 = time.time()
     engine = megatron_engine.engine_for(tensor_parallel=args.tensor_parallel,
                                         pipeline_parallel=args.pipeline_parallel,
-                                        expert_parallel=args.expert_parallel or 1)
+                                        expert_parallel=args.expert_parallel or 1,
+                                        context_parallel=args.context_parallel)
     manifest = runtime_manifest(lid, engine=engine)
     manifest["ignored_flags"] = ignored
     (OUTPUT / f"verl-runtime-{lid}.json").write_text(json.dumps(manifest, indent=1))
@@ -1139,11 +1163,16 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     # (megatron_engine.MTP_OFF_PATTERN)
     close_mtp = bool(model_config.get("hybrid_override_pattern")) and not any(
         key in model_config for key in megatron_engine.MTP_CONFIG_KEYS)
+    # S28 G-CPW: a Mamba model needs seq_idx in verl's THD packing; probe the verl this
+    # process imports (the workers probe their own at start, megatron_ports)
+    mamba = megatron_engine.has_mamba(model_config)
     shape = MegatronShape(
         trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
         rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
         rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
+        cp=int(args.context_parallel or 1), mamba=mamba,
+        seq_idx=megatron_engine.probe_seq_idx(int(args.context_parallel or 1)) if mamba else None,
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
         gpu_memory_utilization=pools.gpu_memory_utilization,
@@ -1151,6 +1180,12 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         grad_nan_check=not args.rl_no_grad_nan_check,
         rollout_pool=not buffer_trainer,
         optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0),
+        bf16_moments=bool(getattr(args, "rl_megatron_bf16_moments", False)),
+        first_stage_layers=getattr(args, "rl_megatron_first_stage_layers", None),
+        last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
+        recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
+        fused_logprob_kernels=bool(getattr(args, "rl_megatron_fused_logprob_kernels", False)),
+        old_logprob_entropy=not bool(getattr(args, "rl_no_old_logprob_entropy", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
@@ -1257,6 +1292,9 @@ def sample_buffer_section(args) -> dict | None:
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
             # S27 G-EQ3: staged bf16 delta releases (0: the release goes into the store whole)
             "release_delta_full_every": int(config.release_delta_full_every or 0),
+            **({"no_release": True} if getattr(args, "rl_measure_no_release", False) else {}),
+            **({"release_only": list(args.rl_release_only_versions)}
+               if getattr(args, "rl_release_only_versions", None) is not None else {}),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
@@ -1379,8 +1417,19 @@ def append_correction_record(args, spec_dict: dict | None) -> None:
 
 
 def _override_value(overrides, key):
+    """The value yeto wrote for ``key``, or None when it wrote no override for it.
+
+    S28 G-120C: Hydra's "add this key" prefixes (``+``, ``++``) are part of the
+    override string but not part of the config path, so a plain ``startswith``
+    never matched an asserted key written through one. Every asserted key under
+    ``override_transformer_config`` therefore read back with ``want: null``, and
+    ``check_asserted`` skips a None -- the key was re-read but never compared
+    (S28 G-120 handoff section 6 item 12 saw this on
+    ``gradient_accumulation_fusion`` and called it "a read-back, not an
+    assertion"). Strip the prefix before comparing so those keys assert.
+    """
     for item in overrides:
-        if item.startswith(key + "="):
+        if item.lstrip("+").startswith(key + "="):
             return item.split("=", 1)[1]
     return None
 

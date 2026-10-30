@@ -302,3 +302,92 @@ def test_a_full_parameter_fully_async_island_with_a_rollouter_is_wired(verl_trai
     import inspect
 
     assert "with a rollouter is not wired" not in inspect.getsource(verl_trainer)
+
+def test_verify_every_is_wired_on_a_buffer_trainer_and_unverified_releases_say_so(tmp_path, verl_trainer):
+    """S28 G-120C: --rl-verify-every N reached the plan of a buffer trainer but not its
+    driver (only the synchronous and the Megatron-engine drivers wired it), so every
+    round hashed the whole trainer. Now the fully_async driver takes it; the rounds it
+    does not verify publish an identity label, and their releases say so."""
+    rounds, groups = 3, 2
+    actor = FullBufferActor(seed=0)
+    base = _full_base(tmp_path, actor.model)
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    done = threading.Event()
+    config = EngineSamplerConfig(sampler_id="island0", num_rollouts=40, max_backlog_groups=2,
+                                 sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32, poll_s=0.01)
+    sampler = build_engine_sampler(
+        config, engine=FakeEngine(max_model_len=64), releases=PolicyReleaseStore(store),
+        buffer=FileSampleBuffer(store, batch_size=1), emit=lambda n, **f: None,
+        prompts=lambda r: [PromptItem(f"p{r}", f"prompt {r}", label="x")],
+        reward=lambda item, c: float(len(c.token_ids) % 2),
+        checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
+        should_stop=done.is_set, sleep=lambda s: time.sleep(0.005))
+    thread = threading.Thread(target=sampler.run, daemon=True)
+    thread.start()
+    plan = {**_plan(tmp_path, base, rounds=rounds, groups=groups), "verify_every": 1000}
+
+    def ports(island):
+        return install_buffer_ports(island, buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                    releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0),
+                                    base_dir=base, tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30,
+                                    weights=release_weights_for(island, plan))
+
+    try:
+        result = verl_trainer.run_fully_async_island(actor, None, plan, {}, buffer_ports=ports)
+    finally:
+        done.set()
+        thread.join(timeout=10)
+    assert result["rounds_completed"] == rounds
+    tape = _lines(tmp_path / "tape.jsonl")
+    wired = [{k: e[k] for k in ("planned", "driver_verify_every", "policy_state", "supports_unverified_rounds")}
+             for e in tape if e["event"] == "rl_verify_every_wired"]
+    assert wired == [{"planned": 1000, "driver_verify_every": 1000,
+                      "policy_state": "VerlFullParameterLocalState", "supports_unverified_rounds": True}]
+    releases = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    # v0 (first) and v3 (the last round) are verified; v1 and v2 are not (N = 1000)
+    assert [(r["policy_version"], r["policy_hash_verified"]) for r in releases] == [
+        (0, True), (1, False), (2, False), (3, True)]
+    store_releases = PolicyReleaseStore(store)
+    latest = store_releases.latest()
+    assert latest.version == rounds and latest.origin is None  # a verified release: record unchanged
+    # the release record of an unverified round says its policy hash is an identity label
+    v2 = next(r for r in releases if r["policy_version"] == 2)  # the store keeps the newest two
+    record = json.loads((store_dir / store_releases.release_dir / v2["path"] / "RELEASE.json").read_text())
+    assert record["origin"] == {"kind": "single", "policy_hash": "unverified-identity"}
+
+
+def test_without_verify_every_every_release_is_verified(tmp_path, verl_trainer):
+    """The default path is unchanged: no wiring event, every release verified."""
+    rounds, groups = 2, 2
+    actor = FullBufferActor(seed=1)
+    base = _full_base(tmp_path, actor.model)
+    store = CheckpointStore(tmp_path / "store")
+    done = threading.Event()
+    config = EngineSamplerConfig(sampler_id="island0", num_rollouts=40, max_backlog_groups=2,
+                                 sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32, poll_s=0.01)
+    sampler = build_engine_sampler(
+        config, engine=FakeEngine(max_model_len=64), releases=PolicyReleaseStore(store),
+        buffer=FileSampleBuffer(store, batch_size=1), emit=lambda n, **f: None,
+        prompts=lambda r: [PromptItem(f"p{r}", f"prompt {r}", label="x")],
+        reward=lambda item, c: float(len(c.token_ids) % 2),
+        checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
+        should_stop=done.is_set, sleep=lambda s: time.sleep(0.005))
+    thread = threading.Thread(target=sampler.run, daemon=True)
+    thread.start()
+    plan = _plan(tmp_path, base, rounds=rounds, groups=groups)
+
+    def ports(island):
+        return install_buffer_ports(island, buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                    releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0),
+                                    base_dir=base, tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30,
+                                    weights=release_weights_for(island, plan))
+
+    try:
+        verl_trainer.run_fully_async_island(actor, None, plan, {}, buffer_ports=ports)
+    finally:
+        done.set()
+        thread.join(timeout=10)
+    assert not [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_verify_every_wired"]
+    releases = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    assert all(r["policy_hash_verified"] for r in releases)

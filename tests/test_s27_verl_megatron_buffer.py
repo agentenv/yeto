@@ -278,9 +278,13 @@ def test_a_megatron_buffer_trainer_installs_the_megatron_trainer_group(tmp_path,
 
 
 def test_the_release_weights_of_a_megatron_buffer_trainer_read_that_group(tmp_path, monkeypatch):
-    """The publication path: ``buffer_ports.release_weights_for`` writes with the HF
-    writer over ``island.full_group``, so the group decided above is the one each
-    release reads (``hf_export.VerlHfWriter`` -> ``group.manifests``)."""
+    """The publication path: ``buffer_ports.release_weights_for`` gives the island
+    release weights, and the group decided above is the one installed.
+
+    S28 G-120: which writer fills those releases is the engine's own -- a Megatron
+    island writes through its trainer ranks (``megatron_ports.MegatronReleaseWriter``),
+    not through ``hf_export.VerlHfWriter``, whose ``group.export_parameters`` the
+    Megatron group does not implement. See ``tests/test_s28_megatron_release.py``."""
     from yeto.rl.adapters.verl import buffer_ports, fully_async_full
     from yeto.rl.adapters.verl.megatron_full_parameter import MegatronFullParameterGroup
 
@@ -302,10 +306,14 @@ class _Tape:
         self.events.append(event)
 
 
+SIZES = {"tp": 1, "pp": 1, "ep": 8, "cp": 1}
+
+
 def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
     """B4: ``run_megatron_island`` is the synchronous driver, which this path never
-    calls, so its two readbacks are wired here instead: the gradient non-finite check
-    (a refusal) and the Ascend plugin stack (a log)."""
+    calls, so its readbacks are wired here instead: the runtime shape (S28 G-CPW, a
+    refusal), the gradient non-finite check (a refusal) and the Ascend plugin stack
+    (a log)."""
     from yeto.rl.adapters.verl import megatron_ports
 
     class _OneRank(_Island):
@@ -315,18 +323,20 @@ def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
 
         def call_workers(self, fn, *args):
             self.calls.append(fn.__name__)
+            if fn is megatron_ports.remote_megatron_runtime:
+                return [{"rank": 0, "sizes": dict(SIZES), "seq_idx": None}]
             if fn is megatron_ports.remote_megatron_grad_checks:
                 return [{"rank": 0, "wrapped": True, "check_for_nan_in_grad": self.flag}]
             return [{"rank": 0, "ran": True, "installed": ["a"], "failed": {}}]
 
-    plan = {"megatron": {"grad_nan_check": True},
+    plan = {"megatron": {"grad_nan_check": True, **SIZES},
             "ascend_plugin_stack": {"root": "/p", "env": {"X": "1"}, "plugins": ["a"]}}
     tape = _Tape()
     island = _OneRank(True)
     megatron_ports.island_megatron_checks(island, plan, tape)
-    assert island.calls == ["remote_megatron_grad_checks", "remote_ascend_plugin_report"]
+    assert island.calls == ["remote_megatron_runtime", "remote_megatron_grad_checks", "remote_ascend_plugin_report"]
     events = [event["event"] for event in tape.events]
-    assert events == ["rl_megatron_grad_checks", "rl_ascend_plugin_stack"]
+    assert events == ["rl_megatron_runtime_shape", "rl_megatron_grad_checks", "rl_ascend_plugin_stack"]
     assert "gradient NaN check wanted=True" in capsys.readouterr().out
 
     # a rank without the check stops the island
@@ -335,8 +345,8 @@ def test_the_buffer_path_runs_the_megatron_start_up_readbacks(capsys):
 
     # no plugin stack section: only the gradient check runs
     quiet = _OneRank(True)
-    megatron_ports.island_megatron_checks(quiet, {"megatron": {"grad_nan_check": True}}, _Tape())
-    assert quiet.calls == ["remote_megatron_grad_checks"]
+    megatron_ports.island_megatron_checks(quiet, {"megatron": {"grad_nan_check": True, **SIZES}}, _Tape())
+    assert quiet.calls == ["remote_megatron_runtime", "remote_megatron_grad_checks"]
 
 
 # ----------------------------------------------------------------------------- the optimizer-state memory
@@ -378,7 +388,7 @@ def test_the_optimizer_offload_fraction_writes_the_engine_keys_and_is_off_by_def
                                      optimizer_offload_fraction=1.5))
 
 
-def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path):
+def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path, monkeypatch):
     """S27 G-FN (B12): a three-way interaction, not an Ascend quirk (G-FJ2 traced it,
     VERL-ASCEND-MEGATRON.md conclusion C item 2). The bridge enters its MTP branch
     whenever mtp_hybrid_override_pattern is truthy and then multiplies the pattern by
@@ -387,6 +397,9 @@ def test_a_hybrid_model_without_mtp_layers_closes_the_bridge_mtp_branch(tmp_path
     pattern as null so the branch stays closed -- which is what the checkpoint asked
     for. A model that really has MTP layers keeps the bridge's own handling."""
     key = "++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_hybrid_override_pattern"
+    # S28 G-CPW: a hybrid (Mamba) model is planned only over a verl with the seq_idx
+    # patch in effect; this CPU test has no verl, so the probe reports a patched one
+    monkeypatch.setattr(me, "probe_seq_idx", lambda cp=1, module=None: me.SeqIdxPatch("stub", int(cp), True))
 
     # a model that is not hybrid at all: nothing is written
     plain = _plan(tmp_path)
@@ -446,3 +459,75 @@ def test_a_buffer_trainer_asks_for_the_naive_weight_transport(tmp_path):
     # the engine-neutral default is unchanged
     assert key + "=nccl" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2)
     assert key + "=naive" in fully_async_run_overrides([], 4, groups_per_round=2, rounds=2, rollouter=False)
+
+
+def test_bf16_moments_flag_writes_precision_aware_keys_with_fp32_masters(tmp_path):
+    """S28 G-RCP: --rl-megatron-bf16-moments keeps the optimizer state on the card with
+    bf16 Adam moments and an FP32 master the full-parameter boundary can read."""
+    on = _plan(tmp_path, extra=["--rl-megatron-bf16-moments"])
+    actor = "actor_rollout_ref.actor"
+    assert on["shape"]["bf16_moments"] is True
+    assert f"{actor}.optim.use_precision_aware_optimizer=True" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_dtype=bf16" in on["overrides"]
+    assert f"{actor}.optim.exp_avg_sq_dtype=bf16" in on["overrides"]
+    assert f"++{actor}.optim.override_optimizer_config.store_param_remainders=False" in on["overrides"]
+    assert not [o for o in on["overrides"] if "cpu_offload" in o or "main_grads_dtype" in o]
+    with pytest.raises(me.MegatronShapeError):
+        _plan(tmp_path, extra=["--rl-megatron-bf16-moments", "--rl-optimizer-offload-fraction", "0.5"])
+
+
+def test_s28_the_120b_recipe_shape_plans_uneven_stages_full_recompute_and_host_offload(tmp_path):
+    """S28 G-120: 24 cards TP4/PP3/EP8, 29/30 first/last stage layers (88 layers),
+    full-layer recompute and the whole optimizer state on the host."""
+    plan = _plan(tmp_path, cards=24, config={"n_routed_experts": 512},
+                 actor_num_nodes=3, actor_num_gpus_per_node=8, rl_island_gpus_per_node=8,
+                 tensor_parallel=4, pipeline_parallel=3, expert_parallel=8,
+                 extra=["--rl-megatron-first-stage-layers", "29", "--rl-megatron-last-stage-layers", "30",
+                        "--rl-megatron-recompute-full-layers", "1", "--rl-optimizer-offload-fraction", "1.0"])
+    shape, o = plan["shape"], plan["overrides"]
+    assert (shape["tp"], shape["pp"], shape["ep"], shape["data_parallel"], shape["trainer_gpus"]) == (4, 3, 8, 2, 24)
+    t = "++actor_rollout_ref.actor.megatron.override_transformer_config"
+    assert _value(o, f"{t}.num_layers_in_first_pipeline_stage") == "29"
+    assert _value(o, f"{t}.num_layers_in_last_pipeline_stage") == "30"
+    assert (_value(o, f"{t}.recompute_granularity"), _value(o, f"{t}.recompute_method"),
+            _value(o, f"{t}.recompute_num_layers")) == ("full", "uniform", "1")
+    assert _value(o, f"{t}.recompute_modules") is None
+    assert _value(o, "++actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload") == "True"
+
+
+def test_s28_default_shape_writes_no_stage_keys_and_keeps_selective_recompute(tmp_path):
+    o = _plan(tmp_path)["overrides"]
+    t = "++actor_rollout_ref.actor.megatron.override_transformer_config"
+    assert not any("pipeline_stage" in x for x in o)
+    assert _value(o, f"{t}.recompute_granularity") == "selective"
+
+
+def test_s28_stage_layers_need_pp():
+    with pytest.raises(me.MegatronShapeError, match="PP >= 2"):
+        me.validate(me.MegatronShape(rollout_pool=False, pp=1, first_stage_layers=29))
+
+
+def test_megatron_overrides_disable_gradient_accumulation_fusion():
+    """S28 G-120: the engine must WRITE gradient_accumulation_fusion=False and assert it.
+
+    Megatron's own default is True and that path calls Apex's
+    fused_weight_gradient_mlp_cuda, which does not exist on Ascend, so a plugin-stack
+    island died in the linear backward with ``NameError: name
+    'fused_weight_gradient_mlp_cuda' is not defined`` (tensor_parallel/layers.py:602;
+    120B run mfu-a1d on npu1, 24 cards).  The recipe runs False as well (args.json),
+    so this is the aligned value.  The key is asserted because writing an override is
+    not proof that the consumer took it -- the same session had TORCHDYNAMO_DISABLE
+    exported on the driver and never delivered to the Ray workers.
+    """
+    from yeto.rl.adapters.verl import megatron_engine as me
+
+    shape = me.MegatronShape(trainer_nodes=3, trainer_gpus_per_node=8, tp=4, pp=3, ep=8)
+    assert shape.gradient_accumulation_fusion is False  # as yeto's neutral default
+
+    key = ("actor_rollout_ref.actor.megatron.override_transformer_config"
+           ".gradient_accumulation_fusion")
+    assert key in me.asserted_keys(shape)
+
+    written = [o for o in me.build_overrides(_run_config(), shape)
+               if "gradient_accumulation_fusion" in o]
+    assert written == [f"++{key}=False"], written

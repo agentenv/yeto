@@ -51,7 +51,7 @@ def test_engine_is_megatron_exactly_when_a_model_parallel_size_is_above_one():
 
 
 @pytest.mark.parametrize("change,match", [
-    (dict(cp=2), "CP>1"),
+    (dict(cp=2, mamba=True), "没有查过"),  # S28 G-CPW: was a blanket CP>1 refusal
     (dict(etp=2), "ETP=1"),
     (dict(tp=3), "TP\\*PP\\*CP=3"),
     (dict(tp=16, trainer_nodes=2), "跨节点"),
@@ -576,7 +576,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     from yeto.rl.adapters.verl import patch_verl
 
     for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB
-                + (patch_verl.AUTO_CLASS,)}:
+                + (patch_verl.AUTO_CLASS,) + patch_verl.PINNED_COPY}:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(VERL_FORK / rel, tmp_path / rel)
     patch_verl.apply(tmp_path, "megatron")
@@ -585,6 +585,11 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     assert util.count("**_yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu)") == 2
     assert util.count("def _yeto_seq_idx_args(") == 1
     compile(util, "util.py", "exec")
+    # S28 G-120D: one pinned host copy in copy_megatron_model_to_cpu, applied once
+    utils = (tmp_path / patch_verl.PINNED_COPY_TARGET).read_text()
+    assert utils.count("def _yeto_pinned_host_copy(") == 1
+    assert utils.count("_yeto_pinned_host_copy(") == 4
+    compile(utils, "megatron_utils.py", "exec")
     assert patch_verl.SEND_HOOK not in (tmp_path / patch_verl.SEND_TARGET).read_text()
     engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
     assert engine.count("_yeto_sub_key") == 2 and engine.count("time.sleep(1.0)  # yeto") == 1
@@ -717,3 +722,39 @@ def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(
     joined = staging_root / mp.HF_STAGING / "round-2"
     assert (joined / "model-00001-of-00001.safetensors").is_file()
     assert not (joined / ".complete").exists() and not (joined / "config.json").exists()
+
+
+# ------------------------------------------------- S28 G-120C: fused log-prob kernels
+def test_fused_logprob_kernels_are_off_by_default_and_written_from_the_shape():
+    off = me.build_overrides(_run(), D0)
+    assert _value(off, "actor_rollout_ref.model.use_fused_kernels") == "False"
+    on = me.build_overrides(_run(), dataclasses.replace(D0, fused_logprob_kernels=True))
+    assert _value(on, "actor_rollout_ref.model.use_fused_kernels") == "True"
+
+
+def test_fused_logprob_kernels_key_is_asserted():
+    # the engine wrote this key for months with nothing checking that verl took it;
+    # it decides whether the [tokens, vocab] logits are materialised
+    assert "actor_rollout_ref.model.use_fused_kernels" in me.ASSERTED_KEYS
+
+
+def test_override_value_sees_through_hydras_add_prefix():
+    # S28 G-120 handoff section 6 item 12: every asserted key written with "++" read
+    # back as want:null, so check_asserted skipped it -- a read-back, not an assertion
+    from yeto.rl.adapters.verl.island_entry import _override_value
+
+    key = "actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion"
+    assert _override_value([f"++{key}=False"], key) == "False"
+    assert _override_value([f"+{key}=False"], key) == "False"
+    assert _override_value([f"{key}=False"], key) == "False"
+    assert _override_value(["actor_rollout_ref.model.lora_rank=0"], key) is None
+
+
+def test_every_asserted_key_of_a_megatron_island_gets_a_want(tmp_path):
+    # the same failure as above, end to end: the plan's asserted map must carry a value
+    # for every key the engine writes, including the "++" ones
+    from yeto.rl.adapters.verl.island_entry import _override_value
+
+    out = me.build_overrides(_run(), D0)
+    nulls = [k for k in me.ASSERTED_KEYS if _override_value(out, k) is None]
+    assert nulls == []
