@@ -576,7 +576,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     from yeto.rl.adapters.verl import patch_verl
 
     for rel in {t for t, *_ in patch_verl.PATCHES + patch_verl.SEQ_IDX + patch_verl.ZMQ_SUB
-                + (patch_verl.AUTO_CLASS,) + patch_verl.PINNED_COPY}:
+                + (patch_verl.AUTO_CLASS, patch_verl.CHUNKED_LOGPROB) + patch_verl.PINNED_COPY}:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(VERL_FORK / rel, tmp_path / rel)
     patch_verl.apply(tmp_path, "megatron")
@@ -598,6 +598,15 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     model = (tmp_path / patch_verl.AUTO_CLASS[0]).read_text()
     assert model.count("yeto S27 G-EQ2") == 1 and patch_verl.AUTO_CLASS[1] not in model
     compile(model, "model.py", "exec")
+    # S28 FCE: the chunked log-prob hook sits once inside _maybe_enable_fused_kernels,
+    # around verl's own patch loop (the anchor itself is kept)
+    impl = (tmp_path / patch_verl.CHUNKED_LOGPROB_TARGET).read_text()
+    assert impl.count("yeto S28 FCE") == 1 and impl.count(patch_verl.CHUNKED_LOGPROB_ANCHOR) == 1
+    fused = impl[impl.index("    def _maybe_enable_fused_kernels(self):"):impl.index("    def _build_optimizer(self):")]
+    assert fused.index("_yeto_chunked_logprob.install()") < fused.index("patch_fused_forward(model)") \
+        < fused.index("_yeto_chunked_logprob.check_installed(self.module)")
+    assert fused.index("if not self.engine_config.use_fused_kernels:") < fused.index("_yeto_chunked_logprob")
+    compile(impl, "transformer_impl.py", "exec")
     with pytest.raises(SystemExit, match="unknown profile"):
         patch_verl.apply(tmp_path, "nope")
 
