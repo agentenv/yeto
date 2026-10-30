@@ -1277,7 +1277,9 @@ class VerlFullParameterLocalState:
         if last is None:
             return None
         mark = self._mark()
-        if self.light:
+        # S29 --rl-measure-no-verify: no release reads the light digest either, and it
+        # reads every shard (~45 s a round on the 120B island)
+        if self.light and not getattr(self, "measure_no_verify", False):
             return self._export_light(int(policy_version), last, mark)
         identity = unverified_identity(int(policy_version), mark)
         print(f"[yeto-verl] full-parameter publication v{policy_version}: unverified (no whole cut; last "
