@@ -229,3 +229,43 @@ pp0 设备时间构成（核时求和，可重叠）：B 的每一类计算算�
 | B（s29-s2） | 3.17M | 364.3s | 8706 | 0.46 |
 
 A6 对 SFT 的 1.66x 里，A 系列 profiling 已归因：update_actor 187.7s（1.35x）+ old_log_prob 约 42s。B 相对 A6 还要再慢 1.32x，在 micro-batch 更少更满、单条更短的情况下仍然更慢，**原因未定位**。下一轮应当直接对 B 与 A6 两臂做同口径的分阶段计时（old_log_prob / 前后向 / 优化器 / 其余），而不是继续从 trace 的比值去推断——本轮两次推断都被实验证伪了。
+
+## 15. 三项补充核查
+
+### 15.1 相位拆解（py-spy 采样法）
+
+第 12 节那 92 个活跃线程采样本身就给出了相位分布（采样落在哪个 Ray actor 方法上）：
+
+| 相位 | 采样占比 | 按 345s 步时折算 |
+|---|---|---|
+| `actor_update_actor`（训练前后向 + 优化器） | 90%（83/92） | 约 311s |
+| `actor_compute_log_prob`（old_log_prob 的额外一次前向） | 9%（8/92） | 约 34s |
+
+与 A 系列 profiling 给 A6 的 old_log_prob 约 42s 同量级。**结论：差距不在 old_log_prob，而在 update_actor 本身。** B 的 update_actor 约 311s / 3.01M token，SFT 整步 138.8s / 2.64M token，按 token 算 update_actor 慢约 2.0 倍。
+
+### 15.2 FLOPs 口径：attention 的 O(L²) 不是解释
+
+Nemotron 120B 的 89 层里只有 8 层是全注意力（`layers_block_type` 实测），hidden 4096，全重计算下每注意力层约 `8·L²·d`，即全模型约 `2.62e5 · ΣL²`。
+
+| 臂 | ΣL²（每步） | attention FLOPs | 线性项 FLOPs | attention 占比 | 含 attention 的 MFU |
+|---|---|---|---|---|---|
+| B（s29-s2，224 条 × 14.1k） | 4.45e10 | 1.17e16 | 2.33e17 | +5.0% | 8.50% → **8.93%** |
+| SFT（28k binpack，按文档均长 8k 估） | 2.11e10 | 5.5e15 | 1.94e17 | +2.8% | 18.59% → **19.11%** |
+
+两种口径下差距几乎不变（2.19x → 2.14x）。**长序列的 attention 二次项解释不了这个差距。** SFT 那一行的 ΣL² 用的是文档均长 8k 的估计值，属于估算，但即使取极端值也不足以改变量级。
+
+### 15.3 配置 diff：recompute 等关键项两边一致
+
+RL 实际生效的 `override_transformer_config`（从 s29-s2 的 hydra 覆盖项提取，共 13 项）：
+`recompute_granularity=full`、`recompute_method=uniform`、`recompute_num_layers=1`、`moe_token_dispatcher_type=alltoall`、`moe_permute_fusion=True`、`moe_grouped_gemm=True`、`moe_router_dtype=fp32`、`moe_aux_loss_coeff=0.0`、`moe_router_bias_update_rate=0.0`、`gradient_accumulation_fusion=False`、`tp_comm_overlap=True`、`num_layers_in_first_pipeline_stage=29`、`num_layers_in_last_pipeline_stage=30`。
+
+SFT 配方（`/data/work/sft-run/go_pp3.sh`）的默认值是 `RECOMPUTE=full`、`RECOMPUTE_METHOD=uniform`、`RECOMPUTE_NUM=1`，并同样叠加 `ASCEND_RECOMP_POLICY`。**两边的重计算配置一致**，不是差异来源。插件栈 RL 侧用的就是 `/data/work/sft-run/plugins`，同一套。
+
+唯一已知未对齐项：`ASCEND_STAGE_TIMER` 的 `stage_timer.py` 在 RL 侧被插件栈排除（它在模块级 import ms-swift，RL 路径没有），所以 RL 拿不到配方自带的分阶段计时——这也是本轮只能用 py-spy 采样法做相位拆解的原因。
+
+### 15.4 结论与下一步
+
+update_actor 内部按 token 慢 2.0 倍，而 recompute/插件/并行形状/attention 口径都已排除。剩下最可能的方向（未验证）：
+1. verl 的 Megatron 训练循环与 ms-swift 的 SFT 循环在**每个 micro-batch 的固定开销**上不同（数据搬运、TensorDict 切片、loss 构建）。注意第 14 节已证明这不是 micro-batch *数量* 的问题——B 的 micro-batch 更少更满仍然更慢，所以是**每个 micro-batch 内部**的差异。
+2. GRPO 的 loss 路径（TIS 校正、advantage、按 token 的比值）比 SFT 的 CE 重。trace 里 elementwise 1.52x、reduce 2.26x 已指向这里，但绝对值当时看着小——在排除其他项之后，这项值得重新量化。
+下一轮应当直接在 verl actor 的 micro-batch 循环里加计时器，把一个 micro-batch 拆成 数据准备 / 前向 / 反向 / loss / 其余，与 SFT 的同口径对比。
