@@ -1,0 +1,24 @@
+# S29 spot: one Nebius preemptible single-GPU VM running a spot rollout island in the sampler image.
+#   sky launch -c s29-spot-a tools/probes/s29_spot/sky_spot.yaml --infra nebius/eu-north1 --gpus H100:1 \
+#     --env ISLAND=0 --env CARD=H100 --secret BOAT_API_KEY --secret YETO_ISLAND_HMAC_KEY -d -y
+resources:
+  use_spot: true
+  disk_size: 200
+  ports: 31600
+  # the image the S29 Modal samplers ran (sglang 0.5.21.dev70+g2fa8801, Harbor layer added at setup)
+  image_id: docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf62137c9e364f779010bc0b753e867a
+
+envs:
+  ISLAND: 0
+  CARD: H100
+
+secrets:
+  BOAT_API_KEY: null
+  YETO_ISLAND_HMAC_KEY: null
+
+file_mounts:
+  /root/yeto-root: /tmp/s29spot/payload/yeto-root
+  /root/s29data: /tmp/s29spot/payload/data
+
+run: |
+  bash /root/yeto-root/tools/probes/s29_spot/vm_run.sh
