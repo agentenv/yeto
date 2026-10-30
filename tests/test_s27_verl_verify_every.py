@@ -279,3 +279,25 @@ def test_the_verl_island_parses_measure_no_verify():
             "--inner-lr", "1", "--seq-len", "1", "--seed", "1", "--rl-measure-no-verify"]
     parsed, ignored = island_entry.parse_args(argv)
     assert parsed.rl_measure_no_verify and "--rl-measure-no-verify" not in ignored
+
+
+def test_measure_no_verify_publishes_every_round_without_reading_a_fragment():
+    """S29: without a verified cut the unverified path used to return None, so the driver
+    hashed every fragment on v0 anyway (~480 GB, ~30 min on the 120B island). In a
+    measurement run the base comes from the layout: no capture, no fragment digest, on
+    the first round as on the last."""
+    state, group = _local_state()
+    state.light = False
+    driver = _driver(state, every=1000, rounds=4)
+    to.wire_verify(driver, state, {"verify_every": 1000, "measure_no_verify": True})
+    assert state.measure_no_verify and state.supports_unverified_rounds
+    for version in range(0, 4):
+        driver.published_version = None if version == 0 else version - 1
+        resident = IslandDriver.export_local_resident(driver, policy_version=version)
+        assert resident is not None and not resident.verified
+        assert resident.digest.payload_bytes == state.adapter.expected_parameter_scalar_count * 4
+        assert resident.layout_hash == "l" * 64
+        group.trained_rounds += 1
+    assert state.adapter.captures == 0, "measurement mode reads no fragment on any round"
+    fresh, _ = _local_state()
+    assert fresh.export_identity(policy_version=0) is None, "outside measurement mode the driver still verifies v0"

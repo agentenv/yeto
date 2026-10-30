@@ -203,6 +203,9 @@ def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
         driver.verify_every_round = True
     if plan.get("measure_no_verify"):  # S29
         driver.measure_no_verify = True
+        # the first round has no verified cut to refer to: the state builds one from the
+        # layout instead of hashing every fragment (VerlFullParameterLocalState._measurement_base)
+        policy_state.measure_no_verify = True
     every = plan.get("verify_every")
     if every is not None:
         driver.verify_every = int(every)
