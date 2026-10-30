@@ -170,7 +170,11 @@ class SamplerLoop:
         while True:
             self._load_newest()
             past_base = getattr(self.follower.releases, "past_base", None)
-            on_base_behind = (self.follower.release is None and past_base is not None and past_base())
+            # D9: serving nothing yet, or still the base weights (a base "release"
+            # counts as loaded), while the run has merged past the base
+            base_version = getattr(self.follower.releases, "base_version", 0)
+            serving_base = self.follower.release is None or int(self.follower.version) <= int(base_version)
+            on_base_behind = serving_base and past_base is not None and past_base()
             if not self.ready() or (self.require_release and self.follower.release is None) or on_base_behind:
                 if waiting_policy_since is None:
                     waiting_policy_since = time.monotonic()

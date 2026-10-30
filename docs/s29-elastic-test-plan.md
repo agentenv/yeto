@@ -99,3 +99,24 @@
 ## 5. 成本护栏
 
 VM 总花费 ≤ $60，并发 ≤ 3 台，空闲等待时关机；只管理 `s29-spot-` 前缀资源。
+
+## 6. 执行结果（10-31 03:45）
+
+| 项 | 结果 | 证据 / 缺陷 |
+|---|---|---|
+| T1 基线 TB2.1 5 step | 通过（两个岛各训 5 个本地 step，每步 4.4–9.6 s，reward 全 0） | D1 D3 D5 D6 已修；docs/s29-evidence/t1-tb21 |
+| T2 tape 一致性 | 发现问题后已修：重复训练（D6 跨 run，D12 重启） | D6 D12 |
+| T3 三方对账 | relay stored/acked、本地 buffer、trainer 训练数一致（修复后） | final/*.tgz |
+| T4 版本推进/staleness | 合并推进正常；spot 岛跟不上版本（WAN 0.18 MB/s） | D9 D10 D13 |
+| T5 relay 流转 | 无丢失、无串道；崩溃时已 ack 的组没有丢（D2 关闭） | D2 |
+| T6.1 kill -9 sampler | 修复后通过（孤儿 SGLang 进程组被回收） | D8 |
+| T6.2 SIGTERM | 通过（PREEMPTED 离开，boat 活跃数归 0） | — |
+| T6.3 sky down VM | 已 down；重开放到 08:00 后的 TB2.1 回归（boat 额度） | — |
+| T6.4 断隧道 60 s | 通过（重拨 7 次后自动恢复，未退出） | drill.log |
+| T6.5 syncer --resume 重启 | 通过（恢复到 step 42，全部成员重连，无 fence） | drill.log |
+| T6.6 trainer 岛 kill -9 | 默认配置下失败（D11）；开 island pool 并修 D12 后通过 | D11 D12 |
+| T6.7 两个 spot 岛同时离线 | trainer 等待不退出（D10 修复后）；未单独计时 | D10 |
+| T8 quorum/grace | quorum=1 时单岛也能推进合并（syncer tape responders 只有 1 个） | syncer.log |
+| T9 长跑泄漏 | 合计约 150 轮；trainer 共享内存 +35% 待确认 | D14 |
+| T10 boat 泄漏 | 通过（全部结束后 activeSandboxes=0） | — |
+| T11 错误注入 | layout hash 不符、policy age 超出 verl 上限都在启动时被显式拒绝 | 基线日志 |

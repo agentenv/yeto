@@ -101,3 +101,22 @@ D1 崩溃前被 ack 的那组并没有丢：relay pump 先把组写进 trainer �
   2. 下发 delta：subscriber 已有 `bcast_delta` 和 int4/int8 推送能力，订阅者也应接收 bf16→int8 的版本差（加周期性全量），量级能降 4–8 倍。
   3. 压缩和多流：zstd + 多 TCP 流（`wan_streams`）；隧道换成 WireGuard/Tailscale 直连，避免 SSH 的单流窗口限制。
   4. 版本节流：spot 岛按 `reload_every` 跳版本，只拉最新 cut；trainer 侧 policy-age 判定按"最新可达 cut"给宽限。
+
+## D9 复测与剩余限制
+
+- 第一版 D9 修复有 bug：`WeightFollower.versions` 是 property，我按方法调用了，导致 spot 岛启动即退出（18:01Z），已修复。
+- 第二个问题：base 权重本身也算一次"已加载 release"，所以条件 `release is None` 不成立。已改为"当前服务的就是 base 版本，且 run 已合并过 base"时暂停开轮（`sampler_loop.py`）。
+- 剩余限制：subscriber 收到第一个 fragment 之前，无法知道 run 已经推进到哪个版本，所以重启后的头几轮仍会在 v0 上生成。在 0.18 MB/s 的链路上，第一个 fragment（约 150 MB）要十几分钟才到。根治要在协议里加一项：SUBSCRIBE 应答带上当前合并版本。已列为后续工作。
+
+## D12 复测：通过
+
+T6.6d：先用修复后的代码训若干轮，游标写入 `lanes/solo1.jsonl`；再 kill -9 岛 1 并重启。第 4 次启动从游标位置继续，重启后重复训练的样本集合为 0，也没有 `island_leave`。
+
+## D14 trainer worker 的共享内存随训练轮数增长（观察，待更长时间的运行确认）
+
+- 现象：trainer 岛 1 约 78 轮内，worker 的 `rssshmem` 从 1.2 GiB 涨到 3.7 GiB，`vmrss` 从 8.4 GiB 涨到 11.3 GiB（+35%）；同期 spot 岛 a 的进程 RSS 只增长 3%（879→903 MB），syncer RSS 稳定在 4.6 GB。
+- 判断：还不能确定是泄漏（可能是 Ray object store 的缓存或预热）。需要 300 轮以上的运行确认，也可能和 full-parameter apply 的共享 tensor 有关。
+
+## D4 结论（未修）
+
+syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subscriber 会直接连进新 run，不会被 fence。T6.5（带 `--resume` 重启）结果正常：恢复到 step 42，所有成员重连，没有 fence 也没有退出。建议：syncer 全新启动时生成随机的 run id，在 HELLO/SUBSCRIBE/RELAY_HELLO 里校验；不一致的客户端以 `fenced: (other run)` 拒绝。
