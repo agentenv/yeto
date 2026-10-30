@@ -194,6 +194,16 @@ PLUGINS: tuple[str, ...] = (
     "ascend_lmhead_gather.py",
     "ascend_fused_vocab_ce.py",
     "ascend_layer_recompute_policy.py",
+    # S29: the 18.60pct recipe (pkg/nemotron-18.60pct-20261028, envs.txt EXTRA_PLUGINS_ADD)
+    # loads these after the layer recompute policy (its ascend_stage_timer.py sits between
+    # and is EXCLUDED here). The 18.44pct table above stopped short of them; each switch
+    # defaults on in its own file. Order matters: headloop / dxmask / cbsrcmask must come
+    # after ascend_mamba_bwd_fuse.py, and moe_partial_recompute is what the policy's P=1 runs.
+    "ascend_conv_bf16_taps.py",
+    "ascend_mamba_headloop.py",
+    "ascend_mamba_dxmask.py",
+    "ascend_mamba_cbsrcmask.py",
+    "ascend_moe_partial_recompute.py",
     "ascend_clip_nosync.py",
 )
 
