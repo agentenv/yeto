@@ -83,7 +83,7 @@ class SubscriberReleaseStore:
         (re)joins such a run must not generate on the base weights while its first
         cut is still arriving: those groups are past any policy-age limit."""
         self.follower.drain()
-        return any(int(v) > self.base_version for v in self.follower.versions())
+        return any(int(v) > self.base_version for v in self.follower.versions)
 
     def finished(self) -> bool:
         """The syncer said the run ended (the sampler loop's stop condition)."""
