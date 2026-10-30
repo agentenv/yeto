@@ -77,6 +77,14 @@ class SubscriberReleaseStore:
         self.base_dir = base_dir
         self._base_identity: dict[str, Any] | None = None
 
+    def past_base(self) -> bool:
+        """The run merged past the base weights: some fragment this subscriber received
+        is newer than ``base_version`` (S29 spot run, defect D9). A sampler that
+        (re)joins such a run must not generate on the base weights while its first
+        cut is still arriving: those groups are past any policy-age limit."""
+        self.follower.drain()
+        return any(int(v) > self.base_version for v in self.follower.versions())
+
     def finished(self) -> bool:
         """The syncer said the run ended (the sampler loop's stop condition)."""
         return bool(self._finished())

@@ -640,8 +640,13 @@ def main(argv=None) -> int:
     # cap every one of 8 trajectories was ABORTED with prompt_exceeds_prompt_length
     # (the agent's own n_input_tokens were 7 585 to 64 960), the batch then had no
     # trainable token, and verl refused the training step.
+    # A buffer trainer (S29 spot run) holds the same agentic rows: the samplers that
+    # wrote them (spot islands, store samplers) are agentic, the trainer has no
+    # --rl-agentic-harbor of its own, and a 512 cap refused the first group
+    # (prompt 7940 tokens, BufferFeedError).
     max_prompt = (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                  if agentic_island(args) else 512)
+                  if agentic_island(args) or sample_roles.sample_role(args) == sample_roles.TRAINER
+                  else 512)
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None

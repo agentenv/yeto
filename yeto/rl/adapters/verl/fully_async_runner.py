@@ -26,6 +26,7 @@ CPU-tested :mod:`.fully_async_round` and :mod:`.fully_async_ports`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 import ray
@@ -40,6 +41,34 @@ _TrainerBase = getattr(FullyAsyncTrainer, "__ray_actor_class__", FullyAsyncTrain
 
 def _ints(values) -> list:
     return [None if v is None else int(v) for v in values]
+
+
+@contextlib.contextmanager
+def whole_round_mini_batch(config, rows: int):
+    """One optimizer mini-batch of exactly the round's rows (S29 spot run, defect D3).
+
+    The island sets ``actor.ppo_mini_batch_size = groups_per_round`` (one mini-batch
+    per round) and verl turns it into rows as ``ppo_mini_batch_size * rollout.n``.
+    A buffered group may hold fewer than ``n`` samples (the sampler keeps a group
+    with ``min_samples`` of its trials), so a round of one 3-sample group asked
+    verl's ``make_iterator`` for a 4-row mini-batch out of 3 rows and raised
+    ``AssertionError: 3 % 4 != 0``. Inside this block the mini-batch is the round's
+    actual row count (``rollout.n`` 1), which is what the configuration means.
+    """
+    from omegaconf import open_dict
+
+    actor, rollout = config.actor_rollout_ref.actor, config.actor_rollout_ref.rollout
+    mini, n = actor.ppo_mini_batch_size, rollout.n
+    if rows == int(mini) * int(n):
+        yield
+        return
+    with open_dict(config):
+        actor.ppo_mini_batch_size, rollout.n = int(rows), 1
+    try:
+        yield
+    finally:
+        with open_dict(config):
+            actor.ppo_mini_batch_size, rollout.n = mini, n
 
 
 class _YetoTrainerMixin:
@@ -168,7 +197,8 @@ class _YetoTrainerMixin:
         batch = self._fit_compute_critic(batch)
         batch = self._fit_compute_advantage(batch)
         batch = self._fit_update_critic(batch)
-        batch = self._fit_update_actor(batch)
+        with whole_round_mini_batch(self.config, len(batch)):
+            batch = self._fit_update_actor(batch)
         self._fit_update_local_step()  # trigger_parameter_sync_step=1: param version + 1
         self.timing_raw["step"] = time.time() - t0
         try:

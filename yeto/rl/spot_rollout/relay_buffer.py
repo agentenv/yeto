@@ -211,6 +211,16 @@ class RelaySampleBuffer:
         depth = self._depth
         return 0 if depth is None else int(depth.next_id) - 1 - int(depth.items)
 
+    def pending_groups(self) -> int:
+        """The sampler loop's backlog on the relay: groups in the channel that no
+        trainer took yet (S29 spot run, defect D5). The release-based backlog
+        (``len - last_seen.buffer_selected``) counts from 0 until the first merged
+        cut is loaded; a full-parameter run merges one fragment per outer step, so
+        the first cut needs ``fragments`` trainer rounds, which need groups, while
+        a sampler at ``max_backlog_groups`` waits for that cut: both sides wait."""
+        depth = self._depth
+        return 0 if depth is None else int(depth.items)
+
     def entries(self) -> list[SampleIndexEntry]:
         return []
 

@@ -113,7 +113,12 @@ class RelayRolloutPool(FullyAsyncRolloutPool):
     """The fully_async rollout port over the relay buffer (module doc)."""
 
     def __init__(self, island: FullyAsyncIsland, cuts: Callable[[], Any]):
-        super().__init__(island, queue_end_is_buffer_end=True)
+        # S29 spot run (defect D10): no cap on discarded pulls. A spot sampler that
+        # restarted on older weights, or that loads cuts slowly over a long WAN, sends
+        # groups past the policy-age limit for a while; they are discarded (and
+        # recorded) and the round waits for newer ones. With verl's 8 x required cap
+        # the whole trainer left INFRA_FAILED after one such stretch.
+        super().__init__(island, queue_end_is_buffer_end=True, max_pulls_factor=0)
         self.cuts = cuts  # the driver's ExternalMergedCuts, once the publisher is bound
 
     def _merged_now(self, rollout_id: int) -> int:

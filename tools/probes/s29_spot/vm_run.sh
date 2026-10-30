@@ -8,6 +8,7 @@ OUT=/root/spot
 DATA=/root/s29data
 BASE=/root/models/Qwen3-0.6B
 YETO=/root/yeto-root
+[ -d "$OUT" ] && mv "$OUT" "$OUT-$(date -u +%H%M%S)"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/vm_run.log") 2>&1
 echo "[s29-spot] island $ISLAND on $CARD $(date -u +%FT%TZ)"
@@ -38,7 +39,8 @@ fi
 PUBLIC_IP=$(curl -s --max-time 10 https://api.ipify.org)
 SGL=$("$PY" -c "import sglang; print(sglang.__version__)")
 "$PY" "$YETO/tools/probes/s29_spot/spot_plan.py" --island "$ISLAND" --public-ip "$PUBLIC_IP" \
-  --engine-version "$SGL" --python "$PY" --card-model "$CARD" --base "$BASE" --data "$DATA" --out "$OUT" > "$OUT/plan.json"
+  --engine-version "$SGL" --python "$PY" --card-model "$CARD" --base "$BASE" --data "$DATA" --out "$OUT" \
+  --mode "${MODE:-tb21}" --groups-per-round "${GROUPS_PER_ROUND:-1}" > "$OUT/plan.json"
 "$PY" -c "import json; d=json.load(open('$OUT/plan.json')); json.dump(d['spec'], open('$OUT/spec.json','w'), indent=1)"
 eval "$("$PY" -c "import json,shlex; d=json.load(open('$OUT/plan.json')); print('\n'.join(f'export {k}={shlex.quote(v)}' for k,v in d['env'].items()))")"
 

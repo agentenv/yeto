@@ -62,6 +62,21 @@ def spec(*, island: int, islands: int, base: str, data: str, out: str, engine_ve
     }
 
 
+def gsm8k_spec(agentic: dict[str, Any], *, data: str, samples_per_group: int = 4,
+               groups_per_round: int = 1) -> dict[str, Any]:
+    """The same island on GSM8K chat prompts with the numeric reward: no boat sandbox,
+    seconds per group, rewards that are not all 0 (so merges move the weights). Used
+    for the long run and the fault drills while the day's boat creations are spent."""
+    out = {k: v for k, v in agentic.items() if k != "agentic"}
+    out["prompts"] = {"path": f"{data}/gsm8k-tasks512.jsonl", "input_key": "messages", "label_key": "label",
+                      "groups_per_round": groups_per_round, "format": "chat",
+                      "data_slot": agentic["prompts"]["data_slot"]}
+    out["sampling"] = {**agentic["sampling"], "max_tokens": 1024, "n": samples_per_group}
+    out["reward"], out["reward_kind"] = "yeto.rl.gsm8k_reward:score", "miles"
+    out["max_backlog_groups"] = 2
+    return out
+
+
 def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 8) -> dict[str, str]:
     return {
         "HARBOR_ENV_TYPE": "boat", "HARBOR_TASKS_DIR": f"{data}/harbor-tasks",
@@ -88,10 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base", default="/root/models/Qwen3-0.6B")
     p.add_argument("--data", default="/root/s29data")
     p.add_argument("--out", default="/root/spot")
+    p.add_argument("--mode", choices=("tb21", "gsm8k"), default="tb21")
+    p.add_argument("--groups-per-round", type=int, default=1)
     a = p.parse_args(argv)
-    print(json.dumps({"spec": spec(island=a.island, islands=a.islands, base=a.base, data=a.data, out=a.out,
-                                   engine_version=a.engine_version, python=a.python, card_model=a.card_model),
-                      "env": env(data=a.data, public_ip=a.public_ip)}, indent=1))
+    sp = spec(island=a.island, islands=a.islands, base=a.base, data=a.data, out=a.out,
+              engine_version=a.engine_version, python=a.python, card_model=a.card_model)
+    if a.mode == "gsm8k":
+        sp = gsm8k_spec(sp, data=a.data, groups_per_round=a.groups_per_round)
+    print(json.dumps({"spec": sp, "env": env(data=a.data, public_ip=a.public_ip)}, indent=1))
     return 0
 
 
