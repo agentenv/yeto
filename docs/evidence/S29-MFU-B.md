@@ -269,3 +269,39 @@ update_actor 内部按 token 慢 2.0 倍，而 recompute/插件/并行形状/att
 1. verl 的 Megatron 训练循环与 ms-swift 的 SFT 循环在**每个 micro-batch 的固定开销**上不同（数据搬运、TensorDict 切片、loss 构建）。注意第 14 节已证明这不是 micro-batch *数量* 的问题——B 的 micro-batch 更少更满仍然更慢，所以是**每个 micro-batch 内部**的差异。
 2. GRPO 的 loss 路径（TIS 校正、advantage、按 token 的比值）比 SFT 的 CE 重。trace 里 elementwise 1.52x、reduce 2.26x 已指向这里，但绝对值当时看着小——在排除其他项之后，这项值得重新量化。
 下一轮应当直接在 verl actor 的 micro-batch 循环里加计时器，把一个 micro-batch 拆成 数据准备 / 前向 / 反向 / loss / 其余，与 SFT 的同口径对比。
+
+## 16. 宽窗口 profiling（NWIN=20）与 PP 调度核对
+
+### 16.1 PP 调度怀疑已排除
+
+`verl/workers/engine/megatron/transformer_impl.py:919` 处，`forward_backward_func` 是**一次性**收下全部 micro-batch 的（`num_microbatches=n_micro_batch`，`make_batch_generator` 统一喂入），1F1B 流水没有被按 micro-batch 拆开调用；`ppo_mini_batch_size = NGROUPS × rollout.n` 使每步只有 1 个 mini-batch，因此也只有一次 warmup/cooldown。**"verl 每个 micro-batch 单独走一次 1F1B 导致 PP3 下三分之二时间空等"这一怀疑不成立。**
+
+### 16.2 窗口内 vs 端到端：差距在 micro-batch 之外
+
+把 2-micro-batch 窗口（第 9 节）按 token 归一：
+
+| 臂 | 窗口 | tokens | pp0 窗口墙时 | tok/s（pp0 视角） |
+|---|---|---|---|---|
+| SFT | 2 个 micro-batch | 56k | 33.245s | 1687 |
+| B | 2 个 micro-batch | 41k | 29.406s | 1394 |
+
+**窗口内 B 只比 SFT 慢 1.21 倍**，而端到端慢 2.0 倍。差额落在窗口之外。
+
+### 16.3 NWIN=20 宽窗口结果（部分）
+
+`s29-pb21`，START=70、NWIN=20，trace 在 `/data/work/s29-prof/traces/b21/`，对比结果 `cmp_b21.json`。
+
+| stage | 臂 | 窗口墙时 | 每 micro-batch | 纯计算 % | 重叠 % | 未覆盖空转 % |
+|---|---|---|---|---|---|---|
+| pp2 | B（20 个 micro-batch） | 47.889s | 2.39s | 65.7 | 30.9 | 3.1 |
+| pp2 | SFT（2 个 micro-batch） | 5.154s | 2.58s | 58.3 | 34.2 | 1.8 |
+
+pp0 与 pp1 被分析器判为 REFUSED（宽窗口下 scope 数量不满足 `analyze_fullstep.py` 的"恰好一个"约束），这两级恰好是之前显示 85~88% 落在 `pp_sendrecv` 的那两级，**最关键的两级没拿到**，是本项的缺口。
+
+可用的 pp2 数据显示：**设备未覆盖空转只有 3.1%**，每 micro-batch 2.39s 甚至略快于 SFT 的 2.58s（而 B 的 micro-batch 只带 0.73 倍 token）。即在 pp2 这一级，按 token B 慢 1.26 倍，与 16.2 的窗口内结论一致，远不足以解释端到端的 2.0 倍。
+
+对照端到端：B 每步 88 个 micro-batch/DP、update_actor 约 328s → 每 micro-batch 墙时 3.73s；而窗口内测得 2.39s（且窗口内还带着 profiler 自身的开销，配方实测约 2.64 倍放大）。两者相差数倍，**进一步指向"时间花在 micro-batch 的前后向之外"**，与 A 系列 profiling 当初的结论一致（当时归因为 host 侧，但第 12~14 节已证明不是可回收的 host 开销）。
+
+### 16.4 下一轮的唯一入口
+
+绕开分析器的 scope 约束，直接在 verl 的 micro-batch 循环里打点（数据准备 / 前向 / 反向 / loss / 其余），并和 SFT 同口径对比。本轮已把范围缩到：**update_actor 内部、micro-batch 前后向之外、且不是 host 可回收开销、不是 PP 调度、不是装填率、不是 recompute 配置、不是 attention 口径**。
