@@ -95,6 +95,10 @@ def parse_args(argv):
     # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
     # release (one 120B release is about 225 GB and a dozen minutes per round)
     p.add_argument("--rl-measure-no-release", action="store_true")
+    # S29: a measurement run also skips the full policy hash of the first and the last
+    # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
+    # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
+    p.add_argument("--rl-measure-no-verify", action="store_true")
     # S28 G-120C: release only these policy versions (comma-separated), e.g. "2": a
     # multi-step run trains on the samples it has and releases once for the samplers
     p.add_argument("--rl-release-only-versions", default=None,
