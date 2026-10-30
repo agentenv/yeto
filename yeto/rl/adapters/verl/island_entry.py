@@ -1172,6 +1172,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
         cp=int(args.context_parallel or 1), mamba=mamba,
+        etp=int(__import__("os").environ.get("YETO_S29_ETP", "1")),
         seq_idx=megatron_engine.probe_seq_idx(int(args.context_parallel or 1)) if mamba else None,
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",

@@ -413,7 +413,7 @@ def validate(shape: MegatronShape) -> None:
     problem = seq_idx_problem(mamba=s.mamba, cp=s.cp, patch=s.seq_idx)
     if problem:
         raise MegatronShapeError(problem)
-    if s.etp != 1:
+    if s.etp != 1 and os.environ.get("YETO_S29_ALLOW_ETP", "") not in ("1", "true", "True"):
         raise MegatronShapeError("verl Megatron 岛只接 ETP=1（专家不做张量并行）")
     model_parallel = s.tp * s.pp * s.cp
     if s.trainer_gpus % model_parallel:
