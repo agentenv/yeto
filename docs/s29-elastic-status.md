@@ -6,3 +6,4 @@
 - 10-31 01:02 核实（回应巡检）：trainer 在 n4 = 192.168.17.6（hostname host-9tird90004），island_entry PID 1191336 1191341 ；ASCEND_RT_VISIBLE_DEVICES 卡 0/1。tape 证据：island 0 train_step 3 samples 4 17:02:13Z；island 1 train_step 2 samples 4 17:02:21Z（tape：n4 /data/work/s29-spot/run/i{0,1}/tape.jsonl）。D5 修复后已恢复：relay channel1 stored=2 acked=2，岛0 训到第 4 轮、岛1 训到第 2 轮。0.6B 单卡显存占用很小，所以 npu-smi 看着接近基线。
 - 10-31 01:09 阶段1 完成：T1 基线（TB2.1×Codex×boat）两 trainer 岛各训满 5 step（每步 4.4–9.6 s，reward 全 0），共发现 6 个缺陷（D1/D3/D5/D6 已修，D2 关闭，D4 待测）。boat 已用 194/200（剩 6）。阶段2 开始：GSM8K 长跑 40 轮/岛 + 故障注入。
 - 10-31 01:54 阶段2 长跑中断：两 trainer 岛在本地第 57/91 步因'整轮样本超龄'退出（D10）；根因是 npu1→Nebius 隧道 <250KB/s，spot 岛拉一个 1.2GB 的 cut 要几十分钟，跟不上版本；另发现 D7（rounds 口径）、D8（kill -9 后 SGLang 孤儿占显存，已修）、D9（重启的 spot 岛先在 v0 上出样本）。下一步：修 D10 的致命退出，放宽 policy age 继续长跑与演练。
+- 10-31 02:02 阶段2 继续：D9/D10 修复后重启长跑（policy age 4，verl 上限）；关键观察：npu1→Nebius WAN 约 0.18 MB/s，1.2 GB 的 cut 很难跟上合并节奏，长跑主要检验'超龄丢弃+等待'是否稳定、是否泄漏。修复已提交 6ee7d5c9。

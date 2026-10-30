@@ -74,5 +74,5 @@ D1 崩溃前被 ack 的那组并没有丢：relay pump 先把组写进 trainer �
 
 - 现象：GSM8K 长跑中，两个 trainer 岛都退出：`RuntimeError: rollout 57: 8 queued samples pulled, only 0/1 within the policy-age limit`（岛 0）、`rollout 91: …`（岛 1），`island_leave reason INFRA_FAILED`。岛 1 的最后几轮 `rl_group_policies` 显示 `ages {"4": 1}`：组的行为版本 v2，trainer 合并版本 6，正好卡在上限，下一次合并就全部超龄。
 - 根因 1（设计）：buffer trainer 的轮收集（`fully_async_ports` 的 `RoundCollector`）把"拉满一轮但全部超龄"当作致命错误。对 spot 岛来说这是正常的瞬时状态（抢占后重启、链路慢），应当丢弃超龄组、继续等新组，而不是让整个 trainer 退出。
-- 根因 2（环境，放大了根因 1）：spot 岛拿新权重太慢。npu1→Nebius 的 SSH 隧道实测不到 250 KB/s（100 MB 400 s 未完成）；Qwen3-0.6B 一个 bf16 cut 约 1.2 GB。spot 岛 b 的加载记录是 v1 17:25:58、v2 17:27:47、v3 17:46:22，而同期 trainer 每 1–2 分钟推进一个合并版本。
+- 根因 2（环境，放大了根因 1）：spot 岛拿新权重太慢。npu1→Nebius 的 SSH 隧道实测约 0.18 MB/s（100 MB 用时 559 s，期间 subscriber 也在占用同一条链路）；Qwen3-0.6B 一个 bf16 cut 约 1.2 GB。spot 岛 b 的加载记录是 v1 17:25:58、v2 17:27:47、v3 17:46:22，而同期 trainer 每 1–2 分钟推进一个合并版本。
 - 处理：先记录；长跑和后续演练把 `--rl-max-policy-age` 放宽，以便继续测其他机制。trainer 侧"全部超龄即退出"需要改成"丢弃并等待（有上限）"，见修复记录。

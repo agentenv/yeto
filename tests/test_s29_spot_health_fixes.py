@@ -47,6 +47,8 @@ def test_d5_relay_backlog_is_the_groups_left_in_the_channel():
 
 def test_d3_whole_round_mini_batch_restores_the_config():
     pytest.importorskip("omegaconf")
+    pytest.importorskip("ray")
+    pytest.importorskip("verl")  # fully_async_runner imports verl's fully_async trainer
     from omegaconf import OmegaConf
 
     from yeto.rl.adapters.verl.fully_async_runner import whole_round_mini_batch
