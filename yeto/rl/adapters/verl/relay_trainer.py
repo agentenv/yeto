@@ -195,11 +195,17 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
     """The rollout port, publisher and placement of a relay trainer over ``buffer`` (the
     local buffer the relay pump fills); the island's queue calls go to the feed."""
     actor_call = island.call
+    from yeto.rl.engine.merged_release import lane_cursor_log
+
     log = CONSUMED_LOG.format(learner=island.learner_id)
+    # S29 spot run (defect D12): the local buffer's cursor log, so a relay trainer that
+    # restarts (and rejoins its pool) continues after the groups it already trained
+    # instead of training the whole local buffer again from position 0.
     feed = BufferFeed(buffer, vmap=IdentityVersions, shape=shape,
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
                       record=lambda fields: island.append_jsonl(log, fields),
-                      tokenize=tokenize, wait_s=wait_s, poll_s=poll_s)
+                      tokenize=tokenize, wait_s=wait_s, poll_s=poll_s,
+                      cursor_log=lane_cursor_log(buffer, int(island.learner_id)))
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the spot samplers generate
     publisher = RelayPublisher(island, feed)

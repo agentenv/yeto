@@ -76,3 +76,28 @@ D1 崩溃前被 ack 的那组并没有丢：relay pump 先把组写进 trainer �
 - 根因 1（设计）：buffer trainer 的轮收集（`fully_async_ports` 的 `RoundCollector`）把"拉满一轮但全部超龄"当作致命错误。对 spot 岛来说这是正常的瞬时状态（抢占后重启、链路慢），应当丢弃超龄组、继续等新组，而不是让整个 trainer 退出。
 - 根因 2（环境，放大了根因 1）：spot 岛拿新权重太慢。npu1→Nebius 的 SSH 隧道实测约 0.18 MB/s（100 MB 用时 559 s，期间 subscriber 也在占用同一条链路）；Qwen3-0.6B 一个 bf16 cut 约 1.2 GB。spot 岛 b 的加载记录是 v1 17:25:58、v2 17:27:47、v3 17:46:22，而同期 trainer 每 1–2 分钟推进一个合并版本。
 - 处理：先记录；长跑和后续演练把 `--rl-max-policy-age` 放宽，以便继续测其他机制。trainer 侧"全部超龄即退出"需要改成"丢弃并等待（有上限）"，见修复记录。
+
+## D11 kill -9 后重启的 trainer 岛无法重新加入同步组（"grpo actor initial broadcast changed"）
+
+- 现象：T6.6 中 `kill -9` trainer 岛 1 后重启，10 s 内退出：`RuntimeError: grpo actor initial broadcast changed`，`island_leave INFRA_FAILED`。
+- 复现：按 launcher 默认参数起的 spot rollout 同步组（`--rl-sample-relay --rl-spot-subscribers N`，不设 `--rl-sync-island-lease-s`），合并推进后杀掉任一 trainer 岛再重启。
+- 根因：只有带 lease 的 island pool（异步轮）才允许重新加入（`FullParameterRoleStream.may_rejoin` = `island_lease_s is not None and partial_quorum`）。launcher 只在显式给出 pool 参数时才开 pool，所以默认 spot 运行的 roster 是固定的，重启的岛收到当前版本（>0）的 catch-up，被当成"初始广播被改"拒绝。spot rollout 本来就是弹性场景，这个默认值是错的；而报错信息也看不出原因。
+- 修复：(1) 报错改为说明真实原因和处理办法（`yeto/rl/engine/full_parameter_stream.py`）；(2) launcher 对没有 island pool 的 spot rollout 运行打印警告，提示设置 `--rl-sync-island-lease-s`（`yeto/launch/syncer.py`）。我也试过直接把 spot 运行默认改成 pool，但这会让 pool 的其他前置检查（quorum/grace、分片 syncer）在现有配置上失败，影响面太大，没有采用。
+- 复测：通过。以 `--rl-sync-island-lease-s 150` 重启整组（`syncer-pool.sh`/`island-pool.sh`），kill -9 岛 1 后重启，新进程 18:59:17 起，无 `island_leave`，继续训练（之后又训了 50+ 轮）。
+
+## D12 relay trainer 重启后从本地 buffer 位置 0 重新训练（重复训练）
+
+- 现象：T6.6b 重启的岛 1 训了 74 轮，其中只有 53 个不同的样本集合，21 轮是把重启前训过的组又训了一遍；本地 buffer 本身 53 个组，sample_id 无重复。
+- 根因：`relay_trainer.install_relay_ports` 构造 `BufferFeed` 时没有传 `cursor_log`，读游标不落盘。普通 buffer trainer 走 `buffer_ports`，会用 `lane_cursor_log(buffer, learner_id)`（S27 G-EQ3 的 `solo<id>`）。
+- 修复：relay feed 同样使用 `lane_cursor_log(buffer, learner_id)`（`yeto/rl/adapters/verl/relay_trainer.py`）。
+- 复测：修复后游标文件 `store1/yeto-relay-buffer/island1/sample-buffer/lanes/solo1.jsonl` 已生成；T6.6d（在新游标写入若干轮后再次 kill/重启）结果见下方"复测记录"。
+
+## D13 npu1→Nebius 广域网带宽约 0.18 MB/s，spot 岛拉权重跟不上合并节奏（结构问题，今晚不修）
+
+- 现象：经 npu1 反向 SSH 隧道，100 MB 传输用时 559 s。Qwen3-0.6B 一个完整 bf16 cut 约 1.2 GB，需要约 2 小时；spot 岛 b 加载 v1→v3 用了 20 分钟，同期 trainer 推进了十几个合并版本。D10 的"整轮超龄"就是它引出来的；对 120B 模型这条路完全不可行。
+- 根因：权重下发走 syncer 的 subscriber 流，单条 TCP 经 SSH 反向隧道跨洲（中国→芬兰/美国），没有压缩，也没有 delta。
+- 建议：
+  1. 权重走对象存储或 CDN：trainer 侧把每个合并 cut 发布到与 spot 岛同区域的对象存储（Nebius S3 / R2），spot 岛就近拉取，syncer 只发清单和摘要。
+  2. 下发 delta：subscriber 已有 `bcast_delta` 和 int4/int8 推送能力，订阅者也应接收 bf16→int8 的版本差（加周期性全量），量级能降 4–8 倍。
+  3. 压缩和多流：zstd + 多 TCP 流（`wan_streams`）；隧道换成 WireGuard/Tailscale 直连，避免 SSH 的单流窗口限制。
+  4. 版本节流：spot 岛按 `reload_every` 跳版本，只拉最新 cut；trainer 侧 policy-age 判定按"最新可达 cut"给宽限。
