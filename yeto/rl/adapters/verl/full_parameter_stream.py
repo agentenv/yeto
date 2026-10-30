@@ -1151,6 +1151,9 @@ def _never_materialize(_version: int):
     raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
 
 
+LIGHT_POLICY_PREFIX = b"yeto-verl-light-policy-v1\0"
+
+
 class VerlFullParameterLocalState:
     """``PolicyState`` of a full-parameter island without an outer sync
     (``--rl-single-island-no-sync``): every export hashes the whole trainer on
@@ -1165,7 +1168,10 @@ class VerlFullParameterLocalState:
     from the same worker call without the payload."""
 
     def __init__(self, group: VerlFullParameterGroup, *, component, max_fragment_bytes: int,
-                 max_chunk_bytes: int = 256 << 20, matrix_merge: str = "avg") -> None:
+                 max_chunk_bytes: int = 256 << 20, matrix_merge: str = "avg",
+                 light_digest: bool | None = None) -> None:
+        from . import local_digest
+
         self.group = group
         self.component = component
         self.max_fragment_bytes = int(max_fragment_bytes)
@@ -1174,6 +1180,14 @@ class VerlFullParameterLocalState:
         self.adapter: VerlChunkedFullParameterAdapter | None = None
         self.runner = _LoopRunner()
         self.policy_version = 0
+        # S28 G-LHASH: a group that can hash its shards in place (the Megatron group)
+        # gets the light digest on the rounds the driver does not fully verify;
+        # YETO_RL_LIGHT_DIGEST=0 (or light_digest=False) keeps the full check every round.
+        wanted = local_digest.enabled() if light_digest is None else bool(light_digest)
+        self.light = wanted and callable(getattr(group, "light_digest", None))
+        if self.light:
+            self.supports_unverified_rounds = True
+            self.full_digest_at_boundaries = True
 
     @property
     def layout_hash(self) -> str:
@@ -1263,6 +1277,8 @@ class VerlFullParameterLocalState:
         if last is None:
             return None
         mark = self._mark()
+        if self.light:
+            return self._export_light(int(policy_version), last, mark)
         identity = unverified_identity(int(policy_version), mark)
         print(f"[yeto-verl] full-parameter publication v{policy_version}: unverified (no whole cut; last "
               f"verified hash {last.policy_tensor_hash()[:12]})", flush=True)
@@ -1271,6 +1287,30 @@ class VerlFullParameterLocalState:
             config_hash=self.component.config_hash, layout_hash=last.layout_hash,
             policy_version=int(policy_version),
             digest=PolicyDigest(identity, identity, last.digest.payload_bytes, ()),
+            materialize_fn=_never_materialize, weights_mark=mark, holds_fn=self._holds, verified=False)
+
+    def _export_light(self, policy_version: int, last, mark: dict):
+        """S28 G-LHASH: the resident state of a round that is not fully verified, with
+        the light digest (:mod:`.local_digest`) as its content hash.  ``verified`` stays
+        False: the light digest depends on the TP/PP/EP split and is not the
+        HF-canonical hash, so nothing compares it with the full check's."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
+
+        result = self.runner.run(self.group.light_digest())
+        content = str(result["digest"])
+        raw = json.dumps({"policy_version": policy_version, "light": content, "layout": last.layout_hash},
+                         sort_keys=True).encode()
+        policy_hash = hashlib.sha256(LIGHT_POLICY_PREFIX + raw).hexdigest()
+        self.last_light = result
+        print(f"[yeto-verl] full-parameter publication v{policy_version}: light digest "
+              f"{result['algorithm']} {content[:12]} ({result['rows']} shard(s), "
+              f"{result['bytes'] / 2**30:.1f} GiB, {result['seconds']:.1f} s slowest rank)", flush=True)
+        return TrainerResidentState(
+            layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
+            config_hash=self.component.config_hash, layout_hash=last.layout_hash,
+            policy_version=policy_version,
+            digest=PolicyDigest(policy_hash, content, last.digest.payload_bytes, ()),
             materialize_fn=_never_materialize, weights_mark=mark, holds_fn=self._holds, verified=False)
 
     def apply(self, state, *, optimizer: str, local_step: int) -> None:

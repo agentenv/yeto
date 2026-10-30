@@ -474,6 +474,11 @@ def verify_publication(driver: Any, version: int) -> bool:
     interval = getattr(driver, "verify_every", None)
     if interval is not None:
         return _verify_on_interval(driver, int(version), int(interval))
+    if bool(getattr(driver.policy_state, "full_digest_at_boundaries", False)):
+        # S28 G-LHASH: the other rounds carry a light content digest
+        # (verl Megatron, adapters/verl/local_digest), so the full check runs on the
+        # first round, every round cut and the last round only.
+        return _verify_on_interval(driver, int(version), None)
     cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
     every = int(getattr(cuts, "every", 0) or 0)
     if cuts is None or every <= 1:
@@ -486,11 +491,12 @@ def verify_publication(driver: Any, version: int) -> bool:
     return int(version) % every == 0
 
 
-def _verify_on_interval(driver: Any, version: int, interval: int) -> bool:
+def _verify_on_interval(driver: Any, version: int, interval: int | None) -> bool:
     """S27 C5 (``--rl-verify-every N``, no-sync island): verify the first publication,
     every N-th version, the policy of the last round and every round that keeps a
-    round cut (a cut needs the content hash); the round-cut interval does not apply."""
-    if interval <= 1 or getattr(driver, "published_version", None) is None:
+    round cut (a cut needs the content hash); the round-cut interval does not apply.
+    ``interval`` None: no periodic rounds (S28 G-LHASH)."""
+    if (interval is not None and interval <= 1) or getattr(driver, "published_version", None) is None:
         return True
     sync = getattr(driver, "sync", None)
     cut_due = getattr(sync, "cut_due", None)
@@ -499,7 +505,7 @@ def _verify_on_interval(driver: Any, version: int, interval: int) -> bool:
     final = getattr(sync, "is_final_round", None)
     if callable(final) and final(driver, rollout_id=version - 1):
         return True
-    return version % interval == 0
+    return interval is not None and version % interval == 0
 
 
 class IslandDriver:

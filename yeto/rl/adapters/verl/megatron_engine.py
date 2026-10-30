@@ -354,6 +354,14 @@ class MegatronShape:
     # refuses a Mamba model whose verl does not generate it.
     mamba: bool = False
     seq_idx: SeqIdxPatch | None = None
+    # S28 G-120C: whether verl's old-log-prob pass computes the token entropy. verl hard
+    # codes calculate_entropy=True there (trainer/ppo/ray_trainer.py:1300), but the value
+    # only feeds the "actor/entropy" metric (experimental/separation/ray_trainer.py:522-536
+    # pops it right after) and never the loss, and computing it is the old-log-prob peak:
+    # a clone of the [tokens, vocab/TP] logits plus fp32 softmax products. Run g120c-rl1
+    # (CP2, 80.7k tokens per CP rank) died there allocating 9.85 GiB. False turns it off
+    # through verl_megatron_patches; "actor/entropy" then reads 0.0 (see that module).
+    old_logprob_entropy: bool = True
 
     @property
     def trainer_gpus(self) -> int:
@@ -563,6 +571,9 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         # (engine/run_config.py) and the Miles adapter passes
         # --no-gradient-accumulation-fusion; this is the verl side of the same switch.
         f"{tcfg}.gradient_accumulation_fusion={shape.gradient_accumulation_fusion}",
+        # S28 G-120C: read by verl_megatron_patches in the trainer process (a yeto-owned
+        # top-level section: verl's dataclass-backed sections refuse unknown keys)
+        f"+{OLD_LOGPROB_ENTROPY_KEY}={shape.old_logprob_entropy}",
     ]
     if shape.first_stage_layers is not None:  # S28 G-120
         out.append(f"{tcfg}.num_layers_in_first_pipeline_stage={int(shape.first_stage_layers)}")
@@ -607,6 +618,9 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
 
 # The island re-reads these after Hydra composition and asserts the values
 # (``trainer.check_asserted``), on top of ``config.ASSERTED_KEYS``.
+# S28 G-120C: the yeto-owned config key the trainer's run-time patch reads
+OLD_LOGPROB_ENTROPY_KEY = "yeto_trainer.old_logprob_entropy"
+
 ASSERTED_KEYS = (
     "actor_rollout_ref.model.lora_rank",
     "actor_rollout_ref.rollout.temperature",
@@ -634,6 +648,8 @@ ASSERTED_KEYS = (
     # for the same reason as the key above: the engine wrote it for months without
     # anything checking that verl took the value.
     "actor_rollout_ref.model.use_fused_kernels",
+    # S28 G-120C: written on every island, so want is never None -- a real assertion
+    OLD_LOGPROB_ENTROPY_KEY,
 )
 
 # Keys of ``separate.ASSERTED_KEYS`` that only verl's separate mode writes. A buffer
