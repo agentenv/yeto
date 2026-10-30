@@ -120,3 +120,34 @@ T6.6d：先用修复后的代码训若干轮，游标写入 `lanes/solo1.jsonl`�
 ## D4 结论（未修）
 
 syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subscriber 会直接连进新 run，不会被 fence。T6.5（带 `--resume` 重启）结果正常：恢复到 step 42，所有成员重连，没有 fence 也没有退出。建议：syncer 全新启动时生成随机的 run id，在 HELLO/SUBSCRIBE/RELAY_HELLO 里校验；不一致的客户端以 `fenced: (other run)` 拒绝。
+
+## 本地复测（n4，CPU 假引擎 spot 岛 + 两个真实 trainer 岛，10-31 04:40）
+
+拓扑：syncer 在 npu1 CPU 上，island pool（lease 150 s）；trainer 岛 0/1 在 n4 的卡 0/1；两个 spot 岛跑在 n4 CPU 上，用 `sampler_engines.fake` 假引擎，其余链路都是真实组件（subscriber、materialize、relay、版本板），脚本是 `fake_sampler.sh` / `fsctl.sh`。岛 0 共训 281 轮，岛 1 共训 224 轮。
+
+### D9 根治：run 的合并版本放到 relay 版本板上
+
+- 方案：没有改 SUBSCRIBE 应答。那样要重新编译 aarch64 的 Rust syncer，而 npu1 和 n4 上都没有 Rust 工具链。改为复用 syncer 已有的 relay board 机制，结果等价：relay trainer 每次 publication 后，把 `{merged_version, max_policy_age}` 写到 board 2（`spot_rollout/version_board.py` 的 `VersionPublisher`，接在 `relay_trainer.RelayPublisher`）。spot 岛每次准备开新一轮时读这个板（`VersionReader`），如果自己正在服务的版本落后超过 `max_policy_age`，就先等，不开轮（`SubscriberReleaseStore.behind` → `SamplerLoop._admit`）。
+- 第一版退路有缺陷，已去掉：第一版在没有板值时，用"收到的某个 fragment 版本 > base"作为判据。本地复测里这会死锁：fragment 是逐个合并的，凑齐完整 cut 需要每个 fragment 都合并一次，而那些合并要靠被拦住的 sampler 产出的组。现在没有板值就不拦。
+- 复测：
+  1. 正常运行时，spot 岛加载的版本一路前进：v7→v8→v9→v10，每个版本都有若干轮。
+  2. run 到 v10 时 kill -9 spot 岛 0 再重启：1 秒内加载到 v11，重启后在 v0 上出的轮数为 0。
+  3. 让 spot 岛 0 不重载权重（`RELOAD=100000`），7 分钟内只有 `rl_sampler_waiting_policy`，开轮数为 0：拦截生效。
+- 单测：`tests/test_s29_spot_health_fixes.py`（版本板发布单调、behind 判定、无板时不拦）。
+
+### D10 本地单独复测：通过
+
+- 做法：spot 岛 1 关掉版本板（`NOBOARD=1`），也不重载权重，持续发 v0 的组。这时 trainer 岛 1 的合并版本是 16–17，远超 `max_policy_age 4`。
+- 结果：`verl-buffer-consumed-1.jsonl` 显示这些组 `kept: false`（例如 position 351、352），被丢弃了。trainer 岛 1 停在第 224 轮等待新组，没有出现 `island_leave`，也没有 INFRA_FAILED。恢复正常 sampler 后继续训练。
+
+### D14 判定：不是泄漏
+
+- 岛 0（281 轮）：worker 共享内存 1187 → 1907 MiB，第 112 轮后保持不变；vmrss 第 112 轮后稳定在 10.09–10.14 GiB。
+- 岛 1（224 轮）：共享内存 960 → 1907 MiB 后保持不变；vmrss 稳定在 9.4–9.7 GiB。
+- 增长按约 240 MiB 一级跳升，正好是一个 fragment 的大小。属于前期的分片缓存预热，有上限。WAN 长跑里看到的 3.7 GiB 发生在重入/catch-up 期间，同样是一次性的。
+
+### D4 修复：fresh syncer 会把旧 run 的 sampler 赶出去
+
+- 方案：同一块版本板。sampler 读到的合并版本如果比它读过的最大值还低，就判定原来的 run 已经没了（fresh syncer 从 v0 重新开始），`SpotChannels.stopping()` 让它退出。断线重连后板的 item id 会重置（fresh syncer 的 item 从 1 重新编号）。带 `--resume` 的重启版本不会回退，不受影响（T6.5 已验证）。
+- 复测：spot 岛运行中，在不带 `--resume` 的情况下全新启动 syncer。新 run 的 trainer 在 20:40:01 把 v0 写上版本板，约 1 分钟内两个 spot 岛都离开，`fsctl count = 0`。
+- 遗留：离开原因记的是 `FINISHED`，应当细分为 `fenced (other run)`。另外，新 run 的 trainer 写板之前，旧 sampler 只是空等，不会出样本。

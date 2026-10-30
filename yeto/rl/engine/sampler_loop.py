@@ -169,13 +169,10 @@ class SamplerLoop:
         waiting_policy_since = None
         while True:
             self._load_newest()
-            past_base = getattr(self.follower.releases, "past_base", None)
-            # D9: serving nothing yet, or still the base weights (a base "release"
-            # counts as loaded), while the run has merged past the base
-            base_version = getattr(self.follower.releases, "base_version", 0)
-            serving_base = self.follower.release is None or int(self.follower.version) <= int(base_version)
-            on_base_behind = serving_base and past_base is not None and past_base()
-            if not self.ready() or (self.require_release and self.follower.release is None) or on_base_behind:
+            behind = getattr(self.follower.releases, "behind", None)  # S29 D9 (spot samplers)
+            on_old_weights = behind is not None and behind(
+                None if self.follower.release is None else self.follower.version)
+            if not self.ready() or (self.require_release and self.follower.release is None) or on_old_weights:
                 if waiting_policy_since is None:
                     waiting_policy_since = time.monotonic()
                     self.emit("rl_sampler_waiting_policy", rollout_id=rollout_id)

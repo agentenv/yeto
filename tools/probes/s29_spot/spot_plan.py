@@ -77,6 +77,19 @@ def gsm8k_spec(agentic: dict[str, Any], *, data: str, samples_per_group: int = 4
     return out
 
 
+def fake_spec(gsm: dict[str, Any], *, reload_every: int = 1, version_board: bool = True) -> dict[str, Any]:
+    """The GSM8K island on the CPU fake engine (``sampler_engines.fake``): every link of
+    the spot island (subscriber, materialize, relay, version board) without a GPU, for
+    local drills and long runs next to the trainers."""
+    out = dict(gsm)
+    out["engine"] = {"factory": "yeto.rl.adapters.sampler_engines.from_spec:build", "adapter": "fake",
+                     "kwargs": {"max_model_len": 4096}}
+    out["checks"] = {"expected_expert_matrices": 0, "require_fixed_answers": False, "probe_pairs": []}
+    out["max_prompt_tokens"] = 2048  # the trainer rows: --seq-len 4096 - response 2048
+    out["reload_every"], out["version_board"], out["telemetry"] = int(reload_every), bool(version_board), False
+    return out
+
+
 def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 8) -> dict[str, str]:
     return {
         "HARBOR_ENV_TYPE": "boat", "HARBOR_TASKS_DIR": f"{data}/harbor-tasks",
@@ -103,13 +116,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base", default="/root/models/Qwen3-0.6B")
     p.add_argument("--data", default="/root/s29data")
     p.add_argument("--out", default="/root/spot")
-    p.add_argument("--mode", choices=("tb21", "gsm8k"), default="tb21")
+    p.add_argument("--mode", choices=("tb21", "gsm8k", "fake"), default="tb21")
+    p.add_argument("--syncer", default="127.0.0.1:29400")
+    p.add_argument("--reload-every", type=int, default=1)
+    p.add_argument("--no-version-board", action="store_true")
     p.add_argument("--groups-per-round", type=int, default=1)
     a = p.parse_args(argv)
     sp = spec(island=a.island, islands=a.islands, base=a.base, data=a.data, out=a.out,
               engine_version=a.engine_version, python=a.python, card_model=a.card_model)
-    if a.mode == "gsm8k":
+    if a.mode in ("gsm8k", "fake"):
         sp = gsm8k_spec(sp, data=a.data, groups_per_round=a.groups_per_round)
+    if a.mode == "fake":
+        sp = fake_spec(sp, reload_every=a.reload_every, version_board=not a.no_version_board)
+    sp["syncer"] = a.syncer
     print(json.dumps({"spec": sp, "env": env(data=a.data, public_ip=a.public_ip)}, indent=1))
     return 0
 

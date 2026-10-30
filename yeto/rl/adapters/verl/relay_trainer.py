@@ -137,6 +137,24 @@ class RelayRolloutPool(FullyAsyncRolloutPool):
         return relay_group_metadata(collector, rollout_id)
 
 
+def _version_publisher(island: Any) -> Any:
+    """The merged-version board writer of this trainer (``spot_rollout.version_board``);
+    None without a relay address (tests, a trainer without spot samplers)."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, parse_addr
+
+    addr = os.environ.get(RELAY_ADDR_ENV)
+    if not addr:
+        return None
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.rl.spot_rollout.relay import RelayBoard
+    from yeto.rl.spot_rollout.version_board import VERSION_BOARD, VersionPublisher
+
+    key = island_hmac_key_from_env()
+    learner = int(getattr(island, "learner_id", 0) or 0)
+    return VersionPublisher(lambda: RelayBoard(parse_addr(addr), VERSION_BOARD, learner, key=key),
+                            int(getattr(island, "limit", 0) or 0))
+
+
 class RelayPublisher:
     """A relay trainer's publication: no release (the spot samplers subscribe to the
     syncer); the param-version pairing and the published hash as on the other verl
@@ -146,6 +164,7 @@ class RelayPublisher:
         self.island = island
         self.feed = feed
         self.driver: Any = None
+        self.version_board = _version_publisher(island)  # S29 D9/D4: the run's merged version
 
     def bind(self, driver: Any) -> None:
         from yeto.rl.engine.external_policy import ExternalMergedCuts
@@ -178,6 +197,8 @@ class RelayPublisher:
                   "released": False, "relay": True, "merged_version": merged_version(self.driver, state),
                   "buffer_selected": self.feed.read_cursor(), "version_map": isl.vmap.to_dict()}
         isl.append_jsonl(f"verl-relay-publish-{isl.learner_id}.jsonl", record)
+        if self.version_board is not None:
+            self.version_board.publish(record["merged_version"])
         isl.emit("rl_verl_version_map", param_version=param_version, outer_version=version)
         isl.published = (version, digest)
         isl.hashes[version] = digest

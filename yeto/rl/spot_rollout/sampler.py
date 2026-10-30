@@ -97,6 +97,12 @@ class SpotChannels:
             reload_every=int(spec.get("reload_every", 1)), finished=self.client.run_finished,
             layout_fingerprint=layout_fingerprint(self.layout).hex(),
             base_version=int(spec.get("base_version", 0)), base_dir=spec.get("base_dir") or base_model)
+        from .version_board import VERSION_BOARD, VersionReader
+
+        # S29 D9/D4: the run's merged version, read at every round admission
+        self.version = VersionReader(lambda: RelayBoard(self.addr, VERSION_BOARD, self.subscriber_id, key=key))
+        if spec.get("version_board", True):  # False: drills that need stale groups (S29 D10)
+            self.releases.version_reader = self.version
         self.buffer = RelaySampleBuffer(self.producer, fragment_versions=self.releases.fragment_versions,
                                         should_stop=self.stopping, cut_of=self.releases.cut_identity)
         emit("rl_spot_sampler_channels", syncer=f"{self.addr[0]}:{self.addr[1]}",
@@ -114,14 +120,17 @@ class SpotChannels:
 
     def stopping(self) -> bool:
         # fenced: a newer process of this sampler took its id on the head
+        # version.regressed: the board went back below a version this sampler read,
+        # i.e. a fresh syncer replaced the run it joined (S29 D4)
         return (self.client.run_finished() or self.client.fenced() or self.syncer_lost()
-                or self.buffer.gone)
+                or self.buffer.gone or self.version.regressed)
 
     def close(self) -> None:
         try:
             self.client.close()
         finally:
             self.producer.close()
+            self.version.close()
 
 
 def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
