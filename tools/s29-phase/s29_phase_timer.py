@@ -107,6 +107,40 @@ def lap(clock, name):
     _clocks[clock] = now
 
 
+def _opt_threads():
+    v = os.environ.get("YETO_S29_OPT_THREADS")
+    if v is None:
+        try:
+            with open("/data/work/s29-mfu/OPT_THREADS_ON") as f:
+                v = f.read().strip()
+        except OSError:
+            v = ""
+    try:
+        return int(v) if v else 0
+    except ValueError:
+        return 0
+
+
+OPT_THREADS = _opt_threads()
+
+
+@contextmanager
+def optimizer_threads():
+    """S29 fix: Ray pins OMP_NUM_THREADS=1 in every WorkerDict, so the CPU-offloaded Adam
+    (optimizer_offload_fraction=1) ran single-threaded. Raise torch's intra-op threads only
+    for optimizer.step and restore them afterwards, so the forward/backward host threads
+    are not disturbed by idle OpenMP workers."""
+    if OPT_THREADS <= 0:
+        yield
+        return
+    prev = torch.get_num_threads()
+    torch.set_num_threads(OPT_THREADS)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(prev)
+
+
 def wrap(fn, name, level=2, keep_list=True):
     def inner(*a, **k):
         if LEVEL < level:

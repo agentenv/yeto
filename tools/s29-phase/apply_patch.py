@@ -3,7 +3,7 @@ import shutil, sys, os
 root = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
 shutil.copy(os.path.join(here, "s29_phase_timer.py"), os.path.join(root, "verl/utils/s29_phase_timer.py"))
-IMP = "from verl.utils.s29_phase_timer import phase as _s29_phase, flush as _s29_flush, patch_megatron as _s29_patch, lap as _s29_lap, lap_start as _s29_lap_start\n"
+IMP = "from verl.utils.s29_phase_timer import optimizer_threads as _s29_opt_threads, phase as _s29_phase, flush as _s29_flush, patch_megatron as _s29_patch, lap as _s29_lap, lap_start as _s29_lap_start\n"
 
 def sub(s, old, new, count=1, after=None):
     base = 0 if after is None else s.index(after)
@@ -113,7 +113,7 @@ def eb(s):
             self.optimizer_zero_grad()
         with _s29_phase("tb.forward_backward_batch"):
             outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
-        with _s29_phase("tb.optimizer_step"):
+        with _s29_phase("tb.optimizer_step"), _s29_opt_threads():
             grad_norm = self.optimizer_step()
 """)
     return s
