@@ -4,6 +4,8 @@ scheduling settings, port probing and the syncer cluster task.
 
 from __future__ import annotations
 
+import sys
+
 import json
 import os
 import shlex
@@ -714,6 +716,13 @@ def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
                          "(--syncer-shards 1)")
     if syncer.role != "actor":
         return ""
+    if not island_pool(args):
+        # S29 spot run (defect D11): with a fixed roster a trainer island that
+        # restarted cannot rejoin the running group (initial broadcast check).
+        print("[launcher] WARNING: spot rollout without an island pool: a trainer island that "
+              "restarts cannot rejoin the running group; set --rl-sync-island-lease-s (and a quorum "
+              "below the island count) to make the trainers rejoinable (a spot rollout run gets one "
+              "by default unless --rl-spot-fixed-roster)", file=sys.stderr)
     return ((f" --max-subscribers {subscribers}" if subscribers else "")
             + (" --sample-relay" if relay else ""))
 

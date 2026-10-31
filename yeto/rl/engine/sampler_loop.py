@@ -100,6 +100,9 @@ class SamplerLoop:
         writes its own shard (``buffer.shard``) counts its shard only, from the
         trainer's read position in that shard (``buffer_shards``)."""
         self.buffer.refresh()
+        pending = getattr(self.buffer, "pending_groups", None)
+        if pending is not None:  # the relay: groups sent and not yet taken by the trainer
+            return max(0, int(pending()))
         seen = self.follower.last_seen
         shard = getattr(self.buffer, "shard", None)
         if seen is None:
@@ -166,7 +169,10 @@ class SamplerLoop:
         waiting_policy_since = None
         while True:
             self._load_newest()
-            if not self.ready() or (self.require_release and self.follower.release is None):
+            behind = getattr(self.follower.releases, "behind", None)  # S29 D9 (spot samplers)
+            on_old_weights = behind is not None and behind(
+                None if self.follower.release is None else self.follower.version)
+            if not self.ready() or (self.require_release and self.follower.release is None) or on_old_weights:
                 if waiting_policy_since is None:
                     waiting_policy_since = time.monotonic()
                     self.emit("rl_sampler_waiting_policy", rollout_id=rollout_id)

@@ -113,7 +113,12 @@ class RelayRolloutPool(FullyAsyncRolloutPool):
     """The fully_async rollout port over the relay buffer (module doc)."""
 
     def __init__(self, island: FullyAsyncIsland, cuts: Callable[[], Any]):
-        super().__init__(island, queue_end_is_buffer_end=True)
+        # S29 spot run (defect D10): no cap on discarded pulls. A spot sampler that
+        # restarted on older weights, or that loads cuts slowly over a long WAN, sends
+        # groups past the policy-age limit for a while; they are discarded (and
+        # recorded) and the round waits for newer ones. With verl's 8 x required cap
+        # the whole trainer left INFRA_FAILED after one such stretch.
+        super().__init__(island, queue_end_is_buffer_end=True, max_pulls_factor=0)
         self.cuts = cuts  # the driver's ExternalMergedCuts, once the publisher is bound
 
     def _merged_now(self, rollout_id: int) -> int:
@@ -132,6 +137,24 @@ class RelayRolloutPool(FullyAsyncRolloutPool):
         return relay_group_metadata(collector, rollout_id)
 
 
+def _version_publisher(island: Any) -> Any:
+    """The merged-version board writer of this trainer (``spot_rollout.version_board``);
+    None without a relay address (tests, a trainer without spot samplers)."""
+    from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, parse_addr
+
+    addr = os.environ.get(RELAY_ADDR_ENV)
+    if not addr:
+        return None
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.rl.spot_rollout.relay import RelayBoard
+    from yeto.rl.spot_rollout.version_board import VERSION_BOARD, VersionPublisher
+
+    key = island_hmac_key_from_env()
+    learner = int(getattr(island, "learner_id", 0) or 0)
+    return VersionPublisher(lambda: RelayBoard(parse_addr(addr), VERSION_BOARD, learner, key=key),
+                            int(getattr(island, "limit", 0) or 0))
+
+
 class RelayPublisher:
     """A relay trainer's publication: no release (the spot samplers subscribe to the
     syncer); the param-version pairing and the published hash as on the other verl
@@ -141,6 +164,7 @@ class RelayPublisher:
         self.island = island
         self.feed = feed
         self.driver: Any = None
+        self.version_board = _version_publisher(island)  # S29 D9/D4: the run's merged version
 
     def bind(self, driver: Any) -> None:
         from yeto.rl.engine.external_policy import ExternalMergedCuts
@@ -173,6 +197,8 @@ class RelayPublisher:
                   "released": False, "relay": True, "merged_version": merged_version(self.driver, state),
                   "buffer_selected": self.feed.read_cursor(), "version_map": isl.vmap.to_dict()}
         isl.append_jsonl(f"verl-relay-publish-{isl.learner_id}.jsonl", record)
+        if self.version_board is not None:
+            self.version_board.publish(record["merged_version"])
         isl.emit("rl_verl_version_map", param_version=param_version, outer_version=version)
         isl.published = (version, digest)
         isl.hashes[version] = digest
@@ -190,11 +216,17 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
     """The rollout port, publisher and placement of a relay trainer over ``buffer`` (the
     local buffer the relay pump fills); the island's queue calls go to the feed."""
     actor_call = island.call
+    from yeto.rl.engine.merged_release import lane_cursor_log
+
     log = CONSUMED_LOG.format(learner=island.learner_id)
+    # S29 spot run (defect D12): the local buffer's cursor log, so a relay trainer that
+    # restarts (and rejoins its pool) continues after the groups it already trained
+    # instead of training the whole local buffer again from position 0.
     feed = BufferFeed(buffer, vmap=IdentityVersions, shape=shape,
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
                       record=lambda fields: island.append_jsonl(log, fields),
-                      tokenize=tokenize, wait_s=wait_s, poll_s=poll_s)
+                      tokenize=tokenize, wait_s=wait_s, poll_s=poll_s,
+                      cursor_log=lane_cursor_log(buffer, int(island.learner_id)))
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the spot samplers generate
     publisher = RelayPublisher(island, feed)

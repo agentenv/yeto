@@ -371,7 +371,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
 
     sync = p.add_argument_group("async sync")
-    sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
+    sync.add_argument("--total-steps", type=int, default=64,
+                      help="outer steps T (one fragment each). RL: the islands' --global-rounds, i.e. sync rounds; with --rl-sync-preset full-parameter (asynchronous rounds) each island trains T x --fragments local steps (S29 D7)")
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(

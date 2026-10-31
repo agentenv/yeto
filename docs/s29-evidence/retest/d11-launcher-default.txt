@@ -1,0 +1,6 @@
+[launcher] spot rollout: island pool on by default (--rl-sync-island-lease-s 150); --rl-spot-fixed-roster keeps a fixed roster
+[launcher] data split (roles): sampler islands read disjoint row slots (sampler k of S: rows i with i % S == k); buffer trainers read buffer lanes, not --data
+launcher argv (no lease / pool option): --rl-sample-role trainer --rl-sync-preset full-parameter --rl-parameter-layout-sha256 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee --fragments 8 --rl-sample-relay --rl-spot-subscribers 2 --gpu modal:1xh200,modal:1xh200
+[launcher] local training steps = global_rounds x fragments = 4 x 8 = 32 (--global-rounds 4 counts sync rounds; each local step pushes one fragment)
+island_pool: True lease: 150.0 syncer flags: --island-lease-s 150.0 --syncer-epoch 0
+island argv lease: [150.0, 150.0]

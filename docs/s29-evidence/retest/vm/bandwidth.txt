@@ -1,0 +1,7 @@
+
+ssh: connect to host 204.12.162.185 port 22: Connection timed out
+direct 100MB: 3.17 MB/s (31.5 s)
+proxy [🇺🇲 美国W01 | IEPL | x1.5] 100MB: 5.6 MB/s
+proxy [🇯🇵 日本W10 | IEPL] 100MB: 6.78 MB/s
+
+direct: 2x timeout 400s for 100MB => < 0.25 MB/s

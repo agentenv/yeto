@@ -688,7 +688,9 @@ def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
 
     source = Path(island_entry.__file__).read_text()
     # the rule itself, read off the module: the agentic branch uses the budget
-    assert "if agentic_island(args) else 512" in source
+    # (S29: a buffer trainer holds the same agentic rows, so it takes the budget too)
+    assert ("if agentic_island(args) or sample_roles.sample_role(args) == sample_roles.TRAINER"
+            in source)
     agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
     plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
 

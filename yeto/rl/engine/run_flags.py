@@ -168,6 +168,23 @@ def shared_flag(*options: str, island: Mapping[str, Any] | None = None,
     return _flag(frozenset(LAYERS), options, kwargs, island=island, cli_aliases=cli_aliases)
 
 
+GLOBAL_ROUNDS_HELP = (
+    "sync rounds R (the syncer's outer budget). With full-parameter asynchronous rounds "
+    "the syncer merges one fragment per outer step and the island pushes one fragment per "
+    "local training step, so the island trains R x --fragments local steps "
+    "(--total-fragment-steps), not R (S29 D7)")
+
+
+def local_training_steps_line(global_rounds: int, fragments: int, *, who: str = "launcher") -> str:
+    """S29 D7: the line a launcher / island prints for full-parameter asynchronous
+    rounds, where ``--global-rounds`` counts sync rounds and the island trains one
+    local step per fragment round."""
+    rounds, frags = int(global_rounds), int(fragments)
+    return (f"[{who}] local training steps = global_rounds x fragments = {rounds} x {frags} = "
+            f"{rounds * frags} (--global-rounds {rounds} counts sync rounds; each local step "
+            "pushes one fragment)")
+
+
 def check_verify_every(args) -> None:
     """S27 C5: ``--rl-verify-every N`` skips the policy hash on a no-sync island only
     (nothing outside the island reads it); N >= 1; not with --rl-verify-every-round."""
@@ -790,7 +807,14 @@ _RESUME = (
     shared_flag("--rl-sample-relay", action="store_true", default=False,
                 help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
                 "reads the spot samplers' groups from it (a local buffer filled by the relay "
-                "pump) and makes no policy releases. Off by default"),
+                "pump) and makes no policy releases. Off by default. With --rl-spot-subscribers "
+                "the run is a spot rollout run: an island pool by default (S29 D11, "
+                "--rl-sync-island-lease-s 150; see --rl-spot-fixed-roster)"),
+    cli_flag("--rl-spot-fixed-roster", action="store_true", default=False,
+             help="S29 D11: a spot rollout run (--rl-sample-relay with --rl-spot-subscribers) "
+             "keeps a fixed island roster instead of the default island pool (a trainer island "
+             "that restarts then cannot rejoin). Any explicit membership option "
+             "(--rl-sync-island-lease-s, ...) also replaces the default"),
     shared_flag("--rl-spot-syncer", default=None, metavar="HOST:PORT",
                 help="--rl-sample-role sampler: follow the weights as a receive-only subscriber of "
                 "this actor syncer (no policy releases from the store) and write the groups to "

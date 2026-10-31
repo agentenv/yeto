@@ -77,6 +77,28 @@ class SubscriberReleaseStore:
         self.base_dir = base_dir
         self._base_identity: dict[str, Any] | None = None
 
+    def past_base(self) -> bool:
+        """The run merged past the base weights: some fragment this subscriber received
+        is newer than ``base_version`` (S29 spot run, defect D9). A sampler that
+        (re)joins such a run must not generate on the base weights while its first
+        cut is still arriving: those groups are past any policy-age limit."""
+        self.follower.drain()
+        return any(int(v) > self.base_version for v in self.follower.versions)
+
+    version_reader: Any = None  # S29 D9: the run's merged version board (sampler.SpotChannels)
+
+    def behind(self, served_version: int | None) -> bool:
+        """Hold rounds: by the run's merged-version board, the weights served (None:
+        none yet) are past the policy-age limit. Without a board value: never.
+
+        (A first fix also held a sampler on the base weights as soon as any fragment
+        it received was newer than the base. That deadlocked a local run: per-fragment
+        versions move one fragment at a time, the full cut needs every fragment
+        merged once, and those merges need the groups the held sampler did not write.
+        The merged version, which is what the policy-age limit counts, is the board's.)"""
+        reader = self.version_reader
+        return reader is not None and reader.behind(served_version)
+
     def finished(self) -> bool:
         """The syncer said the run ended (the sampler loop's stop condition)."""
         return bool(self._finished())

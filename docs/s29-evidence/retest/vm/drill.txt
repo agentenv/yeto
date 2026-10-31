@@ -1,0 +1,45 @@
+
+syncer-up
+
+started
+10:26:41
+10:38 s29r-a uk-south2 ssh timeout -> down, relaunch eu-south1
+10:57:24 tunnel b switched to proxy (JP W10)
+11:00:12 s29r-a up eu-south1 213.239.186.29, tunnel via proxy
+11:31:13 restarted both VM samplers (SIGTERM) with STARTS_PER_HOUR=20 (6/h + retries starved trials)
+11:32:40 samplers restarted with PATH=/opt/sglang/bin (first rerun failed: no sglang on PATH)
+11:45:32 old PREEMPTED samplers were holding (hold_after_reclaim, port 31600) -> kill -9 + restart
+
+
+D11 VM-run kill -9 island1 12:05:59 trained=11
+
+killed island 1
+
+started island 1
+restarted 12:06:03
+12:18:03 D15: nebius compute instance stop s29r-b (computeinstance-u00d17a7an3frp41ks); s29-spot-1 boxes bx_xw5bfek3 bx_j4sn5taq bx_acuweggs
+12:28:23 4a: watchdog deleted bx_acuweggs (lease 600s); bx_xw5bfek3/bx_j4sn5taq gone before (boat idle TTL)
+created bx_89gcvjcs ytl1.s29r1031b.s29-spot-1.518bf0d9.drill
+12:40:15 VM b nebius start (same IP), container restarted, vm_run.sh relaunched; synthetic orphan bx_89gcvjcs (inc 518bf0d9) placed before
+[s29-spot] tunnel up; sampler start 2026-10-31T12:41:09Z
+boat sweep (sampler start): deleted 1 orphan sandbox(es) of run s29r1031b island s29-spot-1: ['bx_89gcvjcs']
+[spot-sampler] boat labels: run s29r1031b island s29-spot-1 incarnation 601ffdc0; deleted 1 sandbox(es) of earlier incarnations
+
+
+island 0: rl_round_trained=9 events=Counter()
+island 1: rl_round_trained=14 events=Counter()
+consumed i0/home/yeto-output/verl-buffer-consumed-0.jsonl: rows=9 kept=9 dropped=0 dup_ids=0 keys=['behavior_versions', 'kept', 'param_versions', 'position', 'response_tokens', 'sample_id', 'samples', 'source']
+consumed i1/home/yeto-output/verl-buffer-consumed-1.jsonl: rows=14 kept=14 dropped=0 dup_ids=0 keys=['behavior_versions', 'kept', 'param_versions', 'position', 'response_tokens', 'sample_id', 'samples', 'source']
+D4 VM start 12:45:02
+
+killed island 0
+killed island 1
+syncer left: 0
+syncer-up
+fresh TB syncer 12:45:07 resume=0
+
+started island 0
+
+started island 1
+new trainers 12:45:08
+12:55:30 proxy used since mihomo start: up 8.70 GB down 0.16 GB

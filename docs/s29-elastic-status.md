@@ -1,0 +1,28 @@
+# S29 弹性测试进度（每个大阶段一行）
+
+- 10-31 00:26 阶段0 准备：测试设计文档完成；trainer 迁到 n4 卡0/1（避开链路抖动卡4/5），syncer 在 npu1 CPU；spot-a(eu-north1 H100) 已出样本，spot-b 换为 us-central1 RTX6000 启动中；B200 已 down。
+- 10-31 00:35 阶段1 基线 T1 进行中：发现并修复 D1（FSDP buffer trainer prompt 行宽 512）、D3（不足 n 条的组让 update_actor 断言失败）；n4 Ray 节点 IP 问题已修；spot-b 换 RTX6000 已 UP；boat 已用 4 次（VM 复用生效）。
+- 10-31 00:59 阶段1 基线 T1：两 trainer 在 n4 持续运行（岛0 训 3 轮、岛1 训 1 轮）；00:42 起停滞的原因是 D5（spot 岛 backlog 在首个合并 cut 前从不下降，与 fragment 逐个合并互相等待，死锁），已修复并重启两个 spot 岛；T6.2（SIGTERM→PREEMPTED 离开、boat 沙箱自动清零）通过。
+- 10-31 01:02 核实（回应巡检）：trainer 在 n4 = 192.168.17.6（hostname host-9tird90004），island_entry PID 1191336 1191341 ；ASCEND_RT_VISIBLE_DEVICES 卡 0/1。tape 证据：island 0 train_step 3 samples 4 17:02:13Z；island 1 train_step 2 samples 4 17:02:21Z（tape：n4 /data/work/s29-spot/run/i{0,1}/tape.jsonl）。D5 修复后已恢复：relay channel1 stored=2 acked=2，岛0 训到第 4 轮、岛1 训到第 2 轮。0.6B 单卡显存占用很小，所以 npu-smi 看着接近基线。
+- 10-31 01:09 阶段1 完成：T1 基线（TB2.1×Codex×boat）两 trainer 岛各训满 5 step（每步 4.4–9.6 s，reward 全 0），共发现 6 个缺陷（D1/D3/D5/D6 已修，D2 关闭，D4 待测）。boat 已用 194/200（剩 6）。阶段2 开始：GSM8K 长跑 40 轮/岛 + 故障注入。
+- 10-31 01:54 阶段2 长跑中断：两 trainer 岛在本地第 57/91 步因'整轮样本超龄'退出（D10）；根因是 npu1→Nebius 隧道 <250KB/s，spot 岛拉一个 1.2GB 的 cut 要几十分钟，跟不上版本；另发现 D7（rounds 口径）、D8（kill -9 后 SGLang 孤儿占显存，已修）、D9（重启的 spot 岛先在 v0 上出样本）。下一步：修 D10 的致命退出，放宽 policy age 继续长跑与演练。
+- 10-31 02:02 阶段2 继续：D9/D10 修复后重启长跑（policy age 4，verl 上限）；关键观察：npu1→Nebius WAN 约 0.18 MB/s，1.2 GB 的 cut 很难跟上合并节奏，长跑主要检验'超龄丢弃+等待'是否稳定、是否泄漏。修复已提交 6ee7d5c9。
+- 10-31 02:25 回应巡检：trainer 正在 n4 训练。n4 = 100.97.160.16 192.168.17.6（hostname host-9tird90004，从 npu1 经 ssh 192.168.17.6 进入），island_entry PID/运行时长 1341835 25:06;1341840 25:05;；tape 最新：island 0 step 29 18:24:55Z，island 1 step 14 18:24:26Z；syncer relay：channel=0 depth_items=0 depth_bytes=0 stored=29 stored_bytes=2230321 duplicate=0 full=0 acked=29 / channel=1 depth_items=0 depth_bytes=0 stored=15 stored_bytes=1300470 duplicate=0 full=0 acked=15。18:01Z 那次 stored=0 是 D9 修复里我自己的 bug（property 当方法调用，spot 岛启动即退出），18:15Z 已修复重启；两台 VM 都在出样本，不是闲置。
+- 10-31 03:26 阶段3 故障演练：T6.1 kill -9 sampler（暴露 D8，已修）；T6.2 SIGTERM→PREEMPTED 通过；T6.4 断隧道 60 s，subscriber 重拨 7 次后自动恢复、relay 续传通过；T6.6 trainer 岛 kill -9 重启：默认配置下无法重入（D11），开 island pool 后能重入，但会重复训练（D12，已修，复测中）。D13 带宽问题已记录改进建议。提交 c804d0db。
+- 10-31 03:45 阶段4 收尾：T6.5 syncer --resume 重启通过；D12 复测通过；D9 第二次修复；T9 发现 D14（trainer 共享内存 +35%，待确认）。两台 VM 已 sky down，Nebius 上无 s29 实例；boat 活跃 0；n4 上 trainer 和 npu1 上 syncer、隧道已停，npu1 上的 sky key 已删除。剩余：08:00 boat 额度重置后，重开 VM 跑一轮真实 TB2.1 回归（含 T6.3 重开）。
+- 10-31 04:40 本地补测（n4 假引擎 spot 岛 + 真实 trainer，281/224 轮）：D9 版本板根治通过（重启后 v0 轮数 0，滞后时拦截生效；第一版退路会死锁，已去掉）；D10 通过（v0 组 kept:false，trainer 不退出）；D14 判定不是泄漏（共享内存在 1.9 GiB 封顶）；D4 修复通过（fresh syncer 下旧 sampler 约 1 分钟内离开）。等 08:00 boat 重置后做 TB2.1 回归。
+- 10-31 08:38 阶段5 TB2.1 回归开始：s29-spot-c（eu-south1 RTX6000）、s29-spot-b（us-central1 RTX6000）已 UP（镜像拉取约 25 分钟），trainer 为 island pool 配置，boat 每岛并发 2。
+- 10-31 09:20 回归进度（回应巡检）：岛 0（VM c，eu-south1）已训 4 step；岛 1 为 0 step。trial 情况：VM c 共 21 个 trial 目录，结果以 NonZeroAgentExitCodeError（0.6B 跑 Codex 很快失败退出，reward 0）和 EnvironmentStartTimeoutError 为主，没有卡在 agent_timeout 1800 s；Codex 通过 records proxy 正常交互（proxy 31600 从本机公网访问返回 HTTP 404，即端口可达、根路径无内容）；boat 复用生效，VM c 的组持续产出。T6.3 是一次真实抢占：s29-spot-b（us-central1）约 00:38Z 被 Nebius 回收（STOPPED，隧道 00:48Z 起超时），trainer 岛 1 没有退出、一直在等。我 sky down 后在同 region 重开，01:10:36Z 新 VM 的 subscriber 重新加入 syncer，但 boat 当日创建额度已用完（200/200），新 VM 的 trial 报 BoatQuotaError，因此岛 1 没拿到组。09:50 截止时清理收尾。
+- 10-31 09:43 回归收尾：岛 0 训 4 step，岛 1 训 2 step。T6.3 经历一次真实抢占后重开、重新加入、继续训练，通过。两台 VM 已 sky down，Nebius 上无 s29 实例；boat 活跃 0（手动删除 1 个残留沙箱，记为 D15）；n4 上 trainer、npu1 上 syncer 和隧道已停，key 已删除。VM 费用约 $3。
+- 10-31 16:40 复测本地阶段（n4 假引擎 spot 岛 + 真实 trainer/syncer/boat，分支 s29-spot-retest）：D7 打印、D11 重入、D4 FENCED(other run)、D15 a/b、D9/D10/D12 回归全部通过；新缺陷 D16（看门狗事件没输出，已修）、D17（n4 无公网/无 boat-sdk，已修部署路径）。Nebius 浏览器登录过期，真机阶段暂停。
+- 10-31 20:40 真机阶段：s29r-a（eu-south1 RTX6000）、s29r-b（us-central1 RTX6000）已开，隧道经 npu1 mihomo 代理（日本 W10）。npu1→VM b 100 MB：直连两次 400 s 都没传完（<0.25 MB/s），经代理 5.6–6.8 MB/s。测试项 1 通过（岛 0 训 6 步、岛 1 训 12 步，TB2.1×Codex×boat）；D11 通过（12:05Z kill -9 岛 1，12:08Z 以新 generation 重入并继续训练）；D15a 通过（12:18Z `nebius compute instance stop` 硬停 VM b，12:27Z trainer 看门狗删除 bx_acuweggs，rl_boat_orphans_deleted）；boat 中沙箱名均为 ytl1.s29r1031b.* 前缀。进行中：D15b（VM b 已重开，sampler 重启中）、D4、D9/D10/D12 回归。sky 改用服务账号刷新 token。
+- 10-31 21:07 真机复测完成：测试项 1–5 全部通过（D9/D10 的超龄条件在真机 run 里达不到，沿用本地复测）；新问题 D18（运维 4 条）已记录；两台 VM 已经用 nebius CLI 删除，sky 表已清；boat 本 run 活跃沙箱 0；n4 trainer、npu1 syncer 和隧道已停。VM 费用估算约 $4（2 × $0.79/h × 约 2.5 h）。代理流量 8.86 GB。
+- 10-31 21:15 120B 端到端预估（还没动手）：
+  - 卡：npu1/n2/n3 各 8 卡，21:10 查看都空闲。
+  - spot 机型：Nebius 只有 1 卡和 8 卡两种机型，能放下 120B bf16（约 240 GB）的最便宜配置是 eu-north1 的 8×H100 spot，$6.32/h。
+  - base 权重：VM 在本地从 HF 下载，不走代理。
+  - 每个版本的跨境字节数：int4 delta（block 128）约 0.53 B/param，合计约 64 GB；zstd 后估计 45–55 GB。
+  - 代理预算 ≤150 GB：只够下发 2 个版本，或者合并 2 个本地 step 后下发 1 次。
+  - 时间：按单节点代理 6–7 MB/s，每个版本约 2–2.5 h；多节点并行估计能降到 30–40 min，没实测。
+  - 代码缺口：syncer 目前只能经 subscriber 协议直推 fragment，"对象存储 + 清单"的下发路径还没有。
+  - 估算总耗时：实现 4–6 h，跑通 3–5 h；VM 费用约 $6.32/h × 4–6 h ≈ $25–40，代理流量约 60–120 GB。

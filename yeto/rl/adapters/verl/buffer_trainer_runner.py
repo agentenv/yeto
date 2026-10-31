@@ -150,7 +150,13 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
                          int(tokenizer.pad_token_id))
         if section.get(RELAY_SECTION_KEY):  # S27 G-EV: the spot samplers' groups through the relay
-            buffer, pump = relay_buffer(int(plan["learner_id"]), environ=environ)
+            # S29 spot run (defect D6): the local buffer lives in the run's own sample store,
+            # not in the host's temp dir. Under /tmp (keyed by learner id only) a fresh run
+            # read the groups an earlier run on the same host had pumped, from position 0,
+            # and trained them again; a relaunch of the same run still finds its own buffer.
+            local_store = str(section.get("store") or "")
+            buffer, pump = relay_buffer(int(plan["learner_id"]), environ=environ,
+                                        tmp_root=local_store if local_store and "://" not in local_store else None)
 
             def relay_ports(island):
                 return install_relay_ports(island, buffer=buffer, shape=shape, tokenize=tokenizer.encode,
