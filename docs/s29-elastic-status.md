@@ -17,3 +17,12 @@
 - 10-31 16:40 复测本地阶段（n4 假引擎 spot 岛 + 真实 trainer/syncer/boat，分支 s29-spot-retest）：D7 打印、D11 重入、D4 FENCED(other run)、D15 a/b、D9/D10/D12 回归全部通过；新缺陷 D16（看门狗事件没输出，已修）、D17（n4 无公网/无 boat-sdk，已修部署路径）。Nebius 浏览器登录过期，真机阶段暂停。
 - 10-31 20:40 真机阶段：s29r-a（eu-south1 RTX6000）、s29r-b（us-central1 RTX6000）已开，隧道经 npu1 mihomo 代理（日本 W10）。npu1→VM b 100 MB：直连两次 400 s 都没传完（<0.25 MB/s），经代理 5.6–6.8 MB/s。测试项 1 通过（岛 0 训 6 步、岛 1 训 12 步，TB2.1×Codex×boat）；D11 通过（12:05Z kill -9 岛 1，12:08Z 以新 generation 重入并继续训练）；D15a 通过（12:18Z `nebius compute instance stop` 硬停 VM b，12:27Z trainer 看门狗删除 bx_acuweggs，rl_boat_orphans_deleted）；boat 中沙箱名均为 ytl1.s29r1031b.* 前缀。进行中：D15b（VM b 已重开，sampler 重启中）、D4、D9/D10/D12 回归。sky 改用服务账号刷新 token。
 - 10-31 21:07 真机复测完成：测试项 1–5 全部通过（D9/D10 的超龄条件在真机 run 里达不到，沿用本地复测）；新问题 D18（运维 4 条）已记录；两台 VM 已经用 nebius CLI 删除，sky 表已清；boat 本 run 活跃沙箱 0；n4 trainer、npu1 syncer 和隧道已停。VM 费用估算约 $4（2 × $0.79/h × 约 2.5 h）。代理流量 8.86 GB。
+- 10-31 21:15 120B 端到端预估（还没动手）：
+  - 卡：npu1/n2/n3 各 8 卡，21:10 查看都空闲。
+  - spot 机型：Nebius 只有 1 卡和 8 卡两种机型，能放下 120B bf16（约 240 GB）的最便宜配置是 eu-north1 的 8×H100 spot，$6.32/h。
+  - base 权重：VM 在本地从 HF 下载，不走代理。
+  - 每个版本的跨境字节数：int4 delta（block 128）约 0.53 B/param，合计约 64 GB；zstd 后估计 45–55 GB。
+  - 代理预算 ≤150 GB：只够下发 2 个版本，或者合并 2 个本地 step 后下发 1 次。
+  - 时间：按单节点代理 6–7 MB/s，每个版本约 2–2.5 h；多节点并行估计能降到 30–40 min，没实测。
+  - 代码缺口：syncer 目前只能经 subscriber 协议直推 fragment，"对象存储 + 清单"的下发路径还没有。
+  - 估算总耗时：实现 4–6 h，跑通 3–5 h；VM 费用约 $6.32/h × 4–6 h ≈ $25–40，代理流量约 60–120 GB。
