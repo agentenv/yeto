@@ -176,6 +176,9 @@ def parse_args(argv):
     # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
     # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
     p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
+    # S29 MFU-C: skip the old-log-prob recompute when old == current (onpolicy_old_logprob;
+    # refused unless one optimizer step per round). measure = keep it, log the difference
+    p.add_argument("--rl-onpolicy-old-logprob", choices=("off", "on", "measure"), default=None)
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -564,6 +567,11 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
+    if getattr(args, "rl_onpolicy_old_logprob", None):  # S29 MFU-C: forwarded to Ray (YETO_)
+        from .onpolicy_old_logprob import ENV as _OPLP_ENV
+
+        os.environ[_OPLP_ENV] = args.rl_onpolicy_old_logprob
+        print(f"[yeto-verl] {_OPLP_ENV}={args.rl_onpolicy_old_logprob}", flush=True)
     buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
     spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)

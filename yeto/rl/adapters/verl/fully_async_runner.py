@@ -161,14 +161,32 @@ class _YetoTrainerMixin:
         install_verl_patches()
         t0 = time.time()
         batch = self._fit_compute_reward(batch)
-        batch = self._fit_compute_log_prob(batch)
-        criteria = self._yeto_criteria(batch)  # 6.4b item 6: re-hooked after old log-probs
-        source = self._yeto_offpolicy_source(batch)
+        # S29 MFU-C: YETO_ONPOLICY_OLD_LOGPROB (onpolicy_old_logprob); off = verl unchanged
+        from . import onpolicy_old_logprob as oplp
+
+        oplp_mode = oplp.mode()
+        if oplp_mode != "off":
+            tis = oplp.check_config(self.config, batch_rows=len(batch),
+                                    local_trigger_step=int(getattr(self, "local_trigger_step", 1)),
+                                    trigger_parameter_sync_step=getattr(self, "trigger_parameter_sync_step", None))
+            batch.meta_info[oplp.META_KEY] = oplp.meta(oplp_mode, tis)
+        if oplp_mode == "on":
+            # no recompute, no save_model_to_cpu: the loss takes old = log_prob.detach()
+            oplp.nan_placeholder(batch)
+            criteria, source = {}, None  # both compare old with rollout; no old exists here
+        else:
+            batch = self._fit_compute_log_prob(batch)
+            criteria = self._yeto_criteria(batch)  # 6.4b item 6: re-hooked after old log-probs
+            source = self._yeto_offpolicy_source(batch)
         batch = self._fit_compute_ref_log_prob(batch)
         batch = self._fit_compute_critic(batch)
         batch = self._fit_compute_advantage(batch)
+        if oplp_mode == "on":
+            oplp.drop_driver_correction(batch, self.metrics)
         batch = self._fit_update_critic(batch)
         batch = self._fit_update_actor(batch)
+        if oplp_mode != "off":
+            self.metrics.update(oplp.derived_metrics(self.metrics, oplp_mode))
         self._fit_update_local_step()  # trigger_parameter_sync_step=1: param version + 1
         self.timing_raw["step"] = time.time() - t0
         try:
