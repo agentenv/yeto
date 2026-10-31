@@ -1,0 +1,19 @@
+# S29 120B: one Nebius 8 x H100 preemptible VM running the 120B spot island (vm120_run.sh).
+#   sky launch -c s29r-120 tools/probes/s29_spot/sky_spot120.yaml --infra nebius/eu-north1 \
+#     --secret BOAT_API_KEY --secret MODAL_TOKEN_ID --secret MODAL_TOKEN_SECRET --env RUN_ID=... -d -y
+resources:
+  use_spot: true
+  accelerators: H100:8  # or H200:8 (--gpus H200:8; same spot price, eu-north1)
+  disk_size: 1500
+  ports: 31600
+  image_id: docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf62137c9e364f779010bc0b753e867a
+envs:
+  RUN_ID: ""
+secrets:
+  BOAT_API_KEY: null
+  MODAL_TOKEN_ID: null
+  MODAL_TOKEN_SECRET: null
+file_mounts:
+  /root/yeto-root: /tmp/s29r/payload/yeto-root
+run: |
+  bash /root/yeto-root/tools/probes/s29_spot/vm120_run.sh

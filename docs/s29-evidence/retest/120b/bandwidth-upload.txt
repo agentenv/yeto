@@ -1,0 +1,6 @@
+
+modal volume put 100MB rc=124 0.33 MB/s (300.0 s)
+nebius s3 eu-north1 PUT http=404 up=0.000 B/s sent=0
+modal volume put via proxy 100MB rc=1 1.74 MB/s
+direct upload: Modal volume 0.33 MB/s (100MB not done in 300s); Nebius S3 eu-north1: no S3 key (SA lacks iam access-key permission), unmeasured; Modal via proxy: grpc ignores HTTPS_PROXY
+npu1->Mac 100MB 28s (3.6 MB/s, no proxy); Mac->Modal volume 100MB 19s (5.3 MB/s, no proxy)

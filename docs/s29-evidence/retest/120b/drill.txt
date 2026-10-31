@@ -1,0 +1,19 @@
+13:28:18 launch s29r-120 8xH100 spot eu-north1
+
+proxy up GB 8.7 down GB 0.16
+[36m(pid=2537260)[0m   @_deprecated(replacement="triton.language.extra.cann.libdevice.finitef")
+[36m(pid=2537260)[0m /data/env/sft92/lib/python3.12/site-packages/huggingface_hub/constants.py:302: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer'
+[36m(pid=2537260)[0m   warnings.warn(
+8
+13:41:58 s29r-120 UP, job submitted (VM start ~13:30)
+14:05:13 REAL PREEMPTION: s29r-120 STOPPED by Nebius (before first round); restarting
+14:09:19 VM restarted (new IP 89.169.123.100), vm120_run relaunched
+14:42:50 REAL PREEMPTION #2: s29r-120 STOPPED (found at 14:42; sample loop empty since ~14:2x)
+14:49:48 restarted VM ip 89.169.123.100
+14:54:30 PREEMPTION #3 (~14:52, minutes after start)
+15:05:35 H100x8 spot start fails RESOURCE_EXHAUSTED (code 8) -> sky down, switch to H200x8 spot eu-north1 ($6.32/h)
+15:24:12 s29r-120h H200x8 up ip 89.169.99.200 (VM created ~15:10)
+15:33:43 VM prompts: dropped rows 0-1 (known uniform-reward groups: all 1 / all 0) to get GRPO signal
+15:54:32 PREEMPTION #4 (H200 s29r-120h, ~15:40)
+16:01:18 H200 VM restarted, vm120_run relaunched (store persisted)
+16:08:14 PREEMPTION #5 (H200, 7 min after start). Stop-loss: delete VM, stop trainer

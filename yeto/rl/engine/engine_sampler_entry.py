@@ -350,6 +350,14 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     spec = apply_rollout_quant(spec)
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
+    if env.get("YETO_BOAT_RUN_ID") and env.get("YETO_BOAT_INCARNATION") != incarnation:
+        # S29 D19: an engine sampler (the release-store path, e.g. the 120B spot island) labels its
+        # boat sandboxes with its incarnation too and sweeps its earlier incarnations' ones; before
+        # this only the spot_rollout sampler did, so these sandboxes carried an empty incarnation
+        # ("ytl1.<run>.<island>..") that no sweep selects
+        from yeto.rl.spot_rollout.sampler import label_boat_sandboxes  # noqa: PLC0415
+
+        label_boat_sandboxes(spec, incarnation, environ=env)
     with _member_incarnation_env(env, incarnation):
         return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
                     stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason)

@@ -216,3 +216,39 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 2. sampler SIGTERM 后以 PREEMPTED 离开，按设计会进入 `hold_after_reclaim`，进程继续占着 records proxy 端口 31600。所以在同一 VM 上原地重启 sampler 之前必须先 kill -9 旧进程，否则新进程报 `address already in use` 退出。建议 `vm_run.sh` 启动前检查并清掉旧的 held 进程。
 3. sky 集群在用户账号下启动，之后把 Nebius 默认 profile 换成服务账号，`sky down` 就以 identity mismatch 拒绝。本次用 `nebius compute instance delete` 删掉两台实例，再 `sky down --purge`。今后 sky 统一使用服务账号 token（本机 `/tmp/s29r/ntokrefresh.sh` 每 30 min 刷新一次）。
 4. `pkill -f <pattern>` 放在 `ssh host '...'` 里会连同执行它的那个远端 shell 一起杀掉（pattern 出现在 shell 自己的命令行里）。重启要写成脚本文件再执行。
+
+## 120B 端到端（10-31 21:15 – 11-01 00:10 CST）：部分完成，因 spot 容量问题止损
+
+方案：合并 2 个本地 step 后下发 1 次 delta。trainer 在 npu1/n2/n3 共 24 卡（G-120D pc1 形态：TP4/PP3/EP8/CP2，每步 2 组 × 4 条，`--rl-release-only-versions 2`）。spot 岛开 1 台 Nebius eu-north1 8 卡 spot VM。证据：`docs/s29-evidence/retest/120b/`。
+
+- **跨境路径实测**（`120b/bandwidth-upload.txt`）：
+  - npu1 直连上传到 Modal volume：0.33 MB/s，300 s 内 100 MB 没传完。
+  - Nebius S3：服务账号没有 access key 权限（PermissionDenied），无法实测。
+  - 经代理连 Modal 不通：gRPC 不认 HTTPS_PROXY。
+  - 不走代理的路径：npu1 → 本机 3.6 MB/s，本机 → Modal volume 5.3 MB/s，两段都 ≥3 MB/s。所以 delta 定为 npu1 → 本机 → Modal volume → VM，代理流量为 0。
+- **新代码**：
+  - `yeto/rl/spot_rollout/cut_manifest.py`：生成 manifest（每个文件的 size + sha256、release 记录、manifest 自身的 digest）；VM 侧 `place` 逐文件校验后搬进本地 store，最后才写 LATEST.json。单测 `tests/test_s29_cut_manifest.py`。
+  - `tools/probes/s29_spot/cut120_mirror.sh`：样本回传，按 sample_id 追加合并（换 VM 后 shard 会从头写）；release 下发。
+  - `vm120_run.sh` 和 `sky_spot120.yaml`：r1-v0（225 GB）由 VM 从 Modal volume 就近下载，H100 机上用了 665 s，H200 机上 594 s，不走代理。
+- **trainer**：第 1 步完成，step_seconds 545，无 NaN（`120b/s29r120-ev.tgz`）。但 pg_loss=0、grad_norm=0。解码样本 payload 确认是组内 reward 一致：两组分别是 [1,1,1,1] 和 [0,0,0,0]，GRPO 的 advantage 为 0。不是 mask 或 IS 权重的 bug。v1 按设计不下发（`not_a_release_version`，只下发 v2），trainer 随后在第 2 步等样本。这不是互相等待：policy age 4 允许 v0 样本，没有样本是因为 VM 被抢占。
+- **spot 容量**：5 次真实抢占（`120b/drill.txt`）。
+  - H100×8 在 14:0x、14:2x、14:52 三次被收回，之后 `instance start` 报 RESOURCE_EXHAUSTED（code 8）。
+  - 换 H200×8（同价 $6.32/h）后，15:40 和 16:08 又各被抢一次，最短的一次开机 7 分钟就被收回。
+  - 每次重开都要先加载 SGLang TP8（约 8–10 分钟），在被收回之前，第 2 步需要的样本一直没产出。
+  - 已在 VM 的 prompts 里去掉已知全对 / 全错的 2 行，以便拿到 advantage≠0 的一步，但还没等到样本 VM 就被收回了。
+- **未完成的验收项**：第 2 步及以后、advantage≠0 / grad_norm>0、spot 岛用 v2 出样本（cut manifest 下发路径只有单测，没有真机跑通）。
+- 硬停 → 重开 → 重新加入：在真实抢占下演练了 4 次。VM 原地重启、store 保留、sampler 重启这条路径正常，但没有一次撑到出样本。
+
+### D19 engine sampler 的 boat 沙箱没有 incarnation 标签（已修）
+
+- 现象：120B 岛走的是 `engine_sampler`（release-store 路径），不是 `spot_rollout.sampler`。它的沙箱名是 `ytl1.s29r120a.spot-0..<name>`，incarnation 段为空。sweep 按 incarnation 选沙箱，所以抢占后的 6 个孤儿沙箱谁也删不掉；release 模式也没有 trainer 侧看门狗。这次是手动删除的。
+- 修复：`engine_sampler_entry.run` 在设了 `YETO_BOAT_RUN_ID`、而本 incarnation 还没打标签时，调用 `label_boat_sandboxes`（打标签，并删除早期 incarnation 留下的沙箱）。单测 `test_d19_an_engine_sampler_labels_its_incarnation`。
+- 遗留：release 模式下 VM 被硬停、且不再重开时，需要一个不依赖 relay 的看门狗，例如由 mirror 按 lease 清扫。
+
+### D20 运维问题（记录）
+
+1. eu-north1 的 8 卡 spot 当前几乎不可用：5 次抢占，最短 7 分钟；之后 H100 报容量不足。120B 端到端建议改用按需机，或换有 8 卡 spot 容量的 region / 时段。
+2. `ray_cluster.sh` 里的 `ray stop --force` 会杀掉同节点上别人的 Ray 集群（这次 n1–n3 上一直挂着另一任务空闲的 lp-e1 集群）。我用的副本已去掉这一行并改用独立端口（6494 / 10101 / 524xx / 30000–31999）。
+3. VM 被 Nebius stop/start 后，sky 容器里的 sshd 不会自己恢复，sky 把集群标成 UNHEALTHY。mirror 已改为在宿主机上 `docker exec` 进容器。
+
+费用（估算）：8 卡 VM 累计开机约 1.7 h × $6.32 ≈ $11（被抢占后的 STOPPED 时段不计 GPU 费用）。0.6B 阶段的 RTX6000 约 $4。代理流量全程 8.86 GB，120B 阶段新增 0（mihomo `/connections` 计数为 up 8.70 / down 0.16 GB，没有变化）。
