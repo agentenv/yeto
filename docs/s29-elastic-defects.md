@@ -169,3 +169,29 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - 现象：回归结束后 boat 还剩 1 个活跃沙箱（`bx_t6ezg6qf`，01:12 由重开后的 VM b 创建，TTL 1800 s），已手动 `boat delete`。VM b 第一次被抢占时留下的 2 个沙箱，也是靠 TTL 自然过期的。
 - 根因：`boat_pool` 的清理依赖进程内的 atexit 和信号处理。VM 被直接 STOP 或 down 时，进程来不及执行这些清理，只能靠 boat 侧的 TTL（空闲 VM 默认 20–30 分钟）释放。
 - 建议：给沙箱打上 sampler incarnation 标签（boat `labels`）；sampler 启动时以及 trainer 侧的看门狗删除"属于已经被取代的 incarnation"的沙箱；或者把空闲 VM 的 TTL 调到 5–10 分钟。本次没有改代码。
+
+## 复测（10-31 下午，分支 s29-spot-retest = PR #314 + D15 + D4/D7/D11 修复）
+
+拓扑与上一轮相同：syncer 在 npu1 CPU，trainer 岛 0/1 在 n4 卡 0/1，run id `s29r1031a`，`YETO_BOAT_ORPHAN_LEASE_S=600`。目录全部换成 `/data/work/s29r`，不碰上一轮的 `/data/work/s29-spot`。证据：`docs/s29-evidence/retest/`。
+
+### D16 trainer 侧 boat 看门狗的删除事件没有输出（已修）
+
+- 现象：`maybe_start_relay_pump` 构造 `OrphanWatchdog.from_env(env)` 和 `RelayPump` 时都没传 `emit`，`rl_boat_orphans_deleted`、`rl_relay_item_rejected` 两个事件被直接丢掉。删除动作本身会做，但 trainer 日志和 tape 里没有记录，测试项 4a 无法取证。
+- 修复：`relay_buffer.pump_event_printer(channel)`，每个事件打印一行 `YETO_RL_EVENT <json>`（`island_id` 取 relay channel，也就是 trainer 岛号）。pump 和看门狗共用这个 emitter。单测 `tests/test_boat_labels.py::test_d16_the_relay_pump_watchdog_prints_its_deletions`。
+- 复测：n4 本地演练里 trainer 岛 1 打印了 `{"event":"rl_boat_orphans_deleted","island":"s29-spot-1","island_id":1,"reason":"island lease expired","sandboxes":["bx_bb2vmkz3"]}`（`retest/local/s29r-keylines.txt`）。
+
+### D17 trainer 节点没有公网，也没装 boat-sdk，看门狗无法工作（已修部署路径）
+
+- 现象：n4 不能直连外网（DNS 解析不了 `boat.dev` / `pypi.org`），trainer 环境 sft92 里也没有 `boat_sdk`。D15 的看门狗依赖 trainer 能调 boat API；照原样部署的话，每次 poll 只会打一条 `sweep failed` 警告，孤儿沙箱还是要等 TTL。
+- 修复：
+  1. `boat_client.SdkBoatClient` 支持 `YETO_BOAT_PROXY`（HTTP CONNECT 代理，写到 boat-sdk `Configuration.proxy`）。
+  2. `tools/probes/s29_spot/boat_connect_proxy.py`：放在 npu1 内网地址上的最小 CONNECT 代理，只放行 `boat.dev:443`。n4 的 sshd 拒绝 remote forward，所以不走 SSH 隧道。
+  3. boat-sdk 1.10.0 wheel 在 npu1 下载后，`pip install --no-deps --target /data/work/s29r/pysite`，再加进 trainer 的 PYTHONPATH。
+- 复测：n4 上 `process_client().list_sandboxes()` 通过代理返回正常；4a 的删除就是走这条路径完成的。
+- 遗留：launcher 还不会检查 trainer 侧的 boat 连通性。建议在 relay pump 启动时探测一次 `list_sandboxes`，失败就大声告警。
+
+### 复测中排除的问题（操作失误，不是缺陷）
+
+- 07:38 重启 trainer 岛 1 时误用了 TB 版 `island.sh`，GSM syncer 以 `HELLO syncer semantic profile does not match` 拒绝。用 `island-gsm.sh` 重做后 D11 通过。
+- 08:24 第一次 D4 演练时 fresh syncer 误用了 TB 版 `syncer.sh`，trainer 同样因 profile 不符被拒。08:35 用 `syncer-gsm.sh` 重做后通过。
+- 08:10 新 run 的 trainer 岛 0 启动时 `ray.init` 等待 180 s 超时（ISLAND-RC=1），直接重启后恢复正常。按偶发基础设施问题记录。

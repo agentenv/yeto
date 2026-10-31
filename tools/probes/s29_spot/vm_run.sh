@@ -41,7 +41,8 @@ SGL=$("$PY" -c "import sglang; print(sglang.__version__)")
 "$PY" "$YETO/tools/probes/s29_spot/spot_plan.py" --island "$ISLAND" --public-ip "$PUBLIC_IP" \
   --engine-version "$SGL" --python "$PY" --card-model "$CARD" --base "$BASE" --data "$DATA" --out "$OUT" \
   --mode "${MODE:-tb21}" --groups-per-round "${GROUPS_PER_ROUND:-1}" \
-  --max-in-flight "${MAX_IN_FLIGHT:-4}" --starts-per-hour "${STARTS_PER_HOUR:-8}" > "$OUT/plan.json"
+  --max-in-flight "${MAX_IN_FLIGHT:-4}" --starts-per-hour "${STARTS_PER_HOUR:-8}" \
+  --run-id "${RUN_ID:-}" --idle-vm-ttl-s "${IDLE_VM_TTL_S:-600}" > "$OUT/plan.json"
 "$PY" -c "import json; d=json.load(open('$OUT/plan.json')); json.dump(d['spec'], open('$OUT/spec.json','w'), indent=1)"
 eval "$("$PY" -c "import json,shlex; d=json.load(open('$OUT/plan.json')); print('\n'.join(f'export {k}={shlex.quote(v)}' for k,v in d['env'].items()))")"
 

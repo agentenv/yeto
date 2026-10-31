@@ -274,3 +274,36 @@ def test_spot_plan_env_sets_labels_and_short_ttls():
     assert env["YETO_BOAT_POOL_IDLE_VM_TTL_S"] == "600"
     assert int(env["YETO_BOAT_POOL_IDLE_TTL_S"]) < 600
     assert "YETO_BOAT_RUN_ID" not in plan.env(data="/d", public_ip="1.2.3.4")
+
+
+def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
+    """S29 D16: maybe_start_relay_pump gave the watchdog no emitter, so
+    rl_boat_orphans_deleted never reached the trainer log."""
+    import json
+
+    from yeto.rl.event_echo import PREFIX
+    from yeto.rl.harness.harbor.boat_labels import OrphanWatchdog
+    from yeto.rl.spot_rollout.relay_buffer import pump_event_printer
+
+    class _Client:
+        def __init__(self):
+            from yeto.rl.harness.harbor.boat_labels import SandboxInfo
+            self.boxes = [SandboxInfo("bx_1", "ytl1.r1.s29-spot-1.aaa.t", "running")]
+            self.deleted = []
+
+        def list_sandboxes(self):
+            return [b for b in self.boxes if b.sandbox_id not in self.deleted]
+
+        def delete(self, sandbox_id):
+            self.deleted.append(sandbox_id)
+
+    now = [0.0]
+    dog = OrphanWatchdog.from_env({"YETO_BOAT_RUN_ID": "r1", "YETO_BOAT_ORPHAN_LEASE_S": "10"},
+                                  emit=pump_event_printer(1), client_factory=_Client, clock=lambda: now[0])
+    dog.observe("s29-spot-1", "aaa")
+    now[0] = 11.0
+    assert dog.poll() == ["bx_1"]
+    line = [l for l in capsys.readouterr().out.splitlines() if l.startswith(PREFIX)][0]
+    record = json.loads(line[len(PREFIX):])
+    assert record["event"] == "rl_boat_orphans_deleted" and record["island_id"] == 1
+    assert record["sandboxes"] == ["bx_1"] and record["reason"] == "island lease expired"

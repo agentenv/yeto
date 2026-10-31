@@ -407,6 +407,20 @@ def relay_sampler_buffer(environ: Mapping[str, str] | None = None) -> "RelaySamp
     return RelaySampleBuffer(producer)
 
 
+def pump_event_printer(channel: int) -> Callable[..., None]:
+    """S29 D16: the emitter of the relay pump and its boat orphan watchdog: one
+    ``YETO_RL_EVENT <json>`` stdout record per event (``island_id`` = the relay
+    channel, which is the trainer island's id), the format the trainer log and
+    the launcher's tape collector read."""
+    from yeto.rl.event_echo import format_record
+
+    def emit(event: str, **fields: Any) -> None:
+        record = {"island_id": int(channel), "time_unix": time.time(), "event": str(event), **fields}
+        print(format_record(record), flush=True)
+
+    return emit
+
+
 def maybe_start_relay_pump(reader_buffer: Any, environ: Mapping[str, str] | None = None) -> RelayPump | None:
     """Start the pump for a trainer's buffer reader when :data:`RELAY_ADDR_ENV`
     is set (None otherwise: the buffer is read as before). The pump writes
@@ -422,9 +436,13 @@ def maybe_start_relay_pump(reader_buffer: Any, environ: Mapping[str, str] | None
     writer = FileSampleBuffer(reader_buffer.store, batch_size=1)
     from yeto.rl.harness.harbor.boat_labels import OrphanWatchdog
 
-    watchdog = OrphanWatchdog.from_env(env)  # S29 D15: None without YETO_BOAT_RUN_ID
+    emit = pump_event_printer(channel)
+    # S29 D15: None without YETO_BOAT_RUN_ID. S29 D16: the watchdog and the pump
+    # print their events (rl_boat_orphans_deleted, rl_relay_item_rejected), which
+    # were dropped without an emitter.
+    watchdog = OrphanWatchdog.from_env(env, emit=emit)
     pump = RelayPump(RelayConsumer(parse_addr(addr), channel), writer, reader=reader_buffer,
-                     prefetch_groups=prefetch, watchdog=watchdog)
+                     prefetch_groups=prefetch, watchdog=watchdog, emit=emit)
     if watchdog is not None:
         print(f"[yeto-relay] boat orphan watchdog: run {watchdog.run} lease {watchdog.lease_s:.0f} s",
               flush=True)

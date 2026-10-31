@@ -38,6 +38,7 @@ from yeto.rl.agentic.loop_local import LoopLocal
 
 API_HOST = "https://boat.dev/api/v1"
 API_KEY_ENV = "BOAT_API_KEY"
+PROXY_ENV = "YETO_BOAT_PROXY"  # http://host:port of an HTTP(S) CONNECT proxy for the boat API
 CLI_CONFIG = Path("~/.config/ascii/boat/config.json")
 
 # Plan limits (box_20).  Override per deployment with the env names below.
@@ -109,7 +110,11 @@ class SdkBoatClient:
         from boat_sdk import ApiClient, Configuration
         from boat_sdk.api.boat_api import BoatApi
 
-        self._client = ApiClient(Configuration(host=host, access_token=token or load_token()))
+        config = Configuration(host=host, access_token=token or load_token())
+        proxy = os.environ.get(PROXY_ENV, "").strip()
+        if proxy:  # S29 D17: a trainer node without direct internet (n4) reaches boat through one
+            config.proxy = proxy
+        self._client = ApiClient(config)
         self._api = BoatApi(self._client)
         self._create_attempts = create_attempts
         self._sleep = sleep

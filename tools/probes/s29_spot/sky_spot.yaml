@@ -11,6 +11,9 @@ resources:
 envs:
   ISLAND: 0
   CARD: H100
+  RUN_ID: ""  # S29 D15: boat sandbox labels; the same YETO_BOAT_RUN_ID on the trainers
+  MAX_IN_FLIGHT: 4
+  STARTS_PER_HOUR: 8
 
 secrets:
   BOAT_API_KEY: null
