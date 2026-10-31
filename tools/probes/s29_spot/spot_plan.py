@@ -90,15 +90,25 @@ def fake_spec(gsm: dict[str, Any], *, reload_every: int = 1, version_board: bool
     return out
 
 
-def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 8) -> dict[str, str]:
-    return {
+def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 8,
+        run_id: str = "", island: int | None = None, idle_vm_ttl_s: int = 600) -> dict[str, str]:
+    # S29 D15: an idle VM's boat TTL (a preempted VM's idle sandboxes stop by then);
+    # the pool deletes an idle VM a little earlier itself.
+    idle_ttl_s = max(60, int(idle_vm_ttl_s) - 120)
+    labels = {}
+    if run_id:  # boat_labels: sandboxes named after run / island; swept at sampler start
+        labels = {"YETO_BOAT_RUN_ID": run_id}
+        if island is not None:
+            labels["YETO_BOAT_ISLAND"] = f"s29-spot-{island}"
+    return {**labels,
         "HARBOR_ENV_TYPE": "boat", "HARBOR_TASKS_DIR": f"{data}/harbor-tasks",
         "HARBOR_TRIALS_DIR": "/tmp/harbor-trials", "HARBOR_SETUP_RETRIES": "1",
         "HARBOR_ENV_KWARGS": json.dumps({"ttl_s": 3600}, separators=(",", ":")),
         "AGENT_MODEL_NAME": "qwen3-0.6b", "AGENT_TIMEOUT": "900", "AGENT_TRIAL_TIMEOUT": "900",
         "YETO_BOAT_MAX_ACTIVE": str(max_in_flight), "YETO_BOAT_STARTS_PER_MINUTE": "4",
         "YETO_BOAT_STARTS_PER_HOUR": str(starts_per_hour),
-        "YETO_BOAT_POOL": "1", "YETO_BOAT_POOL_IDLE_TTL_S": "1500", "YETO_BOAT_POOL_IDLE_VM_TTL_S": "1800",
+        "YETO_BOAT_POOL": "1", "YETO_BOAT_POOL_IDLE_TTL_S": str(idle_ttl_s),
+        "YETO_BOAT_POOL_IDLE_VM_TTL_S": str(int(idle_vm_ttl_s)),
         "YETO_BOAT_POOL_MAX_IDLE": str(max_in_flight), "YETO_BOAT_CODEX_CACHE": "1",
         "YETO_CODEX_CONTEXT_WINDOW": str(MAX_MODEL_LEN), "YETO_CODEX_AUTO_COMPACT_RATIO": "0.85",
         "YETO_RECORDS_PROXY_PUBLIC_BASE": f"http://{public_ip}:{PROXY_PORT}",
@@ -123,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reload-every", type=int, default=1)
     p.add_argument("--no-version-board", action="store_true")
     p.add_argument("--groups-per-round", type=int, default=1)
+    p.add_argument("--run-id", default="", help="boat sandbox labels (S29 D15); same value on the trainer")
+    p.add_argument("--idle-vm-ttl-s", type=int, default=600)
     a = p.parse_args(argv)
     sp = spec(island=a.island, islands=a.islands, base=a.base, data=a.data, out=a.out,
               engine_version=a.engine_version, python=a.python, card_model=a.card_model,
@@ -133,7 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         sp = fake_spec(sp, reload_every=a.reload_every, version_board=not a.no_version_board)
     sp["syncer"] = a.syncer
     print(json.dumps({"spec": sp, "env": env(data=a.data, public_ip=a.public_ip, max_in_flight=a.max_in_flight,
-                                                      starts_per_hour=a.starts_per_hour)}, indent=1))
+                                                      starts_per_hour=a.starts_per_hour, run_id=a.run_id,
+                                                      island=a.island, idle_vm_ttl_s=a.idle_vm_ttl_s)}, indent=1))
     return 0
 
 

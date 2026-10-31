@@ -234,10 +234,12 @@ class RelayPump:
 
     def __init__(self, consumer: RelayConsumer, buffer: Any, *, reader: Any | None = None,
                  prefetch_groups: int = 64, wait_s: float = 5.0,
-                 emit: Callable[..., None] | None = None) -> None:
+                 emit: Callable[..., None] | None = None, watchdog: Any | None = None) -> None:
         """``buffer``: the writer instance of the local buffer; ``reader``: the
         reader's instance (its ``read_cursor`` bounds the prefetch; None: the
-        writer's own cursor)."""
+        writer's own cursor); ``watchdog``: a ``boat_labels.OrphanWatchdog``
+        (S29 D15) that sees every item's sampler incarnation and deletes the
+        boat sandboxes of a spot island that left."""
         if int(prefetch_groups) < 1:
             raise ValueError("prefetch_groups must be >= 1")
         self.consumer = consumer
@@ -246,6 +248,7 @@ class RelayPump:
         self.prefetch_groups = int(prefetch_groups)
         self.wait_s = float(wait_s)
         self.emit = emit
+        self.watchdog = watchdog
         self.appended = 0
         self.duplicates = 0
         self.rejected = 0
@@ -279,6 +282,10 @@ class RelayPump:
                     self.emit("rl_relay_item_rejected", item_id=item.item_id, error=str(error)[:300])
                 self.consumer.ack(item.item_id)
                 continue
+            if self.watchdog is not None:
+                round_ = header.get("sampler_round")
+                if isinstance(round_, Mapping):
+                    self.watchdog.observe(round_.get("sampler"), round_.get("incarnation"))
             sample_id = str(header["sample_id"])
             if sample_id in self._known:
                 self.duplicates += 1
@@ -313,6 +320,8 @@ class RelayPump:
 
     def run(self) -> None:
         while not self._stop.is_set():
+            if self.watchdog is not None:
+                self.watchdog.poll()  # never raises (S29 D15)
             try:
                 if self.step() == 0:
                     self._stop.wait(min(1.0, self.wait_s))
@@ -411,8 +420,14 @@ def maybe_start_relay_pump(reader_buffer: Any, environ: Mapping[str, str] | None
     channel = int(env.get(RELAY_CHANNEL_ENV, "0"))
     prefetch = int(env.get(RELAY_PREFETCH_ENV, "64"))
     writer = FileSampleBuffer(reader_buffer.store, batch_size=1)
+    from yeto.rl.harness.harbor.boat_labels import OrphanWatchdog
+
+    watchdog = OrphanWatchdog.from_env(env)  # S29 D15: None without YETO_BOAT_RUN_ID
     pump = RelayPump(RelayConsumer(parse_addr(addr), channel), writer, reader=reader_buffer,
-                     prefetch_groups=prefetch)
+                     prefetch_groups=prefetch, watchdog=watchdog)
+    if watchdog is not None:
+        print(f"[yeto-relay] boat orphan watchdog: run {watchdog.run} lease {watchdog.lease_s:.0f} s",
+              flush=True)
     print(f"[yeto-relay] pump started: relay {addr} channel {channel} prefetch {prefetch} groups",
           flush=True)
     return pump.start()

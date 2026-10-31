@@ -272,6 +272,25 @@ class BoatSandbox:
             with contextlib.suppress(Exception):
                 self.sandbox_id = await create
             raise
+        await self._label()
+
+    async def _label(self) -> None:
+        """S29 D15: name the sandbox after its run / island / incarnation
+        (``boat_labels``) so a successor can delete it if this process dies
+        without its exit cleanup.  A failed rename is logged (the TTL stays the
+        backstop); a client without ``set_name`` (a test fake) is skipped."""
+        from .boat_labels import labelled_name, labels_from_env
+
+        labels = labels_from_env()
+        set_name = getattr(self._client, "set_name", None)
+        if labels is None or set_name is None or self.sandbox_id is None:
+            return
+        try:
+            await asyncio.shield(asyncio.to_thread(set_name, self.sandbox_id,
+                                                   labelled_name(labels, self._name)))
+        except Exception:  # noqa: BLE001
+            logger.warning("boat sandbox %s: label failed; only its TTL stops it if this process dies",
+                           self.sandbox_id, exc_info=True)
 
     async def _wait_ready(self) -> None:
         loop = asyncio.get_running_loop()

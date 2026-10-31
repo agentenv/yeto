@@ -133,6 +133,30 @@ class SpotChannels:
             self.version.close()
 
 
+def label_boat_sandboxes(spec: Mapping[str, Any], incarnation: str,
+                         environ: Mapping[str, str] | None = None) -> list[str]:
+    """S29 D15: with ``YETO_BOAT_RUN_ID`` set, label this process's boat sandboxes
+    with the island (``sampler_id``) and this incarnation, and delete the
+    sandboxes an earlier incarnation of this island left (a preempted VM runs
+    no exit cleanup). Returns the deleted sandbox ids. The labels go to
+    ``os.environ`` (the boat sandboxes of this process read them there)."""
+    import os
+
+    from yeto.rl.harness.harbor import boat_labels
+
+    env = os.environ if environ is None else environ
+    run = str(env.get(boat_labels.RUN_ID_ENV, "")).strip()
+    if not run:
+        return []
+    labels = {boat_labels.RUN_ID_ENV: run, boat_labels.ISLAND_ENV: str(spec["sampler_id"]),
+              boat_labels.INCARNATION_ENV: str(incarnation)}
+    os.environ.update(labels)
+    deleted = boat_labels.sweep_stale_incarnations(labels)
+    print(f"[spot-sampler] boat labels: run {run} island {spec['sampler_id']} incarnation {incarnation}; "
+          f"deleted {len(deleted)} sandbox(es) of earlier incarnations", flush=True)
+    return deleted
+
+
 def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
              incarnation: str | None = None, resource_sampler: Any = None) -> tuple[int, SpotChannels | None]:
     """Run the engine sampler island of ``spec`` on the spot channels; returns
@@ -144,6 +168,7 @@ def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = Non
     spec.setdefault("num_rollouts", NO_LIMIT_ROUNDS)
     spec.setdefault("store", str(Path(spec["work_dir"]).expanduser() / "store"))
     incarnation = incarnation or new_incarnation()
+    label_boat_sandboxes(spec, incarnation, environ)
     made: dict[str, SpotChannels] = {}
 
     def stores(inc: str, emit: Callable[..., None]) -> tuple[Any, Any]:
