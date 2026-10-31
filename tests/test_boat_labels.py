@@ -328,3 +328,29 @@ def test_d19_an_engine_sampler_labels_its_incarnation(monkeypatch):
               incarnation="abc")  # the spot sampler already labelled this incarnation
     entry.run({"sampler_id": "spot-0"}, environ={}, incarnation="abc")  # no run id: nothing
     assert seen == []
+
+
+def test_d19_the_operator_sweep_deletes_a_run_island_including_unlabelled_incarnations(monkeypatch, capsys):
+    from yeto.rl.harness.harbor import boat_labels as bl
+
+    class _C:
+        def __init__(self):
+            self.boxes = [bl.SandboxInfo("a", "ytl1.r1.spot-0..t", "idle"),
+                          bl.SandboxInfo("b", "ytl1.r1.spot-0.x1.t", "running"),
+                          bl.SandboxInfo("c", "ytl1.r1.spot-1.x1.t", "running"),
+                          bl.SandboxInfo("d", "ytl1.r2.spot-0.x1.t", "running"),
+                          bl.SandboxInfo("e", "other", "running")]
+            self.deleted = []
+
+        def list_sandboxes(self):
+            return self.boxes
+
+        def delete(self, sid):
+            self.deleted.append(sid)
+
+    c = _C()
+    monkeypatch.setattr(bl, "_default_client", lambda: c)
+    assert bl.main(["sweep", "--run", "r1", "--island", "spot-0", "--dry-run"]) == 0 and c.deleted == []
+    assert capsys.readouterr().out.split() == ["a", "b"]
+    assert bl.main(["sweep", "--run", "r1", "--island", "spot-0"]) == 0
+    assert c.deleted == ["a", "b"]

@@ -37,7 +37,11 @@ if [ ! -f "$R1/.complete" ]; then
   echo "[s29-120] r1-v0 from the Modal volume in $(( $(date +%s) - t0 )) s ($(du -sh "$R1" | cut -f1))"
 fi
 [ -f "$STORE/policy-releases/LATEST.json" ] || cp "$R1/RELEASE.json" "$STORE/policy-releases/LATEST.json"
-[ -d "$STORE/prompts" ] || modal volume get --force $VOL /xc120/prompts "$STORE/"
+# PROMPTS_VOL: a prompt file on the volume (default the TB2.1 rows of xc120); S29: the 30 tasks
+# whose earlier groups had mixed rewards, so GRPO advantages are not all zero
+if [ ! -s "$STORE/prompts/agentic.jsonl" ]; then
+  mkdir -p "$STORE/prompts"; modal volume get --force $VOL "${PROMPTS_VOL:-/xc120/prompts/agentic.jsonl}" "$STORE/prompts/agentic.jsonl"
+fi
 [ -d "$STORE/harbor-tasks" ] || modal volume get --force $VOL /xc120/harbor-tasks "$STORE/"
 PUBLIC_IP=$(curl -s --max-time 10 https://api.ipify.org)
 SGL=$("$PY" -c "import sglang; print(sglang.__version__)")
@@ -48,8 +52,8 @@ import os; os.environ["YETO_G120_GPU"] = os.environ.get("CARD", "H100"); os.envi
 src = open("$YETO/tools/probes/s28_g120/agentic_sampler_app.py").read().split("\nif os.environ.get(\"PLAN_ONLY\")")[0]
 ns = {"__name__": "s29plan", "__file__": "$YETO/tools/probes/s28_g120/agentic_sampler_app.py"}
 exec(compile(src, "agentic_sampler_app", "exec"), ns)
-cfg = {**ns["DEFAULTS"], "store": "$STORE", "base_dir": "$R1", "groups_per_round": 2, "samples_per_group": 4,
-       "max_in_flight": 8, "max_backlog_groups": 4, "num_rollouts": 64, "mem_fraction": 0.85}
+cfg = {**ns["DEFAULTS"], "store": "$STORE", "base_dir": "$R1", "groups_per_round": int(os.environ.get("GROUPS", "4")), "samples_per_group": 4,
+       "max_in_flight": int(os.environ.get("MAX_IN_FLIGHT", "16")), "max_backlog_groups": 8, "num_rollouts": 64, "mem_fraction": 0.85}
 sp = ns["spec"]("$STORE", "$OUT", engine_version="$SGL", cfg=cfg)
 sp["sampler_id"] = "spot-0"; sp["buffer_shards"] = ["spot-0"]
 json.dump(sp, open("$OUT/spec.json", "w"), indent=1)
