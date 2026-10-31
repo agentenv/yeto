@@ -1445,6 +1445,11 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     if args.global_rounds < 1 or args.fragments < 1 or args.total_fragment_steps != args.global_rounds * args.fragments:
         raise ValueError("full-parameter fragment budget: --total-fragment-steps must equal "
                          "--global-rounds x --fragments")
+    if async_rounds:
+        from yeto.rl.engine.run_flags import local_training_steps_line
+
+        print(local_training_steps_line(args.global_rounds, args.fragments,
+                                        who=f"yeto-verl island {args.learner_id}"), flush=True)  # S29 D7
     if not _sha256_hex(args.parameter_layout_sha256) or not _sha256_hex(args.syncer_profile_sha256):
         raise ValueError("a synced full-parameter island needs --parameter-layout-sha256 and "
                          "--syncer-profile-sha256 (64 lowercase hex)")

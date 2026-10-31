@@ -80,7 +80,7 @@ pub const MAX_TASK_REPORT: u64 = (1 << 20) + 12;
 pub fn init_digest_payload_len(fragments: usize) -> u64 {
     4 + 32 + 4 + 4 + 32 * fragments as u64
 }
-pub const LEAVE_REASON_NAMES: [&str; 7] = [
+pub const LEAVE_REASON_NAMES: [&str; 8] = [
     "finished",
     "lease_expired",
     "stopped",
@@ -88,6 +88,7 @@ pub const LEAVE_REASON_NAMES: [&str; 7] = [
     "infra_failed",
     "training_failed",
     "config_mismatch",
+    "fenced",
 ];
 
 /// Tape name of a LEAVE reason byte.

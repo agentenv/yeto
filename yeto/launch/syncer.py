@@ -721,7 +721,8 @@ def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
         # restarted cannot rejoin the running group (initial broadcast check).
         print("[launcher] WARNING: spot rollout without an island pool: a trainer island that "
               "restarts cannot rejoin the running group; set --rl-sync-island-lease-s (and a quorum "
-              "below the island count) to make the trainers rejoinable", file=sys.stderr)
+              "below the island count) to make the trainers rejoinable (a spot rollout run gets one "
+              "by default unless --rl-spot-fixed-roster)", file=sys.stderr)
     return ((f" --max-subscribers {subscribers}" if subscribers else "")
             + (" --sample-relay" if relay else ""))
 

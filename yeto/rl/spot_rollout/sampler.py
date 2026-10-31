@@ -125,6 +125,19 @@ class SpotChannels:
         return (self.client.run_finished() or self.client.fenced() or self.syncer_lost()
                 or self.buffer.gone or self.version.regressed)
 
+    def stop_reason(self) -> tuple[Any, dict[str, Any]] | None:
+        """(LeaveReason, detail) of a fence stop, None otherwise (the island
+        then leaves FINISHED as before). S29 D4: a sampler that left because a
+        fresh syncer replaced its run leaves FENCED, fenced="other run"."""
+        from yeto.rl.pool_client import LeaveReason
+
+        if self.version.regressed:
+            return LeaveReason.FENCED, {"fenced": "other run", "run_merged_version": self.version.merged_version,
+                                        "highest_merged_version": self.version.highest}
+        if self.client.fenced():
+            return LeaveReason.FENCED, {"fenced": "superseded"}
+        return None
+
     def close(self) -> None:
         try:
             self.client.close()
@@ -180,6 +193,7 @@ def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = Non
     try:
         rounds = entry.run(spec, environ=environ, incarnation=incarnation, stores=stores,
                            stop=lambda: "channels" in made and made["channels"].stopping(),
+                           stop_reason=lambda: made["channels"].stop_reason() if "channels" in made else None,
                            resource_sampler=resource_sampler)
     finally:
         if "channels" in made:
@@ -200,6 +214,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[spot-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
     finished = channels is not None and channels.client.run_finished()
+    fence = None if channels is None else channels.stop_reason()
+    if fence is not None:
+        print(f"[spot-sampler] left {fence[0].name}: fenced ({fence[1]['fenced']})", flush=True)
     print(f"[spot-sampler] done: {rounds} round(s); the run "
           f"{'finished' if finished else 'did not finish'}", flush=True)
     hold_after_reclaim()

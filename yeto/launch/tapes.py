@@ -135,7 +135,8 @@ _ISLAND_NAME_RE = re.compile(r"-l(\d+)-")
 # rl_learner_finalized. INFRA_FAILED, TRAINING_FAILED, CONFIG_MISMATCH, unknown
 # codes and the pre-reason-code "requested" stay failures (syncer and launcher
 # ship from one build; older runs are not resumed).
-EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired"})
+# "fenced" (S29 D4): the member belongs to a run that is gone, not this one.
+EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired", "fenced"})
 
 
 def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
