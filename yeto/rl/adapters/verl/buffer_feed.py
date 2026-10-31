@@ -211,6 +211,19 @@ def group_rows(samples: Sequence[Mapping[str, Any]], *, uid: str, param_versions
     }
 
 
+def oversized(samples: Sequence[Mapping[str, Any]], shape: RowShape,
+              tokenize: Callable[[str], Sequence[int]] | None = None) -> str | None:
+    """S29 D21: why one sample of the group does not fit ``shape`` (None: all fit)."""
+    for sample in samples:
+        sample = complete_prompt_tokens(sample, tokenize)
+        length = int(sample.get("response_length") or 0)
+        prompt = len(sample.get("tokens") or ()) - length
+        if prompt > shape.prompt_length or length > shape.response_length:
+            return (f"sample {sample.get('index')}: prompt {prompt} / response {length} tokens, "
+                    f"rows {shape.prompt_length} / {shape.response_length}")
+    return None
+
+
 def _position_ids(attention: Sequence[int]) -> list[int]:
     """verl's ``compute_position_id_with_mask``: cumulative sum minus one, floored at 0."""
     out, seen = [], 0
@@ -308,12 +321,24 @@ class BufferFeed:
     def pull(self) -> dict[str, Any] | None:
         if self._last is not None:
             raise BufferFeedError("pull before the previous group was kept or dropped")
-        item = self._next()
-        if item is None:
-            return None
-        samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
-        if not samples:
-            raise BufferFeedError(f"buffer position {item.position}: empty group")
+        while True:
+            item = self._next()
+            if item is None:
+                return None
+            samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
+            if not samples:
+                raise BufferFeedError(f"buffer position {item.position}: empty group")
+            too_long = oversized(samples, self.shape, self.tokenize)
+            if too_long is None:
+                break
+            # S29 D21: a group with a sample wider than the rows (an agentic prompt past
+            # max_prompt_length, a response past max_response_length) is dropped and recorded,
+            # not fatal: before, group_rows raised in keep() and the island left INFRA_FAILED
+            # (run s29r120-b: prompt 8200 > 8192). RL never truncates a trajectory.
+            self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
+                         "kept": False, "dropped": "over_length", "detail": too_long,
+                         "source": (item.entry.provenance or {}).get("sampler_id"), "samples": len(samples)})
+            self.pulled_positions.append(int(item.position))
         versions = [sample_version(s) for s in samples]
         local = tuple(self._local(v) for v in versions)
         lengths = tuple(int(s.get("response_length") or 0) for s in samples)

@@ -15,6 +15,10 @@ mkdir -p "$OUT" "$STORE/policy-releases" "$STORE/sample-buffer"
 exec > >(tee -a "$OUT/vm_run.log") 2>&1
 echo "[s29-120] start $(date -u +%FT%TZ)"; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee "$OUT/gpu.txt"
 PY=/opt/sglang/bin/python3; export PATH=/opt/sglang/bin:$PATH
+# the mirror's later `docker exec` calls do not see the sky secrets; keep the Modal token in a file
+if [ -n "${MODAL_TOKEN_ID:-}" ] && [ ! -f /root/.modal.toml ]; then
+  (umask 077; printf '[s29]\ntoken_id = "%s"\ntoken_secret = "%s"\nactive = true\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > /root/.modal.toml)
+fi
 "$PY" -c "import modal" 2>/dev/null || "$PY" -m pip install -q modal==1.2.6
 if [ ! -f /opt/yeto/image/versions.lock.json ]; then
   "$PY" - <<PYEOF > /tmp/harbor_layer.sh

@@ -45,7 +45,7 @@ export TRITON_CACHE_DIR=$MINE/triton_cache
 # `ray stop --force` kills every Ray process of the user on the node, including another
 # task's cluster on the same nodes (10-31: the idle lp-e1 cluster on n1-n3).
 own_ray_pids() { ps -eo pid,args | awk -v d="$OUT/ray" -v p=":$RAY_PORT" \
-  '($0 ~ d || $0 ~ ("--port=" substr(p, 2)) || $0 ~ ("gcs-address=[0-9.]+" p)) && $0 ~ /ray/ && !/awk/ {print $1}'; }
+  '($0 ~ d || $0 ~ ("port=" substr(p, 2) "( |$)") || $0 ~ ("gcs-address=[0-9.]+" p)) && $0 ~ /ray/ && !/awk/ {print $1}'; }
 for p in $(own_ray_pids); do kill "$p" 2>/dev/null; done; sleep 2
 for p in $(own_ray_pids); do kill -9 "$p" 2>/dev/null; done
 if [ "$ROLE" = head ]; then

@@ -17,3 +17,16 @@ proxy up GB 8.7 down GB 0.16
 15:54:32 PREEMPTION #4 (H200 s29r-120h, ~15:40)
 16:01:18 H200 VM restarted, vm120_run relaunched (store persisted)
 16:08:14 PREEMPTION #5 (H200, 7 min after start). Stop-loss: delete VM, stop trainer
+16:18:34 120B retry: trainer s29r120-b (NGROUPS=4, store s29r120b, mixed-reward 30 tasks) started; capacity scan loop every 20 min
+16:18:45 capacity: eu-north1 fabric-7 8xH200 preemptible avail=1 (instances) MEDIUM -> launch
+16:35:45 s29r-120c up 195.242.29.197
+17:09:04 trainer INFRA_FAILED (BufferFeedError over-long sample); VM stopped by me (stop-loss)
+17:11:05 D21 fixed; trainer s29r120-c (yetosrc-d21, store s29r120c with the 120c VM's groups) launched 17:10:58
+17:12:29 relaunched s29r120-c with RESPLEN=121856 (max_prompt 9216 > 8200)
+17:29:37 VM start: 
+17:35:18 VM start RESOURCE_EXHAUSTED (code 8); retry loop every 5 min
+17:41:42 eu-north1 no capacity; s29r-120c deleted; launch s29r-120d in eu-west1 (H200x8 spot MEDIUM)
+17:55:02 s29r-120d eu-west1: sky SSH timeout 600s (like uk-south2 before) -> down; try us-central1
+18:01:54 run c step 1: grad_norm 0.182, pg_loss -0.0031, adv in [-1.5,0.5], no NaN (verl-metrics-0.jsonl). us-central1 H200 spot: no resources
+18:17:16 eu-west1 VM unreachable from dev machine (port 22), reachable from npu1 -> ssh ProxyCommand via npu1 ncat; sky launch again on s29r-120f
+18:28:35 s29r-120f (eu-west1) preempted ~18:25 before setup completed. Stop: delete VM, stop trainer s29r120-c

@@ -771,3 +771,26 @@ def test_release_only_versions_is_planned_from_the_flag():
               "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60")
     assert "release_only" not in sample_buffer_section(_entry_args(*common))
     assert sample_buffer_section(_entry_args(*common, "--rl-release-only-versions", "2,4"))["release_only"] == [2, 4]
+
+
+def test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal(tmp_path):
+    """S29 D21 (run s29r120-b): a sample past the row widths used to raise in keep()
+    and end the island INFRA_FAILED; the feed now records the group dropped
+    (over_length) and goes on to the next one."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok1")
+    writer.write([_sample(0, index=0), _sample(0, index=1, prompt=tuple(range(1, 8)))], group_key="wide")
+    writer.write([_sample(0, index=0, response=tuple(range(1, 10)))], group_key="long")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok2")
+    reader, vmap, added, records = _buffer(tmp_path), VersionMap(), [], []
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=added.append,
+                         record=records.append, sleep=lambda s: None)
+    for _ in range(2):
+        assert feed.pull() is not None
+        feed("yeto_keep_last")
+    assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
+        (0, True, None), (1, False, "over_length"), (2, False, "over_length"), (3, True, None)]
+    assert "prompt 7" in records[1]["detail"] and "response 9" in records[2]["detail"]
+    assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf3"]
+    assert feed.pulled_positions == [0, 1, 2, 3] and feed.read_cursor() == 4

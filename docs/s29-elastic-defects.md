@@ -252,3 +252,29 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 3. VM 被 Nebius stop/start 后，sky 容器里的 sshd 不会自己恢复，sky 把集群标成 UNHEALTHY。mirror 已改为在宿主机上 `docker exec` 进容器。
 
 费用（估算）：8 卡 VM 累计开机约 1.7 h × $6.32 ≈ $11（被抢占后的 STOPPED 时段不计 GPU 费用）。0.6B 阶段的 RTX6000 约 $4。代理流量全程 8.86 GB，120B 阶段新增 0（mihomo `/connections` 计数为 up 8.70 / down 0.16 GB，没有变化）。
+
+## 120B 重试（11-01 00:13–02:30 CST）：第 1 步拿到真实梯度，下发与抢占重入两项没跑到
+
+- **准备**：
+  - 从 Modal 上历史的 116 组里筛出 30 个"有对有错"的任务（`/s29r120/prompts/agentic.jsonl`）。
+  - trainer 每步 4 组 × 4 条，开 VM 前先起好 trainer。
+  - base 权重下载到 VM 本地盘，同一台 VM 重开时复用。
+  - 用 `nebius capacity resource-advice list` 扫容量（`120b/capacity-scan.txt`）。
+- **结果**：run `s29r120-c` 第 1 步 grad_norm 0.1822、pg_loss −0.0031，advantage 在 [−1.5, 0.5]，ppo_kl 1.4e−5，无 NaN（`120b/s29r120c-ev.tgz` 里的 `verl-metrics-0.jsonl`）。用的是 VM s29r-120c 在 16:46–17:05Z 产出的 4 组：其中 2 组有对有错，1 组全对，1 组全错。
+- **未完成**：第 2 步、v2 下发、spot 岛用 v2 出样本、抢占 → 重开 → 重入 → 继续训练。原因是 8 卡 spot 实际不可用：
+  - eu-north1 的 s29r-120c 被我手动停掉（D21）后，`instance start` 报 RESOURCE_EXHAUSTED。
+  - eu-west1 的 s29r-120d 和 s29r-120f：本机直连不到 VM 的 22 端口（npu1 能到），sky setup 两次超时；第二台改为经 npu1 中转后，没等 setup 完成就被抢占。
+  - us-central1：sky 申请时报无资源，而 advice 当时显示 MEDIUM。
+  - 资源接口显示的 MEDIUM（avail=1）与实际能否开机、能撑多久对不上。
+
+### D21 超长样本让 trainer 整轮致命退出（已修）
+
+- 现象：run `s29r120-b` 中，`buffer_feed.group_rows` 对 prompt 8200 > 8192 的样本抛 `BufferFeedError`，`keep()` 里没有接住，岛以 INFRA_FAILED 退出（exit 1，运行 2385 s 后）。
+- 修复：`BufferFeed.pull()` 先用 `oversized()` 检查整组；有任何一条超出 rows，就把这组记为 `kept:false, dropped:"over_length"`（附原因），继续取下一组。RL 不截断轨迹。单测 `test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal`。trainer 侧把这个修复放进了独立副本 `/data/work/s29r120/yetosrc-d21`。
+- 配置：把 `RESPLEN` 改为 121856，max_prompt = 131072 − 121856 = 9216，超过本批 agentic prompt 的最长值 8200。
+
+### D19 遗留与 D20 已修
+- D19 遗留：新增 `python -m yeto.rl.harness.harbor.boat_labels sweep --run R --island I [--dry-run]`。VM 硬停且不再重开时，由运维或 mirror 调用，删除该 run/island 的全部沙箱，包括 incarnation 为空的旧沙箱。有单测。
+- D20：仓库新增 `tools/probes/s28_g120/ray_cluster.sh`，只停本 run 的 Ray 进程（按 `$OUT/ray` 和自己的端口匹配），不再用 `ray stop --force`。重启时发现它漏掉了 `--gcs_server_port`，已修正匹配规则。另一任务的 lp-e1 集群全程未受影响。
+
+费用（估算，新增部分）：s29r-120c 约 0.75 h、120d 约 0.2 h、120f 约 0.35 h，合计约 1.3 h × $6.32 ≈ $8.2，在 $30 预算内。代理流量新增 0。
