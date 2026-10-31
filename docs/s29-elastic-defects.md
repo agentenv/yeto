@@ -195,3 +195,24 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - 07:38 重启 trainer 岛 1 时误用了 TB 版 `island.sh`，GSM syncer 以 `HELLO syncer semantic profile does not match` 拒绝。用 `island-gsm.sh` 重做后 D11 通过。
 - 08:24 第一次 D4 演练时 fresh syncer 误用了 TB 版 `syncer.sh`，trainer 同样因 profile 不符被拒。08:35 用 `syncer-gsm.sh` 重做后通过。
 - 08:10 新 run 的 trainer 岛 0 启动时 `ray.init` 等待 180 s 超时（ISLAND-RC=1），直接重启后恢复正常。按偶发基础设施问题记录。
+
+### 真机复测结果（10-31 18:25–21:07 CST，run id s29r1031b）
+
+拓扑：s29r-a 在 Nebius eu-south1（RTX6000 preemptible），s29r-b 在 us-central1（RTX6000 preemptible）。trainer 岛 0/1 在 n4，syncer 在 npu1。TB2.1×Codex×boat。反向隧道经 npu1 mihomo 代理（日本 W10），证据在 `docs/s29-evidence/retest/vm/`。
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 1 基础 | 通过：岛 0 训 9 个本地 step、岛 1 训 14 个本地 step；两岛日志都有 D7 的 `local training steps = 5 x 8 = 40` 行 | `vm/n4-keylines.txt`、`vm/s29r-vm-n4.tgz` |
+| 2 D11 | 通过：用默认 TB 脚本（lease 150，即 launcher 的默认值）跑。12:05:59Z kill -9 岛 1；12:08:08Z syncer 以新 generation 给它补发 8 个 fragment，岛 1 从第 11 步继续训练 | `vm/drill.txt`、`vm/s29r-vm-npu1.tgz` |
+| 3 D4 | 通过：12:45:07Z 不带 `--resume` 全新启动 syncer；s29-spot-1 在 12:50:14Z、s29-spot-0 在 12:52:00Z 都以 `FENCED`、`fenced: other run` 离开。旧 syncer 二进制没有记录离开原因，日志里也没有 unknown_7 | `vm/vm-*-keylines.txt`、`vm/vm-*.tgz` |
+| 4 D15 | a) 12:18:02Z 用 `nebius compute instance stop` 硬停 VM b；12:27:29Z trainer 岛 1 打出 `rl_boat_orphans_deleted ["bx_acuweggs"]`（lease 600 s），另外 2 个沙箱已先被 boat 的空闲 TTL 回收。b) 重开 VM b，sampler 启动时删除了旧 incarnation 518bf0d9 的沙箱 `bx_89gcvjcs`。注意：这个沙箱是 VM 重开前按该 incarnation 的标签补建的，因为它原有的沙箱在 a) 里已经删完。boat 中所有沙箱名都带 `ytl1.s29r1031b.<island>.<inc>.` 前缀，说明改名 API 接受这个名字 | `vm/drill.txt`、`vm/n4-keylines.txt`、`vm/vm-b-keylines.txt` |
+| 5 回归 | D12：岛 1 重启前后 consumed 14 行，重复 sample_id 为 0。D9/D10：真机 run 的合并版本只到 v2，没超过 policy age 4，触发不了拦截/丢弃，沿用本地复测结论（v13/v8 重启后 v0 轮数为 0，超龄组标 `kept:false` 后 trainer 不退出）。SIGTERM 后以 PREEMPTED 离开 | `vm/s29r-vm-n4.tgz`、`local/` |
+
+带宽（D13）：npu1→VM b 传 100 MB，直连两次都在 400 s 内没传完（<0.25 MB/s）；经代理美国 W01 为 5.6 MB/s，日本 W10 为 6.78 MB/s。0.6B 全程代理流量 8.86 GB（mihomo `/connections` 计数；订阅面板显示已用 8.98/322 GB）。
+
+### D18 运维问题（记录，非产品代码）
+
+1. `STARTS_PER_HOUR=6` 太低：1 组 4 个 trial，失败后每个还要重试 1 次，一小时的配额很快用完，trial 一直等不到 boat 启动额度。复测中把两岛改成 20/h 后恢复正常。spot_plan 的默认值是 8，建议至少设为 `max_in_flight × 2 × 每小时组数`。
+2. sampler SIGTERM 后以 PREEMPTED 离开，按设计会进入 `hold_after_reclaim`，进程继续占着 records proxy 端口 31600。所以在同一 VM 上原地重启 sampler 之前必须先 kill -9 旧进程，否则新进程报 `address already in use` 退出。建议 `vm_run.sh` 启动前检查并清掉旧的 held 进程。
+3. sky 集群在用户账号下启动，之后把 Nebius 默认 profile 换成服务账号，`sky down` 就以 identity mismatch 拒绝。本次用 `nebius compute instance delete` 删掉两台实例，再 `sky down --purge`。今后 sky 统一使用服务账号 token（本机 `/tmp/s29r/ntokrefresh.sh` 每 30 min 刷新一次）。
+4. `pkill -f <pattern>` 放在 `ssh host '...'` 里会连同执行它的那个远端 shell 一起杀掉（pattern 出现在 shell 自己的命令行里）。重启要写成脚本文件再执行。
