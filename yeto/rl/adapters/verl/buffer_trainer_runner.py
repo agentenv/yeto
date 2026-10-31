@@ -161,6 +161,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
             def relay_ports(island):
                 return install_relay_ports(island, buffer=buffer, shape=shape, tokenize=tokenizer.encode,
                                            wait_s=float(section.get("wait_s") or 3600.0),
+                                        # S29 D22: a group short of samples_per_group breaks verl's
+                                        # mini-batch division; the feed drops it
+                                        group_size=int(plan.get("samples_per_group") or 0) or None,
                                            poll_s=float(section.get("poll_s") or 2.0))
 
             try:

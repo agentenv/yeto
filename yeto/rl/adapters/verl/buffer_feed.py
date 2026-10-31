@@ -257,11 +257,13 @@ class BufferFeed:
                  poll_s: float = 2.0, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 cursor_log: Any = None, merged: MergedVersions | None = None) -> None:
+                 cursor_log: Any = None, merged: MergedVersions | None = None,
+                 group_size: int | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
         merged version pairing (module doc)."""
         self.buffer = buffer
+        self.group_size = None if group_size is None else int(group_size)
         self.vmap = vmap
         self.shape = shape
         self.add_group = add_group
@@ -329,6 +331,14 @@ class BufferFeed:
             if not samples:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
             too_long = oversized(samples, self.shape, self.tokenize)
+            if too_long is None and self.group_size is not None and len(samples) != self.group_size:
+                # S29 D22: an agentic group keeps >= min_samples trials, so it can be short;
+                # verl's update splits the round into mini-batches of groups x n samples and
+                # asserted (run s29r120-d: 15 % 16). A short group is dropped and recorded.
+                reason = "short_group"
+                too_long = f"{len(samples)} samples, the trainer trains groups of {self.group_size}"
+            else:
+                reason = "over_length"
             if too_long is None:
                 break
             # S29 D21: a group with a sample wider than the rows (an agentic prompt past
@@ -336,7 +346,7 @@ class BufferFeed:
             # not fatal: before, group_rows raised in keep() and the island left INFRA_FAILED
             # (run s29r120-b: prompt 8200 > 8192). RL never truncates a trajectory.
             self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
-                         "kept": False, "dropped": "over_length", "detail": too_long,
+                         "kept": False, "dropped": reason, "detail": too_long,
                          "source": (item.entry.provenance or {}).get("sampler_id"), "samples": len(samples)})
             self.pulled_positions.append(int(item.position))
         versions = [sample_version(s) for s in samples]

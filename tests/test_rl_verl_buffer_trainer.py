@@ -794,3 +794,23 @@ def test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal(tmp_path):
     assert "prompt 7" in records[1]["detail"] and "response 9" in records[2]["detail"]
     assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf3"]
     assert feed.pulled_positions == [0, 1, 2, 3] and feed.read_cursor() == 4
+
+
+def test_d22_a_group_short_of_samples_per_group_is_dropped(tmp_path):
+    """S29 D22 (run s29r120-d): an agentic group with 3 of 4 trials made a 15-sample
+    round and verl's mini-batch split asserted (15 % 16); with group_size the feed
+    drops the short group."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok1")
+    writer.write([_sample(0, index=0)], group_key="short")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok2")
+    reader, vmap, added, records = _buffer(tmp_path), VersionMap(), [], []
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=added.append,
+                         record=records.append, sleep=lambda s: None, group_size=2)
+    for _ in range(2):
+        assert feed.pull() is not None
+        feed("yeto_keep_last")
+    assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
+        (0, True, None), (1, False, "short_group"), (2, True, None)]
+    assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf2"]
