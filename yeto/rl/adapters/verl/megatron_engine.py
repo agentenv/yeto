@@ -33,6 +33,7 @@ CUDA 13 / torch 2.13), so it is not offered here.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 
 from yeto.rl import megatron_grad_checks as grad_checks
@@ -412,7 +413,7 @@ def validate(shape: MegatronShape) -> None:
     problem = seq_idx_problem(mamba=s.mamba, cp=s.cp, patch=s.seq_idx)
     if problem:
         raise MegatronShapeError(problem)
-    if s.etp != 1:
+    if s.etp != 1 and os.environ.get("YETO_S29_ALLOW_ETP", "") not in ("1", "true", "True"):
         raise MegatronShapeError("verl Megatron 岛只接 ETP=1（专家不做张量并行）")
     model_parallel = s.tp * s.pp * s.cp
     if s.trainer_gpus % model_parallel:
@@ -560,6 +561,7 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         # RL keeps the routing statistics fixed (as the Miles recipe, nemotron_h.py)
         f"{tcfg}.moe_router_bias_update_rate=0.0",
         f"{tcfg}.moe_aux_loss_coeff=0.0",
+        *_extra_tcfg_overrides(tcfg),
         # S28 G-120: Megatron's weight-gradient accumulation fusion calls Apex's
         # fused_weight_gradient_mlp_cuda, a CUDA extension that does not exist on Ascend
         # (Apex is not installed there at all). Megatron's own default is True, and this
@@ -672,3 +674,15 @@ def asserted_keys(shape: MegatronShape) -> tuple[str, ...]:
     if shape.rollout_pool:
         return ASSERTED_KEYS
     return tuple(key for key in ASSERTED_KEYS if key not in _SEPARATE_ONLY_ASSERTED)
+
+
+def _extra_tcfg_overrides(tcfg):
+    """S29 MFU-B: pass extra transformer_config overrides via YETO_S29_TCFG_EXTRA.
+
+    Example: moe_pad_expert_input_to_capacity=True,moe_expert_capacity_factor=1.25
+    An empty value keeps behaviour identical to before.
+    """
+    raw = os.environ.get("YETO_S29_TCFG_EXTRA", "").strip()
+    if not raw:
+        return []
+    return [f"{tcfg}.{item.strip()}" for item in raw.split(",") if item.strip()]
