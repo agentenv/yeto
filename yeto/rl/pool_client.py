@@ -46,6 +46,10 @@ class LeaveReason(IntEnum):
     INFRA_FAILED = 4
     TRAINING_FAILED = 5
     CONFIG_MISMATCH = 6
+    # S29 D4: the member is not part of this run any more: a newer incarnation
+    # took its id ("superseded") or a fresh syncer replaced the run it joined
+    # ("other run"). An older syncer names the byte unknown_7.
+    FENCED = 7
 
 
 # Island lease on the syncer; the island heartbeats every lease/3. Same

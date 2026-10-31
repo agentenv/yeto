@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
 from yeto.rl.engine.run_config import DP_OPTIMIZERS
-from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
+from yeto.rl.engine.run_flags import GLOBAL_ROUNDS_HELP, RlFlag, cli_flag, island_flag, shared_flag
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
     RL_ENGINES,
@@ -338,7 +338,7 @@ _ISLAND = (
     # L9.12: "release" -- the code is the island image's /opt/yeto/src (checked against
     # the image's release manifest; the digest is the image digest).
     island_flag("--code-pack-mode", choices=["git-patch", "release"], default=None),
-    island_flag("--global-rounds", type=int, required=True),
+    island_flag("--global-rounds", type=int, required=True, help=GLOBAL_ROUNDS_HELP),
     island_flag(
         "--parameter-mode",
         choices=["lora", "full"],

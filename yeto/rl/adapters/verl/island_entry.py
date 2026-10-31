@@ -30,6 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from yeto.rl.engine import run_flags
 from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
@@ -55,7 +56,7 @@ def parse_args(argv):
     p.add_argument("--rl-single-island-no-sync", action="store_true")
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--reward-function", required=True)
-    p.add_argument("--global-rounds", type=int, required=True)
+    p.add_argument("--global-rounds", type=int, required=True, help=run_flags.GLOBAL_ROUNDS_HELP)
     p.add_argument("--groups-per-round", type=int, required=True)
     p.add_argument("--samples-per-group", type=int, required=True)
     p.add_argument("--rollout-max-response-len", type=int, required=True)
