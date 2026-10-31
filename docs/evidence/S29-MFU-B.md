@@ -305,3 +305,57 @@ pp0 与 pp1 被分析器判为 REFUSED（宽窗口下 scope 数量不满足 `ana
 ### 16.4 下一轮的唯一入口
 
 绕开分析器的 scope 约束，直接在 verl 的 micro-batch 循环里打点（数据准备 / 前向 / 反向 / loss / 其余），并和 SFT 同口径对比。本轮已把范围缩到：**update_actor 内部、micro-batch 前后向之外、且不是 host 可回收开销、不是 PP 调度、不是装填率、不是 recompute 配置、不是 attention 口径**。
+
+## 17. update_actor 分段计时、定位与修复（B2，实测）
+
+### 17.1 方法
+
+在 verl-fork 的 `update_actor` / `compute_log_prob` 路径加分段计时（`verl/utils/s29_phase_timer.py`，每个分段边界做 `torch.npu.synchronize()` 再取墙钟），每次调用每个 rank 写一行 JSON 到 `$HOME/phase/`。分段：进入 → 构造迭代器 → train_mode 进出（onload/offload）→ token 数 all_gather → `zero_grad` → `forward_backward_batch`（细分 token 计数 all_reduce、`prepare_micro_batches`、`forward_backward_func`、后处理）→ `optimizer.step` → lr scheduler → metrics 聚合 → 输出 `.cpu()`。级别 2 额外包裹 Megatron 的 `forward_step` / `backward_step` 与每个 `P2PCommunicator` 调用（逐 micro-batch，同步），把各 stage 的计算与流水等待分开。补丁与报告脚本在本地分支 `s29-mfu-b2` 的 `tools/s29-phase/`（`apply_patch.py`、`s29_phase_timer.py`、`phase_report.py`、`verl-fork-s29-phase.diff`）；三台原文件已备份为 `/data/work/s29-mfu/verl-fork.bak-20261031-0646.tgz`。
+
+配置与 s29-bu 完全相同（44 组×4、SEQ 28672、3.0117M token/步、同一份 store 数据），每次跑 3 轮。
+
+### 17.2 第一个发现：此前的基线都只测了第 0 轮（含预热）
+
+| 运行 | 第 0 轮 | 第 1 轮 | 第 2 轮 |
+|---|---|---|---|
+| s29-c1（基线，加计时） | 349.3s | 249.9s | 252.1s |
+| s29-c2（第 0/1 轮基线） | 346.1s | 254.0s | — |
+
+第 0 轮比稳态慢约 100s（前后向 227s vs 149s，optimizer 49~60s vs 43~48s，old_log_prob 53s vs 44s），是首轮的编译/分配器/通信建链开销。第 12~16 节以及基线 338~346s 都是第 0 轮的数。**稳态基线是 250~254s，MFU 11.7%，不是 8.5%。** 原先"每 micro-batch 3.73s 墙时 vs 设备 2.39s"的大部分落差就是这个预热；另外实际每 DP 只有 63 个 micro-batch，不是 88。
+
+### 17.3 稳态倒序耗时表（s29-c1 第 1 轮，级别 2；pp0/pp1/pp2 中位数）
+
+| # | 分段 | pp0 | pp1 | pp2 | 说明 |
+|---|---|---|---|---|---|
+| 1 | update_actor 的 backward_step（63 次） | 99.2s | 97.5s | 100.5s | 正常计算（含全重计算） |
+| 2 | compute_log_prob 总计 | 43.8s | 44.1s | 44.6s | old_log_prob 前向，99% 在 forward_backward_func 里 |
+| 3 | **optimizer.step** | **41.8s** | **43.0s** | **48.3s** | **CPU Adam 单线程（见 17.4）** |
+| 4 | update_actor 的 forward_step（63 次） | 38.9s | 39.3s | 44.1s | 正常计算 |
+| 5 | P2P 等待（流水气泡 + 级间不均） | 11.8s | 11.4s | 2.4s | pp0 主要在 send_forward_recv_backward |
+| 6 | prepare_micro_batches | 0.47s | 0.45s | 0.46s | |
+| 7 | token 计数 all_reduce + `.item()`、all_gather、zero_grad、metrics、onload/offload、输出 `.cpu()` | 均 <0.15s | | | 可忽略 |
+
+forward_backward_func 本身 147~150s，其中设备计算（fwd+bwd）138~145s，P2P 等待 ≤12s（≤8%）。**流水气泡和 stage 间负载不均都不是大项**：三级的 fwd+bwd 只差 3%（pp2 带 logits，最重），29/x/30 的切分已经接近平衡，按长度排序 micro-batch 能回收的上限也就是这 ≤12s 的一部分。onload/offload、metrics、`.item()` 同步全部可忽略。
+
+**micro-batch 前后向之外，唯一的大项是 optimizer.step（每步 42~48s，占 update_actor 的 22~25%）。**
+
+### 17.4 根因：Ray 把 WorkerDict 的 OMP_NUM_THREADS 设为 1
+
+计时器同时记录了 worker 进程的 `torch.get_num_threads()` 与 `OMP_NUM_THREADS`：**两者都是 1**（Ray 对未显式指定的 actor 默认设 1）。配方用 `optimizer_offload_fraction=1`，Adam 全在 host 上跑，于是是单线程 `_fused_adam`。npu1 上单测 2 亿参数：1 线程 1.75s、4 线程 0.44s、16 线程 0.12s（8.8 → 0.6 ns/param），与 43~48s 的量级吻合。
+
+### 17.5 修复与实测
+
+| 运行 | 做法 | 第 0 轮 | 稳态步时（第 1/2 轮） | optimizer.step | 前后向 FBF | MFU（稳态） |
+|---|---|---|---|---|---|---|
+| s29-c1 / c2 第 1 轮 | 基线（线程=1） | 349.3 / 346.1s | 249.9 / 252.1 / 254.0s | 42~50s | 146~148s | **11.7%** |
+| s29-c2 第 2 轮 | 全局 `torch.set_num_threads(16)` | — | 230.7s | 11~19s | 160~163s（+15s） | 12.7% |
+| **s29-c3** | **只在 optimizer.step 期间开 16 线程，结束恢复** | **298.9s** | **217.3 / 213.7s** | **10.7~15.0s** | 146~150s（不变） | **13.7%** |
+
+- 全局开线程会让前后向慢 15s（空闲 OpenMP 线程与 host 侧 kernel 下发争 CPU），所以修复只在 `optimizer.step` 内提高线程数（`verl/utils/s29_phase_timer.optimizer_threads`，`OPT_THREADS_ON`/`YETO_S29_OPT_THREADS` 控制，默认关闭）。
+- 稳态步时 252 → 215.5s（−14.5%），MFU 11.7% → **13.7%**；第 0 轮 348 → 299s（−14%），按旧口径 MFU 8.5% → 9.85%。
+- 数值：只改 CPU 线程数，Adam 结果不变；clip_fraction 两边一致（c1 0.00494/0.00482/0.00484，c3 0.00495/0.00493/0.00498，差异与 run-to-run 同量级）。
+- MFU 口径：3.0117e6 × 7.34e10 / (秒 × 24 × 313e12)。
+
+### 17.6 与 SFT 的剩余差距
+
+SFT 138.8s / 2.642M token（19035 tok/s）；修复后 B 稳态 215.5s / 3.012M（13976 tok/s），按 token 慢 1.36x（原口径 2.0x）。其中约 44s 是 RL 独有的 old_log_prob 前向（SFT 没有）；去掉它后 update_actor 本身 161s / 3.01M = 18700 tok/s，**已与 SFT 基本持平（0.98x）**。剩余可做：optimizer 线程数再调（16 之外未扫）；old_log_prob 若算法允许复用 rollout 的 log prob 可整段省掉（属算法决策，本轮未动）；P2P 等待 ≤12s 是流水气泡上限。
