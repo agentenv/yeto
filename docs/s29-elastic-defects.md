@@ -278,3 +278,33 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - D20：仓库新增 `tools/probes/s28_g120/ray_cluster.sh`，只停本 run 的 Ray 进程（按 `$OUT/ray` 和自己的端口匹配），不再用 `ray stop --force`。重启时发现它漏掉了 `--gcs_server_port`，已修正匹配规则。另一任务的 lp-e1 集群全程未受影响。
 
 费用（估算，新增部分）：s29r-120c 约 0.75 h、120d 约 0.2 h、120f 约 0.35 h，合计约 1.3 h × $6.32 ≈ $8.2，在 $30 预算内。代理流量新增 0。
+
+## 120B 第三轮（11-01 02:30–04:40 CST）：2 步 + v2 下发到近端存储已完成；VM 侧出样本与抢占重入未完成
+
+- 容量接口在 02:31 报 eu-north1 fabric-4 的 8×H100 spot 为 MEDIUM。开出 s29r-120g，24 卡 trainer `s29r120-d` 同时启动。
+- **训练**：两步都有真实梯度，无 NaN（`120b/s29r120d-ev.tgz`）。
+  - 第 1 步：grad_norm 0.1768，pg_loss −0.0031。
+  - 第 2 步：grad_norm 0.3403，pg_loss 0.0487，advantage 在 [−1.5, 1.5]。
+- **v2 下发**：v2 增量 10.62 GB（ratio 0.044），19:26Z 发布。
+  - npu1 → 本机：并行 8 路 scp，427 s（约 25 MB/s；单路约 3.6 MB/s）。
+  - 本机 → Modal volume：2191 s。
+  - 代理流量 0。
+- **第 3 步**：trainer 因 D22 崩溃。19:57Z 主 agent 止损 stop 了 VM；我的看门狗随即自动 start，VM 一直卡在 STARTING，后来回到 STOPPED，之后再 start 也起不来（容量不足）。预算到边缘，04:35 删除 VM 结束。
+- **未完成**：VM 侧 `cut_manifest place` 拉取 v2、spot 岛用 v2 出样本、抢占 → 重开 → 重入 → 继续训练。cut manifest 和 v2 文件已在 Modal volume `/s29r120/r2-v2`，manifest 在本机 `/tmp/s29r/cut120/`。下次有容量时，可直接 `cut120_mirror.sh place r2-v2` 继续。
+
+### D22 组内样本不足一组导致 verl mini-batch 断言（已修）
+
+- 现象：run `s29r120-d` 第 3 步 `AssertionError: 15 % 16 != 0`（verl `make_iterator`）。agentic 组只要求至少 `min_samples` 个 trial，所以一组可能只有 3/4 条；4 组 × 4 条的 mini-batch 被凑成 15 条。
+- 修复：`BufferFeed(group_size=...)`，由 `buffer_trainer_runner` 传入 `samples_per_group`。条数不等于 `samples_per_group` 的组记为 `dropped:"short_group"` 并跳过。单测 `test_d22_a_group_short_of_samples_per_group_is_dropped`。
+
+### D23 运维：spot VM 被 stop 之后的 start 不可靠
+
+- 主 agent 止损 stop 的那台 VM，看门狗 start 后在 STARTING 停了 30 分钟以上，然后回到 STOPPED，再 start 报容量不足。
+- 结论：自动重启要加超时和预算闸。STARTING 超过 10 分钟就放弃，改为等容量扫描命中后新开。
+- 另外，看门狗把"人为 stop"也当作抢占自动 start，与止损操作冲突。止损时必须先停看门狗。
+
+### 费用（估算）
+- 本轮新增 VM：s29r-120g 约 18:35–19:58Z，约 1.4 h × $6.32 ≈ $8.8。
+- 前两轮：约 $8.2（第二轮）+ 约 $11（第一轮）。
+- 合计 8 卡 VM 约 $28。STARTING / STOPPED 时段按不计 GPU 费估算。
+- 代理流量新增 0。

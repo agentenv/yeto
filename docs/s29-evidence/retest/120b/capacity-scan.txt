@@ -5,3 +5,10 @@
 00:13:58 eu-north1 fabric-7 gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=1 limit=8 level=AVAILABILITY_LEVEL_MEDIUM
 00:13:58 eu-west1 fabric-5 gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
 00:13:58 us-central1 us-central1-a gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
+02:31:24 eu-north1 fabric-2 gpu-h100-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
+02:31:24 eu-north1 fabric-3 gpu-h100-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
+02:31:24 eu-north1 fabric-4 gpu-h100-sxm 8gpu-128vcpu-1600gb preemptible avail=1 limit=8 level=AVAILABILITY_LEVEL_MEDIUM
+02:31:24 eu-north1 fabric-6 gpu-h100-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
+02:31:24 eu-north1 fabric-7 gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=None limit=8 level=AVAILABILITY_LEVEL_LOW
+02:31:24 eu-west1 fabric-5 gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=1 limit=8 level=AVAILABILITY_LEVEL_MEDIUM
+02:31:24 us-central1 us-central1-a gpu-h200-sxm 8gpu-128vcpu-1600gb preemptible avail=1 limit=8 level=AVAILABILITY_LEVEL_MEDIUM

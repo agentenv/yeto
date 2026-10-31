@@ -30,3 +30,13 @@ proxy up GB 8.7 down GB 0.16
 18:01:54 run c step 1: grad_norm 0.182, pg_loss -0.0031, adv in [-1.5,0.5], no NaN (verl-metrics-0.jsonl). us-central1 H200 spot: no resources
 18:17:16 eu-west1 VM unreachable from dev machine (port 22), reachable from npu1 -> ssh ProxyCommand via npu1 ncat; sky launch again on s29r-120f
 18:28:35 s29r-120f (eu-west1) preempted ~18:25 before setup completed. Stop: delete VM, stop trainer s29r120-c
+18:31:55 go: s29r-120g eu-north1 H100:8
+18:32:16 trainer s29r120-d launched with the VM
+18:47:30 s29r-120g up 89.169.126.79 id computeinstance-e00ys7r45fp6a2cwsa
+19:26:00 r2-v2 published on npu1
+19:58:26 PREEMPTED -> start
+20:02:08 D22 fixed (short groups dropped); trainer s29r120-e resumes store s29r120d (v2)
+20:02:45 release hand-off attempt 1 failed
+20:04:11 r2-v2 on the Modal volume (upload 2191 s); VM start retry loop (every 5 min)
+20:15:00 no capacity; trainer s29r120-e taken down to free the NPUs (restart with the VM)
+20:35:31 stop: VM stuck STARTING (no capacity), budget at edge -> sky down s29r-120g, end
