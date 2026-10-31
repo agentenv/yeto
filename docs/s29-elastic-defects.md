@@ -151,3 +151,21 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - 方案：同一块版本板。sampler 读到的合并版本如果比它读过的最大值还低，就判定原来的 run 已经没了（fresh syncer 从 v0 重新开始），`SpotChannels.stopping()` 让它退出。断线重连后板的 item id 会重置（fresh syncer 的 item 从 1 重新编号）。带 `--resume` 的重启版本不会回退，不受影响（T6.5 已验证）。
 - 复测：spot 岛运行中，在不带 `--resume` 的情况下全新启动 syncer。新 run 的 trainer 在 20:40:01 把 v0 写上版本板，约 1 分钟内两个 spot 岛都离开，`fsctl count = 0`。
 - 遗留：离开原因记的是 `FINISHED`，应当细分为 `fenced (other run)`。另外，新 run 的 trainer 写板之前，旧 sampler 只是空等，不会出样本。
+
+## TB2.1 小规模回归（10-31 09:43）
+
+- 配置：两台 RTX6000 preemptible，s29-spot-c 在 eu-south1（$1.17/h），s29-spot-b 在 us-central1（$0.79/h）。trainer 为 island pool（lease 150 s），在 n4 的卡 0/1。boat 每岛最多并发 2 个沙箱、每小时最多新建 3 个，并开启 VM 复用。
+- 结果：
+  - 岛 0（VM c）训了 4 step，没训满 5 步，原因是 09:50 截止。
+  - 岛 1 训了 2 step，组来自重开后的 VM b。
+  - trial 大多以 NonZeroAgentExitCodeError 结束（0.6B 跑 Codex 很快失败退出，reward 0），另有 3 次 EnvironmentStartTimeout。没有卡在 agent_timeout 的 trial。
+  - records proxy 31600 从公网可达。
+  - boat 用完 6 次剩余额度后，新 trial 报 BoatQuotaError。
+- T6.3 发生了一次真实抢占：s29-spot-b 约 00:38Z 被 Nebius 回收（STOPPED，隧道 00:48Z 起超时）。trainer 岛 1 没有退出，一直在等。我 `sky down` 后在同 region 重开（00:50Z），新 VM 的 subscriber 01:10:36Z 重新加入 syncer，之后岛 1 训到第 2 步：抢占 → 重开 → 重新加入 → 继续训练，整条链路通过。
+- 费用：两台 VM 合计约 $3（按开机时长和单价估算）。镜像拉取每台约 25 分钟，占了大部分时间。
+
+## D15 spot VM 被硬抢占后，它的 boat 沙箱残留到 TTL 才释放
+
+- 现象：回归结束后 boat 还剩 1 个活跃沙箱（`bx_t6ezg6qf`，01:12 由重开后的 VM b 创建，TTL 1800 s），已手动 `boat delete`。VM b 第一次被抢占时留下的 2 个沙箱，也是靠 TTL 自然过期的。
+- 根因：`boat_pool` 的清理依赖进程内的 atexit 和信号处理。VM 被直接 STOP 或 down 时，进程来不及执行这些清理，只能靠 boat 侧的 TTL（空闲 VM 默认 20–30 分钟）释放。
+- 建议：给沙箱打上 sampler incarnation 标签（boat `labels`）；sampler 启动时以及 trainer 侧的看门狗删除"属于已经被取代的 incarnation"的沙箱；或者把空闲 VM 的 TTL 调到 5–10 分钟。本次没有改代码。
