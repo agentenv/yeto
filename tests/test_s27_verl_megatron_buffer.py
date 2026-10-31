@@ -531,3 +531,20 @@ def test_megatron_overrides_disable_gradient_accumulation_fusion():
     written = [o for o in me.build_overrides(_run_config(), shape)
                if "gradient_accumulation_fusion" in o]
     assert written == [f"++{key}=False"], written
+
+
+def test_comm_overlap_writes_the_recipe_overlap_keys_only_when_asked(tmp_path):
+    """S29: --rl-megatron-comm-overlap turns on the SFT recipe's DP and TP overlap;
+    without it the island writes none of the three keys (verl's DDP default stays)."""
+    meg = "actor_rollout_ref.actor.megatron"
+    keys = (f"++{meg}.override_ddp_config.overlap_grad_reduce",
+            f"++{meg}.override_ddp_config.overlap_param_gather",
+            f"++{meg}.override_transformer_config.tp_comm_overlap")
+    (tmp_path / "off").mkdir()
+    (tmp_path / "on").mkdir()
+    off = _plan(tmp_path / "off")
+    assert off["shape"]["comm_overlap"] is False
+    assert all(_value(off["overrides"], key) is None for key in keys)
+    on = _plan(tmp_path / "on", extra=["--rl-megatron-comm-overlap"])
+    assert on["shape"]["comm_overlap"] is True
+    assert [_value(on["overrides"], key) for key in keys] == ["True", "True", "True"]
