@@ -182,6 +182,17 @@ def verify_plan(args: Any, *, full: bool) -> dict[str, Any]:
 
             print(f"[yeto-verl] WARNING: {note}", file=sys.stderr, flush=True)
             out["verify_every_note"] = note
+    if getattr(args, "rl_measure_no_verify", False):
+        # S29: a debug switch for measurement runs. Nothing outside the island reads the
+        # policy hash when no release is written, so the first and last rounds' full
+        # hash only costs start-up and tear-down time.
+        if not getattr(args, "rl_measure_no_release", False):
+            raise ValueError("--rl-measure-no-verify needs --rl-measure-no-release (a released "
+                             "policy must carry its verified hash)")
+        if not full or every is None:
+            raise ValueError("--rl-measure-no-verify needs a full-parameter island with "
+                             "--rl-verify-every (the policy state must allow unverified rounds)")
+        out["measure_no_verify"] = True
     return out
 
 
@@ -190,6 +201,11 @@ def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
 
     if plan.get("verify_every_round"):
         driver.verify_every_round = True
+    if plan.get("measure_no_verify"):  # S29
+        driver.measure_no_verify = True
+        # the first round has no verified cut to refer to: the state builds one from the
+        # layout instead of hashing every fragment (VerlFullParameterLocalState._measurement_base)
+        policy_state.measure_no_verify = True
     every = plan.get("verify_every")
     if every is not None:
         driver.verify_every = int(every)

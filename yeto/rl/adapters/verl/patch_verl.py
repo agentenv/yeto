@@ -466,9 +466,46 @@ PATCHES = (READBACK, RESUME_CALLS, LORA_SEND, LORA_RECV)
 # S27 G-EK: the FSDP2 full-parameter island in verl's separate mode publishes over the
 # same NCCL checkpoint engine as the Megatron island (and the LoRA fully_async path
 # did already), so the fsdp profile takes the zmq SUB fix as well.
+# S29 MFU-C (megatron profile): on-policy reuse of the old log-probs. Inert unless the
+# trainer put onpolicy_old_logprob.META_KEY into the batch meta (YETO_ONPOLICY_OLD_LOGPROB
+# on / measure); then the loss takes old = log_prob.detach() and recomputes the TIS
+# weights (on), or logs |recomputed old - log_prob.detach()| (measure). See the module.
+ONPOLICY_OLDLP_TARGET = "verl/workers/utils/losses.py"
+ONPOLICY_OLDLP_ANCHOR = (
+    "    data = data.select(*fields).to_padded_tensor()\n"
+    "\n"
+    "    response_mask = data[\"response_mask\"].to(bool)\n"
+    "    # compute policy loss\n"
+    "    old_log_prob = data[\"old_log_probs\"]\n"
+    "    advantages = data[\"advantages\"]\n"
+    "    rollout_is_weights = data.get(\"rollout_is_weights\", None)\n"
+)
+ONPOLICY_OLDLP_HOOK = (
+    "    # yeto S29 MFU-C: on-policy old-log-prob reuse (yeto.rl.adapters.verl.onpolicy_old_logprob)\n"
+    "    _yeto_oplp_spec = tu.get(data, \"yeto_onpolicy_old_logprob\", None)\n"
+    "    if _yeto_oplp_spec is not None and \"rollout_log_probs\" in data.keys():\n"
+    "        fields.append(\"rollout_log_probs\")\n"
+    "    data = data.select(*fields).to_padded_tensor()\n"
+    "\n"
+    "    response_mask = data[\"response_mask\"].to(bool)\n"
+    "    # compute policy loss\n"
+    "    old_log_prob = data[\"old_log_probs\"]\n"
+    "    advantages = data[\"advantages\"]\n"
+    "    rollout_is_weights = data.get(\"rollout_is_weights\", None)\n"
+    "    if _yeto_oplp_spec is not None:\n"
+    "        from yeto.rl.adapters.verl import onpolicy_old_logprob as _yeto_oplp\n"
+    "\n"
+    "        old_log_prob, rollout_is_weights, _yeto_oplp_stats = _yeto_oplp.in_loss(\n"
+    "            _yeto_oplp_spec, log_prob, old_log_prob, data, rollout_is_weights)\n"
+    "        for _k, (_v, _agg) in _yeto_oplp_stats.items():\n"
+    "            metrics[_yeto_oplp.PREFIX + _k] = Metric(\n"
+    "                value=_v, aggregation=AggregationType.SUM if _agg == \"sum\" else AggregationType.MAX)\n"
+)
+ONPOLICY_OLDLP = (ONPOLICY_OLDLP_TARGET, ONPOLICY_OLDLP_ANCHOR, ONPOLICY_OLDLP_HOOK, "replace")
+
 PROFILES = {"fsdp": (*PATCHES, *ZMQ_SUB, AUTO_CLASS, META_INIT, NEMOTRON_FIX, *RANK0_SOURCE),
             "megatron": (READBACK, RESUME_CALLS, *SEQ_IDX, *ZMQ_SUB, AUTO_CLASS, CHUNKED_LOGPROB,
-                         *PINNED_COPY)}
+                         *PINNED_COPY, ONPOLICY_OLDLP)}
 
 
 def _patched(text: str, anchor: str, hook: str, mode: str) -> str:

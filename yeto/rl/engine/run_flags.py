@@ -565,6 +565,11 @@ _RUNTIME = (
                 "the recipe); the recipe's per-stage recompute policy and HCCL_BUFFSIZE stay "
                 "unset (they belong to its three-stage pipeline layout). The island log lists "
                 "every switch and every plugin it did or did not install"),
+    # S29: the 18.60 list adds five plugins that change the numerics path; opt-in only
+    shared_flag("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"),
+                help="with --rl-ascend-plugin-stack: which recipe's plugin list to load. "
+                "Default 18.44. 18.60 also loads conv_bf16_taps, mamba_headloop, mamba_dxmask, "
+                "mamba_cbsrcmask and moe_partial_recompute, which change the numerics path"),
     shared_flag("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                 help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                 "persistent volume mount); default ~/yeto-rl/elastic-state"),
