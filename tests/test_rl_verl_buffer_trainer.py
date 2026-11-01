@@ -814,3 +814,11 @@ def test_d22_a_group_short_of_samples_per_group_is_dropped(tmp_path):
     assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
         (0, True, None), (1, False, "short_group"), (2, True, None)]
     assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf2"]
+
+
+def test_d3_relay_ports_forward_group_size():
+    import inspect
+
+    from yeto.rl.adapters.verl.relay_trainer import install_relay_ports
+
+    assert "group_size" in inspect.signature(install_relay_ports).parameters

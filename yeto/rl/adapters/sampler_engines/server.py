@@ -84,19 +84,61 @@ def server_group_file(engine: str, port: int) -> Path:
     return Path(tempfile.gettempdir()) / f"yeto-{engine}-server-{int(port)}.pgid"
 
 
+def process_cmdline(pid: int) -> list[str] | None:
+    """The argv of a live process (None when it is gone or unreadable)."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except FileNotFoundError:
+        if Path("/proc/self/cmdline").exists():
+            return None  # procfs present: the process is gone
+        raw = None
+    except OSError:
+        return None
+    if raw is not None:
+        args = [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+        return args or None
+    try:  # no procfs (macOS): ask ps
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],  # noqa: S603, S607
+                             capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.stdout.strip()
+    return text.split() if out.returncode == 0 and text else None
+
+
+def is_engine_server(argv: Sequence[str] | None, engine: str, port: int) -> bool:
+    """``argv`` is an ``engine`` server started with ``--port <port>``."""
+    if not argv:
+        return False
+    args = list(argv)
+    if not any(engine.lower() in arg.lower() for arg in args):
+        return False
+    want = str(int(port))
+    for i, arg in enumerate(args):
+        if arg == f"--port={want}" or (arg == "--port" and i + 1 < len(args) and args[i + 1] == want):
+            return True
+    return False
+
+
 def reap_stale_server(engine: str, port: int, *, kill: Callable[[int, int], None] | None = None) -> int | None:
     """End the process group a SIGKILLed island left on this port (S29 spot run, defect D8).
 
     ``kill -9`` of a spot sampler process leaves its SGLang scheduler running
     (58.7 GiB of the H100's memory), so the next sampler process on the same VM
     cannot start its own server. The group id comes from the file the earlier
-    island wrote at start; returns it when a group was signalled."""
+    island wrote at start; returns it when a group was signalled. The group is
+    signalled only when its leader is alive and its command line names ``engine``
+    and ``--port <port>``; otherwise (a reused pid) the file is removed and
+    nothing is killed."""
     path = server_group_file(engine, port)
     try:
         pgid = int(path.read_text().strip())
     except (OSError, ValueError):
         return None
     path.unlink(missing_ok=True)
+    if pgid <= 1 or not is_engine_server(process_cmdline(pgid), engine, port):
+        # the leader is gone or the pid was reused by an unrelated process: only drop the file
+        return None
     try:
         (kill or os.killpg)(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):

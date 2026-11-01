@@ -33,6 +33,9 @@ CUDA 13 / torch 2.13), so it is not offered here.
 
 from __future__ import annotations
 
+import os
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 
 from yeto.rl import megatron_grad_checks as grad_checks
@@ -305,6 +308,11 @@ class MegatronShape:
     # S27 G-FL: Megatron's per-bucket non-finite gradient check
     # (yeto.rl.megatron_grad_checks); off only through --rl-no-grad-nan-check
     grad_nan_check: bool = True
+    # S29: overlap the DP gradient reduce / parameter gather and the TP communication
+    # with compute, as the Ascend SFT recipe does (args.json). verl builds its DDP
+    # config with overlap_grad_reduce False (utils/megatron_utils.py) and never sets the
+    # other two; s29-a2 measured update_actor 1.4x slower than the recipe at equal tokens.
+    comm_overlap: bool = False
     # S28 G-120: Megatron's weight-gradient accumulation fusion calls Apex's
     # fused_weight_gradient_mlp_cuda, which does not exist on Ascend (no Apex there).
     # Megatron's own default is True, so the key has to be written: a plugin-stack
@@ -412,7 +420,7 @@ def validate(shape: MegatronShape) -> None:
     problem = seq_idx_problem(mamba=s.mamba, cp=s.cp, patch=s.seq_idx)
     if problem:
         raise MegatronShapeError(problem)
-    if s.etp != 1:
+    if s.etp != 1 and os.environ.get(ALLOW_ETP_ENV, "") not in ("1", "true", "True"):
         raise MegatronShapeError("verl Megatron 岛只接 ETP=1（专家不做张量并行）")
     model_parallel = s.tp * s.pp * s.cp
     if s.trainer_gpus % model_parallel:
@@ -599,6 +607,10 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.
     for field, value in grad_checks.ddp_overrides(check_for_nan_in_grad=shape.grad_nan_check).items():
         out.append(f"++{meg}.override_ddp_config.{field}={value}")
+    if shape.comm_overlap:  # S29
+        out += [f"++{meg}.override_ddp_config.overlap_grad_reduce=True",
+                f"++{meg}.override_ddp_config.overlap_param_gather=True",
+                f"{tcfg}.tp_comm_overlap=True"]
     # S27 G-FN: the optimizer-state memory keys, under the actor's optimizer config
     # ("optim.x" becomes actor_rollout_ref.actor.optim.x; a "++" prefix
     # stays in front of the whole key, as Hydra wants it)
@@ -613,6 +625,7 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
         out.append(f"actor_rollout_ref.actor.clip_ratio_low={float(eps_clip)!r}")
     if eps_clip_high is not None:
         out.append(f"actor_rollout_ref.actor.clip_ratio_high={float(eps_clip_high)!r}")
+    out.extend(_extra_tcfg_overrides(tcfg, written=out))
     return out
 
 
@@ -672,3 +685,97 @@ def asserted_keys(shape: MegatronShape) -> tuple[str, ...]:
     if shape.rollout_pool:
         return ASSERTED_KEYS
     return tuple(key for key in ASSERTED_KEYS if key not in _SEPARATE_ONLY_ASSERTED)
+
+
+# S29 MFU-B: measurement-only environment switches. They change the training
+# numerics or layout outside the run flags, so a run that publishes releases
+# refuses them (check_experiment_env) and every run that sees one records it.
+ETP_ENV = "YETO_S29_ETP"
+ALLOW_ETP_ENV = "YETO_S29_ALLOW_ETP"
+TCFG_EXTRA_ENV = "YETO_S29_TCFG_EXTRA"
+EXPERIMENT_ENVS = (ETP_ENV, ALLOW_ETP_ENV, TCFG_EXTRA_ENV)
+# Refused together with a release: the two switches that bypass a check or the
+# engine's own transformer_config values.
+RELEASE_REFUSED_ENVS = (ALLOW_ETP_ENV, TCFG_EXTRA_ENV)
+# transformer_config keys RL pins on purpose (routing statistics fixed, as the Miles
+# recipe). The keys build_overrides writes itself, and the asserted keys, are refused
+# on top of these.
+RL_FIXED_TCFG_KEYS = ("moe_router_bias_update_rate", "moe_aux_loss_coeff")
+
+
+class ExperimentEnvError(ValueError):
+    """An S29 measurement switch is malformed or not allowed on this run."""
+
+
+def experiment_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The S29 measurement switches that are set (non-empty), by name."""
+
+    where = os.environ if environ is None else environ
+    return {name: str(where[name]) for name in EXPERIMENT_ENVS if str(where.get(name, "")).strip()}
+
+
+def parse_etp(environ: Mapping[str, str] | None = None) -> int:
+    """``YETO_S29_ETP`` as an int (default 1); a non-integer value is a clear ValueError."""
+
+    where = os.environ if environ is None else environ
+    raw = str(where.get(ETP_ENV, "")).strip()
+    if not raw:
+        return 1
+    try:
+        return int(raw)
+    except ValueError:
+        raise ExperimentEnvError(f"{ETP_ENV} must be an integer (expert tensor parallel size), "
+                         f"got {raw!r}") from None
+
+
+def check_experiment_env(*, releases: bool, environ: Mapping[str, str] | None = None,
+                         log=None) -> dict[str, str]:
+    """Warn about every S29 switch that is set and refuse the risky ones on a release run.
+
+    Returns :func:`experiment_env` so the caller can record it in the run plan."""
+
+    found = experiment_env(environ)
+    say = log if log is not None else (lambda line: print(line, file=sys.stderr, flush=True))
+    for name, value in sorted(found.items()):
+        say(f"[yeto-verl] WARNING: measurement switch {name}={value!r} is in effect")
+    refused = sorted(set(found) & set(RELEASE_REFUSED_ENVS))
+    if releases and refused:
+        raise ExperimentEnvError(f"{refused} are measurement-only switches and this run publishes "
+                         f"releases; unset them or run with --rl-measure-no-release")
+    return found
+
+
+def _extra_tcfg_overrides(tcfg, *, written: Sequence[str] = (),
+                          environ: Mapping[str, str] | None = None) -> list[str]:
+    """S29 MFU-B: pass extra transformer_config overrides via YETO_S29_TCFG_EXTRA.
+
+    Example: moe_pad_expert_input_to_capacity=True,moe_expert_capacity_factor=1.25
+    An empty value keeps behaviour identical to before. Items are split on commas,
+    so a value cannot contain one; an item without ``key=value`` (what a comma inside
+    a value leaves behind) is refused. A key RL pins (:data:`RL_FIXED_TCFG_KEYS`), a
+    key ``written`` already sets, or an asserted key is refused too.
+    """
+    where = os.environ if environ is None else environ
+    raw = str(where.get(TCFG_EXTRA_ENV, "")).strip()
+    if not raw:
+        return []
+    prefix = f"{tcfg.removeprefix('++')}."
+    protected = set(RL_FIXED_TCFG_KEYS)
+    for item in [*written, *ASSERTED_KEYS]:
+        path = item.removeprefix("++").removeprefix("+").partition("=")[0]
+        if path.startswith(prefix):
+            protected.add(path[len(prefix):])
+    out = []
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        key, eq, value = item.partition("=")
+        key = key.strip()
+        if not eq or not key or not value.strip():
+            raise ExperimentEnvError(f"{TCFG_EXTRA_ENV}: item {item!r} is not key=value; items are "
+                             f"comma separated, so a value must not contain a comma")
+        if key in protected:
+            raise ExperimentEnvError(f"{TCFG_EXTRA_ENV} must not override {key}: RL sets it "
+                             f"itself or asserts it")
+        out.append(f"{tcfg}.{key}={value.strip()}")
+    return out

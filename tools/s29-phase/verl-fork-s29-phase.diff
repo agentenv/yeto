@@ -1,0 +1,273 @@
+--- a/verl/workers/engine_workers.py
++++ b/verl/workers/engine_workers.py
+@@ -24,6 +24,7 @@
+ import psutil
+ import torch
+ from codetiming import Timer
++from verl.utils.s29_phase_timer import optimizer_threads as _s29_opt_threads, phase as _s29_phase, flush as _s29_flush, patch_megatron as _s29_patch, lap as _s29_lap, lap_start as _s29_lap_start
+ from omegaconf import DictConfig, open_dict
+ from tensordict import NonTensorData, TensorDict
+ from torch.distributed.device_mesh import init_device_mesh
+@@ -250,6 +251,7 @@
+         Returns:
+ 
+         """
++        _s29_lap_start("ua")
+         maybe_fix_3d_position_ids(data)
+         batch_size_per_dp = data.shape[0]
+         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
+@@ -279,6 +281,7 @@
+             dataloader_kwargs=dataloader_kwargs,
+         )
+ 
++        _s29_lap("ua", "ua.prep_iterator")
+         with (
+             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
+             Timer(name="train_batch", logger=None),
+@@ -288,6 +291,7 @@
+             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
+ 
+             for batch_idx, mini_batch_td in enumerate(dataloader):
++                _s29_lap("ua", "ua.ctx_enter+dataloader_next")
+                 maybe_fix_3d_position_ids(mini_batch_td)
+                 # add global token num
+                 if "input_ids" in mini_batch_td:
+@@ -311,8 +315,10 @@
+                 )
+                 # Name the mini-batch in the trace so each iteration of this otherwise identical
+                 # loop is distinguishable when the whole step is recorded (continuous mode).
++                _s29_lap("ua", "ua.token_num_allgather")
+                 with torch.profiler.record_function(f"mini_batch{batch_idx}"):
+                     actor_output = self.train_batch(mini_batch_td)
++                _s29_lap("ua", "ua.train_batch")
+                 # Advance the profiler once per mini-batch. This drives any
+                 # torch.profiler.schedule (the schedule's unit is one update mini-batch) and,
+                 # with no schedule, only labels torch's ProfilerStep#<n> boundary. start()/stop()
+@@ -320,6 +326,7 @@
+                 self.profiler.step()
+                 output_lst.append(actor_output)
+ 
++            _s29_lap("ua", "ua.profiler_step")
+             if self.engine.is_mp_src_rank_with_outputs():
+                 actor_output = [tu.get(output, "metrics") for output in output_lst]
+                 metrics = {}
+@@ -337,6 +344,8 @@
+                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
+             else:
+                 output = None
++            _s29_lap("ua", "ua.metrics_agg")
++        _s29_lap("ua", "ua.ctx_exit")
+         return output
+ 
+     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+@@ -362,6 +371,7 @@
+             if key not in data.keys():
+                 tu.assign_non_tensor(data, **{key: val})
+ 
++        _s29_lap_start("tb")
+         with (
+             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
+             Timer(name="train_batch", logger=None) as timer,
+@@ -370,6 +380,7 @@
+             # containing loss, model_output and metrics
+             # for training, we only care about loss and metrics
+         delta_time = timer.last
++        _s29_lap("tb", "tb.engine_train_batch")
+ 
+         update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)
+         # update lr scheduler
+@@ -378,6 +389,7 @@
+         else:
+             lr = None
+ 
++        _s29_lap("tb", "tb.lr_scheduler")
+         if self.engine.is_mp_src_rank_with_outputs():
+             # we don't need model_output in training. Maybe we change out mind later
+             output.pop("model_output")
+@@ -393,6 +405,7 @@
+         else:
+             final_output = None
+ 
++        _s29_lap("tb", "tb.postprocess_cpu")
+         return final_output
+ 
+     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+@@ -419,6 +432,7 @@
+         # for sft training, we need to compute loss in eval
+         loss_function = self.loss_fn if compute_loss else None
+ 
++        _s29_lap_start("ib")
+         with (
+             self.engine.eval_mode(disable_auto_offload=disable_auto_offload),
+             Timer(name="eval_batch", logger=None) as timer,
+@@ -427,6 +441,7 @@
+             with adapter_ctx:
+                 output = self.engine.infer_batch(data, loss_function=loss_function)
+         delta_time = timer.last
++        _s29_lap("ib", "ib.engine_infer_batch")
+ 
+         if self.engine.is_mp_src_rank_with_outputs():
+             final_output = self._postprocess_output(
+@@ -438,6 +453,7 @@
+             ).cpu()
+         else:
+             final_output = None
++        _s29_lap("ib", "ib.postprocess_cpu")
+ 
+         return final_output
+ 
+@@ -704,9 +720,13 @@
+     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+     @_with_routing_replay_flag(enabled=True)
+     def compute_log_prob(self, data: TensorDict) -> TensorDict:
+-        output = self.actor.infer_batch(data)
+-
+-        return output.cpu() if output is not None else None
++        _s29_patch("compute_log_prob")
++        with _s29_phase("lp.TOTAL"):
++            output = self.actor.infer_batch(data)
++            with _s29_phase("lp.output_cpu"):
++                output = output.cpu() if output is not None else None
++        _s29_flush("compute_log_prob")
++        return output
+ 
+     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+     # scheduled=True: this stage iterates over update mini-batches, so in discrete mode its trace
+@@ -714,8 +734,13 @@
+     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
+     @_with_routing_replay_flag(enabled=True)
+     def update_actor(self, data: TensorDict) -> TensorDict:
+-        output = self.actor.train_mini_batch(data=data)
+-        return output.cpu() if output is not None else None
++        _s29_patch()
++        with _s29_phase("ua.TOTAL"):
++            output = self.actor.train_mini_batch(data=data)
++            with _s29_phase("ua.output_cpu"):
++                output = output.cpu() if output is not None else None
++        _s29_flush("update_actor")
++        return output
+ 
+     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
+--- a/verl/workers/engine/base.py
++++ b/verl/workers/engine/base.py
+@@ -123,9 +123,12 @@
+         """
+         maybe_fix_3d_position_ids(data)
+ 
+-        self.optimizer_zero_grad()
+-        outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+-        grad_norm = self.optimizer_step()
++        with _s29_phase("tb.zero_grad"):
++            self.optimizer_zero_grad()
++        with _s29_phase("tb.forward_backward_batch"):
++            outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
++        with _s29_phase("tb.optimizer_step"), _s29_opt_threads():
++            grad_norm = self.optimizer_step()
+         if self.is_mp_src_rank_with_outputs():
+             assert "grad_norm" not in outputs["metrics"]
+             outputs["metrics"]["grad_norm"] = grad_norm
+@@ -297,6 +300,9 @@
+         return nullcontext()
+ 
+ 
++from verl.utils.s29_phase_timer import optimizer_threads as _s29_opt_threads, phase as _s29_phase, flush as _s29_flush, patch_megatron as _s29_patch, lap as _s29_lap, lap_start as _s29_lap_start
++
++
+ class BaseEngineCtx:
+     def __init__(self, engine: BaseEngine, mode, **kwargs):
+         """Base Engine context that handles load and offload
+@@ -329,10 +335,12 @@
+ 
+     def __enter__(self):
+         self.engine.mode = self.mode
+-        self._context_switch(get_device_name())
++        with _s29_phase(f"ctx.{self.mode}.enter_onload"):
++            self._context_switch(get_device_name())
+ 
+     def __exit__(self, exc_type, exc_val, exc_tb):
+-        self._context_switch("cpu")
++        with _s29_phase(f"ctx.{self.mode}.exit_offload"):
++            self._context_switch("cpu")
+         self.engine.mode = None
+ 
+ 
+--- a/verl/workers/engine/megatron/transformer_impl.py
++++ b/verl/workers/engine/megatron/transformer_impl.py
+@@ -23,6 +23,7 @@
+ from megatron.core import parallel_state as mpu
+ from megatron.core.package_info import __version__
+ from megatron.core.pipeline_parallel import get_forward_backward_func
++from verl.utils.s29_phase_timer import optimizer_threads as _s29_opt_threads, phase as _s29_phase, flush as _s29_flush, patch_megatron as _s29_patch, lap as _s29_lap, lap_start as _s29_lap_start
+ from omegaconf import OmegaConf
+ from tensordict import TensorDict
+ 
+@@ -786,6 +787,7 @@
+         return torch.tensor(input_ids.numel(), device=input_ids.device)
+ 
+     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
++        _s29_lap_start("fbb")
+         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
+         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
+ 
+@@ -824,6 +826,7 @@
+             if input_ids_for_max.is_nested:
+                 global_max_seqlen = int(input_ids_for_max.offsets().diff().max().item())
+ 
++        _s29_lap("fbb", "fbb.tokcount_allreduce_item")
+         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
+         if vpp_size is not None and vpp_size > 1:
+             num_batches_divided_by = self.tf_config.microbatch_group_size_per_vp_stage
+@@ -865,6 +868,7 @@
+                 min_num_micro_batch=None,
+             )
+ 
++        _s29_lap("fbb", "fbb.prepare_micro_batches")
+         if num_batches_divided_by is not None:
+             assert len(micro_batches) % num_batches_divided_by == 0, (
+                 f"micro_batches {micro_batches} must be divisible by num_batches_divided_by "
+@@ -916,6 +920,7 @@
+ 
+         # TODO: we may use the new schedule instead
+         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
++        _s29_lap("fbb", "fbb.setup")
+         losses_reduced = forward_backward_func(
+             forward_step_func=forward_step,
+             data_iterator=batch_generator,
+@@ -925,6 +930,7 @@
+             micro_batch_size=1,  # the communication shape is obtained via p2p comm
+             forward_only=forward_only,
+         )
++        _s29_lap("fbb", "fbb.FBF.fwd_only" if forward_only else "fbb.FBF.train")
+ 
+         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
+             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+@@ -974,6 +980,7 @@
+         if enable_routing_replay:
+             RouterReplay.clear_global_indices()
+             RouterReplay.clear_global_router_replay_action()
++        _s29_lap("fbb", "fbb.post")
+         return output
+ 
+     def _mbridge_export_tasks(self):
+@@ -1193,7 +1200,8 @@
+     ):
+         batch: TensorDict = next(batch_iter)
+ 
+-        batch = batch.to(get_device_id())
++        with _s29_phase("mb.batch_h2d", level=2):
++            batch = batch.to(get_device_id())
+         use_fused_kernels = tu.get_non_tensor_data(
+             batch, key="use_fused_kernels", default=self.engine_config.use_fused_kernels
+         )
+@@ -1403,7 +1411,9 @@
+             loss = torch.tensor(1.0, device=device)
+             scaled_loss = loss
+             metrics = {}
+-        output = {"loss": loss.detach().item(), "metrics": metrics}
++        with _s29_phase("mb.loss_item", level=2):
++            _loss_item = loss.detach().item()
++        output = {"loss": _loss_item, "metrics": metrics}
+         if forward_only or not self.engine_config.dynamic_context_parallel:
+             # Detach before this reaches Megatron's forward_data_store; see detach_tree.
+             output["model_output"] = detach_tree(model_output)

@@ -20,8 +20,9 @@ Format: symptom / repro / root cause / fix / retest.
 - Symptom: trainer island 0 trained round 0 (4 samples); in round 1 it got a group with only 3 samples (one trial was lost in boat, and the sampler kept the group under `min_samples 2`), `AssertionError: 3 % 4 != 0` (verl `tensordict_utils.make_iterator`), island exits.
 - Repro: `--groups-per-round 1 --samples-per-group 4`, sampler `min_samples < n`; reproduces whenever an incomplete group appears.
 - Root cause: the island sets `actor.ppo_mini_batch_size` to `groups_per_round` (one mini-batch per round); verl multiplies by `rollout.n` to get rows, assuming each group has exactly n samples; groups in the buffer can have fewer than n.
-- Fix: `fully_async_runner.whole_round_mini_batch`: during update_actor set the mini-batch to the actual row count of the round (`rollout.n` temporarily 1), restore after the call (`yeto/rl/adapters/verl/fully_async_runner.py`).
-- Retest: passed. Trainer island 0 trained the 3-sample group in round 1 (`trained_samples 3`, step 4.45 s), then round 2 with 4 samples was normal. Limitation: with dp>1 the row count must also be divisible by dp; this run used dp=1 and did not cover it.
+- First fix (withdrawn): `fully_async_runner.whole_round_mini_batch` set the mini-batch to the round's actual row count (`rollout.n` temporarily 1) around update_actor. It only changed the driver-side config, so the actor workers kept their own mini-batch size (D22 later hit the same assertion), and temporarily changing `rollout.n` affected every fully_async trainer. The mechanism was removed.
+- Fix: the relay trainer's buffer feed drops a group whose sample count differs from `samples_per_group` and records it (`dropped: short_group` in the consumed log; `yeto/rl/adapters/verl/buffer_feed.py`, `group_size` passed by `buffer_trainer_runner` through `relay_trainer.install_relay_ports`).
+- Retest of the first fix: trainer island 0 trained the 3-sample group in round 1 (`trained_samples 3`, step 4.45 s) with dp=1; that result does not carry over to the current fix, under which such a group is dropped instead.
 
 ## D4 After a syncer restart without --resume, spot islands resend old-run groups to the new run (observation)
 

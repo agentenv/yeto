@@ -96,6 +96,10 @@ def parse_args(argv):
     # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
     # release (one 120B release is about 225 GB and a dozen minutes per round)
     p.add_argument("--rl-measure-no-release", action="store_true")
+    # S29: a measurement run also skips the full policy hash of the first and the last
+    # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
+    # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
+    p.add_argument("--rl-measure-no-verify", action="store_true")
     # S28 G-120C: release only these policy versions (comma-separated), e.g. "2": a
     # multi-step run trains on the samples it has and releases once for the samplers
     p.add_argument("--rl-release-only-versions", default=None,
@@ -159,6 +163,8 @@ def parse_args(argv):
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
     # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
     p.add_argument("--rl-ascend-plugin-stack", default=None)
+    # S29: which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
+    p.add_argument("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"))
     # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
     # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
@@ -174,9 +180,15 @@ def parse_args(argv):
     # they are 47.8% of the activation per token, and the Ascend blockers are in
     # infra-drafts/SESSION28/report/FCE-PLAN.md.
     p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
+    # S29: the SFT recipe's communication overlap (args.json: overlap_grad_reduce,
+    # overlap_param_gather, tp_comm_overlap all true); verl's DDP default is off
+    p.add_argument("--rl-megatron-comm-overlap", action="store_true")
     # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
     # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
     p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
+    # S29 MFU-C: skip the old-log-prob recompute when old == current (onpolicy_old_logprob;
+    # refused unless one optimizer step per round). measure = keep it, log the difference
+    p.add_argument("--rl-onpolicy-old-logprob", choices=("off", "on", "measure"), default=None)
     # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
@@ -386,6 +398,18 @@ AGENT_LOOP_YAML = "agent-loop.yaml"
 AGENT_LOOP_TARGET = "yeto.rl.adapters.verl.harbor_agent_loop.HarborAgentLoop"
 
 
+def wide_prompt_rows(args: Any) -> bool:
+    """The prompt rows take the sequence budget (seq_len - response_len) instead of 512:
+    an agentic island, or a spot relay buffer trainer (``--rl-sample-role trainer``
+    with ``--rl-sample-relay``), whose rows the agentic spot islands wrote."""
+    from yeto.rl.engine import sample_roles
+
+    if agentic_island(args):
+        return True
+    return (bool(getattr(args, "rl_sample_relay", False))
+            and sample_roles.sample_role(args) == sample_roles.TRAINER)
+
+
 def agentic_island(args: Any) -> bool:
     """``--rl-agentic-harbor``: the rollout runs Harbor trials (``harness_env.is_harbor_agent``)."""
     return bool(getattr(args, "rl_agentic_harbor", False))
@@ -565,6 +589,11 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
+    if getattr(args, "rl_onpolicy_old_logprob", None):  # S29 MFU-C: forwarded to Ray (YETO_)
+        from .onpolicy_old_logprob import ENV as _OPLP_ENV
+
+        os.environ[_OPLP_ENV] = args.rl_onpolicy_old_logprob
+        print(f"[yeto-verl] {_OPLP_ENV}={args.rl_onpolicy_old_logprob}", flush=True)
     buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
     spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -641,13 +670,12 @@ def main(argv=None) -> int:
     # cap every one of 8 trajectories was ABORTED with prompt_exceeds_prompt_length
     # (the agent's own n_input_tokens were 7 585 to 64 960), the batch then had no
     # trainable token, and verl refused the training step.
-    # A buffer trainer (S29 spot run) holds the same agentic rows: the samplers that
-    # wrote them (spot islands, store samplers) are agentic, the trainer has no
-    # --rl-agentic-harbor of its own, and a 512 cap refused the first group
-    # (prompt 7940 tokens, BufferFeedError).
+    # A spot relay trainer (S29 spot run) holds the same agentic rows: the spot
+    # islands that wrote them are agentic, the trainer has no --rl-agentic-harbor of
+    # its own, and a 512 cap refused the first group (prompt 7940 tokens,
+    # BufferFeedError). Other buffer trainers keep the 512 default.
     max_prompt = (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                  if agentic_island(args) or sample_roles.sample_role(args) == sample_roles.TRAINER
-                  else 512)
+                  if wide_prompt_rows(args) else 512)
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None
@@ -763,6 +791,7 @@ def main(argv=None) -> int:
         if int(island) == lid:
             exit_after = int(version)
     readback = work / "readback"
+    onpolicy_old_logprob_static_check(args, overrides)  # S29 MFU-C: before verl starts
     plan = {
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
@@ -776,6 +805,9 @@ def main(argv=None) -> int:
         "engine": engine,
         **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
             "store_note": store_note} if megatron is not None else {}),
+        # S29 MFU-B: the measurement switches in effect (absent when none is set)
+        **({"experiment_env": megatron["experiment_env"]}
+           if megatron is not None and megatron.get("experiment_env") else {}),
         # S27 G-FL: absent unless --rl-ascend-plugin-stack asked for it
         **({"ascend_plugin_stack": megatron["ascend_plugin_stack"]}
            if megatron is not None and megatron["ascend_plugin_stack"] else {}),
@@ -847,6 +879,20 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def onpolicy_old_logprob_static_check(args, overrides) -> None:
+    """S29 MFU-C: the batch-independent checks of ``onpolicy_old_logprob.check_config``
+    on the island's own overrides, so a refused configuration fails at plan time, not
+    at the first training step. The trainer still runs the full check every step."""
+    if getattr(args, "rl_onpolicy_old_logprob", None) not in ("on", "measure"):
+        return
+    from . import onpolicy_old_logprob as oplp
+
+    try:
+        oplp.check_static(oplp.config_from_overrides(overrides))
+    except oplp.OnPolicyReuseError as error:
+        raise SystemExit(str(error)) from None
 
 
 def rollout_ahead_of(args) -> tuple[int, int]:
@@ -1172,12 +1218,21 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     # S28 G-CPW: a Mamba model needs seq_idx in verl's THD packing; probe the verl this
     # process imports (the workers probe their own at start, megatron_ports)
     mamba = megatron_engine.has_mamba(model_config)
+    # S29 MFU-B: measurement switches are logged, recorded in the plan, and refused on
+    # a run that publishes releases
+    try:
+        experiment = megatron_engine.check_experiment_env(
+            releases=not bool(getattr(args, "rl_measure_no_release", False)))
+        etp = megatron_engine.parse_etp()
+    except megatron_engine.ExperimentEnvError as error:
+        raise SystemExit(str(error)) from None
     shape = MegatronShape(
         trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
         rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
         rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
         cp=int(args.context_parallel or 1), mamba=mamba,
+        etp=etp,
         seq_idx=megatron_engine.probe_seq_idx(int(args.context_parallel or 1)) if mamba else None,
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
@@ -1191,6 +1246,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
         recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
         fused_logprob_kernels=bool(getattr(args, "rl_megatron_fused_logprob_kernels", False)),
+        comm_overlap=bool(getattr(args, "rl_megatron_comm_overlap", False)),
         old_logprob_entropy=not bool(getattr(args, "rl_no_old_logprob_entropy", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
@@ -1204,8 +1260,12 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         max_model_len=max_prompt + args.rollout_max_response_len, reward_path=reward_path,
         reward_name=reward_name, chat_template_kwargs=chat, n_gpus=trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
-    overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
-                                eps_clip_high=algo.get("eps_clip_high")) + [
+    try:
+        engine_overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
+                                           eps_clip_high=algo.get("eps_clip_high"))
+    except megatron_engine.ExperimentEnvError as error:  # S29 MFU-B: a refused YETO_S29_TCFG_EXTRA item
+        raise SystemExit(str(error)) from None
+    overrides = engine_overrides + [
         "actor_rollout_ref.rollout.agent.num_workers=8",
         "reward.num_workers=8",
     ]
@@ -1220,7 +1280,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     if args.rl_lr_schedule not in (None, "constant"):
         raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
     return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports,
-            "asserted_keys": asserted_keys(shape),
+            "asserted_keys": asserted_keys(shape), "experiment_env": experiment,
             "ascend_plugin_stack": ascend_plugin_stack_section(args, engine=megatron_engine.ENGINE_MEGATRON)}
 
 
@@ -1230,7 +1290,10 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     Only an island with model parallelism takes it: those plugins patch Megatron-Core
     (and the model code), which the FSDP2 island does not use."""
     root = getattr(args, "rl_ascend_plugin_stack", None)
+    recipe = getattr(args, "rl_ascend_plugin_recipe", None)
     if not root:
+        if recipe:
+            raise SystemExit("--rl-ascend-plugin-recipe needs --rl-ascend-plugin-stack")
         return None
     if engine != megatron_engine.ENGINE_MEGATRON:
         raise SystemExit("--rl-ascend-plugin-stack 只接有模型并行的 verl 岛（TP/PP/EP > 1）："
@@ -1238,7 +1301,7 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     from yeto.rl import ascend_plugin_stack
 
     try:
-        return ascend_plugin_stack.plan(str(root))
+        return ascend_plugin_stack.plan(str(root), recipe=recipe)
     except ascend_plugin_stack.AscendPluginStackError as error:
         raise SystemExit(f"--rl-ascend-plugin-stack: {error}") from None
 
