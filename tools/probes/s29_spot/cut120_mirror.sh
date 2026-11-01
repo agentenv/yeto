@@ -60,11 +60,13 @@ release() {
 }
 
 place() {
-  # the VM half alone (the files are already on the volume): manifest to the VM, pull, verify, place
+  # the VM half alone (the files are already on the volume): manifest to the VM, pull, verify, place.
+  # D24: the download dir must exist first; modal 1.2.6 `volume get <dir> <missing-path>` writes every
+  # file onto that one path (the last file wins), and the manifest check then sees only one blob
   local rel=$1 digest=${2:-$(awk '{print $1}' "$LOCAL/$1.make.txt" | tail -1)} t0
   t0=$(date +%s)
   vmsh "cat > /root/$rel.manifest.json" < "$LOCAL/$rel.manifest.json"
-  vmsh "set -e; rm -rf /root/staged-$rel; export PATH=/opt/sglang/bin:\$PATH; modal volume get --force $VOL $VOLDIR/$rel /root/staged-$rel-dl >/dev/null; \
+  vmsh "set -e; rm -rf /root/staged-$rel /root/staged-$rel-dl; mkdir -p /root/staged-$rel-dl; export PATH=/opt/sglang/bin:\$PATH; modal volume get --force $VOL $VOLDIR/$rel /root/staged-$rel-dl >/dev/null; \
     d=/root/staged-$rel-dl; [ -d \$d/$rel ] && d=\$d/$rel; mv \$d /root/staged-$rel; \
     cd /root/yeto-root && PYTHONPATH=. python3 -m yeto.rl.spot_rollout.cut_manifest place --manifest /root/$rel.manifest.json \
       --digest $digest --staged /root/staged-$rel --store /root/store" || return 1

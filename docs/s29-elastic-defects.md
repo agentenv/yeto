@@ -308,3 +308,12 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - 前两轮：约 $8.2（第二轮）+ 约 $11（第一轮）。
 - 合计 8 卡 VM 约 $28。STARTING / STOPPED 时段按不计 GPU 费估算。
 - 代理流量新增 0。
+
+## 120B 第四轮（11-01 09:15 CST 起）：补验收①②③
+
+### D24 `cut120_mirror.sh place` 在新 VM 上把整个目录下载成一个文件（已修）
+
+- 现象：s29r-120i 上第一次 `place r2-v2` 用了约 1 分钟就失败，报 `staged files differ: missing ['RELEASE.json', 'TEXT_SUBSET.json', ...]`。VM 上 `/root/staged-r2-v2` 是一个 215 MB 的单个文件（其中一个 ydelta）。
+- 原因：modal 1.2.6 的 `modal volume get <远端目录> <不存在的本地路径>` 会把每个文件依次写到同一个路径上，最后一个文件留下。上一轮的 VM 没走到这一步，所以没暴露。
+- 修复：`place()` 先 `rm -rf` 旧的下载目录，再 `mkdir -p /root/staged-<rel>-dl`，然后 `modal volume get`（目录存在时 modal 会写到 `<dl>/<rel>/...`，脚本原本就处理这种布局）。单测 `tests/test_s29_mirror_place.py`。
+- 修复后：71 个文件 sha256 全部通过，digest `5f3dcd62…`，VM 侧拉取 + 校验 + 落位共 48 s（纯下载 27 s），没经过代理。
