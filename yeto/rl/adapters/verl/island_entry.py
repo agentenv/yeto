@@ -95,6 +95,10 @@ def parse_args(argv):
     # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
     # release (one 120B release is about 225 GB and a dozen minutes per round)
     p.add_argument("--rl-measure-no-release", action="store_true")
+    # S29: a measurement run also skips the full policy hash of the first and the last
+    # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
+    # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
+    p.add_argument("--rl-measure-no-verify", action="store_true")
     # S28 G-120C: release only these policy versions (comma-separated), e.g. "2": a
     # multi-step run trains on the samples it has and releases once for the samplers
     p.add_argument("--rl-release-only-versions", default=None,
@@ -158,6 +162,8 @@ def parse_args(argv):
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
     # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
     p.add_argument("--rl-ascend-plugin-stack", default=None)
+    # S29: which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
+    p.add_argument("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"))
     # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
     # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
@@ -173,6 +179,9 @@ def parse_args(argv):
     # they are 47.8% of the activation per token, and the Ascend blockers are in
     # infra-drafts/SESSION28/report/FCE-PLAN.md.
     p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
+    # S29: the SFT recipe's communication overlap (args.json: overlap_grad_reduce,
+    # overlap_param_gather, tp_comm_overlap all true); verl's DDP default is off
+    p.add_argument("--rl-megatron-comm-overlap", action="store_true")
     # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
     # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
     p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
@@ -1185,6 +1194,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         last_stage_layers=getattr(args, "rl_megatron_last_stage_layers", None),
         recompute_full_layers=getattr(args, "rl_megatron_recompute_full_layers", None),
         fused_logprob_kernels=bool(getattr(args, "rl_megatron_fused_logprob_kernels", False)),
+        comm_overlap=bool(getattr(args, "rl_megatron_comm_overlap", False)),
         old_logprob_entropy=not bool(getattr(args, "rl_no_old_logprob_entropy", False)),
         close_mtp_pattern=close_mtp)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
@@ -1224,7 +1234,10 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     Only an island with model parallelism takes it: those plugins patch Megatron-Core
     (and the model code), which the FSDP2 island does not use."""
     root = getattr(args, "rl_ascend_plugin_stack", None)
+    recipe = getattr(args, "rl_ascend_plugin_recipe", None)
     if not root:
+        if recipe:
+            raise SystemExit("--rl-ascend-plugin-recipe needs --rl-ascend-plugin-stack")
         return None
     if engine != megatron_engine.ENGINE_MEGATRON:
         raise SystemExit("--rl-ascend-plugin-stack 只接有模型并行的 verl 岛（TP/PP/EP > 1）："
@@ -1232,7 +1245,7 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     from yeto.rl import ascend_plugin_stack
 
     try:
-        return ascend_plugin_stack.plan(str(root))
+        return ascend_plugin_stack.plan(str(root), recipe=recipe)
     except ascend_plugin_stack.AscendPluginStackError as error:
         raise SystemExit(f"--rl-ascend-plugin-stack: {error}") from None
 

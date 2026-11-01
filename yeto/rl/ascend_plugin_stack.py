@@ -197,6 +197,42 @@ PLUGINS: tuple[str, ...] = (
     "ascend_clip_nosync.py",
 )
 
+# S29: the 18.60pct recipe (pkg/nemotron-18.60pct-20261028, envs.txt EXTRA_PLUGINS_ADD)
+# loads these after the layer recompute policy (its ascend_stage_timer.py sits between
+# and is EXCLUDED here). They change the numerics path, so they are opt-in:
+# ``--rl-ascend-plugin-recipe 18.60`` loads them, the default (18.44) does not. Each
+# switch defaults on in its own file. Order matters: headloop / dxmask / cbsrcmask must
+# come after ascend_mamba_bwd_fuse.py, and moe_partial_recompute is what the policy's
+# P=1 runs.
+PLUGINS_1860_ADD: tuple[str, ...] = (
+    "ascend_conv_bf16_taps.py",
+    "ascend_mamba_headloop.py",
+    "ascend_mamba_dxmask.py",
+    "ascend_mamba_cbsrcmask.py",
+    "ascend_moe_partial_recompute.py",
+)
+
+# The recipes the stack knows; :data:`PLUGINS` (the 18.44pct list) is the default.
+RECIPES: tuple[str, ...] = ("18.44", "18.60")
+DEFAULT_RECIPE = "18.44"
+RECIPE_FLAG = "--rl-ascend-plugin-recipe"
+# The island passes the chosen recipe to its Ray workers through this variable
+# (forwarded by the YETO_ prefix, like :data:`ENV`). Unset means :data:`DEFAULT_RECIPE`.
+RECIPE_SELECT_ENV = "YETO_ASCEND_STACK_RECIPE"
+
+
+def recipe_plugins(recipe: str | None = None) -> tuple[str, ...]:
+    """The plugin list of ``recipe`` (default :data:`DEFAULT_RECIPE`); refuses an unknown name."""
+
+    name = str(recipe).strip() if recipe else DEFAULT_RECIPE
+    if name not in RECIPES:
+        raise AscendPluginStackError(
+            f"{RECIPE_FLAG} must be one of {sorted(RECIPES)}, got {recipe!r}")
+    if name == "18.44":
+        return tuple(PLUGINS)
+    at = PLUGINS.index("ascend_layer_recompute_policy.py") + 1
+    return tuple(PLUGINS[:at]) + PLUGINS_1860_ADD + tuple(PLUGINS[at:])
+
 # Plugins of the recipe's stack this switch leaves out, with the evidence.
 EXCLUDED: dict[str, str] = {
     "nemo_template_fix.py": "imports ms-swift at module level (line 9, from swift.template.register)",
@@ -234,20 +270,24 @@ def recipe_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def plan(root: str, *, extra_env: Mapping[str, str] | None = None) -> dict[str, Any]:
+def plan(root: str, *, extra_env: Mapping[str, str] | None = None,
+         recipe: str | None = None) -> dict[str, Any]:
     """What :func:`install` would set and import, without touching anything.
 
     ``plugins`` lists ``{"plugin", "path", "present"}`` in load order; ``excluded``
     and ``unset`` carry the reasons."""
 
     base = str(root).rstrip("/")
+    name = str(recipe).strip() if recipe else DEFAULT_RECIPE
+    plugins = recipe_plugins(name)
     return {
         "root": base,
+        "recipe": name,
         "env": recipe_env(extra_env),
         "unset": dict(UNSET),
         "excluded": dict(EXCLUDED),
-        "plugins": [{"plugin": name, "path": f"{base}/{name}",
-                     "present": os.path.isfile(os.path.join(base, name))} for name in PLUGINS],
+        "plugins": [{"plugin": item, "path": f"{base}/{item}",
+                     "present": os.path.isfile(os.path.join(base, item))} for item in plugins],
     }
 
 
@@ -305,13 +345,13 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
 
     where = os.environ if environ is None else environ
     say = log if log is not None else (lambda line: print(line, flush=True))
-    report = plan(root, extra_env=extra_env)
+    report = plan(root, extra_env=extra_env, recipe=os.environ.get(RECIPE_SELECT_ENV) or None)
     # Assignment, never setdefault: a Ray worker of an already-running cluster
     # inherits the raylet's environment, and an inherited STACK_REWRITES that names
     # clamp has to lose to the recipe's value (module docstring, first bullet).
     for key, value in report["env"].items():
         where[key] = value
-    say(f"[yeto-ascend-stack] root={report['root']} switches={len(report['env'])} "
+    say(f"[yeto-ascend-stack] root={report['root']} recipe={report['recipe']} switches={len(report['env'])} "
         f"plugins={len(report['plugins'])} excluded={len(report['excluded'])}")
     for key, value in sorted(report["env"].items()):
         say(f"[yeto-ascend-stack]   set {key}={value}")
@@ -319,7 +359,7 @@ def install(root: str, *, environ: Any = None, extra_env: Mapping[str, str] | No
         say(f"[yeto-ascend-stack]   unset {name}: {reason}")
     for name, reason in sorted(report["excluded"].items()):
         say(f"[yeto-ascend-stack]   excluded {name}: {reason}")
-    wanted = list(PLUGINS if plugins is None else plugins)
+    wanted = list([row["plugin"] for row in report["plugins"]] if plugins is None else plugins)
     wanted = _narrow(wanted, say)
     rows: list[dict[str, Any]] = []
     for name in wanted:

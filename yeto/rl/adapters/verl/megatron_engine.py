@@ -305,6 +305,11 @@ class MegatronShape:
     # S27 G-FL: Megatron's per-bucket non-finite gradient check
     # (yeto.rl.megatron_grad_checks); off only through --rl-no-grad-nan-check
     grad_nan_check: bool = True
+    # S29: overlap the DP gradient reduce / parameter gather and the TP communication
+    # with compute, as the Ascend SFT recipe does (args.json). verl builds its DDP
+    # config with overlap_grad_reduce False (utils/megatron_utils.py) and never sets the
+    # other two; s29-a2 measured update_actor 1.4x slower than the recipe at equal tokens.
+    comm_overlap: bool = False
     # S28 G-120: Megatron's weight-gradient accumulation fusion calls Apex's
     # fused_weight_gradient_mlp_cuda, which does not exist on Ascend (no Apex there).
     # Megatron's own default is True, so the key has to be written: a plugin-stack
@@ -599,6 +604,10 @@ def build_overrides(cfg: vconf.VerlRunConfig, shape: MegatronShape, *,
     # (yeto.rl.megatron_grad_checks). The island re-reads the flag off the DDP wrappers.
     for field, value in grad_checks.ddp_overrides(check_for_nan_in_grad=shape.grad_nan_check).items():
         out.append(f"++{meg}.override_ddp_config.{field}={value}")
+    if shape.comm_overlap:  # S29
+        out += [f"++{meg}.override_ddp_config.overlap_grad_reduce=True",
+                f"++{meg}.override_ddp_config.overlap_param_gather=True",
+                f"{tcfg}.tp_comm_overlap=True"]
     # S27 G-FN: the optimizer-state memory keys, under the actor's optimizer config
     # ("optim.x" becomes actor_rollout_ref.actor.optim.x; a "++" prefix
     # stays in front of the whole key, as Hydra wants it)

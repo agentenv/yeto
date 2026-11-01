@@ -177,6 +177,11 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
     # checkpoint engine as the fully_async path, so it gets the same NCCL host setting
     disaggregated = fully_async or plan.get("engine") == "megatron" or bool(plan.get("separate"))  # S27 G-EK
     stack = (plan.get("ascend_plugin_stack") or {}).get("root")
+    if stack:  # S29: the recipe the plan chose reaches every worker (YETO_ prefix forwarded)
+        from yeto.rl import ascend_plugin_stack
+
+        os.environ[ascend_plugin_stack.RECIPE_SELECT_ENV] = str(
+            plan["ascend_plugin_stack"].get("recipe") or ascend_plugin_stack.DEFAULT_RECIPE)
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None

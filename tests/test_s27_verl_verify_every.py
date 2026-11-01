@@ -21,7 +21,8 @@ from yeto.rl.engine.policy_digest import UNVERIFIED_PREFIX, WeightsChanged  # no
 
 
 def _args(**over):
-    base = dict(rl_verify_every_round=False, rl_verify_every=None, rl_single_island_no_sync=True)
+    base = dict(rl_verify_every_round=False, rl_verify_every=None, rl_single_island_no_sync=True,
+                rl_measure_no_release=False, rl_measure_no_verify=False)
     return SimpleNamespace(**{**base, **over})
 
 
@@ -236,3 +237,67 @@ def test_a_full_parameter_island_refuses_the_options_it_cannot_honour_even_witho
     assert launch_flags.NOT_MAPPED_REASONS["--rl-profile-trainer"] in str(error.value)
     assert set(launch_flags.NOT_APPLICABLE_ON_FULL_PARAMETER) <= set(launch_flags.NOT_MAPPED_REASONS)
     assert "--rl-debug-dump" not in launch_flags.NOT_MAPPED_REASONS, "mapped (debug_plan)"
+
+
+# --------------------------------------------------------------------- S29 --rl-measure-no-verify
+
+
+def test_measure_no_verify_is_admitted_only_on_a_no_release_full_island_with_verify_every():
+    ok = to.verify_plan(_args(rl_verify_every=1000, rl_measure_no_release=True, rl_measure_no_verify=True),
+                        full=True)
+    assert ok == {"verify_every": 1000, "measure_no_verify": True}
+    with pytest.raises(ValueError, match="--rl-measure-no-release"):
+        to.verify_plan(_args(rl_verify_every=1000, rl_measure_no_verify=True), full=True)
+    with pytest.raises(ValueError, match="--rl-verify-every"):
+        to.verify_plan(_args(rl_measure_no_release=True, rl_measure_no_verify=True), full=True)
+    with pytest.raises(ValueError, match="full-parameter"):
+        to.verify_plan(_args(rl_verify_every=4, rl_measure_no_release=True, rl_measure_no_verify=True),
+                       full=False)
+
+
+def test_measure_no_verify_skips_the_first_and_the_last_publication():
+    from yeto.rl.engine.driver import verify_publication
+
+    state = SimpleNamespace(supports_unverified_rounds=True, allow_unverified_rounds=lambda: None)
+    final = SimpleNamespace(is_final_round=lambda driver, rollout_id: True, cut_due=lambda v: False)
+    plain = SimpleNamespace(policy_state=state, verify_every=1000, published_version=None, sync=final)
+    assert verify_publication(plain, 0) is True  # first publication: full hash by default
+    driver = SimpleNamespace(policy_state=state, sync=final, published_version=None)
+    to.wire_verify(driver, state, {"verify_every": 1000, "measure_no_verify": True})
+    assert driver.measure_no_verify is True
+    assert verify_publication(driver, 0) is False   # first
+    driver.published_version = 4
+    assert verify_publication(driver, 5) is False   # last
+
+
+def test_the_verl_island_parses_measure_no_verify():
+    from yeto.rl.adapters.verl import island_entry
+
+    argv = ["--model", "m", "--model-revision", "a" * 40, "--data", "d", "--learner-id", "0",
+            "--reward-function", "r", "--global-rounds", "1", "--groups-per-round", "1",
+            "--samples-per-group", "1", "--rollout-max-response-len", "1", "--event-tape", "t",
+            "--inner-lr", "1", "--seq-len", "1", "--seed", "1", "--rl-measure-no-verify"]
+    parsed, ignored = island_entry.parse_args(argv)
+    assert parsed.rl_measure_no_verify and "--rl-measure-no-verify" not in ignored
+
+
+def test_measure_no_verify_publishes_every_round_without_reading_a_fragment():
+    """S29: without a verified cut the unverified path used to return None, so the driver
+    hashed every fragment on v0 anyway (~480 GB, ~30 min on the 120B island). In a
+    measurement run the base comes from the layout: no capture, no fragment digest, on
+    the first round as on the last."""
+    state, group = _local_state()
+    state.light = False
+    driver = _driver(state, every=1000, rounds=4)
+    to.wire_verify(driver, state, {"verify_every": 1000, "measure_no_verify": True})
+    assert state.measure_no_verify and state.supports_unverified_rounds
+    for version in range(0, 4):
+        driver.published_version = None if version == 0 else version - 1
+        resident = IslandDriver.export_local_resident(driver, policy_version=version)
+        assert resident is not None and not resident.verified
+        assert resident.digest.payload_bytes == state.adapter.expected_parameter_scalar_count * 4
+        assert resident.layout_hash == "l" * 64
+        group.trained_rounds += 1
+    assert state.adapter.captures == 0, "measurement mode reads no fragment on any round"
+    fresh, _ = _local_state()
+    assert fresh.export_identity(policy_version=0) is None, "outside measurement mode the driver still verifies v0"

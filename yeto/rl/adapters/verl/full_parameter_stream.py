@@ -1274,6 +1274,8 @@ class VerlFullParameterLocalState:
         from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
 
         last = getattr(self, "_last_verified", None)
+        if last is None and getattr(self, "measure_no_verify", False):
+            last = self._measurement_base(int(policy_version))
         if last is None:
             return None
         mark = self._mark()
@@ -1288,6 +1290,26 @@ class VerlFullParameterLocalState:
             policy_version=int(policy_version),
             digest=PolicyDigest(identity, identity, last.digest.payload_bytes, ()),
             materialize_fn=_never_materialize, weights_mark=mark, holds_fn=self._holds, verified=False)
+
+    def _measurement_base(self, policy_version: int):
+        """S29 --rl-measure-no-verify: the base an unverified publication refers to,
+        built from the layout alone. ``layout_hash`` comes from the manifests and the
+        payload size from the parameter count, so no fragment is exported or hashed --
+        :meth:`export` would read and hash all of them (about 480 GB on the 120B
+        island, ~30 min). Only a measurement run (no release) asks for it, so nothing
+        compares its placeholder digest with a real one."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+        from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS
+
+        adapter = self._adapter()
+        identity = unverified_identity(int(policy_version), self._mark())
+        return TrainerResidentState(
+            layout=LAYOUT_FRAGMENTS, base_model_revision=self.component.model_revision,
+            config_hash=self.component.config_hash, layout_hash=adapter.layout.layout_hash,
+            policy_version=int(policy_version),
+            digest=PolicyDigest(identity, identity, adapter.expected_parameter_scalar_count * 4, ()),
+            materialize_fn=_never_materialize, weights_mark=self._mark(), holds_fn=self._holds,
+            verified=False)
 
     def _export_light(self, policy_version: int, last, mark: dict):
         """S28 G-LHASH: the resident state of a round that is not fully verified, with

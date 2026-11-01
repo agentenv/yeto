@@ -642,3 +642,54 @@ def test_the_armed_hook_installs_when_the_worker_imports_verl_itself(tmp_path, m
     finally:
         builtins.__import__ = original_import
     assert bound.read_text() == "3"
+
+
+# S29: the five 18.60pct plugins change the numerics path, so they are opt-in.
+NEW_1860 = ("ascend_conv_bf16_taps.py", "ascend_mamba_headloop.py", "ascend_mamba_dxmask.py",
+            "ascend_mamba_cbsrcmask.py", "ascend_moe_partial_recompute.py")
+
+
+def test_default_list_leaves_out_the_1860_plugins(tmp_path):
+    assert set(NEW_1860).isdisjoint(stack.PLUGINS)
+    assert stack.recipe_plugins() == tuple(stack.PLUGINS)
+    report = stack.plan(str(tmp_path))
+    assert report["recipe"] == "18.44"
+    assert set(NEW_1860).isdisjoint(row["plugin"] for row in report["plugins"])
+
+
+def test_1860_switch_adds_them_after_the_recompute_policy(tmp_path):
+    names = [row["plugin"] for row in stack.plan(str(tmp_path), recipe="18.60")["plugins"]]
+    assert set(NEW_1860) <= set(names) and len(names) == len(stack.PLUGINS) + len(NEW_1860)
+    at = names.index("ascend_layer_recompute_policy.py")
+    assert tuple(names[at + 1:at + 6]) == NEW_1860
+    assert names.index("ascend_mamba_bwd_fuse.py") < names.index("ascend_mamba_headloop.py")
+
+
+def test_unknown_recipe_is_refused(tmp_path):
+    with pytest.raises(stack.AscendPluginStackError, match="18.44"):
+        stack.plan(str(tmp_path), recipe="18.99")
+
+
+def test_install_reads_the_recipe_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv(stack.RECIPE_SELECT_ENV, "18.60")
+    report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
+    assert set(NEW_1860) <= {row["plugin"] for row in report["plugins"]}
+    monkeypatch.delenv(stack.RECIPE_SELECT_ENV)
+    report = stack.install(str(tmp_path), environ={}, log=lambda line: None)
+    assert set(NEW_1860).isdisjoint(row["plugin"] for row in report["plugins"])
+
+
+def test_island_section_carries_the_recipe_and_refuses_it_alone(tmp_path):
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.verl import island_entry, megatron_engine
+
+    engine = megatron_engine.ENGINE_MEGATRON
+    args = SimpleNamespace(rl_ascend_plugin_stack=str(tmp_path), rl_ascend_plugin_recipe=None)
+    assert island_entry.ascend_plugin_stack_section(args, engine=engine)["recipe"] == "18.44"
+    args.rl_ascend_plugin_recipe = "18.60"
+    section = island_entry.ascend_plugin_stack_section(args, engine=engine)
+    assert set(NEW_1860) <= {row["plugin"] for row in section["plugins"]}
+    with pytest.raises(SystemExit, match="needs --rl-ascend-plugin-stack"):
+        island_entry.ascend_plugin_stack_section(
+            SimpleNamespace(rl_ascend_plugin_stack=None, rl_ascend_plugin_recipe="18.60"), engine=engine)
