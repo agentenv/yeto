@@ -248,6 +248,8 @@ def make_miles_island_task(
            if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
         + (f" --rl-ascend-plugin-stack {args.rl_ascend_plugin_stack}"
            if getattr(args, "rl_ascend_plugin_stack", None) else "")
+        + (f" --rl-ascend-plugin-recipe {args.rl_ascend_plugin_recipe}"
+           if getattr(args, "rl_ascend_plugin_recipe", None) else "")
         + (" --rl-no-grad-nan-check" if getattr(args, "rl_no_grad_nan_check", False) else "")
         + (" --rl-allow-pipeline-parallel-sync"
            if getattr(args, "rl_allow_pipeline_parallel_sync", False) else "")

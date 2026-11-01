@@ -162,6 +162,8 @@ def parse_args(argv):
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
     # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
     p.add_argument("--rl-ascend-plugin-stack", default=None)
+    # S29: which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
+    p.add_argument("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"))
     # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
     # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
@@ -1232,7 +1234,10 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     Only an island with model parallelism takes it: those plugins patch Megatron-Core
     (and the model code), which the FSDP2 island does not use."""
     root = getattr(args, "rl_ascend_plugin_stack", None)
+    recipe = getattr(args, "rl_ascend_plugin_recipe", None)
     if not root:
+        if recipe:
+            raise SystemExit("--rl-ascend-plugin-recipe needs --rl-ascend-plugin-stack")
         return None
     if engine != megatron_engine.ENGINE_MEGATRON:
         raise SystemExit("--rl-ascend-plugin-stack 只接有模型并行的 verl 岛（TP/PP/EP > 1）："
@@ -1240,7 +1245,7 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
     from yeto.rl import ascend_plugin_stack
 
     try:
-        return ascend_plugin_stack.plan(str(root))
+        return ascend_plugin_stack.plan(str(root), recipe=recipe)
     except ascend_plugin_stack.AscendPluginStackError as error:
         raise SystemExit(f"--rl-ascend-plugin-stack: {error}") from None
 
