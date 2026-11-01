@@ -1,0 +1,21 @@
+[s29-spot] island 1 on RTX6000 2026-10-31T10:45:30Z
+[s29-spot] waiting for the syncer tunnel on 127.0.0.1:29400
+[s29-spot] tunnel up; sampler start 2026-10-31T10:46:03Z
+[spot-sampler] boat labels: run s29r1031b island s29-spot-1 incarnation cee902e2; deleted 0 sandbox(es) of earlier incarnations
+[s29-spot] island 1 on RTX6000 2026-10-31T11:31:12Z
+[s29-spot] island 1 on RTX6000 2026-10-31T11:32:20Z
+[s29-spot] waiting for the syncer tunnel on 127.0.0.1:29400
+[s29-spot] tunnel up; sampler start 2026-10-31T11:32:25Z
+[spot-sampler] boat labels: run s29r1031b island s29-spot-1 incarnation b6937913; deleted 0 sandbox(es) of earlier incarnations
+[s29-spot] island 1 on RTX6000 2026-10-31T11:46:19Z
+[s29-spot] waiting for the syncer tunnel on 127.0.0.1:29400
+[s29-spot] tunnel up; sampler start 2026-10-31T11:46:25Z
+[spot-sampler] boat labels: run s29r1031b island s29-spot-1 incarnation 518bf0d9; deleted 0 sandbox(es) of earlier incarnations
+[s29-spot] island 1 on RTX6000 2026-10-31T12:40:14Z
+[s29-spot] waiting for the syncer tunnel on 127.0.0.1:29400
+[s29-spot] tunnel up; sampler start 2026-10-31T12:41:09Z
+boat sweep (sampler start): deleted 1 orphan sandbox(es) of run s29r1031b island s29-spot-1: ['bx_89gcvjcs']
+[spot-sampler] boat labels: run s29r1031b island s29-spot-1 incarnation 601ffdc0; deleted 1 sandbox(es) of earlier incarnations
+[engine-sampler] leaving FENCED: {'fenced': 'other run', 'run_merged_version': 0, 'highest_merged_version': 1}
+[spot-sampler] left FENCED: fenced (other run)
+[s29-spot] sampler exited 0 2026-10-31T12:50:22Z

@@ -244,11 +244,14 @@ class BufferFeed:
                  poll_s: float = 2.0, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 cursor_log: Any = None, merged: MergedVersions | None = None) -> None:
+                 cursor_log: Any = None, merged: MergedVersions | None = None,
+                 group_size: int | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
-        merged version pairing (module doc)."""
+        merged version pairing (module doc); ``group_size``: groups of any other
+        size are dropped (S29 D3)."""
         self.buffer = buffer
+        self.group_size = None if group_size is None else int(group_size)
         self.vmap = vmap
         self.shape = shape
         self.add_group = add_group
@@ -308,12 +311,23 @@ class BufferFeed:
     def pull(self) -> dict[str, Any] | None:
         if self._last is not None:
             raise BufferFeedError("pull before the previous group was kept or dropped")
-        item = self._next()
-        if item is None:
-            return None
-        samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
-        if not samples:
-            raise BufferFeedError(f"buffer position {item.position}: empty group")
+        while True:
+            item = self._next()
+            if item is None:
+                return None
+            samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
+            if not samples:
+                raise BufferFeedError(f"buffer position {item.position}: empty group")
+            if self.group_size is None or len(samples) == self.group_size:
+                break
+            # S29 D3: a sampler keeps a group with >= min_samples trials, so it can be short;
+            # verl splits the round into mini-batches of groups x n samples and asserts on
+            # a short one (3 % 4). The short group is dropped and recorded.
+            self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
+                         "kept": False, "dropped": "short_group",
+                         "detail": f"{len(samples)} samples, the trainer trains groups of {self.group_size}",
+                         "source": (item.entry.provenance or {}).get("sampler_id"), "samples": len(samples)})
+            self.pulled_positions.append(int(item.position))
         versions = [sample_version(s) for s in samples]
         local = tuple(self._local(v) for v in versions)
         lengths = tuple(int(s.get("response_length") or 0) for s in samples)

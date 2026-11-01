@@ -128,7 +128,8 @@ class FullyAsyncRolloutPool:
         raises :class:`~yeto.rl.engine.buffer_payload.SampleBufferExhausted` and
         the run ends FINISHED (S26 E9.3), not a failure."""
         self.island = island
-        self.max_pulls = max_pulls_factor * island.required
+        # 0: no cap (the relay pool; every pull waits for a new group, see RelayRolloutPool)
+        self.max_pulls = max_pulls_factor * island.required if max_pulls_factor > 0 else None
         self.queue_end_is_buffer_end = bool(queue_end_is_buffer_end)
         self._cursor = FullyAsyncDataCursor(island.seek_rollouter)
 
@@ -162,7 +163,7 @@ class FullyAsyncRolloutPool:
         collector = self._collector(rollout_id)
         pulled = 0
         while not collector.full:
-            if pulled >= self.max_pulls:
+            if self.max_pulls is not None and pulled >= self.max_pulls:
                 raise RuntimeError(f"rollout {rollout_id}: {pulled} queued samples pulled, only "
                                    f"{len(collector.kept)}/{isl.required} within the policy-age limit")
             meta = isl.call("yeto_pull_sample")

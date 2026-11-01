@@ -688,15 +688,30 @@ def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
 
     source = Path(island_entry.__file__).read_text()
     # the rule itself, read off the module: the agentic branch uses the budget
-    assert "if agentic_island(args) else 512" in source
+    # (S29: a spot relay trainer holds the same agentic rows, so it takes the budget too)
+    assert "if wide_prompt_rows(args) else 512" in source
     agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
     plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
 
     def cap(args):  # the expression at island_entry.py's max_prompt
         return (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                if island_entry.agentic_island(args) else 512)
+                if island_entry.wide_prompt_rows(args) else 512)
 
     assert cap(agentic) == 81920 - 8192
     assert cap(plain) == 512  # a math run is unchanged
     tiny = argparse.Namespace(rl_agentic_harbor=True, seq_len=1024, rollout_max_response_len=8192)
     assert cap(tiny) == 512  # never below the floor
+
+
+def test_only_agentic_or_relay_trainers_widen_the_prompt_rows():
+    """S29: a buffer trainer takes seq_len - response_len only on the spot relay path;
+    any other --rl-sample-role trainer island keeps the 512 default."""
+    from yeto.rl.adapters.verl import island_entry
+
+    base = dict(rl_agentic_harbor=False, rl_sample_role="trainer", seq_len=81920, rollout_max_response_len=8192)
+    assert island_entry.wide_prompt_rows(argparse.Namespace(**base, rl_sample_relay=True))
+    assert not island_entry.wide_prompt_rows(argparse.Namespace(**base, rl_sample_relay=False))
+    assert not island_entry.wide_prompt_rows(argparse.Namespace(**base))
+    both = {**base, "rl_sample_role": "both"}
+    assert not island_entry.wide_prompt_rows(argparse.Namespace(**both, rl_sample_relay=True))
+    assert island_entry.wide_prompt_rows(argparse.Namespace(**{**base, "rl_agentic_harbor": True}))

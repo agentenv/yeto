@@ -1053,8 +1053,15 @@ class FullParameterRoleStream:
                     if previous is not None:
                         previous.release()
                 elif update.version != 0 or previous is not None:
+                    # S29 spot run (defect D11): the usual cause is a restarted island
+                    # joining a pool that already merged, without an island lease
+                    # (only an island pool with a lease and asynchronous rounds may
+                    # rejoin, ``may_rejoin``). Say so instead of a bare "changed".
                     raise RuntimeError(
-                        f"{self.config.algorithm} {self.config.role} initial broadcast changed"
+                        f"{self.config.algorithm} {self.config.role} initial broadcast changed "
+                        f"(fragment {update.fragment_id} arrived at version {update.version}): the "
+                        "pool already merged past version 0; a restarted island rejoins only an "
+                        "island pool with a lease (--rl-sync-island-lease-s) and asynchronous rounds"
                     )
                 observed[stored.fragment_id] = stored
             if len(observed) < count:

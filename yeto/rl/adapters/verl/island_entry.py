@@ -30,6 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from yeto.rl.engine import run_flags
 from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
@@ -55,7 +56,7 @@ def parse_args(argv):
     p.add_argument("--rl-single-island-no-sync", action="store_true")
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--reward-function", required=True)
-    p.add_argument("--global-rounds", type=int, required=True)
+    p.add_argument("--global-rounds", type=int, required=True, help=run_flags.GLOBAL_ROUNDS_HELP)
     p.add_argument("--groups-per-round", type=int, required=True)
     p.add_argument("--samples-per-group", type=int, required=True)
     p.add_argument("--rollout-max-response-len", type=int, required=True)
@@ -397,6 +398,18 @@ AGENT_LOOP_YAML = "agent-loop.yaml"
 AGENT_LOOP_TARGET = "yeto.rl.adapters.verl.harbor_agent_loop.HarborAgentLoop"
 
 
+def wide_prompt_rows(args: Any) -> bool:
+    """The prompt rows take the sequence budget (seq_len - response_len) instead of 512:
+    an agentic island, or a spot relay buffer trainer (``--rl-sample-role trainer``
+    with ``--rl-sample-relay``), whose rows the agentic spot islands wrote."""
+    from yeto.rl.engine import sample_roles
+
+    if agentic_island(args):
+        return True
+    return (bool(getattr(args, "rl_sample_relay", False))
+            and sample_roles.sample_role(args) == sample_roles.TRAINER)
+
+
 def agentic_island(args: Any) -> bool:
     """``--rl-agentic-harbor``: the rollout runs Harbor trials (``harness_env.is_harbor_agent``)."""
     return bool(getattr(args, "rl_agentic_harbor", False))
@@ -657,8 +670,12 @@ def main(argv=None) -> int:
     # cap every one of 8 trajectories was ABORTED with prompt_exceeds_prompt_length
     # (the agent's own n_input_tokens were 7 585 to 64 960), the batch then had no
     # trainable token, and verl refused the training step.
+    # A spot relay trainer (S29 spot run) holds the same agentic rows: the spot
+    # islands that wrote them are agentic, the trainer has no --rl-agentic-harbor of
+    # its own, and a 512 cap refused the first group (prompt 7940 tokens,
+    # BufferFeedError). Other buffer trainers keep the 512 default.
     max_prompt = (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                  if agentic_island(args) else 512)
+                  if wide_prompt_rows(args) else 512)
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None

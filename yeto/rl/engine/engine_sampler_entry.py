@@ -329,7 +329,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         resource_sampler: Callable[[Callable[..., None]], Any] | None = None,
         incarnation: str | None = None, stop: Callable[[], bool] | None = None,
         on_event: Callable[..., None] | None = None,
-        stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None = None) -> int:
+        stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None = None,
+        stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None) -> int:
     """Build every part of the island from ``spec``, run it from the resume
     point, stop the engine; returns the rounds this incarnation ran.
     ``resource_sampler(emit)`` returns a started telemetry thread (default:
@@ -338,7 +339,9 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     round starts; the island leaves FINISHED, not PREEMPTED). ``on_event(event,
     **fields)`` sees every tape record after it is written. ``stores(incarnation,
     emit)``: the (release store, sample buffer) pair instead of :func:`build_stores`
-    (S27 G-EA: a spot sampler follows the syncer and writes to the relay)."""
+    (S27 G-EA: a spot sampler follows the syncer and writes to the relay).
+    ``stop_reason()``: after the loop ends, (LeaveReason, detail) to leave with
+    instead of FINISHED, or None (S29 D4: a fenced spot sampler leaves FENCED)."""
     import os  # noqa: PLC0415
 
     from .sampler_resume import new_incarnation  # noqa: PLC0415
@@ -349,7 +352,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     incarnation = incarnation or new_incarnation()
     with _member_incarnation_env(env, incarnation):
         return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
-                    stop=stop, on_event=on_event, stores=stores)
+                    stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason)
 
 
 @contextlib.contextmanager
@@ -377,7 +380,8 @@ def _member_incarnation_env(env: Any, incarnation: str):
 def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          environ: Mapping[str, str] | None, resource_sampler: Callable[[Callable[..., None]], Any] | None,
          stop: Callable[[], bool] | None, on_event: Callable[..., None] | None,
-         stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None) -> int:
+         stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None,
+         stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None) -> int:
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .sampler_resume import (  # noqa: PLC0415
@@ -442,8 +446,14 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
                         {"seq": latest.seq, "policy_version": latest.version})
         rounds = 0 if buffer.data_ended else island.run()
         preempted = reclaimed()
-        leave(LeaveReason.PREEMPTED if preempted else LeaveReason.FINISHED, rounds=rounds,
-              dropped_groups=island.round.dropped_groups)
+        fence = None if preempted or stop_reason is None else stop_reason()
+        if fence is not None:  # S29 D4: e.g. FENCED, fenced="other run"
+            reason, detail = fence
+            print(f"[engine-sampler] leaving {reason.name}: {dict(detail)}", flush=True)
+            leave(reason, rounds=rounds, dropped_groups=island.round.dropped_groups, **dict(detail))
+        else:
+            leave(LeaveReason.PREEMPTED if preempted else LeaveReason.FINISHED, rounds=rounds,
+                  dropped_groups=island.round.dropped_groups)
         if not preempted:
             from yeto.rl.event_echo import FINALIZED_EVENT  # noqa: PLC0415
 

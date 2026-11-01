@@ -33,7 +33,8 @@ from .topology import (
     rl_island_count, rl_island_placement_args, rl_island_spec, rl_min_nodes, rl_trainer_shape,
 )
 from .syncer import (
-    ROLE_SYNCERS, island_pool, rl_dense_sweep, rl_full_parameter_async, rl_full_parameter_final_cut,
+    DEFAULT_ISLAND_LEASE_S, ROLE_SYNCERS, island_pool, rl_dense_sweep, rl_full_parameter_async,
+    rl_full_parameter_final_cut,
     rl_needs_critic, rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
@@ -394,6 +395,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     args.wire_dtype = "f32"
     args.rl_total_fragment_steps = args.total_steps * args.fragments
     if async_rounds:
+        from ..rl.engine.run_flags import local_training_steps_line
+
+        print(local_training_steps_line(args.total_steps, args.fragments), flush=True)  # S29 D7
         # The decoupled preset's outer step; the outer-merge options override.
         args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
         args.outer_lr = 0.7
@@ -642,6 +646,75 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
                          f"or {FULL_PARAMETER_SYNC_PRESET} with asynchronous rounds")
 
 
+def spot_rollout_run(args) -> bool:
+    """S29: a spot rollout run (relay trainers fed by spot sampler islands)."""
+    return bool(getattr(args, "rl_sample_relay", False)) and int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0
+
+
+def _spot_pool_off_reason(args, num_islands: int) -> str | None:
+    """Why a spot rollout run keeps its fixed roster (None: the island pool applies).
+    Each reason is a precondition of :func:`_check_island_pool` (or of an option
+    that needs a fixed roster) the run does not meet."""
+    if getattr(args, "rl_spot_fixed_roster", False):
+        return "--rl-spot-fixed-roster"
+    if getattr(args, "experimental_rl_sync", False):
+        return "--experimental-rl-sync"
+    preset = getattr(args, "rl_sync_preset", "strict-avg")
+    if not (preset in ("strict-avg", "decoupled") or rl_full_parameter_async(args)):
+        return f"preset {preset} without asynchronous rounds"
+    if rl_needs_critic(args):
+        return "a critic"
+    if int(getattr(args, "syncer_shards", None) or 1) > 1:
+        return "--syncer-shards > 1"
+    if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0):
+        return "--rl-sync-bcast-delta-full-every"
+    if num_islands < 2:
+        return f"{num_islands} synced island"
+    return None
+
+
+def _default_spot_island_pool(args) -> None:
+    """S29 D11: a spot rollout run (``--rl-sample-relay`` with
+    ``--rl-spot-subscribers``) is elastic, so it runs an island pool by default:
+    ``--rl-sync-island-lease-s`` 150 (``DEFAULT_ISLAND_LEASE_S``), which makes a
+    restarted trainer island rejoinable. Any explicit membership option keeps the
+    command as given; ``--rl-spot-fixed-roster`` keeps the fixed roster.
+
+    The pool's own precondition (rounds may merge without some island, see
+    :func:`_check_island_pool`) is met, not bypassed: ``--rl-sync-mode async``
+    already gives quorum 1 and a grace window; when the resolved values would be
+    a strict fixed roster (quorum = every island, no grace, no base lag) and
+    ``--rl-sync-quorum`` was not given, the quorum becomes islands - 1. A run
+    whose explicit options make the rounds fixed, or that misses another pool
+    precondition (one syncer, no critic, asynchronous rounds, no broadcast
+    deltas), keeps the fixed roster with the launcher's warning."""
+    import sys
+
+    if not spot_rollout_run(args) or island_pool(args):
+        return
+    try:
+        num_islands = _synced_learners(args, parse_gpu_spec(args.gpu))
+    except (ValueError, AttributeError, TypeError):
+        return  # the later checks name the problem
+    reason = _spot_pool_off_reason(args, num_islands)
+    quorum = getattr(args, "rl_sync_quorum", None)
+    grace = int(getattr(args, "rl_sync_grace_ms", None) or 0)
+    lag = int(getattr(args, "rl_sync_max_base_lag", 0) or 0)
+    fixed = (getattr(args, "rl_sync_quorum_theta", None) is None and grace == 0 and lag == 0
+             and (quorum is None or int(quorum) >= num_islands))
+    if reason is None and fixed and quorum is not None:
+        reason = f"explicit --rl-sync-quorum {quorum} with no grace or base lag"
+    if reason is not None:
+        print(f"[launcher] spot rollout keeps a fixed island roster ({reason})", file=sys.stderr)
+        return
+    if fixed:
+        args.rl_sync_quorum = num_islands - 1
+    args.rl_sync_island_lease_s = DEFAULT_ISLAND_LEASE_S
+    print(f"[launcher] spot rollout: island pool on by default (--rl-sync-island-lease-s "
+          f"{DEFAULT_ISLAND_LEASE_S:g}" + (f", --rl-sync-quorum {args.rl_sync_quorum}" if fixed else "")
+          + "); --rl-spot-fixed-roster keeps a fixed roster", file=sys.stderr)
+
+
 def _check_island_pool(args, *, num_islands: int) -> None:
     """Membership options (--rl-sync-quorum-theta, ...; dynamic membership)
     apply to the strict-avg, decoupled and asynchronous full-parameter
@@ -752,6 +825,7 @@ def _prepare_rl_args(
     _validate_quant_tier(args)  # S26 E6: refused before any cloud spend
     _prepare_node_inventory(args)
     _apply_rl_sync_mode(args)
+    _default_spot_island_pool(args)  # S29 D11
     _default_peer_recovery(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent

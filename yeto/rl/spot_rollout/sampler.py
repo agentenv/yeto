@@ -97,6 +97,12 @@ class SpotChannels:
             reload_every=int(spec.get("reload_every", 1)), finished=self.client.run_finished,
             layout_fingerprint=layout_fingerprint(self.layout).hex(),
             base_version=int(spec.get("base_version", 0)), base_dir=spec.get("base_dir") or base_model)
+        from .version_board import VERSION_BOARD, VersionReader
+
+        # S29 D9/D4: the run's merged version, read at every round admission
+        self.version = VersionReader(lambda: RelayBoard(self.addr, VERSION_BOARD, self.subscriber_id, key=key))
+        if spec.get("version_board", True):  # False: drills that need stale groups (S29 D10)
+            self.releases.version_reader = self.version
         self.buffer = RelaySampleBuffer(self.producer, fragment_versions=self.releases.fragment_versions,
                                         should_stop=self.stopping, cut_of=self.releases.cut_identity)
         emit("rl_spot_sampler_channels", syncer=f"{self.addr[0]}:{self.addr[1]}",
@@ -114,14 +120,54 @@ class SpotChannels:
 
     def stopping(self) -> bool:
         # fenced: a newer process of this sampler took its id on the head
+        # version.regressed: the board went back below a version this sampler read,
+        # i.e. a fresh syncer replaced the run it joined (S29 D4)
         return (self.client.run_finished() or self.client.fenced() or self.syncer_lost()
-                or self.buffer.gone)
+                or self.buffer.gone or self.version.regressed)
+
+    def stop_reason(self) -> tuple[Any, dict[str, Any]] | None:
+        """(LeaveReason, detail) of a fence stop, None otherwise (the island
+        then leaves FINISHED as before). S29 D4: a sampler that left because a
+        fresh syncer replaced its run leaves FENCED, fenced="other run"."""
+        from yeto.rl.pool_client import LeaveReason
+
+        if self.version.regressed:
+            return LeaveReason.FENCED, {"fenced": "other run", "run_merged_version": self.version.merged_version,
+                                        "highest_merged_version": self.version.highest}
+        if self.client.fenced():
+            return LeaveReason.FENCED, {"fenced": "superseded"}
+        return None
 
     def close(self) -> None:
         try:
             self.client.close()
         finally:
             self.producer.close()
+            self.version.close()
+
+
+def label_boat_sandboxes(spec: Mapping[str, Any], incarnation: str,
+                         environ: Mapping[str, str] | None = None) -> list[str]:
+    """S29 D15: with ``YETO_BOAT_RUN_ID`` set, label this process's boat sandboxes
+    with the island (``sampler_id``) and this incarnation, and delete the
+    sandboxes an earlier incarnation of this island left (a preempted VM runs
+    no exit cleanup). Returns the deleted sandbox ids. The labels go to
+    ``os.environ`` (the boat sandboxes of this process read them there)."""
+    import os
+
+    from yeto.rl.harness.harbor import boat_labels
+
+    env = os.environ if environ is None else environ
+    run = str(env.get(boat_labels.RUN_ID_ENV, "")).strip()
+    if not run:
+        return []
+    labels = {boat_labels.RUN_ID_ENV: run, boat_labels.ISLAND_ENV: str(spec["sampler_id"]),
+              boat_labels.INCARNATION_ENV: str(incarnation)}
+    os.environ.update(labels)
+    deleted = boat_labels.sweep_stale_incarnations(labels)
+    print(f"[spot-sampler] boat labels: run {run} island {spec['sampler_id']} incarnation {incarnation}; "
+          f"deleted {len(deleted)} sandbox(es) of earlier incarnations", flush=True)
+    return deleted
 
 
 def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
@@ -135,6 +181,7 @@ def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = Non
     spec.setdefault("num_rollouts", NO_LIMIT_ROUNDS)
     spec.setdefault("store", str(Path(spec["work_dir"]).expanduser() / "store"))
     incarnation = incarnation or new_incarnation()
+    label_boat_sandboxes(spec, incarnation, environ)
     made: dict[str, SpotChannels] = {}
 
     def stores(inc: str, emit: Callable[..., None]) -> tuple[Any, Any]:
@@ -146,6 +193,7 @@ def run_spec(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = Non
     try:
         rounds = entry.run(spec, environ=environ, incarnation=incarnation, stores=stores,
                            stop=lambda: "channels" in made and made["channels"].stopping(),
+                           stop_reason=lambda: made["channels"].stop_reason() if "channels" in made else None,
                            resource_sampler=resource_sampler)
     finally:
         if "channels" in made:
@@ -166,6 +214,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[spot-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
     finished = channels is not None and channels.client.run_finished()
+    fence = None if channels is None else channels.stop_reason()
+    if fence is not None:
+        print(f"[spot-sampler] left {fence[0].name}: fenced ({fence[1]['fenced']})", flush=True)
     print(f"[spot-sampler] done: {rounds} round(s); the run "
           f"{'finished' if finished else 'did not finish'}", flush=True)
     hold_after_reclaim()

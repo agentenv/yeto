@@ -1,0 +1,21 @@
+old/run4/island0.log: [yeto-verl island 0] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+old/run4/island0.log: [36m(YetoBufferTaskRunner pid=2802172)[0m [yeto-relay] boat orphan watchdog: run s29r1031b lease 600 s
+old/run4/island0.log: ISLAND-RC=137
+old/run4/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [yeto-relay] boat orphan watchdog: run s29r1031b lease 600 s
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:01:00,170 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:02:03,506 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:03:06,031 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:04:08,562 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:05:11,086 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2802176)[0m [Rank 0 | Local Rank 0] 2026-10-31 19:06:13,616 WARNING [yeto.rl.harness.harbor.boat_labels:242] => boat orphan watchdog: sweep failed
+old/run4/island1.log: ISLAND-RC=137
+old/run4/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2932609)[0m [yeto-relay] boat orphan watchdog: run s29r1031b lease 600 s
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2932609)[0m [Rank 0 | Local Rank 0] 2026-10-31 20:27:29,053 WARNING [yeto.rl.harness.harbor.boat_labels:138] => boat sweep (island lease expired): deleted 1 orphan sandbox(es) of run s29r1031b island s29-spot-1: ['bx_acuweggs']
+old/run4/island1.log: [36m(YetoBufferTaskRunner pid=2932609)[0m YETO_RL_EVENT {"event":"rl_boat_orphans_deleted","island":"s29-spot-1","island_id":1,"reason":"island lease expired","run":"s29r1031b","sandboxes":["bx_acuweggs"],"time_unix":1793449649.0540154}
+old/run4/island1.log: ISLAND-RC=137
+run/island0.log: [yeto-verl island 0] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+run/island0.log: [36m(YetoBufferTaskRunner pid=2992804)[0m [yeto-relay] boat orphan watchdog: run s29r1031b lease 600 s
+run/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+run/island1.log: [36m(YetoBufferTaskRunner pid=2992808)[0m [yeto-relay] boat orphan watchdog: run s29r1031b lease 600 s

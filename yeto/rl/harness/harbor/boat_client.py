@@ -38,6 +38,7 @@ from yeto.rl.agentic.loop_local import LoopLocal
 
 API_HOST = "https://boat.dev/api/v1"
 API_KEY_ENV = "BOAT_API_KEY"
+PROXY_ENV = "YETO_BOAT_PROXY"  # http://host:port of an HTTP(S) CONNECT proxy for the boat API
 CLI_CONFIG = Path("~/.config/ascii/boat/config.json")
 
 # Plan limits (box_20).  Override per deployment with the env names below.
@@ -80,6 +81,9 @@ class BoatClient(Protocol):
     def usage_seconds(self, sandbox_id: str) -> float | None: ...
     def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None: ...
     def delete(self, sandbox_id: str) -> None: ...
+    # S29 D15 (optional on fakes): the name carries the run labels (boat_labels)
+    # def set_name(self, sandbox_id: str, name: str) -> None
+    # def list_sandboxes(self) -> list[boat_labels.SandboxInfo]
 
 
 def load_token() -> str:
@@ -106,7 +110,11 @@ class SdkBoatClient:
         from boat_sdk import ApiClient, Configuration
         from boat_sdk.api.boat_api import BoatApi
 
-        self._client = ApiClient(Configuration(host=host, access_token=token or load_token()))
+        config = Configuration(host=host, access_token=token or load_token())
+        proxy = os.environ.get(PROXY_ENV, "").strip()
+        if proxy:  # S29 D17: a trainer node without direct internet (n4) reaches boat through one
+            config.proxy = proxy
+        self._client = ApiClient(config)
         self._api = BoatApi(self._client)
         self._create_attempts = create_attempts
         self._sleep = sleep
@@ -173,6 +181,25 @@ class SdkBoatClient:
         from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
 
         self._api.update(sandbox_id, UpdateSandboxRequest(ttl_seconds=int(ttl_seconds)))
+
+    def set_name(self, sandbox_id: str, name: str) -> None:
+        """Rename the sandbox (S29 D15: the name carries the run labels, ``boat_labels``)."""
+        from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
+
+        self._api.update(sandbox_id, UpdateSandboxRequest(name=name))
+
+    def list_sandboxes(self) -> list:
+        """Every sandbox of the account (all pages) as ``boat_labels.SandboxInfo``."""
+        from .boat_labels import SandboxInfo
+
+        out, cursor = [], None
+        while True:
+            page = self._api.sandboxes(limit=200, cursor=cursor)
+            out += [SandboxInfo(str(s.id), str(s.name or ""), str(s.state)) for s in page.sandboxes]
+            info = page.page_info
+            if info is None or not info.has_more or not info.next_cursor:
+                return out
+            cursor = info.next_cursor
 
     def delete(self, sandbox_id: str) -> None:
         self._api.delete_sandbox(x_ascii_confirm_delete=sandbox_id, sandbox_id=sandbox_id)

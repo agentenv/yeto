@@ -1,0 +1,33 @@
+run/island0.log: [yeto-verl island 0] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+run/island0.log: [36m(YetoBufferTaskRunner pid=2675455)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+run/island0.log: ISLAND-RC=137
+run/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+run/island1.log: [36m(YetoBufferTaskRunner pid=2675459)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+run/island1.log: ISLAND-RC=137
+old/run1/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2408924)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2408924)[0m [Rank 0 | Local Rank 0] 2026-10-31 15:37:16,871 WARNING [yeto.rl.harness.harbor.boat_labels:138] => boat sweep (island lease expired): deleted 1 orphan sandbox(es) of run s29r1031a island s29-spot-1: ['bx_bb2vmkz3']
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2408924)[0m YETO_RL_EVENT {"event":"rl_boat_orphans_deleted","island":"s29-spot-1","island_id":1,"reason":"island lease expired","run":"s29r1031a","sandboxes":["bx_bb2vmkz3"],"time_unix":1793432236.871568}
+old/run1/island1.log: ISLAND-RC=137
+old/run1/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 5 x 8 = 40 (--global-rounds 5 counts sync rounds; each local step pushes one fragment)
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2475215)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2475215)[0m YETO_RL_EVENT {"error":"StrictRlInvariantError: syncer refused this island: syncer rejected protocol session: HELLO syncer semantic profile does not match the running server","event":"rl_strict_failure","island_id":1,"metric":"syncer_profile_mismatch","time_unix":1793432456.911287,"value":1}
+old/run1/island1.log: [36m(YetoBufferTaskRunner pid=2475215)[0m YETO_RL_EVENT {"error":"syncer refused this island: syncer rejected protocol session: HELLO syncer semantic profile does not match the running server","error_type":"StrictRlInvariantError","event":"island_leave","island_id":1,"reason":5,"reason_name":"TRAINING_FAILED","time_unix":1793432456.9115765}
+old/run1/island1.log: ISLAND-RC=1
+old/run2/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+old/run2/island1.log: [36m(YetoBufferTaskRunner pid=2559789)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+old/run2/island1.log: ISLAND-RC=137
+old/run2/island1.log: [yeto-verl island 1] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+old/run2/island1.log: [36m(YetoBufferTaskRunner pid=2602917)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+old/run2/island1.log: ISLAND-RC=137
+old/run2/island0.log: ISLAND-RC=1
+old/run2/island0.log: [yeto-verl island 0] local training steps = global_rounds x fragments = 40 x 8 = 320 (--global-rounds 40 counts sync rounds; each local step pushes one fragment)
+old/run2/island0.log: [36m(YetoBufferTaskRunner pid=2575382)[0m [yeto-relay] boat orphan watchdog: run s29r1031a lease 600 s
+old/run2/island0.log: ISLAND-RC=137
+run/fake0.log: [spot-sampler] boat labels: run s29r1031a island s29-spot-0 incarnation 40e58bf5; deleted 0 sandbox(es) of earlier incarnations
+run/fake0.log: [engine-sampler] leaving FENCED: {'fenced': 'other run', 'run_merged_version': 0, 'highest_merged_version': 13}
+run/fake0.log: [spot-sampler] left FENCED: fenced (other run)
+run/fake1.log: [spot-sampler] boat labels: run s29r1031a island s29-spot-1 incarnation e01f3b19; deleted 0 sandbox(es) of earlier incarnations
+run/fake1.log: [engine-sampler] leaving FENCED: {'fenced': 'other run', 'run_merged_version': 0, 'highest_merged_version': 13}
+run/fake1.log: [spot-sampler] left FENCED: fenced (other run)
+old/run1/fake0.log: [spot-sampler] boat labels: run s29r1031a island s29-spot-0 incarnation cf459916; deleted 0 sandbox(es) of earlier incarnations

@@ -67,9 +67,83 @@ def popen_spawn(argv: Sequence[str], env: Mapping[str, str]) -> Process:
     reclaim (Modal ``container stop``) sends SIGINT to every process of the
     container: the island turns it into the reclaim marker and leaves after
     the round in progress, so the server must not die under that round
-    (T-E2V eval-e2-verl-e2v-a). ``stop()`` still ends it with SIGTERM."""
+    (T-E2V eval-e2-verl-e2v-a). ``stop()`` still ends it with SIGTERM.
+
+    The server runs in its own process group (its pid is the group id), so the
+    island can end the server's workers with it and a later island process on
+    the same machine can end a server an island killed with SIGKILL left behind
+    (:func:`reap_stale_server`)."""
     return subprocess.Popen(list(argv), env={**os.environ, **env},  # noqa: S603
-                            preexec_fn=_ignore_sigint)  # noqa: PLW1509 - only resets one signal
+                            preexec_fn=_ignore_sigint,  # noqa: PLW1509 - only resets one signal
+                            start_new_session=True)
+
+
+def server_group_file(engine: str, port: int) -> Path:
+    import tempfile  # noqa: PLC0415
+
+    return Path(tempfile.gettempdir()) / f"yeto-{engine}-server-{int(port)}.pgid"
+
+
+def process_cmdline(pid: int) -> list[str] | None:
+    """The argv of a live process (None when it is gone or unreadable)."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except FileNotFoundError:
+        if Path("/proc/self/cmdline").exists():
+            return None  # procfs present: the process is gone
+        raw = None
+    except OSError:
+        return None
+    if raw is not None:
+        args = [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+        return args or None
+    try:  # no procfs (macOS): ask ps
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],  # noqa: S603, S607
+                             capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.stdout.strip()
+    return text.split() if out.returncode == 0 and text else None
+
+
+def is_engine_server(argv: Sequence[str] | None, engine: str, port: int) -> bool:
+    """``argv`` is an ``engine`` server started with ``--port <port>``."""
+    if not argv:
+        return False
+    args = list(argv)
+    if not any(engine.lower() in arg.lower() for arg in args):
+        return False
+    want = str(int(port))
+    for i, arg in enumerate(args):
+        if arg == f"--port={want}" or (arg == "--port" and i + 1 < len(args) and args[i + 1] == want):
+            return True
+    return False
+
+
+def reap_stale_server(engine: str, port: int, *, kill: Callable[[int, int], None] | None = None) -> int | None:
+    """End the process group a SIGKILLed island left on this port (S29 spot run, defect D8).
+
+    ``kill -9`` of a spot sampler process leaves its SGLang scheduler running
+    (58.7 GiB of the H100's memory), so the next sampler process on the same VM
+    cannot start its own server. The group id comes from the file the earlier
+    island wrote at start; returns it when a group was signalled. The group is
+    signalled only when its leader is alive and its command line names ``engine``
+    and ``--port <port>``; otherwise (a reused pid) the file is removed and
+    nothing is killed."""
+    path = server_group_file(engine, port)
+    try:
+        pgid = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    path.unlink(missing_ok=True)
+    if pgid <= 1 or not is_engine_server(process_cmdline(pgid), engine, port):
+        # the leader is gone or the pid was reused by an unrelated process: only drop the file
+        return None
+    try:
+        (kill or os.killpg)(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return None
+    return pgid
 
 
 def httpx_call(method: str, url: str, body: Any, timeout_s: float) -> tuple[int, Any]:
@@ -232,7 +306,14 @@ class ServerEngine:
         self._check_host_memory()
         self._stopping = False
         self._version = None
+        if self._spawn is popen_spawn:
+            stale = reap_stale_server(self.ENGINE, self.config.port)
+            if stale is not None:
+                print(f"[{self.ENGINE}-server] ended the process group {stale} an earlier island left "
+                      f"on port {self.config.port}", flush=True)
         self._process = self._spawn(self.argv(model_dir), self.env())
+        if self._spawn is popen_spawn:
+            server_group_file(self.ENGINE, self.config.port).write_text(str(self._process.pid))
         self._wait_ready()
         detail = self.after_ready()
         self._version = int(version)
@@ -289,6 +370,8 @@ class ServerEngine:
             except subprocess.TimeoutExpired:
                 process.kill()
                 code = process.wait(timeout=30)
+        if self._spawn is popen_spawn:
+            server_group_file(self.ENGINE, self.config.port).unlink(missing_ok=True)
         known = code in self.EXIT_CODES_AFTER_STOP
         self.last_exit = {"code": code, "during": "stop",
                           "normal": code in (0, -signal.SIGTERM) or known,

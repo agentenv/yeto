@@ -787,6 +787,7 @@ pins both.
 | 4 | INFRA_FAILED | node or trainer lost, reconfiguration or storage failure, any unmapped error |
 | 5 | TRAINING_FAILED | a training check failed (publication, policy identity, optimizer step, non-finite values) |
 | 6 | CONFIG_MISMATCH | incompatible configuration |
+| 7 | FENCED | the member is no longer part of this run: superseded by a newer incarnation, or a fresh syncer replaced the run it joined (S29 D4); an older syncer records `unknown_7` |
 
 The exception table is `yeto/rl/engine/leave_reason.py`. An island sends at
 most one LEAVE: a reclaim listener's PREEMPTED is not overwritten by the
