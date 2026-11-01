@@ -822,3 +822,59 @@ def test_d3_relay_ports_forward_group_size():
     from yeto.rl.adapters.verl.relay_trainer import install_relay_ports
 
     assert "group_size" in inspect.signature(install_relay_ports).parameters
+def test_dropped_groups_are_counted_and_a_high_drop_rate_warns(tmp_path, capsys):
+    """Dropped groups emit rl_buffer_group_dropped with running counts; a drop rate
+    above the threshold over a window warns once per window."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok1")
+    for key in ("s1", "s2", "s3"):
+        writer.write([_sample(0, index=0)], group_key=key)
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok2")
+    reader, vmap, added, records, events = _buffer(tmp_path), VersionMap(), [], [], []
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=added.append,
+                         record=records.append, sleep=lambda s: None, group_size=2,
+                         emit=lambda event, **fields: events.append((event, fields)),
+                         drop_window=4, drop_warn_ratio=0.5, drop_stall_warn_s=1e9)
+    for _ in range(2):
+        assert feed.pull() is not None
+        feed("yeto_keep_last")
+    dropped = [f for e, f in events if e == "rl_buffer_group_dropped"]
+    assert [(f["reason"], f["count"], f["position"]) for f in dropped] == [
+        ("short_group", 1, 1), ("short_group", 2, 2), ("short_group", 3, 3)]
+    high = [f for e, f in events if e == "rl_buffer_drop_rate_high"]
+    assert len(high) == 1 and high[0]["rate"] == 0.75 and high[0]["window"] == 4
+    assert "3 of the last 4 buffer groups were dropped" in capsys.readouterr().out
+    assert feed.dropped == {"short_group": 3} and feed.accepted == 2
+
+
+def test_a_long_run_of_drops_reports_a_starved_feed(tmp_path, capsys):
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    for key in ("s1", "s2", "s3"):
+        writer.write([_sample(0, index=0)], group_key=key)
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok")
+    reader, vmap, events = _buffer(tmp_path), VersionMap(), []
+    vmap.record(0, 0)
+    now = [0.0]
+
+    def clock():
+        now[0] += 400.0
+        return now[0]
+
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=lambda rows: None,
+                         record=lambda fields: None, sleep=lambda s: None, group_size=2, clock=clock,
+                         emit=lambda event, **fields: events.append((event, fields)),
+                         drop_window=100, drop_stall_warn_s=600.0)
+    assert feed.pull() is not None
+    starved = [f for e, f in events if e == "rl_buffer_feed_starved"]
+    assert starved and starved[0]["streak"] >= 1 and starved[0]["reason"] == "short_group"
+    out = capsys.readouterr().out
+    assert "no trainable group for" in out and "a trainable group again after 3 dropped groups" in out
+
+
+def test_the_default_feed_emitter_prints_a_yeto_rl_event(capsys):
+    from yeto.rl.event_echo import PREFIX
+
+    bf.print_feed_event("rl_buffer_group_dropped", island_id=1, reason="short_group", count=1)
+    line = capsys.readouterr().out.strip()
+    assert line.startswith(PREFIX) and '"event":"rl_buffer_group_dropped"' in line

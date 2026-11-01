@@ -80,7 +80,9 @@ metrics read it).
 
 from __future__ import annotations
 
+import os
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -243,6 +245,26 @@ class _Pulled:
     record: dict[str, Any]
 
 
+DROP_WINDOW_ENV = "YETO_BUFFER_DROP_WINDOW"  # groups per drop-rate window (default 20)
+DROP_WARN_RATIO_ENV = "YETO_BUFFER_DROP_WARN_RATIO"  # warn above this drop rate (default 0.5)
+DROP_STALL_WARN_ENV = "YETO_BUFFER_DROP_STALL_WARN_S"  # no trainable group for this long (default 600)
+
+
+def _env_number(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def print_feed_event(event: str, **fields: Any) -> None:
+    """The feed's default emitter: one ``YETO_RL_EVENT <json>`` stdout record."""
+    from yeto.rl.event_echo import format_record
+
+    print(format_record({"island_id": fields.pop("island_id", None), "time_unix": time.time(),
+                         "event": str(event), **fields}), flush=True)
+
+
 class BufferFeed:
     """The rollout port's queue calls over the sample buffer (module doc).
 
@@ -258,11 +280,32 @@ class BufferFeed:
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
                  cursor_log: Any = None, merged: MergedVersions | None = None,
-                 group_size: int | None = None) -> None:
+                 group_size: int | None = None, emit: Callable[..., None] | None = None,
+                 drop_window: int | None = None, drop_warn_ratio: float | None = None,
+                 drop_stall_warn_s: float | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
-        merged version pairing (module doc)."""
+        merged version pairing (module doc). ``emit(event, **fields)`` reports a
+        dropped group (``rl_buffer_group_dropped``, with running counts), a drop
+        rate above ``drop_warn_ratio`` over the last ``drop_window`` groups
+        (``rl_buffer_drop_rate_high``) and ``drop_stall_warn_s`` seconds of drops
+        without a trainable group (``rl_buffer_feed_starved``); the thresholds
+        default to :data:`DROP_WINDOW_ENV` / :data:`DROP_WARN_RATIO_ENV` /
+        :data:`DROP_STALL_WARN_ENV`."""
         self.buffer = buffer
+        self.emit = print_feed_event if emit is None else emit
+        self.drop_window = max(1, int(drop_window if drop_window is not None
+                                      else _env_number(DROP_WINDOW_ENV, 20)))
+        self.drop_warn_ratio = float(drop_warn_ratio if drop_warn_ratio is not None
+                                     else _env_number(DROP_WARN_RATIO_ENV, 0.5))
+        self.drop_stall_warn_s = float(drop_stall_warn_s if drop_stall_warn_s is not None
+                                       else _env_number(DROP_STALL_WARN_ENV, 600.0))
+        self.dropped: dict[str, int] = {}
+        self.accepted = 0
+        self._outcomes: deque[bool] = deque(maxlen=self.drop_window)  # True: dropped
+        self._last_accepted_at = clock()
+        self._stall_warned_at: float | None = None
+        self._streak = 0
         self.group_size = None if group_size is None else int(group_size)
         self.vmap = vmap
         self.shape = shape
@@ -340,6 +383,7 @@ class BufferFeed:
             else:
                 reason = "over_length"
             if too_long is None:
+                self._accepted()
                 break
             # S29 D21: a group with a sample wider than the rows (an agentic prompt past
             # max_prompt_length, a response past max_response_length) is dropped and recorded,
@@ -349,6 +393,7 @@ class BufferFeed:
                          "kept": False, "dropped": reason, "detail": too_long,
                          "source": (item.entry.provenance or {}).get("sampler_id"), "samples": len(samples)})
             self.pulled_positions.append(int(item.position))
+            self._dropped(reason, int(item.position), too_long)
         versions = [sample_version(s) for s in samples]
         local = tuple(self._local(v) for v in versions)
         lengths = tuple(int(s.get("response_length") or 0) for s in samples)
@@ -362,6 +407,43 @@ class BufferFeed:
         return {"uid": f"{UID_PREFIX}{int(item.position)}", "min_steps": local, "max_steps": local,
                 "calls": (None,) * len(samples), "lengths": lengths,
                 "rewards": tuple(float(s.get("reward") or 0.0) for s in samples)}
+
+    def _accepted(self) -> None:
+        self.accepted += 1
+        self._outcomes.append(False)
+        if self._stall_warned_at is not None:
+            print(f"[yeto-buffer-feed] a trainable group again after {self._streak} dropped groups",
+                  flush=True)
+        self._streak = 0
+        self._last_accepted_at = self.clock()
+        self._stall_warned_at = None
+
+    def _dropped(self, reason: str, position: int, detail: str) -> None:
+        self.dropped[reason] = self.dropped.get(reason, 0) + 1
+        self._outcomes.append(True)
+        self._streak += 1
+        total = sum(self.dropped.values())
+        self.emit("rl_buffer_group_dropped", reason=reason, position=position, detail=detail,
+                  count=self.dropped[reason], dropped_total=total, accepted_total=self.accepted)
+        if len(self._outcomes) == self.drop_window:
+            rate = sum(self._outcomes) / self.drop_window
+            if rate > self.drop_warn_ratio:
+                print(f"[yeto-buffer-feed] WARNING: {sum(self._outcomes)} of the last {self.drop_window} "
+                      f"buffer groups were dropped (rate {rate:.0%} > {self.drop_warn_ratio:.0%}); "
+                      f"dropped so far {dict(self.dropped)}, accepted {self.accepted}", flush=True)
+                self.emit("rl_buffer_drop_rate_high", rate=rate, window=self.drop_window,
+                          threshold=self.drop_warn_ratio, dropped=dict(self.dropped), accepted_total=self.accepted)
+                self._outcomes.clear()  # one warning per window
+        now = self.clock()
+        idle = now - self._last_accepted_at
+        if idle >= self.drop_stall_warn_s and (
+                self._stall_warned_at is None or now - self._stall_warned_at >= self.drop_stall_warn_s):
+            self._stall_warned_at = now
+            print(f"[yeto-buffer-feed] WARNING: no trainable group for {idle:.0f} s: the last {self._streak} "
+                  f"buffer groups were all dropped (last: {reason}, {detail}); training makes no progress "
+                  f"until a group fits the trainer's rows and group size", flush=True)
+            self.emit("rl_buffer_feed_starved", idle_s=idle, streak=self._streak, reason=reason,
+                      dropped=dict(self.dropped), accepted_total=self.accepted)
 
     def keep(self) -> None:
         last = self._take_last()
