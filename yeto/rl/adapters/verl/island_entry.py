@@ -765,6 +765,7 @@ def main(argv=None) -> int:
         if int(island) == lid:
             exit_after = int(version)
     readback = work / "readback"
+    onpolicy_old_logprob_static_check(args, overrides)  # S29 MFU-C: before verl starts
     plan = {
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
@@ -849,6 +850,20 @@ def main(argv=None) -> int:
         stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def onpolicy_old_logprob_static_check(args, overrides) -> None:
+    """S29 MFU-C: the batch-independent checks of ``onpolicy_old_logprob.check_config``
+    on the island's own overrides, so a refused configuration fails at plan time, not
+    at the first training step. The trainer still runs the full check every step."""
+    if getattr(args, "rl_onpolicy_old_logprob", None) not in ("on", "measure"):
+        return
+    from . import onpolicy_old_logprob as oplp
+
+    try:
+        oplp.check_static(oplp.config_from_overrides(overrides))
+    except oplp.OnPolicyReuseError as error:
+        raise SystemExit(str(error)) from None
 
 
 def rollout_ahead_of(args) -> tuple[int, int]:

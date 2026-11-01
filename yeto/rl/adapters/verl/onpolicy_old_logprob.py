@@ -78,23 +78,15 @@ def _get(node: Any, key: str, default: Any = None) -> Any:
     return getattr(node, key, default)
 
 
-def check_config(config: Any, *, batch_rows: int, local_trigger_step: int = 1,
-                 trigger_parameter_sync_step: int | None = None) -> dict:
-    """Refuse every configuration in which the update pass does not run on the
-    recompute's weights, or in which ``old_log_probs`` is read by something other than
-    the PPO ratio and the TIS weights. Returns the TIS settings the worker needs."""
+def _static_problems(config: Any, *, local_trigger_step: int = 1,
+                     trigger_parameter_sync_step: int | None = None) -> list[str]:
+    """The refusals that do not depend on the batch (:func:`check_static`)."""
     problems = []
     actor = _get(_get(config, "actor_rollout_ref"), "actor")
-    rollout = _get(_get(config, "actor_rollout_ref"), "rollout")
     algorithm = _get(config, "algorithm")
     epochs = int(_get(actor, "ppo_epochs", 1) or 1)
     if epochs != 1:
         problems.append(f"actor.ppo_epochs={epochs} (must be 1)")
-    n = int(_get(rollout, "n", 1) or 1)
-    mini = int(_get(actor, "ppo_mini_batch_size", 0) or 0) * n
-    if mini <= 0 or int(batch_rows) != mini:
-        problems.append(f"batch of {batch_rows} rows is not exactly one PPO mini-batch of "
-                        f"ppo_mini_batch_size x rollout.n = {mini} rows (must be one optimizer step)")
     trigger = trigger_parameter_sync_step
     if trigger is None:
         trigger = _get(_get(config, "async_training"), "trigger_parameter_sync_step", 1)
@@ -123,10 +115,74 @@ def check_config(config: Any, *, batch_rows: int, local_trigger_step: int = 1,
     level = _get(rc, "rollout_is", None)
     if level not in (None, "token", "sequence"):
         problems.append(f"rollout_correction.rollout_is={level!r}")
+    return problems
+
+
+def check_static(config: Any) -> None:
+    """The batch-independent part of :func:`check_config`, for the island to run at
+    plan time so a refused configuration fails before verl starts, not at the first
+    training step. :func:`check_config` still runs every step."""
+    problems = _static_problems(config)
     if problems:
         raise OnPolicyReuseError(f"{ENV}: old-log-prob reuse refused: " + "; ".join(problems))
+
+
+def _hydra_value(text: str) -> Any:
+    value = text.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    lowered = value.lower()
+    if lowered in ("null", "none", "~"):
+        return None
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    for kind in (int, float):
+        try:
+            return kind(value)
+        except ValueError:
+            pass
+    return value
+
+
+def config_from_overrides(overrides: Any) -> dict:
+    """A nested dict of the Hydra overrides (``key.path=value``, ``+``/``++`` prefixes
+    dropped, a later write wins), enough for :func:`check_static`. Keys the overrides
+    do not write are absent, so the checks see their defaults."""
+    root: dict = {}
+    for item in overrides:
+        key, eq, value = str(item).partition("=")
+        if not eq or key.startswith("~"):
+            continue
+        parts = key.lstrip("+").split(".")
+        node = root
+        for part in parts[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                child = node[part] = {}
+            node = child
+        node[parts[-1]] = _hydra_value(value)
+    return root
+
+
+def check_config(config: Any, *, batch_rows: int, local_trigger_step: int = 1,
+                 trigger_parameter_sync_step: int | None = None) -> dict:
+    """Refuse every configuration in which the update pass does not run on the
+    recompute's weights, or in which ``old_log_probs`` is read by something other than
+    the PPO ratio and the TIS weights. Returns the TIS settings the worker needs."""
+    problems = _static_problems(config, local_trigger_step=local_trigger_step,
+                                trigger_parameter_sync_step=trigger_parameter_sync_step)
+    actor = _get(_get(config, "actor_rollout_ref"), "actor")
+    rollout = _get(_get(config, "actor_rollout_ref"), "rollout")
+    n = int(_get(rollout, "n", 1) or 1)
+    mini = int(_get(actor, "ppo_mini_batch_size", 0) or 0) * n
+    if mini <= 0 or int(batch_rows) != mini:
+        problems.append(f"batch of {batch_rows} rows is not exactly one PPO mini-batch of "
+                        f"ppo_mini_batch_size x rollout.n = {mini} rows (must be one optimizer step)")
+    if problems:
+        raise OnPolicyReuseError(f"{ENV}: old-log-prob reuse refused: " + "; ".join(problems))
+    rc = _get(_get(config, "algorithm"), "rollout_correction")
     threshold = _get(rc, "rollout_is_threshold", 2.0)
-    return {"rollout_is": level, "rollout_is_threshold": threshold}
+    return {"rollout_is": _get(rc, "rollout_is", None), "rollout_is_threshold": threshold}
 
 
 def meta(mode_: str, tis: Mapping[str, Any]) -> str:
