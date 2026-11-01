@@ -767,3 +767,25 @@ def test_every_asserted_key_of_a_megatron_island_gets_a_want(tmp_path):
     out = me.build_overrides(_run(), D0)
     nulls = [k for k in me.ASSERTED_KEYS if _override_value(out, k) is None]
     assert nulls == []
+
+
+def test_island_plan_records_and_gates_the_s29_measurement_switches(tmp_path, monkeypatch):
+    """S29 MFU-B: the measurement switches land in the plan, a bad ETP is a clear
+    exit, and a release run refuses the switches that bypass a check."""
+    for name in me.EXPERIMENT_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    assert not _plan(tmp_path)["experiment_env"]
+    monkeypatch.setenv(me.ETP_ENV, "x")
+    with pytest.raises(SystemExit, match="YETO_S29_ETP must be an integer"):
+        _plan(tmp_path)
+    monkeypatch.delenv(me.ETP_ENV)
+    monkeypatch.setenv(me.TCFG_EXTRA_ENV, "moe_expert_capacity_factor=1.25")
+    with pytest.raises(SystemExit, match="--rl-measure-no-release"):
+        _plan(tmp_path)
+    plan = _plan(tmp_path, rl_measure_no_release=True)
+    assert plan["experiment_env"] == {me.TCFG_EXTRA_ENV: "moe_expert_capacity_factor=1.25"}
+    assert _value(plan["overrides"],
+                  "actor_rollout_ref.actor.megatron.override_transformer_config.moe_expert_capacity_factor") == "1.25"
+    monkeypatch.setenv(me.TCFG_EXTRA_ENV, "moe_aux_loss_coeff=0.1")
+    with pytest.raises(SystemExit, match="must not override moe_aux_loss_coeff"):
+        _plan(tmp_path, rl_measure_no_release=True)
