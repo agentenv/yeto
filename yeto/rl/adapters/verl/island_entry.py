@@ -770,6 +770,9 @@ def main(argv=None) -> int:
         "engine": engine,
         **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
             "store_note": store_note} if megatron is not None else {}),
+        # S29 MFU-B: the measurement switches in effect (absent when none is set)
+        **({"experiment_env": megatron["experiment_env"]}
+           if megatron is not None and megatron.get("experiment_env") else {}),
         # S27 G-FL: absent unless --rl-ascend-plugin-stack asked for it
         **({"ascend_plugin_stack": megatron["ascend_plugin_stack"]}
            if megatron is not None and megatron["ascend_plugin_stack"] else {}),
@@ -1166,13 +1169,21 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     # S28 G-CPW: a Mamba model needs seq_idx in verl's THD packing; probe the verl this
     # process imports (the workers probe their own at start, megatron_ports)
     mamba = megatron_engine.has_mamba(model_config)
+    # S29 MFU-B: measurement switches are logged, recorded in the plan, and refused on
+    # a run that publishes releases
+    try:
+        experiment = megatron_engine.check_experiment_env(
+            releases=not bool(getattr(args, "rl_measure_no_release", False)))
+        etp = megatron_engine.parse_etp()
+    except megatron_engine.ExperimentEnvError as error:
+        raise SystemExit(str(error)) from None
     shape = MegatronShape(
         trainer_nodes=pools.trainer_nodes, trainer_gpus_per_node=pools.trainer_gpus_per_node,
         rollout_nodes=pools.rollout_nodes, rollout_gpus_per_node=pools.rollout_gpus_per_node,
         rollout_tp=pools.rollout_tp, tp=int(args.tensor_parallel or 1),
         pp=int(args.pipeline_parallel or 1), ep=int(args.expert_parallel or 1),
         cp=int(args.context_parallel or 1), mamba=mamba,
-        etp=int(__import__("os").environ.get("YETO_S29_ETP", "1")),
+        etp=etp,
         seq_idx=megatron_engine.probe_seq_idx(int(args.context_parallel or 1)) if mamba else None,
         max_tokens_per_gpu=int(args.rl_max_tokens_per_gpu or 8192),
         router_replay="R3" if args.use_rollout_routing_replay else "disabled",
@@ -1199,8 +1210,12 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         max_model_len=max_prompt + args.rollout_max_response_len, reward_path=reward_path,
         reward_name=reward_name, chat_template_kwargs=chat, n_gpus=trainer_gpus,
         experiment_name=f"yeto-verl-{args.learner_id}")
-    overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
-                                eps_clip_high=algo.get("eps_clip_high")) + [
+    try:
+        engine_overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
+                                           eps_clip_high=algo.get("eps_clip_high"))
+    except megatron_engine.ExperimentEnvError as error:  # S29 MFU-B: a refused YETO_S29_TCFG_EXTRA item
+        raise SystemExit(str(error)) from None
+    overrides = engine_overrides + [
         "actor_rollout_ref.rollout.agent.num_workers=8",
         "reward.num_workers=8",
     ]
@@ -1215,7 +1230,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     if args.rl_lr_schedule not in (None, "constant"):
         raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
     return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports,
-            "asserted_keys": asserted_keys(shape),
+            "asserted_keys": asserted_keys(shape), "experiment_env": experiment,
             "ascend_plugin_stack": ascend_plugin_stack_section(args, engine=megatron_engine.ENGINE_MEGATRON)}
 
 
