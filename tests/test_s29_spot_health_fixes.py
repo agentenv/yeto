@@ -135,14 +135,75 @@ def test_d4_a_fresh_syncer_fences_the_sampler():
 
     board = _Board()
     reader = VersionReader(lambda: board, poll_s=0.0)
-    VersionPublisher(lambda: board, 4).publish(42)
+    VersionPublisher(lambda: board, 4, run="run-a").publish(42)
     reader.refresh()
     assert not reader.regressed
     board.fresh()  # a syncer started without --resume
     reader.close()  # the reconnect that follows it
-    VersionPublisher(lambda: board, 4).publish(1)
+    VersionPublisher(lambda: board, 4, run="run-b").publish(1)
     reader.refresh()
     assert reader.regressed
+
+
+def test_d4_interleaved_trainers_of_one_run_do_not_fence():
+    from yeto.rl.spot_rollout.version_board import VersionPublisher, VersionReader
+
+    board = _Board()
+    reader = VersionReader(lambda: board, poll_s=0.0)
+    ahead = VersionPublisher(lambda: board, 4, run="run-a", publisher=0)
+    lagging = VersionPublisher(lambda: board, 4, run="run-a", publisher=1)
+    ahead.publish(10)
+    reader.refresh()
+    lagging.publish(9)  # newest PUT wins: the board now holds the older version
+    reader.refresh()
+    assert not reader.regressed
+    assert reader.merged_version == 10 and reader.highest == 10 and reader.publisher == 0
+    lagging.publish(11)
+    reader.refresh()
+    assert not reader.regressed and reader.merged_version == 11 and reader.publisher == 1
+
+
+def test_d4_only_a_run_identity_change_fences():
+    from yeto.rl.spot_rollout.version_board import VersionPublisher, VersionReader
+
+    board = _Board()
+    reader = VersionReader(lambda: board, poll_s=0.0)
+    VersionPublisher(lambda: board, 4, run="run-a").publish(10)
+    reader.refresh()
+    VersionPublisher(lambda: board, 4, run="run-a").publish(3)  # a restarted trainer, same run
+    reader.refresh()
+    assert not reader.regressed
+    VersionPublisher(lambda: board, 4, run="run-b").publish(20)  # higher, but another run
+    reader.refresh()
+    assert reader.regressed
+
+
+def test_d4_board_item_ids_going_backwards_fence():
+    from yeto.rl.spot_rollout.version_board import VersionPublisher, VersionReader
+
+    board = _Board()
+    reader = VersionReader(lambda: board, poll_s=0.0)
+    pub = VersionPublisher(lambda: board, 4)
+    pub.publish(5)
+    pub.publish(6)
+    reader.refresh()
+    assert not reader.regressed
+    board.fresh()
+    reader.close()
+    VersionPublisher(lambda: board, 4).publish(7)
+    reader.refresh()
+    assert reader.regressed
+
+
+def test_version_board_records_carry_run_and_publisher(monkeypatch):
+    from yeto.rl.spot_rollout import version_board as vb
+
+    monkeypatch.delenv("YETO_RUN_GROUP", raising=False)
+    monkeypatch.setenv("YETO_RUN_ID", "r1")
+    assert vb.run_identity_from_env() == "r1"
+    rec = vb.decode_record(vb.encode(3, 4, run="r1", publisher=2))
+    assert rec == {"merged_version": 3, "max_policy_age": 4, "run": "r1", "publisher": 2}
+    assert vb.decode(vb.encode(3, 4)) == (3, 4)
 
 
 def test_d10_a_round_of_stale_groups_is_discarded_and_the_round_waits():

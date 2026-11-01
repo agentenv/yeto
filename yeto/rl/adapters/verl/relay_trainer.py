@@ -147,12 +147,13 @@ def _version_publisher(island: Any) -> Any:
         return None
     from yeto.protocol import island_hmac_key_from_env
     from yeto.rl.spot_rollout.relay import RelayBoard
-    from yeto.rl.spot_rollout.version_board import VERSION_BOARD, VersionPublisher
+    from yeto.rl.spot_rollout.version_board import VERSION_BOARD, VersionPublisher, run_identity_from_env
 
     key = island_hmac_key_from_env()
     learner = int(getattr(island, "learner_id", 0) or 0)
     return VersionPublisher(lambda: RelayBoard(parse_addr(addr), VERSION_BOARD, learner, key=key),
-                            int(getattr(island, "limit", 0) or 0))
+                            int(getattr(island, "limit", 0) or 0),
+                            run=run_identity_from_env(), publisher=learner)
 
 
 class RelayPublisher:
