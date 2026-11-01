@@ -40,3 +40,33 @@ proxy up GB 8.7 down GB 0.16
 20:04:11 r2-v2 on the Modal volume (upload 2191 s); VM start retry loop (every 5 min)
 20:15:00 no capacity; trainer s29r120-e taken down to free the NPUs (restart with the VM)
 20:35:31 stop: VM stuck STARTING (no capacity), budget at edge -> sky down s29r-120g, end
+01:15:56 round4: capacity eu-north1 fabric-7 H200x8 spot MEDIUM avail=2 -> go s29r-120i
+01:15:56 go: s29r-120i eu-north1 H200:8
+01:26:51 VM s29r-120i RUNNING (created 01:16:27); trainer s29r120-f launched from store s29r120d (v2)
+01:30:09 s29r-120i up 89.169.122.97 id computeinstance-e00vrbc5g6dsqvkgnb
+01:30:10 r2-v2 published on npu1
+01:37:10 leftover relwatch (go120.sh) started a redundant release r2-v2; killed (v2 already on volume)
+01:39:49 item1: place r2-v2 OK on s29r-120i, digest 5f3dcd62..., 71 files sha256-checked, 48 s (first try failed: D24 modal get into missing dir)
+02:03:07 item2: run s29r120-f trained global step 3 (train_step=2): 16 samples/4 groups incl. v2 group spot-0-e12b1c33-r0 (behavior_version 2), grad_norm 0.1759, pg_loss -0.0360, nonfinite_tokens 0
+02:03:27 drill: vmwatch stopped (D23); 20 boat boxes of incarnation e12b1c33 alive; nebius stop computeinstance-e00vrbc5g6dsqvkgnb
+02:05:17 drill: nebius start
+02:05:18 after start: STOPPED 
+02:16:24 drill: stop/start failed: start x2 -> code=8 RESOURCE_EXHAUSTED (~10 min), VM still STOPPED -> fallback delete + new VM
+02:17:30 s29r-120i deleted (ran 01:16:27-02:05:13 RUNNING); launch replacement s29r-120j eu-north1 H200:8 (fabric-7 MEDIUM avail=1)
+02:17:30 go: s29r-120j eu-north1 H200:8
+02:23:40 s29r-120j launch failed:   Failed to acquire resources in all zones in eu-north1 for {Nebius([Spot], {'H200': 8}, image_id={'eu-north1': 'docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf
+02:23:58 go: s29r-120j1 eu-north1 H200:8
+02:30:22 s29r-120j1 launch failed:   Failed to acquire resources in all zones in eu-north1 for {Nebius([Spot], {'H200': 8}, image_id={'eu-north1': 'docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf
+02:30:24 go: s29r-120j2 eu-north1 H100:8
+02:36:48 s29r-120j2 launch failed:   Failed to acquire resources in all zones in eu-north1 for {Nebius([Spot], {'H100': 8}, image_id={'eu-north1': 'docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf
+02:36:50 go: s29r-120j3 eu-west1 H200:8
+02:43:11 s29r-120j3 launch failed:   Failed to acquire resources in all zones in eu-west1 for {Nebius([Spot], {'H200': 8}, image_id={'eu-west1': 'docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c63818562daf62
+02:53:22 coordinator: rotate regions; try us-central1 H200:8 spot
+02:53:22 go: s29r-120k us-central1 H200:8
+03:00:42 s29r-120k launch failed:   Failed to acquire resources in all zones in us-central1 for {Nebius([Spot], {'H200': 8}, image_id={'us-central1': 'docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:d639e258709b9d4ae4a980c6381856
+03:00:57 all 8xH100/H200 spot regions failed once this round (eu-north1 H200 x3, eu-north1 H100, eu-west1 H200, us-central1 H200) -> on-demand eu-north1 H100:8 (cheapest viable, catalog $36/h)
+03:00:57 go: s29r-120m eu-north1 H100:8
+03:13:35 s29r-120m up 89.169.122.21 id computeinstance-e00tx4qp6y2m33e163
+03:14:25 s29r-120m: place r2-v2 -> [mirror] r2-v2 placed on the VM (digest 5f3dcd62d816f4d3b6c72b2fb85d20f54b962f37b34817c98a2cf58a76d6c756) 40 s
+03:23:53 re-entry: s29r-120m sampler incarnation eb0bd74d (old e12b1c33); sweep deleted 0 - the 20 old e12b1c33 boxes were already gone (boat TTL auto-stop), boat active 0 at 03:23
+03:39:30 item3: global step 4 (train_step=3) on groups e12b1c33-r0-row2/3 + eb0bd74d-r0-row0/1 (new incarnation), e12b1c33-r0-row1 dropped short_group; grad_norm 0.3616 pg_loss 0.0257 nonfinite 0 -> s29r-120m deleted

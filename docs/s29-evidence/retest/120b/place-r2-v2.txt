@@ -1,0 +1,4 @@
+placed /root/store/policy-releases/r2-v2 version=2
+[mirror] r2-v2 placed on the VM (digest 5f3dcd62d816f4d3b6c72b2fb85d20f54b962f37b34817c98a2cf58a76d6c756) 48 s
+placed /root/store/policy-releases/r2-v2 version=2
+[mirror] r2-v2 placed on the VM (digest 5f3dcd62d816f4d3b6c72b2fb85d20f54b962f37b34817c98a2cf58a76d6c756) 40 s

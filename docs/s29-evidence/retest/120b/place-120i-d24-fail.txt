@@ -1,0 +1,2 @@
+[cut-manifest] staged files differ: missing ['RELEASE.json', 'TEXT_SUBSET.json', 'TOKENIZER_PATCH.json', 'chat_template.jinja', 'config.json'], extra []
+rc=1

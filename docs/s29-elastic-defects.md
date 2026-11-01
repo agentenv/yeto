@@ -317,3 +317,17 @@ syncer 不带 `--resume` 地全新重启后，旧 run 的 spot 岛 producer/subs
 - 原因：modal 1.2.6 的 `modal volume get <远端目录> <不存在的本地路径>` 会把每个文件依次写到同一个路径上，最后一个文件留下。上一轮的 VM 没走到这一步，所以没暴露。
 - 修复：`place()` 先 `rm -rf` 旧的下载目录，再 `mkdir -p /root/staged-<rel>-dl`，然后 `modal volume get`（目录存在时 modal 会写到 `<dl>/<rel>/...`，脚本原本就处理这种布局）。单测 `tests/test_s29_mirror_place.py`。
 - 修复后：71 个文件 sha256 全部通过，digest `5f3dcd62…`，VM 侧拉取 + 校验 + 落位共 48 s（纯下载 27 s），没经过代理。
+
+### 第四轮结果（run `s29r120-f`，从 store `s29r120d` 的 v2 续训）
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| ① VM 拉取 v2 并校验 sha256 | 通过：s29r-120i（spot）与替换机 s29r-120m 各 `place r2-v2` 一次，71 个文件 sha256 全过，digest `5f3dcd62…`，48 s / 40 s，从 Modal volume 直拉，不经代理 | `120b/place-r2-v2.txt` |
+| ② spot 岛用 v2 出样本、trainer 训到第 3 步 | 通过：组 `spot-0-e12b1c33-r0-*` 的 `behavior_version=2`；第 3 步（`train_step=2`）16 条/4 组，grad_norm 0.1759，pg_loss −0.0360，nonfinite_tokens 0 | `120b/s29r120f-key.txt`、`s29r120f-ev.tgz` |
+| ③ 抢占 → 重入 → 第 4 步 | 通过（用删机 + 新开代替）：新 incarnation `eb0bd74d` 的组被训练；第 4 步（`train_step=3`）用了旧 incarnation 已回传的 2 组 + 新 incarnation 2 组，grad_norm 0.3616，pg_loss 0.0257，nonfinite 0；旧组 `e12b1c33-r0-row1`（3 条）按 D22 被丢弃 | 同上、`120b/drill.txt` |
+
+- **模拟抢占**：02:05Z 先停看门狗（D23），再 `nebius stop`。之后 `start` 两次都等约 10 分钟报 `code=8`（RESOURCE_EXHAUSTED），D23 复现，改为删机 + 新开。
+- **重开**：spot 轮换 eu-north1 H200 ×3、eu-north1 H100、eu-west1 H200、us-central1 H200，全部 `Failed to acquire resources`（02:17–03:00Z）。按指示改开按需 eu-north1 H100×8（s29r-120m，03:01–03:39Z）。
+- **旧 sampler**：旧 VM 被删，旧进程随之消失，没有能观察到 FENCED 离开的进程。这条 120B 路径不经 syncer，没有 FENCED 事件可看；隔离靠 incarnation 前缀的 sample_id 和新 incarnation 启动时的清扫。
+- **boat 沙箱**：旧 incarnation 的 20 个沙箱在新 incarnation 启动（03:23Z）前已被 boat TTL 自动回收，所以清扫删除数为 0。结束时用 `boat_labels sweep --run s29r120d` 删掉新 incarnation 的 20 个，active 0。
+- **费用（估算）**：s29r-120i spot 01:16–02:05Z 0.81 h × $13.60（sky 报价）≈ $11；s29r-120m 按需 0.64 h × $36 ≈ $23；失败的申请没有开出机器。本轮合计约 $34。代理流量新增 0（VM 直拉 Modal，npu1↔本机走直连 scp）。
