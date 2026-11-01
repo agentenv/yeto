@@ -39,7 +39,7 @@ def test_make_place_round_trip(tmp_path):
     target = cm.place(manifest, staged, far, expected_digest=sha)
     assert (target / "model.safetensors.ydelta").read_bytes() == b"delta" * 1000
     assert json.loads((far / "policy-releases" / "LATEST.json").read_text()) == record
-    # idempotent: placing again keeps the release and rewrites LATEST
+    # idempotent: placing again keeps the release (LATEST already names it)
     assert cm.place(manifest, tmp_path / "gone", far, expected_digest=sha) == target
 
 
@@ -78,3 +78,35 @@ def test_cli(tmp_path, capsys):
                     "--store", str(far)]) == 0
     assert cm.main(["place", "--manifest", str(out), "--digest", "1" * 64, "--staged", str(staged),
                     "--store", str(far)]) == 2
+
+
+def test_placing_an_older_manifest_again_keeps_the_newer_latest(tmp_path):
+    store, record = _store(tmp_path)
+    old = cm.make(store, "r2-v2")
+    staged = tmp_path / "staged"
+    shutil.copytree(store / "policy-releases" / "r2-v2", staged)
+    far = _far(tmp_path)
+    cm.place(old, staged, far, expected_digest=None)
+    root = store / "policy-releases"
+    (root / "r3-v3").mkdir()
+    (root / "r3-v3" / "config.json").write_text("{}")
+    newer = {"path": "r3-v3", "version": 3, "seq": 3, "files": {"config.json": 2}}
+    (root / "LATEST.json").write_text(json.dumps(newer))
+    staged3 = tmp_path / "staged3"
+    shutil.copytree(root / "r3-v3", staged3)
+    cm.place(cm.make(store, "r3-v3"), staged3, far, expected_digest=None)
+    latest = far / "policy-releases" / "LATEST.json"
+    assert json.loads(latest.read_text()) == newer
+    # the idempotent branch with the older manifest: the release is kept, LATEST is not rolled back
+    assert cm.place(old, tmp_path / "gone", far, expected_digest=None) == far / "policy-releases" / "r2-v2"
+    assert json.loads(latest.read_text()) == newer
+    assert record["seq"] == 2
+
+
+@pytest.mark.parametrize("name", ["../evil", "a/b", "..", ".", "", "x\\y", "r2..v2"])
+def test_a_release_name_with_a_path_is_refused(tmp_path, name):
+    store, _ = _store(tmp_path)
+    manifest = dict(cm.make(store, "r2-v2"), release=name)
+    with pytest.raises(cm.ManifestError, match="plain release directory name"):
+        cm.place(manifest, tmp_path / "staged", _far(tmp_path), expected_digest=None)
+    assert not (tmp_path / "far" / "policy-releases" / "LATEST.json").exists()

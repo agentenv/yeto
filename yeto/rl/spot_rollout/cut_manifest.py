@@ -106,15 +106,61 @@ def verify(manifest: Mapping[str, Any], staged: Path) -> None:
             raise ManifestError(f"{name}: sha256 mismatch")
 
 
+def check_release_name(name: Any, what: str = "release") -> str:
+    """A release directory name: one path component, never ``.``/``..`` or a separator."""
+    if (not isinstance(name, str) or not name or name in (".", "..") or ".." in name
+            or "/" in name or "\\" in name or os.sep in name or (os.altsep and os.altsep in name)
+            or "\0" in name):
+        raise ManifestError(f"manifest {what} {name!r} is not a plain release directory name")
+    return name
+
+
+def _order(record: Mapping[str, Any]) -> tuple[int, int] | None:
+    """(seq, version) of a release record; None when neither is a number."""
+    def num(value: Any) -> int | None:
+        try:
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
+    seq, version = num(record.get("seq")), num(record.get("version"))
+    if seq is None and version is None:
+        return None
+    return (-1 if seq is None else seq, -1 if version is None else version)
+
+
+def _newer_than_latest(record: Mapping[str, Any], latest: Path) -> bool:
+    """``record`` is newer (by seq, then version) than the store's current LATEST."""
+    try:
+        current = json.loads(latest.read_text())
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return True  # an unreadable LATEST is replaced
+    if not isinstance(current, dict):
+        return True
+    mine, theirs = _order(record), _order(current)
+    if theirs is None:
+        return True
+    if mine is None:
+        return False
+    return mine > theirs
+
+
 def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
           expected_digest: str | None) -> Path:
     """Verify, move ``staged`` to ``store/policy-releases/<release>`` and write
     LATEST.json last. The release's delta base must already be in the store.
-    Idempotent: a release already placed with the same files is kept."""
+    Idempotent: a release already placed with the same files is kept. LATEST.json
+    is replaced only by a release newer (seq, then version) than the one it names,
+    so placing an older manifest again never rolls the store back."""
     check(manifest, expected_digest)
+    check_release_name(manifest.get("release"))
     root = Path(store) / RELEASES
     root.mkdir(parents=True, exist_ok=True)
     base = manifest.get("base")
+    if base:
+        check_release_name(base, "delta base")
     if base and not (root / base).is_dir():
         raise ManifestError(f"delta base {base} is not in {root}")
     target = root / manifest["release"]
@@ -127,9 +173,10 @@ def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
             shutil.rmtree(tmp)
         shutil.move(str(staged), tmp)
         os.replace(tmp, target)
-    latest = root / f".{LATEST}.tmp"
-    latest.write_text(json.dumps(manifest["record"], sort_keys=True))
-    os.replace(latest, root / LATEST)
+    if _newer_than_latest(manifest["record"], root / LATEST):
+        latest = root / f".{LATEST}.tmp"
+        latest.write_text(json.dumps(manifest["record"], sort_keys=True))
+        os.replace(latest, root / LATEST)
     return target
 
 
