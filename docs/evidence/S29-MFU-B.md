@@ -245,7 +245,7 @@ Same order of magnitude as A-series profiling's ~42s old_log_prob for A6. **Conc
 
 ### 15.2 FLOPs accounting: attention O(L²) is not the explanation
 
-Only 8 of Nemotron 120B's 89 layers are full attention (measured from `layers_block_type`), hidden 4096; with full recompute each attention layer costs about `8·L²·d`, i.e. about `2.62e5 · ΣL²` for the whole model.
+Only 8 of Nemotron 120B's 89 layers are full attention (measured from `layers_block_type`), hidden 4096; with full recompute each attention layer costs about `8 × L² × d`, i.e. about `2.62e5 × ΣL²` for the whole model.
 
 | Arm | ΣL² (per step) | attention FLOPs | Linear-term FLOPs | attention share | MFU incl. attention |
 |---|---|---|---|---|---|
