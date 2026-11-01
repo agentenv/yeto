@@ -252,3 +252,31 @@ class OrphanWatchdog:
             self._emit("rl_boat_orphans_deleted", run=self.run, island=island, reason=reason,
                        sandboxes=ids)
         return ids
+
+
+def main(argv: list[str] | None = None) -> int:
+    """S29 D19: ``python -m yeto.rl.harness.harbor.boat_labels sweep --run R [--island I]``
+    deletes every sandbox of run R (and island I): the operator's or a mirror's
+    sweep for a release-store spot island whose VM was stopped and is not
+    coming back (no relay trainer watches it, no new incarnation sweeps)."""
+    import argparse
+
+    p = argparse.ArgumentParser(prog="boat_labels")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("sweep")
+    s.add_argument("--run", required=True)
+    s.add_argument("--island", default=None)
+    s.add_argument("--dry-run", action="store_true")
+    a = p.parse_args(argv)
+    client = _default_client()
+    if a.dry_run:
+        boxes = select(client.list_sandboxes(), run=clean(a.run), island=a.island)
+        print(" ".join(b.sandbox_id for b in boxes) or "(none)")
+        return 0
+    ids = sweep(client, run=clean(a.run), island=a.island, reason="operator sweep")
+    print(f"deleted {len(ids)}: {' '.join(ids)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

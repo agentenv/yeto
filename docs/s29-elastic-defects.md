@@ -217,3 +217,118 @@ Bandwidth (D13): npu1->VM b 100 MB, direct failed to finish within 400 s twice (
 2. After SIGTERM the sampler leaves as PREEMPTED and by design enters `hold_after_reclaim`; the process keeps holding records proxy port 31600. So before restarting the sampler in place on the same VM the old process must be killed with kill -9, otherwise the new process exits with `address already in use`. Suggest `vm_run.sh` check for and clear old held processes before starting.
 3. The sky cluster was launched under the user account; after the Nebius default profile was switched to the service account, `sky down` refused with identity mismatch. This time the two instances were deleted with `nebius compute instance delete`, then `sky down --purge`. From now on sky uses the service account token consistently (local `/tmp/s29r/ntokrefresh.sh` refreshes it every 30 min).
 4. `pkill -f <pattern>` inside `ssh host '...'` also kills the remote shell running it (the pattern appears in the shell's own command line). Restarts must be written to a script file and executed.
+
+## 120B end to end (10-31 21:15 – 11-01 00:10 CST): partially done, stopped due to spot capacity
+
+Plan: push 1 delta after merging 2 local steps. Trainer on 24 cards across npu1/n2/n3 (G-120D pc1 layout: TP4/PP3/EP8/CP2, 2 groups × 4 samples per step, `--rl-release-only-versions 2`). The spot island runs on 1 Nebius eu-north1 8-GPU spot VM. Evidence: `docs/s29-evidence/retest/120b/`.
+
+- **Cross-border path measurements** (`120b/bandwidth-upload.txt`):
+  - npu1 direct upload to Modal volume: 0.33 MB/s, 100 MB not finished within 300 s.
+  - Nebius S3: the service account lacks access key permission (PermissionDenied), could not measure.
+  - Modal via proxy does not work: gRPC ignores HTTPS_PROXY.
+  - Paths without the proxy: npu1 -> local machine 3.6 MB/s, local machine -> Modal volume 5.3 MB/s, both legs ≥3 MB/s. So the delta route is npu1 -> local machine -> Modal volume -> VM, with 0 proxy traffic.
+- **New code**:
+  - `yeto/rl/spot_rollout/cut_manifest.py`: builds a manifest (size + sha256 per file, release record, digest of the manifest itself); VM-side `place` verifies file by file, moves them into the local store, and writes LATEST.json last. Unit test `tests/test_s29_cut_manifest.py`.
+  - `tools/probes/s29_spot/cut120_mirror.sh`: sample return, append-merged by sample_id (after a VM change shards are written from the start again); release distribution.
+  - `vm120_run.sh` and `sky_spot120.yaml`: r1-v0 (225 GB) is downloaded by the VM from the nearby Modal volume, 665 s on the H100 machine and 594 s on the H200 machine, not through the proxy.
+- **trainer**: step 1 done, step_seconds 545, no NaN (`120b/s29r120-ev.tgz`). But pg_loss=0 and grad_norm=0. Decoding the sample payloads confirms identical rewards within groups: the two groups are [1,1,1,1] and [0,0,0,0], so the GRPO advantage is 0. Not a mask or IS weight bug. v1 is not distributed by design (`not_a_release_version`, only v2 is distributed), and the trainer then waits for samples at step 2. This is not a mutual wait: policy age 4 allows v0 samples; there are no samples because the VM was preempted.
+- **Spot capacity**: 5 real preemptions (`120b/drill.txt`).
+  - H100×8 was reclaimed three times at 14:0x, 14:2x and 14:52, after which `instance start` reported RESOURCE_EXHAUSTED (code 8).
+  - After switching to H200×8 (same price $6.32/h), it was preempted again once each at 15:40 and 16:08; the shortest run was reclaimed 7 minutes after boot.
+  - Each reopen first has to load SGLang TP8 (about 8–10 minutes), and the samples needed for step 2 were never produced before reclamation.
+  - The 2 rows known to be all-correct / all-wrong were removed from the VM's prompts to get a step with advantage≠0, but the VM was reclaimed before samples arrived.
+- **Acceptance items not completed**: step 2 and beyond, advantage≠0 / grad_norm>0, spot island producing samples on v2 (the cut manifest distribution path only has unit tests, not run on a real VM).
+- Hard stop -> reopen -> rejoin: drilled 4 times under real preemption. The path of in-place VM restart, store retained, sampler restart works, but none lasted long enough to produce samples.
+
+### D19 boat sandboxes of the engine sampler have no incarnation label (fixed)
+
+- Symptom: the 120B island uses `engine_sampler` (release-store path), not `spot_rollout.sampler`. Its sandbox names are `ytl1.s29r120a.spot-0..<name>` with an empty incarnation segment. The sweep selects sandboxes by incarnation, so the 6 orphaned sandboxes after preemption could not be deleted by anyone; release mode also has no trainer-side watchdog. They were deleted manually this time.
+- Fix: `engine_sampler_entry.run` calls `label_boat_sandboxes` (labels, and deletes sandboxes left by earlier incarnations) when `YETO_BOAT_RUN_ID` is set and this incarnation is not yet labeled. Unit test `test_d19_an_engine_sampler_labels_its_incarnation`.
+- Leftover: in release mode, when the VM is hard-stopped and never reopened, a relay-independent watchdog is needed, e.g. a lease-based sweep by the mirror.
+
+### D20 Ops issues (recorded)
+
+1. eu-north1 8-GPU spot is currently almost unusable: 5 preemptions, the shortest at 7 minutes; then H100 reported insufficient capacity. For 120B end to end, suggest on-demand instances, or a region / time window with 8-GPU spot capacity.
+2. `ray stop --force` in `ray_cluster.sh` kills other people's Ray clusters on the same node (this time an idle lp-e1 cluster from another task was running on n1–n3 throughout). My copy removed that line and uses separate ports (6494 / 10101 / 524xx / 30000–31999).
+3. After Nebius stop/start of a VM, sshd inside the sky container does not recover on its own and sky marks the cluster UNHEALTHY. The mirror now uses `docker exec` into the container on the host.
+
+Cost (estimate): 8-GPU VM total uptime about 1.7 h × $6.32 ≈ $11 (STOPPED periods after preemption incur no GPU charge). RTX6000 in the 0.6B phase about $4. Total proxy traffic 8.86 GB, 0 added in the 120B phase (mihomo `/connections` counter up 8.70 / down 0.16 GB, unchanged).
+
+## 120B retry (11-01 00:13–02:30 CST): step 1 got real gradients; distribution and preemption rejoin not reached
+
+- **Preparation**:
+  - Selected 30 "mixed correct/wrong" tasks from the 116 historical groups on Modal (`/s29r120/prompts/agentic.jsonl`).
+  - Trainer at 4 groups × 4 samples per step, started before opening the VM.
+  - Base weights downloaded to the VM's local disk, reused when the same VM is reopened.
+  - Capacity scanned with `nebius capacity resource-advice list` (`120b/capacity-scan.txt`).
+- **Result**: run `s29r120-c` step 1 grad_norm 0.1822, pg_loss −0.0031, advantage in [−1.5, 0.5], ppo_kl 1.4e−5, no NaN (`verl-metrics-0.jsonl` in `120b/s29r120c-ev.tgz`). It used 4 groups produced by VM s29r-120c during 16:46–17:05Z: 2 groups mixed correct/wrong, 1 group all correct, 1 group all wrong.
+- **Not completed**: step 2, v2 distribution, spot island producing samples on v2, preemption -> reopen -> rejoin -> continue training. The reason is that 8-GPU spot is effectively unavailable:
+  - After I manually stopped s29r-120c in eu-north1 (D21), `instance start` reported RESOURCE_EXHAUSTED.
+  - s29r-120d and s29r-120f in eu-west1: the local machine could not reach port 22 on the VM directly (npu1 could), sky setup timed out twice; the second VM was switched to relay via npu1 and was preempted before setup finished.
+  - us-central1: sky reported no resources on request, while advice showed MEDIUM at the time.
+  - The MEDIUM (avail=1) shown by the resource API does not match whether an instance can actually start or how long it lasts.
+
+### D21 An over-length sample makes the trainer's whole round fatal (fixed)
+
+- Symptom: in run `s29r120-b`, `buffer_feed.group_rows` raised `BufferFeedError` for a sample with prompt 8200 > 8192; `keep()` did not catch it, and the island exited with INFRA_FAILED (exit 1, after running 2385 s).
+- Fix: `BufferFeed.pull()` first checks the whole group with `oversized()`; if any sample exceeds the rows, the group is recorded as `kept:false, dropped:"over_length"` (with the reason) and the next group is taken. RL does not truncate trajectories. Unit test `test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal`. On the trainer side this fix went into a separate copy `/data/work/s29r120/yetosrc-d21`.
+- Config: `RESPLEN` changed to 121856, max_prompt = 131072 − 121856 = 9216, above the longest agentic prompt in this batch, 8200.
+
+### D19 leftover and D20 fixed
+- D19 leftover: added `python -m yeto.rl.harness.harbor.boat_labels sweep --run R --island I [--dry-run]`. When a VM is hard-stopped and not reopened, ops or the mirror call it to delete all sandboxes of that run/island, including old sandboxes with an empty incarnation. Has unit tests.
+- D20: added `tools/probes/s28_g120/ray_cluster.sh` to the repo; it stops only this run's Ray processes (matched by `$OUT/ray` and its own ports) and no longer uses `ray stop --force`. On restart it was found to miss `--gcs_server_port`; the matching rule was corrected. The other task's lp-e1 cluster was unaffected throughout.
+
+Cost (estimate, added): s29r-120c about 0.75 h, 120d about 0.2 h, 120f about 0.35 h, total about 1.3 h × $6.32 ≈ $8.2, within the $30 budget. Proxy traffic added: 0.
+
+## 120B round 3 (11-01 02:30–04:40 CST): 2 steps + v2 distribution to nearby storage done; VM-side sample production and preemption rejoin not done
+
+- At 02:31 the capacity API reported 8×H100 spot in eu-north1 fabric-4 as MEDIUM. Opened s29r-120g, and started the 24-card trainer `s29r120-d` at the same time.
+- **Training**: both steps had real gradients, no NaN (`120b/s29r120d-ev.tgz`).
+  - Step 1: grad_norm 0.1768, pg_loss −0.0031.
+  - Step 2: grad_norm 0.3403, pg_loss 0.0487, advantage in [−1.5, 1.5].
+- **v2 distribution**: v2 delta 10.62 GB (ratio 0.044), published at 19:26Z.
+  - npu1 -> local machine: 8 parallel scp streams, 427 s (about 25 MB/s; about 3.6 MB/s single stream).
+  - Local machine -> Modal volume: 2191 s.
+  - Proxy traffic 0.
+- **Step 3**: the trainer crashed on D22. At 19:57Z the main agent stopped the VM to cut losses; my watchdog then automatically started it, the VM stayed in STARTING, later went back to STOPPED, and further starts failed (insufficient capacity). Budget at the edge; VM deleted at 04:35 and ended.
+- **Not completed**: VM-side `cut_manifest place` pulling v2, spot island producing samples on v2, preemption -> reopen -> rejoin -> continue training. The cut manifest and v2 files are in Modal volume `/s29r120/r2-v2`, the manifest is on the local machine at `/tmp/s29r/cut120/`. Next time capacity is available, continue directly with `cut120_mirror.sh place r2-v2`.
+
+### D22 A group short of samples triggers the verl mini-batch assertion (fixed)
+
+- Symptom: run `s29r120-d` step 3 `AssertionError: 15 % 16 != 0` (verl `make_iterator`). Agentic groups only require at least `min_samples` trials, so a group may have only 3/4 samples; the 4 groups × 4 samples mini-batch ended up with 15 samples.
+- Fix: `BufferFeed(group_size=...)`, with `samples_per_group` passed in by `buffer_trainer_runner`. Groups whose sample count differs from `samples_per_group` are recorded as `dropped:"short_group"` and skipped. Unit test `test_d22_a_group_short_of_samples_per_group_is_dropped`.
+
+### D23 Ops: starting a spot VM after it was stopped is unreliable
+
+- The VM the main agent stopped to cut losses sat in STARTING for over 30 minutes after the watchdog started it, then went back to STOPPED, and the next start reported insufficient capacity.
+- Conclusion: automatic restart needs a timeout and a budget gate. Give up if STARTING exceeds 10 minutes, and instead open a new one once a capacity scan hits.
+- Also, the watchdog treats a "manual stop" as a preemption and starts it automatically, conflicting with loss-cut operations. The watchdog must be stopped first when cutting losses.
+
+### Cost (estimate)
+- New VM this round: s29r-120g about 18:35–19:58Z, about 1.4 h × $6.32 ≈ $8.8.
+- Previous two rounds: about $8.2 (round 2) + about $11 (round 1).
+- Total 8-GPU VM about $28. STARTING / STOPPED periods estimated with no GPU charge.
+- Proxy traffic added: 0.
+
+## 120B round 4 (from 11-01 09:15 CST): completing acceptance items ①②③
+
+### D24 `cut120_mirror.sh place` downloads a whole directory into a single file on a new VM (fixed)
+
+- Symptom: the first `place r2-v2` on s29r-120i failed after about 1 minute with `staged files differ: missing ['RELEASE.json', 'TEXT_SUBSET.json', ...]`. On the VM, `/root/staged-r2-v2` was a single 215 MB file (one of the ydelta files).
+- Cause: in modal 1.2.6, `modal volume get <remote dir> <nonexistent local path>` writes each file in turn to the same path, leaving the last file. The previous round's VM never got to this step, so it was not exposed.
+- Fix: `place()` first `rm -rf` the old download directory, then `mkdir -p /root/staged-<rel>-dl`, then `modal volume get` (when the directory exists modal writes to `<dl>/<rel>/...`, a layout the script already handled). Unit test `tests/test_s29_mirror_place.py`.
+- After the fix: sha256 passed for all 71 files, digest `5f3dcd62…`, VM-side pull + verify + place took 48 s in total (27 s pure download), not through the proxy.
+
+### Round 4 results (run `s29r120-f`, resumed from v2 in store `s29r120d`)
+
+| Acceptance item | Result | Evidence |
+|---|---|---|
+| ① VM pulls v2 and verifies sha256 | Passed: s29r-120i (spot) and the replacement s29r-120m each ran `place r2-v2` once, sha256 passed for all 71 files, digest `5f3dcd62…`, 48 s / 40 s, pulled directly from the Modal volume, not through the proxy | `120b/place-r2-v2.txt` |
+| ② spot island produces samples on v2, trainer reaches step 3 | Passed: groups `spot-0-e12b1c33-r0-*` have `behavior_version=2`; step 3 (`train_step=2`) 16 samples/4 groups, grad_norm 0.1759, pg_loss −0.0360, nonfinite_tokens 0 | `120b/s29r120f-key.txt`, `s29r120f-ev.tgz` |
+| ③ preemption -> rejoin -> step 4 | Passed (using delete + new instance instead): groups from new incarnation `eb0bd74d` were trained; step 4 (`train_step=3`) used 2 groups already returned by the old incarnation + 2 groups from the new incarnation, grad_norm 0.3616, pg_loss 0.0257, nonfinite 0; old group `e12b1c33-r0-row1` (3 samples) was dropped per D22 | same as above, `120b/drill.txt` |
+
+- **Simulated preemption**: at 02:05Z first stopped the watchdog (D23), then `nebius stop`. Afterwards `start` twice waited about 10 minutes each and reported `code=8` (RESOURCE_EXHAUSTED), reproducing D23; switched to delete + new instance.
+- **Reopen**: spot rotation across eu-north1 H200 ×3, eu-north1 H100, eu-west1 H200, us-central1 H200, all `Failed to acquire resources` (02:17–03:00Z). As instructed, switched to on-demand eu-north1 H100×8 (s29r-120m, 03:01–03:39Z).
+- **Old sampler**: the old VM was deleted and the old process vanished with it, so there was no process to observe a FENCED leave. This 120B path does not go through the syncer, so there is no FENCED event to see; isolation relies on incarnation-prefixed sample_ids and the sweep at new incarnation startup.
+- **boat sandboxes**: the old incarnation's 20 sandboxes had already been reclaimed automatically by boat TTL before the new incarnation started (03:23Z), so the sweep deleted 0. At the end, `boat_labels sweep --run s29r120d` deleted the new incarnation's 20, active 0.
+- **Cost (estimate)**: s29r-120i spot 01:16–02:05Z 0.81 h × $13.60 (sky quote) ≈ $11; s29r-120m on-demand 0.64 h × $36 ≈ $23; failed requests did not start any machine. Round total about $34. Proxy traffic added: 0 (VM pulls Modal directly, npu1<->local machine uses direct scp).

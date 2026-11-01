@@ -307,3 +307,50 @@ def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
     record = json.loads(line[len(PREFIX):])
     assert record["event"] == "rl_boat_orphans_deleted" and record["island_id"] == 1
     assert record["sandboxes"] == ["bx_1"] and record["reason"] == "island lease expired"
+
+
+def test_d19_an_engine_sampler_labels_its_incarnation(monkeypatch):
+    """S29 D19: the release-store engine sampler (120B spot island) labels and sweeps
+    with its own incarnation; before, its sandboxes were named ytl1.<run>.<island>.. ."""
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.spot_rollout import sampler
+
+    seen = []
+    monkeypatch.setattr(sampler, "label_boat_sandboxes",
+                        lambda spec, inc, environ=None: seen.append((spec["sampler_id"], inc)) or [])
+    monkeypatch.setattr(entry, "_run", lambda *a, **k: 0)
+    monkeypatch.setattr(entry, "island_config", lambda spec: None)
+    monkeypatch.setattr(entry, "apply_rollout_quant", lambda spec: spec)
+    entry.run({"sampler_id": "spot-0"}, environ={"YETO_BOAT_RUN_ID": "r1"}, incarnation="abc")
+    assert seen == [("spot-0", "abc")]
+    seen.clear()
+    entry.run({"sampler_id": "spot-0"}, environ={"YETO_BOAT_RUN_ID": "r1", "YETO_BOAT_INCARNATION": "abc"},
+              incarnation="abc")  # the spot sampler already labelled this incarnation
+    entry.run({"sampler_id": "spot-0"}, environ={}, incarnation="abc")  # no run id: nothing
+    assert seen == []
+
+
+def test_d19_the_operator_sweep_deletes_a_run_island_including_unlabelled_incarnations(monkeypatch, capsys):
+    from yeto.rl.harness.harbor import boat_labels as bl
+
+    class _C:
+        def __init__(self):
+            self.boxes = [bl.SandboxInfo("a", "ytl1.r1.spot-0..t", "idle"),
+                          bl.SandboxInfo("b", "ytl1.r1.spot-0.x1.t", "running"),
+                          bl.SandboxInfo("c", "ytl1.r1.spot-1.x1.t", "running"),
+                          bl.SandboxInfo("d", "ytl1.r2.spot-0.x1.t", "running"),
+                          bl.SandboxInfo("e", "other", "running")]
+            self.deleted = []
+
+        def list_sandboxes(self):
+            return self.boxes
+
+        def delete(self, sid):
+            self.deleted.append(sid)
+
+    c = _C()
+    monkeypatch.setattr(bl, "_default_client", lambda: c)
+    assert bl.main(["sweep", "--run", "r1", "--island", "spot-0", "--dry-run"]) == 0 and c.deleted == []
+    assert capsys.readouterr().out.split() == ["a", "b"]
+    assert bl.main(["sweep", "--run", "r1", "--island", "spot-0"]) == 0
+    assert c.deleted == ["a", "b"]
