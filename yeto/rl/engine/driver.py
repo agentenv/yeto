@@ -471,6 +471,10 @@ def verify_publication(driver: Any, version: int) -> bool:
         return True
     if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
         return True
+    if bool(getattr(driver, "measure_no_verify", False)):
+        # S29 --rl-measure-no-verify: a measurement run with no release; train_options
+        # admits it only there, so no reader of the hash exists
+        return False
     interval = getattr(driver, "verify_every", None)
     if interval is not None:
         return _verify_on_interval(driver, int(version), int(interval))
