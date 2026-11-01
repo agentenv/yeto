@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -27,14 +28,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: syncer
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # Same install as docs/TESTING.md (CPU torch + the `test` extra).
       - name: Install CPU torch and deps
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install pytest pytest-timeout transformers==4.57.1 datasets peft cloudpickle "skypilot[aws]"
+          uv pip install --system --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.8.0+cpu" -r pyproject.toml --extra test
       - name: Tests (includes live syncer+learner integration loop)
-        run: python -m pytest tests/ -q
+        run: PYTHONPATH=. python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
 
+  # No self-hosted GPU runner is registered; run this job by hand only.
   gpu:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, gpu]
     steps:
       - uses: actions/checkout@v4
