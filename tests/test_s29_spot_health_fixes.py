@@ -66,12 +66,41 @@ def test_d8_a_killed_islands_server_group_is_reaped(tmp_path, monkeypatch):
     from yeto.rl.adapters.sampler_engines import server
 
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "sglang", "--port", "31999"],
+                             start_new_session=True)
     server.server_group_file("sglang", 31999).write_text(str(child.pid))
     assert server.reap_stale_server("sglang", 31999) == child.pid
     assert child.wait(timeout=10) == -signal.SIGKILL
     assert not server.server_group_file("sglang", 31999).exists()
     assert server.reap_stale_server("sglang", 31999) is None  # nothing left to reap
+
+
+def test_d8_a_reused_pgid_is_not_killed(tmp_path, monkeypatch):
+    from yeto.rl.adapters.sampler_engines import server
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    killed = []
+    cmdlines = {4242: ["/usr/bin/python3", "-m", "http.server", "8000"],
+                4343: ["python", "-m", "sglang.launch_server", "--port", "30001"],
+                4444: ["python", "-m", "sglang.launch_server", "--port", "31999"]}
+    monkeypatch.setattr(server, "process_cmdline", lambda pid: cmdlines.get(pid))
+    kill = lambda pgid, sig: killed.append(pgid)  # noqa: E731
+    for pgid in (4242, 4343, 5555):  # unrelated, another port, gone
+        server.server_group_file("sglang", 31999).write_text(str(pgid))
+        assert server.reap_stale_server("sglang", 31999, kill=kill) is None
+        assert not server.server_group_file("sglang", 31999).exists()
+    assert killed == []
+    server.server_group_file("sglang", 31999).write_text("4444")
+    assert server.reap_stale_server("sglang", 31999, kill=kill) == 4444 and killed == [4444]
+
+
+def test_d8_engine_server_cmdline_match():
+    from yeto.rl.adapters.sampler_engines.server import is_engine_server
+
+    assert is_engine_server(["vllm", "serve", "m", "--port=8001"], "vllm", 8001)
+    assert not is_engine_server(["vllm", "serve", "m", "--port", "80011"], "vllm", 8001)
+    assert not is_engine_server(["sglang", "--port", "8001"], "vllm", 8001)
+    assert not is_engine_server(None, "vllm", 8001)
 
 
 def test_d10_the_relay_pool_never_caps_discarded_pulls():
