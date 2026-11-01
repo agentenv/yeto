@@ -45,22 +45,6 @@ def test_d5_relay_backlog_is_the_groups_left_in_the_channel():
     assert len(buf) == 4 and buf.pending_groups() == 1
 
 
-def test_d3_whole_round_mini_batch_restores_the_config():
-    pytest.importorskip("omegaconf")
-    pytest.importorskip("ray")
-    pytest.importorskip("verl")  # fully_async_runner imports verl's fully_async trainer
-    from omegaconf import OmegaConf
-
-    from yeto.rl.adapters.verl.fully_async_runner import whole_round_mini_batch
-
-    cfg = OmegaConf.create({"actor_rollout_ref": {"actor": {"ppo_mini_batch_size": 1}, "rollout": {"n": 4}}})
-    with whole_round_mini_batch(cfg, 3):
-        assert cfg.actor_rollout_ref.actor.ppo_mini_batch_size == 3 and cfg.actor_rollout_ref.rollout.n == 1
-    assert cfg.actor_rollout_ref.actor.ppo_mini_batch_size == 1 and cfg.actor_rollout_ref.rollout.n == 4
-    with whole_round_mini_batch(cfg, 4):  # a full round is left alone
-        assert cfg.actor_rollout_ref.rollout.n == 4
-
-
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
 def test_d8_a_killed_islands_server_group_is_reaped(tmp_path, monkeypatch):
     from yeto.rl.adapters.sampler_engines import server

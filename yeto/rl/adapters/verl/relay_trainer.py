@@ -213,7 +213,8 @@ class RelayPublisher:
 
 def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShape,
                         tokenize: Callable[[str], Sequence[int]] | None = None, wait_s: float = 3600.0,
-                        poll_s: float = 2.0) -> tuple[RelayRolloutPool, RelayPublisher, BufferPlacement]:
+                        poll_s: float = 2.0, group_size: int | None = None,
+                        ) -> tuple[RelayRolloutPool, RelayPublisher, BufferPlacement]:
     """The rollout port, publisher and placement of a relay trainer over ``buffer`` (the
     local buffer the relay pump fills); the island's queue calls go to the feed."""
     actor_call = island.call
@@ -227,7 +228,8 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
                       record=lambda fields: island.append_jsonl(log, fields),
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s,
-                      cursor_log=lane_cursor_log(buffer, int(island.learner_id)))
+                      cursor_log=lane_cursor_log(buffer, int(island.learner_id)),
+                      group_size=group_size)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the spot samplers generate
     publisher = RelayPublisher(island, feed)
