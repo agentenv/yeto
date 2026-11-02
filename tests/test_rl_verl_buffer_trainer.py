@@ -1076,3 +1076,37 @@ def test_background_release_log_stays_in_version_order_and_the_worker_never_read
     assert [r["policy_version"] for r in log] == sorted(r["policy_version"] for r in log)
     assert [r["policy_version"] for r in log if r["released"] is True] == [1, 3]
     assert origin_threads and all(origin_threads)
+
+
+def test_a_round_cut_behind_the_store_continues_above_its_releases(tmp_path):
+    """The store holds v1..v3 (released after the last round cut, at v1). Retraining
+    from the cut and calling its rounds v2, v3 would give those numbers other
+    weights than the store's; the account continues at v3 as a relaunch does, and
+    the first trained round releases v4: every version names one set of weights."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store, keep=4)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    for version in (1, 2, 3):
+        _released(releases, version)
+    hashes = {r.version: r.policy_hash for r in releases.records()}
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i, version in enumerate((2, 3)):
+        writer.write([_sample(version, index=0), _sample(version, index=1)], group_key=f"g{i}")
+    driver, island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=1, required=2,
+                                          base=base, releases=releases, resume_versions=True,
+                                          buffer=FileSampleBuffer(store, batch_size=1, create_index=False))
+    driver.sync.round_cuts = SimpleNamespace(  # the cut the run resumes from: v1
+        resume=lambda d: {"next_rollout_id": 1}, due=lambda *a, **k: False,
+        save=lambda *a, **k: None, prepare=lambda *a, **k: None)
+    state = driver.run()
+
+    assert driver.rounds_completed == 1 and state.policy_version == 4
+    events = _lines(tmp_path / "tape.jsonl")
+    behind = [e for e in events if e["event"] == "rl_round_cut_behind_releases"]
+    assert [(e["cut_rollout_id"], e["latest_release_version"]) for e in behind] == [(1, 3)]
+    release_log = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    assert [(r["policy_version"], r["released"]) for r in release_log] == [(3, False), (4, True)]
+    records = releases.records()
+    assert [r.version for r in records] == [1, 2, 3, 4]  # no version released twice
+    assert {r.version: r.policy_hash for r in records if r.version <= 3} == hashes

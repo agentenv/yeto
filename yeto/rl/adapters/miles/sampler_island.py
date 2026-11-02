@@ -30,6 +30,14 @@
   ``base_policy``). Synced trainers release it (a restarted trainer restores its
   published versions from the store's releases).
 
+  Relaunch of a single trainer (no lane, no syncer; as the verl buffer trainer,
+  ``merged_release.ResumedReleases``): the version account continues above the
+  highest release vK the store holds -- also when the round cut it resumes from
+  is behind vK (``LocalOnlySync.start``, ``rl_round_cut_behind_releases``). Its
+  first publication is vK and releases nothing (``resumed_base_version``); the
+  first trained round releases vK+1. A version number never names two sets of
+  weights and ``LATEST`` never goes back to an older version.
+
 Engine weight load (the order of the publisher, ``publish.MilesPublisher``):
 under the controller's update lock, every engine loads the release, then the
 plain policy version is stamped and read back on every engine; any failure
@@ -80,7 +88,12 @@ from yeto.rl.engine.policy_release import (
     copy_with_digest,
     ReleaseNotLoaded,
 )
-from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, release_version
+from yeto.rl.engine.merged_release import (
+    MergedReleaseGuard,
+    is_publisher,
+    release_version,
+    resumed_releases,
+)
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.release_delta import DeltaMirror, default_mirror
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
@@ -673,6 +686,7 @@ class ReleasingPublisher:
                  read_position_from_thread: Callable[[], int | None] | None = None,
                  read_shards_from_thread: Callable[[], dict[str, int] | None] | None = None,
                  delta: DeltaChain | None = None,
+                 resumed_base: int | None = None,
                  timer: Callable[[], float] = time.perf_counter) -> None:
         """``delta``: staged releases go out as bf16 deltas along this chain
         (``policy_release`` module doc, delta releases). ``read_shards``: the
@@ -683,7 +697,9 @@ class ReleasingPublisher:
         policy version), ``guard`` keeps the release versions increasing and
         ``origin(state)`` is the release record's ``origin``.
         ``read_position_from_thread`` / ``read_shards_from_thread``: the same reads,
-        callable from the upload thread (default: ``read_position`` / ``read_shards``)."""
+        callable from the upload thread (default: ``read_position`` / ``read_shards``).
+        ``resumed_base``: a relaunched single trainer's vK (module doc, relaunch):
+        versions up to it are the store's already and are not released again."""
         if (staging is None) != (releaser is None):
             raise ValueError("staging and releaser go together")
         if delta is not None and staging is None:
@@ -704,6 +720,7 @@ class ReleasingPublisher:
         self.staging = None if staging is None else Path(staging)
         self.releaser = releaser
         self.skip_base = bool(skip_base)
+        self.resumed_base = None if resumed_base is None else int(resumed_base)
         self.timer = timer
 
     def _engine_checksum(self) -> str | None:
@@ -727,6 +744,13 @@ class ReleasingPublisher:
                           latest_version=None if latest is None else latest.version,
                           reason="not_newer_than_latest")
                 return result
+        if self.resumed_base is not None and version <= self.resumed_base:
+            # the store holds vK already and nothing newer is trained yet: releasing it
+            # would give vK a second set of weights (module doc, relaunch)
+            self.emit("rl_policy_release_skipped", policy_version=version,
+                      local_version=int(state.policy_version), latest_version=self.resumed_base,
+                      reason="resumed_base_version")
+            return result
         if self.skip_base and version == BASE_POLICY_VERSION and self.releases.latest() is None:
             self.emit("rl_policy_release_skipped", policy_version=version,
                       local_version=int(state.policy_version), latest_version=None,
@@ -907,6 +931,8 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         if not publisher_island:
             return None
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
+    else:
+        synced = _resume_single_trainer(driver, release_store(config, environ))
 
     lora = lora_mode(miles_args)
     # module doc: a trainer island stages its full releases unless --rl-release-inline
@@ -944,6 +970,25 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
         start_trainer_releaser(miles_args, config, environ)
     return publisher
+
+
+def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore) -> dict[str, Any]:
+    """A single trainer relaunched over a store that holds releases (module doc,
+    relaunch): its account continues at the highest release vK, and the versions
+    below it are restored with the hashes the store recorded. Returns the
+    ``ReleasingPublisher`` keywords ({} for a store without releases)."""
+    limit = getattr(driver, "_max_policy_age", None)
+    resumed = resumed_releases(releases, int(limit()) if callable(limit) else 0)
+    if resumed is None:
+        return {}
+    resume_at = getattr(getattr(driver, "sync", None), "resume_at", None)
+    if callable(resume_at):
+        resume_at(resumed.start_version, behind_round_cuts=True)
+    driver.published_policy_history = resumed.history
+    driver.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
+                start_version=resumed.start_version, account_resumed=callable(resume_at),
+                known_versions=list(resumed.known_versions()))
+    return {"resumed_base": resumed.base_version}
 
 
 def start_trainer_releaser(miles_args: Any, config: Any, environ: Any = None) -> Any:

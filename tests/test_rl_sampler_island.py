@@ -256,9 +256,84 @@ def test_release_is_committed_by_latest_and_republish_is_a_no_op(tmp_path):
     assert releases.resolve(first) == tmp_path / RELEASE_DIR / "r1-v1"
     assert releases.release(1, "h1", _write_weights) is None  # a restarted trainer republishes
     releases.release(2, "h2", _write_weights)
-    rewind = releases.release(1, "h1b", _write_weights)  # restored from an older cut
-    assert (rewind.seq, rewind.version) == (3, 1)
-    assert sorted(p.name for p in (tmp_path / RELEASE_DIR).iterdir()) == [LATEST, "r2-v2", "r3-v1"]
+    assert releases.latest().version == 2
+    # A trainer restored from an older cut used to release v1 again with other
+    # weights here (LATEST went back to v1, and v1 named two sets of weights). The
+    # trainer now continues above the store's releases and never releases a version
+    # the store holds (test_a_single_trainer_restored_from_an_older_cut_...).
+    assert sorted(p.name for p in (tmp_path / RELEASE_DIR).iterdir()) == [LATEST, "r1-v1", "r2-v2"]
+
+
+def test_a_single_trainer_restored_from_an_older_cut_continues_above_the_store(tmp_path):
+    """Intended change of semantics: the store holds v1..v3 (released after the last
+    round cut, at v1). The relaunched single trainer continues its account at v3 (as
+    the verl buffer trainer, rl_round_cut_behind_releases), releases nothing for v3,
+    and its first trained round is v4: LATEST never goes back and every version
+    names one set of weights."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
+    for version in (1, 2, 3):
+        releases.release(version, f"h{version}", _write_weights)
+    hashes = {r.version: r.policy_hash for r in releases.records()}
+    events = []
+    sync = LocalOnlySync(2)
+    sync.round_cuts = SimpleNamespace(resume=lambda d: {"next_rollout_id": 1})  # wired first
+    driver = SimpleNamespace(
+        publisher=SimpleNamespace(publish=lambda s: None), sync=sync, _max_policy_age=lambda: 2,
+        emit=lambda event, **fields: events.append((event, fields)),
+        export_local_resident=lambda *, policy_version: _State(policy_version, "cut"),
+        rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="trainer", store=str(tmp_path), release_inline=True))
+    exported = []
+    actor = SimpleNamespace(export_hf=lambda rollout_id, path: exported.append(rollout_id)
+                            or _write_weights(Path(path)))
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor,
+                                    runner=SimpleNamespace(run=lambda value: value))
+    br._ACTIVE.pop(br.TRAINER, None)
+    assert driver.published_policy_history() == [(1, "h1"), (2, "h2"), (3, "h3")]
+
+    start = sync.start(driver)
+    assert (start.rollout_id, start.state.policy_version) == (3, 3)  # not the cut's 1
+    assert ("rl_round_cut_behind_releases",
+            {"cut_rollout_id": 1, "latest_release_version": 3}) in events
+    wired.publish(start.state)  # the cut's weights: v3 is the store's, not released again
+    skipped = [f for e, f in events if e == "rl_policy_release_skipped"]
+    assert [(f["policy_version"], f["reason"]) for f in skipped] == [(3, "resumed_base_version")]
+    wired.publish(_State(4, "h4"))  # the first trained round
+    assert exported == [4]
+    assert [f["policy_version"] for e, f in events if e == "rl_policy_released"] == [4]
+    records = releases.records()  # the trainer's store keeps the newest two
+    assert [r.version for r in records] == [3, 4]  # no version released twice
+    assert {r.version: r.policy_hash for r in records if r.version <= 3} == {3: hashes[3]}
+    assert releases.latest().version == 4
+
+
+def test_a_single_trainer_relaunched_without_a_cut_continues_above_the_store(tmp_path):
+    """No round cut (a plain relaunch): the account starts at the store's vK, not at 0."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
+    releases.release(1, "h1", _write_weights)
+    releases.release(2, "h2", _write_weights)
+    sync = LocalOnlySync(1)
+    driver = SimpleNamespace(
+        publisher=SimpleNamespace(publish=lambda s: None), sync=sync, _max_policy_age=lambda: 1,
+        emit=lambda event, **fields: None,
+        export_local_resident=lambda *, policy_version: _State(policy_version, "base"),
+        rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="trainer", store=str(tmp_path), release_inline=True))
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=SimpleNamespace(
+        export_hf=lambda rollout_id, path: _write_weights(Path(path))),
+        runner=SimpleNamespace(run=lambda value: value))
+    br._ACTIVE.pop(br.TRAINER, None)
+    start = sync.start(driver)
+    assert start.rollout_id == 2 and sync._end() == 3
+    wired.publish(start.state)
+    wired.publish(_State(3, "h3"))
+    assert [(r.version, r.policy_hash) for r in releases.records()] == [(2, "h2"), (3, "h3")]
 
 
 def test_lora_release_records_the_file_digest_and_the_follower_checks_it(tmp_path):
