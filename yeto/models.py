@@ -112,7 +112,7 @@ MODEL_ALIASES = {
 }
 
 # Aliases with a completed Yeto fine-tuning run on real hardware. The
-# README surfaces these first; everything else is supported but untested.
+# docs/MODELS.md lists these first; everything else is supported but untested.
 TESTED_ALIASES = {
     "qwen36-27b",
     "deepseek4flash",

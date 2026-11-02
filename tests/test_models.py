@@ -37,14 +37,27 @@ def test_shape_memory_uses_the_shared_aliases():
     assert memory.MODEL_ALIASES is MODEL_ALIASES
 
 
-def test_readme_table_matches_alias_table():
+def test_models_doc_matches_alias_table():
     import pathlib
     import re
 
-    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
-    table_aliases = set(re.findall(r"^\| `([a-z0-9.\-]+)` \| `", readme, flags=re.M))
-    assert table_aliases == set(MODEL_ALIASES), (
-        "README model table is out of sync with yeto/models.py — regenerate it"
+    doc = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "MODELS.md").read_text()
+    table_aliases = re.findall(r"^\| `([a-z0-9.\-]+)` \| `", doc, flags=re.M)
+    assert sorted(table_aliases) == sorted(MODEL_ALIASES), (
+        "docs/MODELS.md is out of sync with yeto/models.py; run scripts/gen_model_table.py"
+    )
+
+
+def test_models_doc_is_the_generator_output():
+    import importlib.util
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("gen_model_table", root / "scripts" / "gen_model_table.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert (root / "docs" / "MODELS.md").read_text() == gen.render(), (
+        "docs/MODELS.md differs from scripts/gen_model_table.py output; regenerate it"
     )
 
 
