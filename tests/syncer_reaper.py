@@ -114,7 +114,9 @@ def reap(owner_matches) -> int:
 
 def _ps() -> list[tuple[int, int, str]]:
     try:
-        out = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True,
+        # -ww: procps cuts lines to 80 columns when stdout is not a terminal, which
+        # drops the binary path of a syncer under a long checkout or tmp path
+        out = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,args="], capture_output=True,
                              text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return []
