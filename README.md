@@ -115,7 +115,7 @@ Everything below is for the Miles RL path (`--rl-engine ports`; see
   differences within +/-1.5% and seed-dependent), and the controller refuses
   `auto` unless the attestation declares it. D2 is CPU-validated (trace
   replay); no GPU four-scenario run exists. Details and runbook:
-  [openspec/changes/rl-infra-spec/elastic-ops.md](openspec/changes/rl-infra-spec/elastic-ops.md).
+  the elastic-ops design note (archived outside the repo).
 - **Fleet dashboard.** Read-only view over learner/syncer tapes, controller
   journal and `fleet.jsonl`: `yeto dashboard serve` (loopback-only, GET-only),
   `yeto dashboard export` (single self-contained HTML), and
@@ -129,8 +129,7 @@ Everything below is for the Miles RL path (`--rl-engine ports`; see
 - **Codex harness / Terminal-Bench.** Terminal-Bench 2.1 rollouts through the
   Codex harness (`--codex-*` options, `yeto-codex-traces`); the validation
   run report is archived outside the repository.
-  Moving the harness onto the ports engine is tracked in
-  `openspec/changes/rl-codex-harness-rollout`.
+  Moving the harness onto the ports engine is tracked outside the repo.
 
 ## Architecture
 

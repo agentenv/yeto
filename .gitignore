@@ -35,8 +35,8 @@ docs/DECOUPLED_DILOCO_MILES_RL_DESIGN.md
 # 本地图页集中目录（不上传）
 diagrams/
 
-# Run evidence, run logs and reports stay outside the repository.
-openspec/changes/*/evidence/
+# Specs, run evidence, run logs and reports stay outside the repository.
+/openspec/
 **/run-logs/
 
 # Run logs never enter the repository. These rules come last so no earlier
@@ -46,7 +46,4 @@ openspec/changes/*/evidence/
 *.stderr
 *.stdout
 *metrics*.json
-openspec/**/*.jsonl
-openspec/**/*.out
-openspec/**/*.err
 .g1-build/

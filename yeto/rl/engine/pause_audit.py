@@ -2,8 +2,8 @@
 
 Pure. It answers: at this moment, may the island pause its local loop for up to
 ``T`` seconds while its outer-sync connection stays alive, and what is the
-upper bound? Every number here is sourced from the code audit recorded in
-``openspec/changes/rl-infra-spec/pause-audit.md`` (file:line citations there).
+upper bound? Every number here is sourced from the code audit
+recorded in pause-audit.md (archived outside the repo).
 
 Rules:
 

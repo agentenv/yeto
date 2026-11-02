@@ -1,7 +1,7 @@
 """Verda-side truth for yeto's launcher: instance ids, recovery guard, teardown proof.
 
 sky's Verda provisioner cannot be trusted to say whether a node exists
-(openspec change fix-verda-provider), so yeto asks Verda itself — with
+(change fix-verda-provider), so yeto asks Verda itself — with
 its own HTTP client (yeto.shape.providers._verda_request) — before
 relaunching an island and after tearing one down.
 """
