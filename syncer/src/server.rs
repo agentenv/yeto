@@ -332,6 +332,8 @@ fn encode_optional_u64(encoded: &mut Vec<u8>, value: Option<u64>) {
 struct OutFrame {
     msg_type: u8,
     parts: Vec<bytes::Bytes>,
+    /// Signalled once the writer task has written the frame to the socket.
+    written: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[derive(Debug)]
@@ -379,6 +381,62 @@ struct Group {
     reasm: Mutex<HashMap<u64, PartialMsg>>,
     /// Wire bytes of this learner (shared by every generation of the learner).
     wire: Arc<WireCounter>,
+    /// Data-stream readers still running for this generation.
+    readers: Arc<ReaderGate>,
+}
+
+/// Counts the data-stream read loops of one generation, so its
+/// `Event::Disconnected` is sent only after the last of them has queued its
+/// events (a PUSH split into chunks over the data streams).
+#[derive(Debug)]
+struct ReaderGate {
+    /// Running readers and whether the control connection has closed (no
+    /// reader may start after that).
+    state: Mutex<(usize, bool)>,
+    active: tokio::sync::watch::Sender<usize>,
+}
+
+impl Default for ReaderGate {
+    fn default() -> Self {
+        Self { state: Mutex::new((0, false)), active: tokio::sync::watch::channel(0).0 }
+    }
+}
+
+impl ReaderGate {
+    /// Admit one data-stream reader; None once the control connection closed.
+    fn enter(self: &Arc<Self>) -> Option<ReaderGuard> {
+        let mut state = self.state.lock().unwrap();
+        if state.1 {
+            return None;
+        }
+        state.0 += 1;
+        self.active.send_replace(state.0);
+        Some(ReaderGuard(self.clone()))
+    }
+
+    /// Refuse new readers and wait (bounded) until the running ones exit.
+    /// False if some reader still runs at the deadline.
+    async fn close_and_wait(&self, timeout: Duration) -> bool {
+        let mut active = {
+            let mut state = self.state.lock().unwrap();
+            state.1 = true;
+            self.active.subscribe()
+        };
+        tokio::time::timeout(timeout, active.wait_for(|count| *count == 0))
+            .await
+            .is_ok_and(|result| result.is_ok())
+    }
+}
+
+/// Held by a running data-stream reader; dropping it leaves the gate.
+struct ReaderGuard(Arc<ReaderGate>);
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.0 -= 1;
+        self.0.active.send_replace(state.0);
+    }
 }
 
 impl Group {
@@ -387,6 +445,7 @@ impl Group {
             .send(OutFrame {
                 msg_type,
                 parts: vec![payload],
+                written: None,
             })
             .await
             .map_err(|_| {
@@ -641,6 +700,7 @@ impl<'a> TensorFrame<'a> {
         Ok(OutFrame {
             msg_type: MSG_CHUNK,
             parts: vec![bytes::Bytes::from(head), bytes::Bytes::from(chunk)],
+            written: None,
         })
     }
 }
@@ -1094,6 +1154,12 @@ struct RegistryState {
     /// S27 G-EL: learners whose catch-up or recovery replay a forwarder
     /// task sends; publications offer them each version instead of sending.
     resends: HashMap<Member, Arc<ResendConn>>,
+    /// Generations whose control connection closed but whose
+    /// `Event::Disconnected` the scheduler has not handled yet, with how many
+    /// such closes (one generation can reconnect and close again). Events it
+    /// sent before closing (a PUSH) may still be queued, so a round that
+    /// captured it must not be rebound to a replacement yet.
+    closing: HashMap<Member, u32>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1151,6 +1217,7 @@ impl RegistryState {
     /// The control connection of `member` closed.
     fn unregister(&mut self, member: Member) {
         self.groups.remove(&member);
+        *self.closing.entry(member).or_insert(0) += 1;
         if self.current.get(&member.learner_id) == Some(&member) {
             self.current.remove(&member.learner_id);
         }
@@ -1159,6 +1226,17 @@ impl RegistryState {
         }
         self.membership.depart(member);
         self.persist_membership();
+    }
+
+    /// The scheduler handled the `Event::Disconnected` of `member`: every
+    /// event its connection sent before closing has been handled too.
+    fn disconnect_handled(&mut self, member: Member) {
+        if let Some(count) = self.closing.get_mut(&member) {
+            *count -= 1;
+            if *count == 0 {
+                self.closing.remove(&member);
+            }
+        }
     }
 
     fn is_recovering(&self, member: Member) -> bool {
@@ -2412,6 +2490,7 @@ async fn handle_connection(
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
                 wire: wire_counter(learner_id),
+                readers: Arc::new(ReaderGate::default()),
             });
             let registration =
                 { registry.lock().unwrap().register_group_with(group.clone(), Instant::now(), ext) };
@@ -2464,6 +2543,11 @@ async fn handle_connection(
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             registry.lock().unwrap().unregister(member);
+            // A data stream may still be reading this generation's last PUSH
+            // chunks; Disconnected must queue behind them.
+            if !group.readers.close_and_wait(DATA_READER_DRAIN).await {
+                warn!(learner_id, generation, "data streams still open after the control connection closed");
+            }
             event_tx.send(Event::Disconnected { member }).await.ok();
             if let Some(line) = wire_bytes_line(&wire_bytes_snapshot()) {
                 info!(learner_id, generation, "learner control connection closed; wire bytes per learner: {line}");
@@ -2538,6 +2622,11 @@ async fn handle_connection(
                     Ok(_) => unreachable!(),
                 };
             }
+            let Some(_reader) = group.readers.enter() else {
+                // The control connection already closed and its Disconnected
+                // may be on its way: this stream sends nothing more.
+                return Ok(());
+            };
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
         MSG_SUBSCRIBE => {
@@ -2577,6 +2666,10 @@ async fn handle_connection(
         t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {t}"),
     }
 }
+
+/// How long a closed control connection waits for its data streams' readers
+/// before reporting the generation disconnected.
+const DATA_READER_DRAIN: Duration = Duration::from_secs(10);
 
 /// How long a SUBSCRIBE waits for the first learner to establish the session.
 const SUBSCRIBE_SESSION_WAIT: Duration = Duration::from_secs(1800);
@@ -2653,6 +2746,7 @@ async fn serve_subscriber(
         reasm: Mutex::new(HashMap::new()),
         // Its downlink bytes are counted under its subscriber id (head egress).
         wire: wire_counter(parsed.learner_id),
+        readers: Arc::new(ReaderGate::default()),
     });
     // Its data streams may attach while it waits for the session.
     hub.waiting.lock().unwrap().insert(member, group.clone());
@@ -2936,6 +3030,9 @@ async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>, w
         match tokio::time::timeout(WRITE_TIMEOUT, write).await {
             Ok(Ok(())) => {
                 wire.sent.fetch_add(len as u64 + 13, Ordering::Relaxed);
+                if let Some(written) = frame.written {
+                    let _ = written.send(());
+                }
             }
             Ok(Err(e)) => {
                 warn!("write failed: {e}");
@@ -3474,10 +3571,26 @@ async fn recv_init_event(
 async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
     let message = format!("{error:#}");
     append_strict_failure(cfg.event_tape.as_deref(), "init_digest_mismatch", &message);
+    // The syncer exits right after; wait until each writer task has written
+    // the frame, or the islands would see a bare closed connection instead
+    // of the reason.
+    let mut written = Vec::new();
     for group in current_groups(registry) {
-        let _ = group.send_small(MSG_ERROR, message.clone().into()).await;
+        let (done, wait) = tokio::sync::oneshot::channel();
+        let frame = OutFrame { msg_type: MSG_ERROR, parts: vec![message.clone().into()], written: Some(done) };
+        if group.control.send(frame).await.is_ok() {
+            written.push(wait);
+        }
     }
+    let _ = tokio::time::timeout(Duration::from_secs(2), wait_all_written(written)).await;
     bail!("RL strict failure init_digest_mismatch: {message}");
+}
+
+/// Wait for every receiver (a dropped sender counts as done).
+async fn wait_all_written(receivers: Vec<tokio::sync::oneshot::Receiver<()>>) {
+    for receiver in receivers {
+        let _ = receiver.await;
+    }
 }
 
 /// Connected learners the scheduler waits for before the first round: every
@@ -3677,11 +3790,14 @@ async fn scheduler(
                 }
                 record_budget_report(&mut budget_reports, target, member, local_steps)?;
             }
-            Event::Disconnected { member } => warn!(
-                learner_id = member.learner_id,
-                generation = member.generation,
-                "disconnected during init"
-            ),
+            Event::Disconnected { member } => {
+                registry.lock().unwrap().disconnect_handled(member);
+                warn!(
+                    learner_id = member.learner_id,
+                    generation = member.generation,
+                    "disconnected during init"
+                )
+            }
             Event::Recovery { member, .. } => ignore_recovery_message(member, "initialization"),
         }
     }
@@ -4684,6 +4800,10 @@ async fn scheduler(
                     break 'outer;
                 }
                 Event::Disconnected { member } => {
+                    // Every event this connection sent before closing has
+                    // been handled now; only from here may its unanswered
+                    // slots move to a replacement.
+                    registry.lock().unwrap().disconnect_handled(member);
                     // A disconnect never erases accepted work. An unanswered
                     // slot may move to the already-current replacement only
                     // after the captured generation is gone. This also covers
@@ -5104,11 +5224,14 @@ async fn collect_budget_reports(
                         .insert(learner_id, tokio::time::Instant::now() + progress_timeout);
                 }
             }
-            Event::Disconnected { member } => warn!(
-                learner_id = member.learner_id,
-                generation = member.generation,
-                "disconnected while waiting for learner-budget cutoff"
-            ),
+            Event::Disconnected { member } => {
+                registry.lock().unwrap().disconnect_handled(member);
+                warn!(
+                    learner_id = member.learner_id,
+                    generation = member.generation,
+                    "disconnected while waiting for learner-budget cutoff"
+                );
+            }
             Event::Init { .. } | Event::InitDigest { .. } | Event::FinalAck { .. } | Event::Leave { .. } => {}
             Event::Recovery { member, .. } => ignore_recovery_message(member, "the budget cutoff"),
         }
@@ -5353,7 +5476,9 @@ fn rebind_current_unanswered_rounds(
         };
 
         let expected = round.expected_members[expected_index];
-        if registry.groups.contains_key(&expected) {
+        // Still connected, or closed with its last events (a PUSH for this
+        // round) possibly still queued behind its Disconnected event.
+        if registry.groups.contains_key(&expected) || registry.closing.contains_key(&expected) {
             continue;
         }
 
@@ -6955,6 +7080,7 @@ async fn finalize_learners_after(
                 }
             }
             Event::Disconnected { member } => {
+                registry.lock().unwrap().disconnect_handled(member);
                 if final_grace.is_some()
                     && !acknowledged.contains_key(&member.learner_id)
                     && !current_groups(registry)
@@ -8693,6 +8819,7 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
             wire: Arc::new(WireCounter::default()),
+            readers: Arc::new(ReaderGate::default()),
         })
     }
 
@@ -8716,6 +8843,7 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
             wire: Arc::new(WireCounter::default()),
+            readers: Arc::new(ReaderGate::default()),
         })
     }
 
@@ -8748,6 +8876,7 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
             wire: Arc::new(WireCounter::default()),
+            readers: Arc::new(ReaderGate::default()),
         });
         (group, if data_stream { data_rx } else { control_rx })
     }
@@ -9920,6 +10049,7 @@ mod tests {
             rr: AtomicUsize::new(1),
             reasm: Mutex::new(HashMap::new()),
             wire: Arc::new(WireCounter::default()),
+            readers: Arc::new(ReaderGate::default()),
         };
         let values: Vec<f32> = (0..11).map(|value| value as f32 - 3.0).collect();
         let prefix = crate::resend::bcast_prefix(2, 9);
@@ -11200,6 +11330,7 @@ mod tests {
             .try_send(OutFrame {
                 msg_type: MSG_PULL_REQ,
                 parts: vec![bytes::Bytes::new()],
+                written: None,
             })
             .is_ok());
         let group = test_group_with_control(member(0, 10), control);
@@ -12019,6 +12150,102 @@ mod tests {
 
         assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, superseded).is_empty());
         assert_eq!(rounds[0].expected_members, vec![current]);
+    }
+
+    #[test]
+    fn closed_generation_is_not_rebound_before_its_disconnect_is_handled() {
+        // The old connection sent its PUSH and closed: it left `groups`, but
+        // the PUSH may still be queued, so its slot must stay captured until
+        // the scheduler handles its Disconnected event.
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        registry.lock().unwrap().unregister(old);
+        let mut rounds = vec![test_round(vec![old])];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+
+        registry.lock().unwrap().disconnect_handled(old);
+        assert_eq!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(), 1);
+        assert_eq!(rounds[0].expected_members, vec![replacement]);
+    }
+
+    #[test]
+    fn same_generation_closing_twice_stays_closing_until_both_are_handled() {
+        // One generation reconnects and closes again before the scheduler
+        // handled its first Disconnected: the slot stays captured until both
+        // are handled.
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        registry.lock().unwrap().unregister(old);
+        registry.lock().unwrap().unregister(old);
+        let mut rounds = vec![test_round(vec![old])];
+
+        registry.lock().unwrap().disconnect_handled(old);
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+
+        registry.lock().unwrap().disconnect_handled(old);
+        assert!(!registry.lock().unwrap().closing.contains_key(&old));
+        assert_eq!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(), 1);
+        // A stray extra Disconnected does not underflow.
+        registry.lock().unwrap().disconnect_handled(old);
+    }
+
+    #[tokio::test]
+    async fn control_close_waits_for_data_stream_readers() {
+        // A data stream still reading the last PUSH chunks holds the
+        // generation's Disconnected back until it exits.
+        let gate = Arc::new(ReaderGate::default());
+        let reader = gate.enter().expect("reader admitted before close");
+        let (events, mut received) = mpsc::channel::<&'static str>(4);
+        let data_events = events.clone();
+        let data = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            data_events.send("push").await.unwrap();
+            drop(reader);
+        });
+        let control_gate = gate.clone();
+        let control = tokio::spawn(async move {
+            assert!(control_gate.close_and_wait(Duration::from_secs(5)).await);
+            events.send("disconnected").await.unwrap();
+        });
+        data.await.unwrap();
+        control.await.unwrap();
+        assert_eq!(received.recv().await, Some("push"));
+        assert_eq!(received.recv().await, Some("disconnected"));
+        // No data stream may start reading after the control connection closed.
+        assert!(gate.enter().is_none());
+    }
+
+    #[tokio::test]
+    async fn control_close_wait_is_bounded() {
+        let gate = Arc::new(ReaderGate::default());
+        let _stuck = gate.enter().unwrap();
+        assert!(!gate.close_and_wait(Duration::from_millis(20)).await);
+    }
+
+    #[tokio::test]
+    async fn writer_task_acknowledges_written_frames() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut client = client.await.unwrap();
+        let (_rd, wr) = server.into_split();
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(writer_task(wr, rx, Arc::new(WireCounter::default())));
+        let (done, written) = tokio::sync::oneshot::channel();
+        tx.send(OutFrame { msg_type: MSG_ERROR, parts: vec![bytes::Bytes::from_static(b"why")], written: Some(done) })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), written).await.unwrap().unwrap();
+        let mut frame = [0u8; 16];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut frame).await.unwrap();
+        assert_eq!(frame[4], MSG_ERROR);
+        assert_eq!(&frame[13..], b"why");
     }
 
     #[test]

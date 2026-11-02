@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -103,7 +103,7 @@ class RlFlag:
     options: tuple[str, ...]
     kwargs: Mapping[str, Any]
     layers: frozenset[str]
-    island: Mapping[str, Any] = _EMPTY
+    island: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)
     cli_aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
