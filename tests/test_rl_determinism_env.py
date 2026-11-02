@@ -4,7 +4,7 @@ import pytest
 
 from yeto.rl.engine.determinism import DeterminismNotCalibrated, determinism_env
 
-# Value before the move (miles_adapter/entry.py, s16-decouple-p2).
+# Value before the move (miles_adapter/entry.py, before the decoupling).
 PRE_MOVE = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
             "NVIDIA_TF32_OVERRIDE": "0", "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}
 

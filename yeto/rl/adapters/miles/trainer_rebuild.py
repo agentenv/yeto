@@ -1,11 +1,11 @@
-"""Same-shape trainer rebuild + full cut restore (rl-infra-spec 4.3; failure paths for 4.5).
+"""Same-shape trainer rebuild + full cut restore (failure paths for 4.5).
 
 Only the trainer subprocesses are rebuilt (fork-M6 ``rebuild_training_models``
 with the startup sizes, i.e. same TP/PP/CP/EP/DP); learner, driver, bridge,
 rollout manager and engines stay alive. The actor handle is shared by the
 trainer, policy-state and publisher ports (and the eval dispatcher), so it is
 held in a :class:`SwappableActor`: the driver keeps its port objects and only
-the handle behind them changes (design D1: no ``rebind``, no second
+the handle behind them changes (no ``rebind``, no second
 ``initialize``/``after_local_train``).
 
 Preconditions checked before anything is disposed (4.1 audit, review H1):
@@ -24,7 +24,7 @@ in the rollout process (``rollout_executor.py:304-310``: data source load plus
 functions are no-ops, the data source reads the rollout process' own
 ``args.load``, i.e. ``--ref-load`` in bridge mode, and returns when no dataset
 state file exists there). Whatever a (custom) load does, the data cursor is
-read through ``data_cursor()`` (``RolloutPool.data_cursor``; E1 interface)
+read through ``data_cursor()`` (``RolloutPool.data_cursor``)
 before disposal and after the rebuild: any difference -> RECOVERY_REQUIRED.
 yeto's ports engine never reads ``args.start_rollout_id`` (review L3: only other
 runtimes do).
@@ -110,7 +110,7 @@ def swap_critic(critic: "SwappableActor | None", new_critic: Any) -> None:
 
 
 def live_cursor(rollout: Any, when: str) -> dict[str, int]:
-    """The rollout data cursor, read live (INFRA-E1 f707dc3: ``data_cursor()`` is None
+    """The rollout data cursor, read live (``data_cursor()`` is None
     when it cannot be read). Unknown -> fail closed, never compared."""
     cursor = rollout.data_cursor()
     if cursor is None:
@@ -120,7 +120,7 @@ def live_cursor(rollout: Any, when: str) -> dict[str, int]:
 
 def confirm_resumed_cursor(trainer: Any, cursor: Mapping[str, int]) -> None:
     """Hand the data cursor the rebuilt trainer continues from to its resume
-    assertions (S25 N7.6: compared with the cut's data watermark)."""
+    assertions (compared with the cut's data watermark)."""
     confirm = getattr(trainer, "confirm_resumed_data_cursor", None)
     if callable(confirm):
         confirm(cursor)
@@ -139,7 +139,7 @@ def rebuild_preconditions(args: Any) -> list[str]:
 
 
 class DataCursorSource(Protocol):
-    """Placeholder for E1's ``RolloutPool.data_cursor()`` (cut-audit.md §5)."""
+    """Placeholder for ``RolloutPool.data_cursor()``."""
 
     def data_cursor(self) -> Mapping[str, int]: ...
 
@@ -166,7 +166,7 @@ def _default_rebuild() -> Callable[..., Awaitable[tuple[Any, Any]]]:
 
 def inject_rebuild_failures(rebuild: Callable[..., Awaitable[Any]], module: Any,
                             failures: int) -> Callable[..., Awaitable[Any]]:
-    """Test-only (G-4.5): the first ``failures`` calls fail INSIDE the fork at its
+    """Test-only: the first ``failures`` calls fail INSIDE the fork at its
     ``create_training_models`` stage, so the fork's own cleanup and
     ``TrainerRebuildError`` path runs (not a yeto-side stand-in)."""
     remaining = [int(failures)]
@@ -235,9 +235,9 @@ def rebuild_same_shape(
     """Dispose + rebuild the trainer (same shape) and restore the cut via ``restore()``.
 
     ``resumed_cursor`` is the data position the next batch starts from, compared
-    with the cut's data watermark after the restore (S25 N7.6); default: the
+    with the cut's data watermark after the restore; default: the
     live data cursor read after the rebuild. Only a caller that replays a batch
-    drawn at the cut (the E2 harness) passes the cut's cursor.
+    drawn at the cut (the cut-equivalence harness) passes the cut's cursor.
 
     ``trainer`` is the :class:`~.trainer.MilesTrainerGroup`; its layout is
     read back from the running ranks before and after. ``restore`` calls
@@ -301,7 +301,7 @@ def rebuild_same_shape(
 
 
 # --------------------------------------------------------------------------
-# Rebuild at another DP size / bundle set (rl-infra-spec 4.6/4.7, fork-M6)
+# Rebuild at another DP size / bundle set (fork-M6)
 # --------------------------------------------------------------------------
 
 
@@ -326,7 +326,7 @@ def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
     """
     from miles.ray import placement_group
 
-    # fork F-R1 (2f23a0fc) publishes slice_pg_info; the private name stays as a fallback
+    # fork 2f23a0fc publishes slice_pg_info; the private name stays as a fallback
     fn = check_slice_pg_info(getattr(placement_group, "slice_pg_info", None)
                              or getattr(placement_group, "_slice_pg_info", None))
     return fn(startup_view, tuple(bundle_positions))
@@ -337,7 +337,7 @@ def check_slice_pg_info(fn: Any) -> Callable[..., Any]:
     import inspect
 
     if not callable(fn):
-        raise RuntimeError("fork miles.ray.placement_group._slice_pg_info is missing (fork gap F-R2)")
+        raise RuntimeError("fork miles.ray.placement_group._slice_pg_info is missing")
     params = list(inspect.signature(fn).parameters)
     if params != ["info", "indices"]:
         raise RuntimeError(f"fork _slice_pg_info signature changed: {params} (expected ['info', 'indices'])")

@@ -1,4 +1,4 @@
-"""S26 E9.5: Harbor agentic trajectories suspended between rounds (CPU).
+"""Harbor agentic trajectories suspended between rounds (CPU).
 
 Real pieces: the turn gate, the outer layer, the gate relay over HTTP on
 127.0.0.1 (aiohttp), the Miles agent function and hooks, the cut export /

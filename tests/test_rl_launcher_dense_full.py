@@ -1,4 +1,4 @@
-"""Launcher end-to-end wiring of --rl-sync-preset full-parameter (P0-1.7b.1-Q6/Q7). No Ray.
+"""Launcher end-to-end wiring of --rl-sync-preset full-parameter. No Ray.
 
 The dense strict sweep is launched like any ports island on a fixed
 partition; the syncer adds the policy-sweep profile and the launcher sends
@@ -108,7 +108,7 @@ def test_dense_full_refusals(extra, message, monkeypatch):
 
 
 def test_dense_full_is_an_alias_of_the_full_parameter_preset():
-    # P0-1.7b.2-Q2: the old name still parses, on both layers, to the new one.
+    # The old name still parses, on both layers, to the new one.
     args, plan = _dense_plan(preset="dense-full")
     assert args.rl_sync_preset == "full-parameter"
     command = plan["island_requests"][0]["learner_command"]
@@ -152,7 +152,7 @@ EXPERT_FULL = (
 
 
 def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(monkeypatch):
-    # P0 1.7b.2: attention LoRA + clone experts ride the same strict sweep as dense.
+    # Attention LoRA + clone experts ride the same strict sweep as dense.
     from yeto import launcher
     from yeto.launcher import _prepare_rl_args, dry_run_plan
 
@@ -189,7 +189,7 @@ def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(mo
 
 
 def test_ports_entry_takes_the_full_parameter_identity_from_run_miles(monkeypatch):
-    """P0-1.11 GPU run fpprobe-20261014a: the full-parameter island has no LoRA
+    """A GPU probe run: the full-parameter island has no LoRA
     rank, so ``_run_ports`` must forward the identity run_miles bound instead
     of re-deriving a LoRA hash (it raised TypeError on lora_r=None)."""
     from types import SimpleNamespace

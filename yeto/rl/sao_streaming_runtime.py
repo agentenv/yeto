@@ -5,7 +5,7 @@ both role-specific syncer sessions, the fresh trajectory-evidence path and
 the layout attestation of both roles.  This module loads and checks that
 contract; it is engine-neutral.  The Miles adapter
 (``yeto.rl.adapters.miles.full_parameter.sao_binding``) turns the checked
-role contracts into the two-role full-parameter sync (P0-D8).
+role contracts into the two-role full-parameter sync.
 """
 
 from __future__ import annotations
@@ -476,7 +476,7 @@ def load_sao_streaming_runtime(
     evidence_kind = evidence_contract["kind"]
     # ``schema_version`` is the layout label the context was attested with
     # (part of its hash). It must stay 2; the writer emits trajectory evidence
-    # schema 4 (rl-drop-reward-tamper-hash, P0-S).
+    # schema 4.
     evidence_schema_version = evidence_contract["schema_version"]
     if (
         evidence_kind not in EVIDENCE_KINDS

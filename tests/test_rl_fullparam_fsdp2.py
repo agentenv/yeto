@@ -1,4 +1,4 @@
-"""S25 N7.2: FSDP2 full-parameter plan; one step on 2 gloo ranks on CPU."""
+"""FSDP2 full-parameter plan; one step on 2 gloo ranks on CPU."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def test_full_offload_selects_cpu_offload_policy(monkeypatch):
 def test_one_step_two_gloo_ranks_tiny_glm5_next():
     res = run_two_ranks(tiny_glm5_next_config())
     assert math.isfinite(res["loss"]) and math.isfinite(res["grad_norm"]) and res["grad_norm"] > 0
-    # Not trained: the DSA indexer (no gradient on the HF path, N7.0 T5; seen here on CPU)
+    # Not trained: the DSA indexer (no gradient on the HF path; seen here on CPU)
     # and the vision tower (text-only input). Every other tensor moved.
     assert res["unchanged"], "expected the indexer and vision tower to stay put"
     assert all(".indexer." in n or n.startswith("model.visual.") for n in res["unchanged"])

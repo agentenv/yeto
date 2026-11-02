@@ -270,7 +270,7 @@ def terminate_and_verify(
 
 
 def _terminate_and_verify_nodes(cluster, *, probe, attempts, sleep_fn, down, num_nodes) -> bool:
-    """rl-multinode-island D10: a multi-node island is confirmed gone only when the
+    """A multi-node island is confirmed gone only when the
     cloud confirms EVERY node instance. The instance ids are captured before the
     first down; no cloud probe, a failing probe or any instance still live after
     the retries -> False, with the unconfirmed instance ids listed. sky.down's own

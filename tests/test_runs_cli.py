@@ -669,7 +669,7 @@ def test_modal_ops_app_status_parses_modal_app_list_json(monkeypatch):
 
 
 def test_down_confirms_a_multi_node_island_per_node(monkeypatch, capsys):
-    """S14/A19 (T4-S7 §7): the `yeto down` CLI path passed no num_nodes, so a
+    """The `yeto down` CLI path passed no num_nodes, so a
     multi-node island was confirmed like a single node; it now derives the node
     count from the recorded --gpu and takes the launcher's per-node path."""
     args = make_args_dict("d6")

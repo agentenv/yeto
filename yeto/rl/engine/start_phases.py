@@ -1,4 +1,4 @@
-"""Trainer start phases (rl-trainer-cold-start-cost L0, design D4).
+"""Trainer start phases.
 
 A trainer start passes seven fixed phases, in this order:
 
@@ -53,7 +53,7 @@ SHELL_PHASES = ("container_ready", "setup_done", "ray_ready")
 # Setup shell -> island: events the setup shell could not write to the tape
 # (no tape exists before the island starts), one JSON object per line.
 SETUP_EVENTS_FILE = "setup-events.jsonl"
-# Run manifest key (L0.2): {learner_id: summary}.
+# Run manifest key: {learner_id: summary}.
 MANIFEST_KEY = "trainer_start"
 
 Emit = Callable[..., None]

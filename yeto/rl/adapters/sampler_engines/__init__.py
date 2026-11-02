@@ -1,5 +1,5 @@
 """Sampler engine adapters: implementations of the neutral
-:class:`~yeto.rl.engine.sampler_engine.SamplerEngine` port (rl-hetero-sampler-engines D1).
+:class:`~yeto.rl.engine.sampler_engine.SamplerEngine` port.
 
 * ``sglang-server`` (:mod:`.sglang_server`): an SGLang HTTP server, PPU stage 1;
 * ``vllm-server`` (:mod:`.vllm_server`): a vLLM OpenAI-compatible server

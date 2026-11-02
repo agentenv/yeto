@@ -1,4 +1,4 @@
-"""Learner side of bf16 downlink deltas (S26 E3; syncer ``src/downlink.rs``).
+"""Learner side of bf16 downlink deltas (syncer ``src/downlink.rs``).
 
 A session whose dtype carries ``DTYPE_FLAG_BCAST_DELTA`` receives every
 BCAST_FRAGMENT with a 41-byte downlink header after ``fragment_id, version``::
@@ -10,7 +10,7 @@ keeps one f32 *anchor* per fragment, bit-identical to the syncer's: FULL sets
 it, DELTA adds the decoded delta in f32 (numpy float32 addition rounds like
 Rust's). The digest is checked after every update. Callers above the client
 (``drain_updates``, inbound chunk sinks) only ever see the reconstructed f32
-anchor, so adapters, N7.6 cuts and manifests are unchanged.
+anchor, so adapters, sharded-optimizer cuts and manifests are unchanged.
 
 A missing or mismatched anchor raises :class:`DownlinkResync` (a
 ``ConnectionError``): the client drops its connection group, and the

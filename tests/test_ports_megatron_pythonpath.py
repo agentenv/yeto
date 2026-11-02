@@ -1,4 +1,4 @@
-"""S11 try25 fnA: megatron.post_training unresolvable in the ports image.
+"""Flash-Next: megatron.post_training unresolvable in the ports image.
 
 The image's Megatron-LM is a setuptools editable install whose finder maps
 only megatron.core and megatron.training ('megatron' itself is an empty

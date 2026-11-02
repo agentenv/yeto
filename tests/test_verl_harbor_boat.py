@@ -1,4 +1,4 @@
-"""S25 N10.8c: verl's HarborAgentLoop on boat sandboxes, end to end on CPU.
+"""verl's HarborAgentLoop on boat sandboxes, end to end on CPU.
 
 Real pieces: ``HarborAgentLoop.run``, the outer layer, ``build_trial_config``
 (provider ``boat`` -> ``import_path``), Harbor's ``Trial`` and the boat

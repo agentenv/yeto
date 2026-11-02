@@ -1,4 +1,4 @@
-"""``Publisher`` port over upstream ``update_weights`` (task 3.5, D11).
+"""``Publisher`` port over upstream ``update_weights`` .
 
 Sequence for one full publication of ``state`` (already applied to the trainer
 through :class:`~.state.MilesPolicyState`):
@@ -10,7 +10,7 @@ through :class:`~.state.MilesPolicyState`):
    yeto policy version on the engines and the rollout executor;
 3. under the controller's update lock (``start_update_weights`` ...
    ``end_update_weights``), stamp every engine with the plain policy version
-   (SGLang weight version, P0-S) and read it back; any engine failing either
+   (SGLang weight version) and read it back; any engine failing either
    step aborts the lock and raises :class:`PublicationError` -- a partial
    publication never yields a manifest. The label ``yeto:<version>:<hash>``
    stays on the yeto side (``engine.policy_versions.PublishedPolicies``);
@@ -25,7 +25,7 @@ hash inside the policy token and the one ``IslandDriver.publish`` checks).
 update snapshot, so the driver's "every member acknowledged" check compares
 like with like.
 
-Member publication (rl-infra-spec 3.5, fork M4 + 3.5a mechanism (a)),
+Member publication (fork M4 + 3.5a mechanism (a)),
 :meth:`MilesPublisher.publish_members`:
 
 1. ``wait_cells_tracked`` for the new members (started by ``add_engines``);
@@ -71,7 +71,7 @@ from .state_plugin import ALIGN_WEIGHT_VERSION
 async def _stamp_engine_version(
     engines: list[Any], ids: list[str], version: int
 ) -> tuple[set[str], PublicationCause]:
-    """Write the plain policy version to every engine and read it back (P0-S).
+    """Write the plain policy version to every engine and read it back.
 
     Returns the engines that failed and why; the caller holds the update lock.
     """
@@ -91,7 +91,7 @@ async def _stamp_engine_version(
 
 
 class PublicationError(RuntimeError):
-    """``cause`` says why the publication was refused (A4 E1-B); ``engine_ids`` are
+    """``cause`` says why the publication was refused; ``engine_ids`` are
     the engines that disagree (payload read-back / token / failed update)."""
 
     def __init__(self, message: str, failed_members: frozenset[str] = frozenset(), *,
@@ -108,14 +108,14 @@ class PublicationError(RuntimeError):
 # ``MilesPublisher._injected_block``). Unset (default) = no effect. Set by the
 # launcher's ``--rl-test-inject-update-weights-block-s``.
 INJECT_UPDATE_BLOCK_ENV = "YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S"
-# Test-only (plan.md E1-B, 3.5): the FIRST member update_weights of the process
+# Test-only: the FIRST member update_weights of the process
 # ships a LoRA adapter perturbed by this amount (the trainer's adapter is
 # perturbed for that one member-scoped update and restored right after), so the
 # new engines hold different LoRA weights than the published policy and
 # check_weights must refuse to admit them. (A base-checkpoint reload did not
-# change the LoRA weights the checksum covers: A4 E1-B on Nebius.)
+# change the LoRA weights the checksum covers.)
 INJECT_LORA_PERTURB_ENV = "YETO_RL_TEST_INJECT_LORA_PERTURB"
-# Test-only (A4 E1-B (a)): the FIRST member publication of the process stays this many
+# Test-only: the FIRST member publication of the process stays this many
 # seconds after ``end_update_weights`` registered the new members as cordoned and before
 # ``check_weights`` / ``admit_cells`` (an observation window for "new engines are
 # cordoned, not routed"). Only honoured in test-injection mode, i.e. when another
@@ -444,11 +444,11 @@ class MilesPublisher:
     def _check_trainer_holds(self, state: Any) -> str:
         """The trainer must still hold the policy being published (same check as
         before). rl-publish-fastpath: for a trainer-resident state the trainer reports
-        its weights version (no export); see design D3."""
+        its weights version (no export)."""
 
         tensor_hash = state.policy_tensor_hash()
         if is_resident(state):
-            # D3: compare the trainer's weights version, no export (a replaced trainer
+            # compare the trainer's weights version, no export (a replaced trainer
             # process falls back to a trainer-side content re-hash).
             try:
                 state.check_holds()
@@ -471,11 +471,11 @@ class MilesPublisher:
         version = state.policy_version if token_rollout_id is None else token_rollout_id
         token = policy_token(version, tensor_hash)
         self.last_timing = {"check_s": time.monotonic() - started}
-        # E1: a round whose policy is not hashed (state.verified False) also skips the
+        # a round whose policy is not hashed (state.verified False) also skips the
         # engine read-back; the next verified publication reads it back again
         members, checksums = self._runner.run(
             self._publish(version, token, read_back=getattr(state, "verified", True) is not False))
-        # E1 diagnosis: where a publication's wall time goes (driver log only)
+        # diagnosis: where a publication's wall time goes (driver log only)
         print("yeto publish timing " + json.dumps(
             {k: round(v, 3) for k, v in self.last_timing.items()}, sort_keys=True), flush=True)
         self.last_engine_checksums = checksums
@@ -586,7 +586,7 @@ class MilesPublisher:
         if timing is not None:
             timing[key] = time.monotonic() - mark
 
-    # -- convertible node (rl-trainer-start-stop L7.2) --------------------------
+    # -- convertible node --------------------------
     @property
     def published_checksum(self) -> str | None:
         """Digest of the weight checksum every engine reported at the last full
@@ -618,7 +618,7 @@ class MilesPublisher:
 
         Needs the KV cache back: in LoRA mode the adapter is first loaded into
         each engine's LoRA pool by one generate (as for a member publication),
-        so the checksum covers it (G-L7.4: a generate with the KV cache released
+        so the checksum covers it (GPU check: a generate with the KV cache released
         crashed the engine scheduler)."""
         if self._loaded_engines is None:
             raise PublicationError("served_checksum needs a load_version first")
@@ -702,7 +702,7 @@ class MilesPublisher:
         await self._controller.end_commit_weight_version()
 
     def _update_weights_to(self, version: int) -> Callable[..., Any]:
-        """The weight update that stamps ``version`` (P0-S).
+        """The weight update that stamps ``version``.
 
         Miles' ``update_weights`` stamps its own counter on the engines and the
         rollout executor; the counter is aligned first so that it stamps the
@@ -829,7 +829,7 @@ class MilesPublisher:
                          seconds=seconds, released_ts=time.time(), outcome=outcome, applied=True)
 
     async def _hold(self, cells: list[str], seconds: float) -> None:
-        """TEST ONLY: observation window of E1-B (a). Awaited, so the event loop (the
+        """TEST ONLY: observation window of the publication-failure test. Awaited, so the event loop (the
         fork's controller, health checks, the watchdog's liveness probe) keeps running."""
         import sys
 
@@ -984,7 +984,7 @@ class MilesPublisher:
                         "engine": f"engine{i}", "keys": len(body), "lora_keys": len(mine),
                         "lora_keys_differ": sum(1 for k, v in mine.items() if ref_lora.get(k) != v)
                         + sum(1 for k in ref_lora if k not in mine)})
-                # target-state evidence for the judge (A4 E1-B): what each engine's pool
+                # target-state evidence for the judge: what each engine's pool
                 # actually holds, not what the trainer sent
                 self._record("lora_readback", target_members=[member_id(c) for c in cells],
                              reference_lora_keys=len(ref_lora), engines=per_engine,

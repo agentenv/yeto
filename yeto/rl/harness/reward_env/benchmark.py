@@ -198,10 +198,10 @@ HOLDOUT_SCHEMA = "yeto-eval-holdout/1"
 def build_holdout(adapter: BenchmarkAdapter, quotas: dict[str, int | None], *, seed: int, rule: str,
                   task_ids: Iterable[str] | None = None,
                   exclude: Iterable[str] | dict[str, str] = ()) -> dict[str, Any]:
-    """Stratified, reproducible hold-out list in the WP3 D6b JSON shape.
+    """Stratified, reproducible hold-out list in the hold-out JSON shape.
 
-    ``exclude`` removes tasks from the pool *before* stratified sampling (WP3
-    D2: the S15 smoke tasks were trained on).  Pass a mapping ``task_id ->
+    ``exclude`` removes tasks from the pool *before* stratified sampling (the
+    smoke tasks were trained on).  Pass a mapping ``task_id ->
     reason`` to record reasons; a plain iterable records ``"excluded"``.  When
     non-empty the file carries ``excluded: [{task_id, reason}]`` (sorted).
 
@@ -245,7 +245,7 @@ def build_train_split(adapter: Any, holdout: dict[str, Any], *,
                       task_ids: Iterable[str] | None = None) -> dict[str, Any]:
     """Training task list = all tasks - hold-out items - ``exclude`` (task_id -> reason).
 
-    Hold-out *exclusions* that are not in ``exclude`` (e.g. the S15 smoke-6,
+    Hold-out *exclusions* that are not in ``exclude`` (e.g. the smoke-6,
     which left only the eval pool) stay in training.  The file pins the
     hold-out sha256 so a training run can prove which list it was cut against.
     """

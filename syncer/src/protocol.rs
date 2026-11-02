@@ -29,7 +29,7 @@ pub const MSG_BUDGET_DONE: u8 = 14;
 /// Sent before the island closes its connection; the reason goes on the
 /// `pool_leave` tape record.
 pub const MSG_LEAVE: u8 = 27;
-/// Local-init startup (S27): every island loaded the same base checkpoint and
+/// Local-init startup: every island loaded the same base checkpoint and
 /// reports the SHA-256 of each owned fragment's INIT_PARAMS tensor bytes:
 /// `u32 learner_id | [32] layout_hash | u32 first_fragment | u32 count |
 /// count x [32] digest`. Valid only on f32-bulk sessions.
@@ -38,10 +38,10 @@ pub const MSG_INIT_DIGEST: u8 = 28;
 /// the island adopts its local weights as version 0 and no initial BCAST
 /// follows. Payload: `[32]` SHA-256 over the concatenated fragment digests.
 pub const MSG_INIT_CONFIRM: u8 = 29;
-/// Task dispenser (S27 P2, `dispense.rs`): the first frame of a dispense
+/// Task dispenser (`dispense.rs`): the first frame of a dispense
 /// connection, its own connection like BW_PROBE (never part of a learner
 /// session). Payload: `u16 version (=1) | u32 learner_id | u64 incarnation |
-/// u64 rows | [32] data fingerprint`, or with streams (S27 P3, version 2):
+/// u64 rows | [32] data fingerprint`, or with streams (version 2):
 /// `u16 version (=2) | u32 learner_id | u64 incarnation | [32] fingerprint |
 /// u16 n | n x (u64 rows, u64 weight, u16 name_len, name) | u16 m |
 /// m x u16 accepted stream (m = 0: every stream)`; sealed with
@@ -67,7 +67,7 @@ pub const MSG_TASK_ACK: u8 = 55;
 /// Island -> syncer: empty; renews the lease.
 pub const MSG_TASK_HEARTBEAT: u8 = 56;
 pub const TASK_PROTOCOL_VERSION: u16 = 1;
-/// TASK_HELLO / TASK_WELCOME version of an island with streams (S27 P3).
+/// TASK_HELLO / TASK_WELCOME version of an island with streams.
 pub const TASK_PROTOCOL_VERSION_STREAMS: u16 = 2;
 /// Largest TASK_HELLO payload (256 streams with 64-byte names, the HMAC).
 pub const MAX_TASK_HELLO: u64 = 32 * 1024;
@@ -97,11 +97,11 @@ pub fn leave_reason_name(reason: u8) -> String {
         .get(reason as usize)
         .map_or_else(|| format!("unknown_{reason}"), |name| (*name).to_string())
 }
-/// S26 E3b: link-bandwidth probe. First and only frame of its own connection
+/// Link-bandwidth probe. First and only frame of its own connection
 /// (never part of a learner session): the island uploads N bytes, the syncer
 /// acknowledges with the u64 byte count, then streams M bytes back.
 pub const MSG_BW_PROBE: u8 = 26;
-/// S27 G-EA: first frame of a receive-only subscriber (`subscriber.rs`):
+/// First frame of a receive-only subscriber (`subscriber.rs`):
 /// a HELLO body sealed in the subscribe MAC domain. 60-66 are the sample
 /// relay (`sample_relay.rs`).
 pub const MSG_SUBSCRIBE: u8 = 67;
@@ -117,30 +117,30 @@ pub const DTYPE_BF16: u8 = 2;
 /// base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT travel as
 /// bf16 (see `bulk_dtype`, docs/PROTOCOL.md v4).
 pub const DTYPE_Q4: u8 = 3;
-/// Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16 while
+/// Session dtype 4: PUSH_FRAGMENT deltas travel as bf16 while
 /// INIT_PARAMS, BCAST_FRAGMENT and FINAL stay exact f32. The syncer keeps f32
 /// masters and momentum; only the learner's outer gradient is rounded.
 pub const DTYPE_F32_PUSH_BF16: u8 = 4;
 
-/// Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled
+/// Session dtype 5: PUSH_FRAGMENT deltas travel as block-scaled
 /// int8 (see `decode_i8`); INIT_PARAMS, BCAST_FRAGMENT and FINAL stay f32.
 pub const DTYPE_F32_PUSH_I8: u8 = 5;
 
-/// Session dtype 6 (S27 P3): PUSH_FRAGMENT deltas travel in the dtype-3 q4
+/// Session dtype 6: PUSH_FRAGMENT deltas travel in the dtype-3 q4
 /// block codec (see `decode_q4`); INIT_PARAMS, BCAST_FRAGMENT and FINAL stay
 /// f32, so only the learner's outer gradient is quantized.
 pub const DTYPE_F32_PUSH_Q4: u8 = 6;
 
-/// Session dtype 7 (S27 P3): PUSH_FRAGMENT deltas travel as linear symmetric
+/// Session dtype 7: PUSH_FRAGMENT deltas travel as linear symmetric
 /// int4 with one absmax scale per block (see `decode_i4`); INIT_PARAMS,
 /// BCAST_FRAGMENT and FINAL stay f32.
 pub const DTYPE_F32_PUSH_I4: u8 = 7;
-/// Session-dtype flag (S26 E3): BCAST_FRAGMENT carries a 41-byte downlink
+/// Session-dtype flag: BCAST_FRAGMENT carries a 41-byte downlink
 /// header and, between periodic f32 refreshes, a bf16 delta against the
 /// anchor every learner holds (see `crate::downlink`). Valid only on f32-bulk
 /// sessions (dtypes 1, 4, 5, 6, 7).
 pub const DTYPE_FLAG_BCAST_DELTA: u8 = 0x80;
-/// Session-dtype flag (S27): quantization blocks of PUSH_FRAGMENT deltas
+/// Session-dtype flag: quantization blocks of PUSH_FRAGMENT deltas
 /// restart at every tensor boundary of the fragment, so a replicated tensor
 /// quantizes identically whatever its neighbours are. Valid only on the
 /// block-quantized push dtypes 5, 6 and 7; without it the blocks run

@@ -1,13 +1,13 @@
 """CPU bitwise check: plugin functions before/after a decoupling refactor
-(yeto-framework-decoupling task 4.4 / 4.6 / D6a item 3, hash-migration.md).
+(the hash-migration rule of the framework decoupling).
 
-Takes the *old* function bodies from a git revision (default: the stage-2
-branch tip ``s16-decouple-p2``), executes them in the namespace of the
+Takes the *old* function bodies from a git revision (default: the
+pre-refactor branch tip, see ``main``), executes them in the namespace of the
 current module (so helpers are shared and only the refactored body differs),
 feeds both the same fixed inputs and compares outputs with ``torch.equal``
 on float32 tensors.
 
-    PYTHONPATH=/tmp/s15-noray python tests/decoupling_bitwise_check.py [REV]
+    PYTHONPATH=<site-packages-without-ray> python tests/decoupling_bitwise_check.py [REV]
 
 Prints one line per case and exits non-zero on any difference. CPU only,
 no Ray, no Miles.

@@ -1,4 +1,4 @@
-//! Task dispenser of the RL syncer (S27 P2): which island trains which rows.
+//! Task dispenser of the RL syncer: which island trains which rows.
 //!
 //! The dispenser hands out *positions* of one global row sequence. Position
 //! `p` is row `order(p / rows)[p % rows]` of `--data`, where `rows` is the
@@ -29,7 +29,7 @@
 //! once (an island reports a position when its group enters a training
 //! batch). Islands without a dispenser never see any of this.
 //!
-//! Streams (S27 P3, `--data-mix` and `--rl-island-task-labels`): the rows
+//! Streams (`--data-mix` and `--rl-island-task-labels`): the rows
 //! may be split into *streams* (one per source data set and task label). A
 //! position then carries its stream in its high bits ([`STREAM_SHIFT`]):
 //! position `(s << 40) | k` is the `k`-th position of stream `s`, i.e. row
@@ -41,7 +41,7 @@
 //! `1 - 1 / (2k - 2)` for `k` streams). A holder may accept only some
 //! streams (task label affinity); it then gets only their positions, and the
 //! mix of the positions given out follows the claims. One stream with
-//! weight 1 and no name is exactly the P2 dispenser (positions are row
+//! weight 1 and no name is exactly the single-stream dispenser (positions are row
 //! sequence numbers).
 //!
 //! Pure state machine like `membership.rs`: no sockets, no files; every
@@ -56,7 +56,7 @@ use anyhow::{ensure, Result};
 pub use crate::members::Holder;
 use crate::members::{Retired, SharedMembers, RETIRED_LIMIT};
 
-/// Magic and version of the persisted dispenser record (YDS1: the P2 record,
+/// Magic and version of the persisted dispenser record (YDS1: the single-stream record,
 /// one stream; still restored).
 const PERSIST_MAGIC_V1: &[u8; 4] = b"YDS1";
 const PERSIST_MAGIC: &[u8; 4] = b"YDS2";
@@ -132,7 +132,7 @@ impl DispenseConfig {
 
 /// One stream of the run's rows (module doc): its row count, its integer
 /// weight in the interleave of fresh positions, and its name (the source
-/// data set and task label, for the log; "" for the single P2 stream).
+/// data set and task label, for the log; "" for the single plain stream).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamDecl {
     pub rows: u64,
@@ -149,7 +149,7 @@ pub struct DataDecl {
 }
 
 impl DataDecl {
-    /// The P2 data: one stream of `rows` rows.
+    /// Single-stream data: one stream of `rows` rows.
     pub fn single(rows: u64, fingerprint: [u8; 32]) -> Self {
         Self { streams: vec![StreamDecl { rows, weight: 1, name: String::new() }], fingerprint }
     }
@@ -615,7 +615,7 @@ impl Dispenser {
         self.data = Some(data);
     }
 
-    /// Admit an island process whose data is one stream of `rows` rows (P2).
+    /// Admit an island process whose data is one stream of `rows` rows.
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn open(&mut self, holder: Holder, rows: u64, fingerprint: [u8; 32], now: Instant) -> DResult<OpenOutcome> {
         self.open_with(holder, &DataDecl::single(rows, fingerprint), None, now)
@@ -1100,7 +1100,7 @@ impl Dispenser {
         bytes
     }
 
-    /// Restore a record of `encode_persisted` (or a P2 `YDS1` record) into a
+    /// Restore a record of `encode_persisted` (or a single-stream `YDS1` record) into a
     /// fresh dispenser. Parsed fully before any state changes.
     pub fn restore_persisted(&mut self, bytes: &[u8]) -> Result<()> {
         ensure!(self.data.is_none() && self.live.is_empty(), "restore needs a fresh dispenser");
@@ -1347,7 +1347,7 @@ mod tests {
 
     #[test]
     fn a_member_superseded_on_another_channel_loses_its_rows_and_is_fenced() {
-        // S27: the syncer's one member table; a spot rollout subscriber (or
+        // The syncer's one member table; a spot rollout subscriber (or
         // relay producer) of a newer incarnation of the sampler joins it.
         let t = Instant::now();
         let table = crate::members::shared(Duration::from_secs(10));
@@ -1791,7 +1791,7 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------- streams (S27 P3)
+    // ------------------------------------------------------------- streams
 
     fn decl(streams: &[(u64, u64, &str)]) -> DataDecl {
         DataDecl {
@@ -1810,7 +1810,7 @@ mod tests {
     }
 
     /// The mix of fresh positions: after every claim, every stream is within
-    /// one position of its share (the P3 check "mix error within one block",
+    /// one position of its share (the check "mix error within one block",
     /// here exact to one position), for any claim sizes and weights.
     #[test]
     fn streams_interleave_within_one_position_of_their_weights() {
@@ -1955,7 +1955,7 @@ mod tests {
         let events: Vec<String> = e.take_events().iter().map(DispenseEvent::json_fields).collect();
         assert!(events[0].starts_with("\"kind\":\"dispense_streams\""), "{events:?}");
         assert!(events[0].contains("\"name\":\"pwn \\\"x\\\"\""), "{}", events[0]);
-        // a P2 record (YDS1, one stream) restores as the single plain stream
+        // a single-stream record (YDS1) restores as the single plain stream
         let mut v1 = Vec::new();
         v1.extend_from_slice(b"YDS1");
         v1.push(1);

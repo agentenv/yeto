@@ -1,6 +1,6 @@
-"""Real Megatron-Core + Megatron-Bridge round trip of the HF boundary on CPU (S27 G-FG).
+"""Real Megatron-Core + Megatron-Bridge round trip of the HF boundary on CPU.
 
-Run by ``tests/test_s27_verl_megatron_sync.py`` in a separate interpreter that
+Run by ``tests/test_verl_megatron_sync.py`` in a separate interpreter that
 has Megatron-Core and Megatron-Bridge (paths in ``YETO_MEGATRON_LM_PATH`` and
 ``YETO_MEGATRON_BRIDGE_PATH``); not collected by pytest.  Takes ``tp pp dp
 out.json``, spawns ``tp * pp * dp`` gloo ranks, builds a small Qwen3-like
@@ -8,7 +8,7 @@ out.json``, spawns ``tp * pp * dp`` gloo ranks, builds a small Qwen3-like
 :mod:`yeto.rl.megatron_hf_boundary` against Bridge's Qwen3 mapping:
 
 * ``tp``: tensor parallel size (column/row parallel, fused QKV and gate/up);
-* ``pp``: pipeline parallel size (S27 G-FL); each stage owns part of the tasks
+* ``pp``: pipeline parallel size; each stage owns part of the tasks
   and receives the rest over the PP group, and the last stage owns the tied
   embedding's second copy;
 * ``dp``: data parallel size; the optimizer is a DistributedOptimizer stand-in
@@ -208,7 +208,7 @@ MUTATIONS = ("", "no-tied", "stage-local-export")
 
 def _mutate(boundary) -> None:
     """``YETO_PP_MUTATE`` breaks one piece of the cross-stage work on purpose, so the
-    checks below can be shown to catch it (S27 G-FL):
+    checks below can be shown to catch it:
 
     * ``no-tied``: the apply stops writing the tied embedding's second copy, so the
       last stage keeps a stale output layer (check 6 and 7 must fail);

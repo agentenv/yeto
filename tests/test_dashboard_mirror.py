@@ -1,4 +1,4 @@
-"""fleet-dashboard 4.4: ssh tape mirror reconnects without losing or repeating records.
+"""Ssh tape mirror reconnects without losing or repeating records.
 
 The ssh hop is simulated with ``sh -c 'tail -c +N file'``: each connection
 ends (a dropped link) after streaming what exists; the remote tape grows

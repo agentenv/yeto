@@ -115,7 +115,7 @@ def test_colocated_translation_core_flags():
 
 
 def test_fixed_partition_translation():
-    # rl-infra-spec 2.1: a LoRA fixed partition keeps the trainer resident
+    # A LoRA fixed partition keeps the trainer resident
     # (NCCL broadcast publish every round); offload_train is refused below.
     cfg = sub(make_config(colocated=False), "serving", offload_train=False)
     launch = mc.translate_run_config(cfg, AlgorithmSpec())
@@ -253,7 +253,7 @@ def _pin_before_dp_replicas(monkeypatch):
 
 
 def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin(monkeypatch):
-    # S27 G-AX: a Miles without data-parallel replicas refuses DP>1 at its first manifest.
+    # A Miles without data-parallel replicas refuses DP>1 at its first manifest.
     _pin_before_dp_replicas(monkeypatch)
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     with pytest.raises(mc.MilesConfigError, match="DP 2 needs Miles 921cde8c7 or later"):
@@ -264,7 +264,7 @@ def test_full_parameter_sync_at_dp_above_one_needs_the_replica_pin(monkeypatch):
 
 
 def _pin_without_sharded_masters(monkeypatch):
-    """Pin Miles 59aea07f9 (S27 closing): DP replicas, but no sharded masters."""
+    """Pin Miles 59aea07f9: DP replicas, but no sharded masters."""
     from yeto.rl.adapters.miles import pins
 
     monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "59aea07f9a1e48b6fcb9fed03c70964a00275a40")
@@ -288,7 +288,7 @@ def test_full_parameter_sync_at_dp_above_one_refuses_optimizer_offload(monkeypat
 
 @pytest.mark.usefixtures("dp_replicas")
 def test_dp_optimizer_falls_back_to_whole_masters_without_the_sharded_pin(monkeypatch):
-    # S27 G-BE: a pin before the sharded masters keeps the non-distributed optimizer.
+    # A pin before the sharded masters keeps the non-distributed optimizer.
     from yeto.rl.adapters.miles import run_config_rules
 
     _pin_without_sharded_masters(monkeypatch)
@@ -302,7 +302,7 @@ def test_dp_optimizer_falls_back_to_whole_masters_without_the_sharded_pin(monkey
 
 @pytest.mark.usefixtures("dp_replicas")
 def test_dp_optimizer_keeps_the_distributed_optimizer_with_the_sharded_pin():
-    # The pinned image (S27 eff, 7402a53-2fa8801) has the sharded masters, so auto
+    # The pinned image (7402a53-2fa8801) has the sharded masters, so auto
     # keeps Miles' default distributed optimizer at DP>1.
     from yeto.rl.adapters.miles import run_config_rules
 
@@ -325,7 +325,7 @@ def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     from yeto.rl.adapters.miles import pins, run_config_rules
     from yeto.rl.engine.run_config import full_parameter_layout_problem
 
-    # The pinned image (S27 eff, 7402a53-2fa8801) has the replicas.
+    # The pinned image (7402a53-2fa8801) has the replicas.
     assert run_config_rules.full_parameter_dp_replica_gap() is None
     assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
                                          rollout_gpus_per_engine=1) is None
@@ -342,7 +342,7 @@ def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
 
 @pytest.mark.usefixtures("dp_replicas")
 def test_trainer_only_full_parameter_island_starts_no_engine():
-    # S25 T-INTEG2: a full-parameter trainer that reads the store (DP>1, no engine).
+    # A full-parameter trainer that reads the store (DP>1, no engine).
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     cfg = sub(cfg, "parallel", dedicated_rollout_gpus=0, visible_gpus_per_node=2)
     assert not cfg.parallel.colocated
@@ -367,7 +367,7 @@ def test_full_parameter_mode_turns_the_distributed_optimizer_off():
 
 
 def test_no_sync_full_parameter_trainer_keeps_the_distributed_optimizer():
-    # N7.1d: only the full-parameter sync reads whole masters; a store-fed trainer
+    # Only the full-parameter sync reads whole masters; a store-fed trainer
     # island shards the optimizer state over DP and may offload it to the host.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
@@ -380,7 +380,7 @@ def test_no_sync_full_parameter_trainer_keeps_the_distributed_optimizer():
 
 
 def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader(monkeypatch):
-    # S27 G-B: Miles reads DP=1 distributed-optimizer masters (incl. the
+    # Miles reads DP=1 distributed-optimizer masters (incl. the
     # HybridDeviceOptimizer's offloaded FP32 copies) from 56190a5a8 on; an
     # older pinned image is refused before launch.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
@@ -441,7 +441,7 @@ def _deepseek_v4_expert_full_config():
 
 
 def test_deepseek_v4_expert_full_is_a_full_parameter_lora_hybrid():
-    # P0 1.7b.2: the recipe flags plus Adam and the Miles LoRA-hybrid transport.
+    # The recipe flags plus Adam and the Miles LoRA-hybrid transport.
     argv = list(mc.translate_run_config(_deepseek_v4_expert_full_config(), AlgorithmSpec()).argv)
 
     assert argv[argv.index("--model-name") + 1] == "deepseekv4"
@@ -463,7 +463,7 @@ def test_deepseek_v4_recipe_without_expert_full_has_no_hybrid_flags():
 
 
 def test_deepseek_v4_clone_only_lora_uses_packed_expert_adapters():
-    # P0 1.7b.2b: standard LoRA keeps one packed adapter per grouped-expert linear.
+    # Standard LoRA keeps one packed adapter per grouped-expert linear.
     cfg = sub(_deepseek_v4_expert_full_config(), "trainable", expert_full_count=0,
               lora_targets="attention-routed-experts")
     argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
@@ -493,7 +493,7 @@ def test_leaf_policy_matches_run_config_fields():
     leaves |= {"eval", "geometry.moe", "algorithm.lr_schedule"}  # the None variants
     # rl-algo-critic-family 2.4: critic run config (None here) and its leaves
     leaves |= {"algorithm.critic", "algorithm.critic.critic_load", "algorithm.critic.init_sha256"}
-    # L4.6: the sample buffer config (None here) and its leaves
+    # The sample buffer config (None here) and its leaves
     leaves |= {f"sample_buffer.{f.name}" for f in dataclasses.fields(rc.SampleBufferConfig)}
     assert leaves == set(mc.LEAF_POLICY)
 
@@ -770,7 +770,7 @@ def test_lr_schedule_flags_are_adapter_owned():
 # ---------------------------------------------------------------- append roles are decided by the --tito-model template
 
 def test_explicit_append_roles_are_refused():
-    """Since S26 E0.5 no signed Codex agent may state the append roles."""
+    """Since the Codex harness was removed no signed Codex agent may state the append roles."""
     from types import SimpleNamespace
 
     from yeto.rl.adapters.miles.config import LEAF_POLICY
@@ -781,9 +781,9 @@ def test_explicit_append_roles_are_refused():
     assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
 
 
-# --- S17 N16: --rl-lr-schedule ----------------------------------------------------
+# --- --rl-lr-schedule -----------------------------------------------------------
 def test_elastic_island_lr_schedule_is_constant():
-    """S17 M1 (N5 a73ab1b2, folded into the auto rule): an elastic island runs until the
+    """(Folded into the auto rule) an elastic island runs until the
     syncer's final outer version, so a linear horizon could reach 0 before it ends."""
     assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
                                   island_scheduling="elastic") == rc.LrSchedule("constant", 6)
@@ -866,7 +866,7 @@ def test_rl_lr_schedule_flag_reaches_the_island_and_the_miles_argv():
 @pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
 @pytest.mark.parametrize("family", ["sao", "vapo", "compactionrl"])
 def test_upstream_parse_args_accepts_critic_family_on_pinned_image(tmp_path, family):
-    """S19 #1 (critic 6.3 / supplement 2.5): the pinned image's Miles parses the
+    """The pinned image's Miles parses the
     critic-family fork flags with the full ports translation.  Runs only in the
     image (Miles + Megatron + SGLang import)."""
 
@@ -889,7 +889,7 @@ def test_upstream_parse_args_accepts_critic_family_on_pinned_image(tmp_path, fam
     # A legal run config for a critic-family spec: the estimator comes from the
     # spec, the LR decay horizon (50) exceeds the critic LR warm-up (10), and
     # init='copy_actor_backbone' + warmup_steps > 0 families load the warm-up
-    # stage product (design D5; sao has warmup_steps=0 and takes no critic_load).
+    # stage product (sao has warmup_steps=0 and takes no critic_load).
     cfg = sub(cfg, "algorithm", advantage_estimator=spec.advantage.estimator,
               lr_schedule=rc.LrSchedule("linear", 50),
               critic=None if family == "sao"
@@ -917,7 +917,7 @@ def test_dynamic_batching_refused_for_bshd_gated_delta_net_models():
 
 
 def test_gradient_accumulation_fusion_is_opt_in():
-    # S26 E0.1: the Miles recipes train with the fusion on; yeto keeps it off by default
+    # The Miles recipes train with the fusion on; yeto keeps it off by default
     off = " ".join(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
     assert "--no-gradient-accumulation-fusion" in off
     cfg = dataclasses.replace(make_config(), train_memory=rc.TrainMemoryConfig(gradient_accumulation_fusion=True))
@@ -958,7 +958,7 @@ def _memory_config(**memory):
 
 
 def test_grad_reduce_bf16_replaces_the_fp32_gradient_accumulation():
-    # G-DF C4: bf16 gradient buffers for Nemotron-3 Nano on 80 GB cards; FP32 masters stay
+    # bf16 gradient buffers for Nemotron-3 Nano on 80 GB cards; FP32 masters stay
     base = list(mc.translate_run_config(_memory_config(), AlgorithmSpec(), full_parameter_sync=False).argv)
     assert "--accumulate-allreduce-grads-in-fp32" in base and "--grad-reduce-in-bf16" not in base
     argv = list(mc.translate_run_config(_memory_config(grad_reduce_bf16=True), AlgorithmSpec(),
@@ -967,7 +967,7 @@ def test_grad_reduce_bf16_replaces_the_fp32_gradient_accumulation():
 
 
 def test_precision_aware_optimizer_only_without_the_full_parameter_sync():
-    # G-DF C4: bf16 Adam moments; the sync's FP32-master reader would find only remainders
+    # bf16 Adam moments; the sync's FP32-master reader would find only remainders
     argv = list(mc.translate_run_config(_memory_config(precision_aware_optimizer=True), AlgorithmSpec(),
                                    full_parameter_sync=False).argv)
     i = argv.index("--use-precision-aware-optimizer")
@@ -997,7 +997,7 @@ def _session_config():
 
 
 def test_session_server_gets_a_finite_upstream_timeout():
-    # S27 G-EF: Miles' default --miles-router-timeout is None (a call to a dead engine hangs)
+    # Miles' default --miles-router-timeout is None (a call to a dead engine hangs)
     argv = list(mc.translate_run_config(_session_config(), AlgorithmSpec()).argv)
     assert argv.count("--miles-router-timeout") == 1
     assert flag_value(argv, "--miles-router-timeout") == str(mc.SESSION_UPSTREAM_TIMEOUT_S) == "600"

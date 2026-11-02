@@ -1,7 +1,7 @@
 """MaxRL / MAPO / GDPO advantage transforms (rl-algo-seq-and-adv 4.1, 4.2, 4.4, 5.2, 5.3, 5.4).
 
 CPU only. References are independent float64 implementations of the paper
-formulas (design D5/D6), compared element-wise with ``pytest.approx``
+formulas (design notes), compared element-wise with ``pytest.approx``
 (rel 1e-5, abs 1e-6: the transforms compute in float32 exactly like Miles'
 GRPO normalization).
 """

@@ -1,4 +1,4 @@
-"""CompactionRL rollout side (change ``rl-algo-critic-family`` task 9.2, design D8).
+"""CompactionRL rollout side.
 
 Pure-Python episode driver for compacted agent rollouts, after CompactionRL
 (arXiv 2607.05378v1, sec. 4.1 eq. 6-9, sec. 5.1):
@@ -17,12 +17,11 @@ Pure-Python episode driver for compacted agent rollouts, after CompactionRL
 
 The paper does not give the q_sum section names, the ``<analysis>`` wording or
 the u_resume text: :data:`SUMMARY_SECTIONS`, :data:`SUMMARY_PROMPT` and
-:data:`RESUME_TEMPLATE` are yeto drafts (design D8 asks for a 9-section
-template; the paper's sec. 4.1 lists what must be kept: original goal, completed
+:data:`RESUME_TEMPLATE` are yeto drafts (a 9-section template; the paper's sec. 4.1 lists what must be kept: original goal, completed
 actions, important observations, unresolved errors, current state, plausible
 next steps) and need user confirmation.
 
-Integration (task 9.1 gap): the driver takes a ``policy(messages) -> str`` and
+Integration: the driver takes a ``policy(messages) -> str`` and
 an ``env`` with ``step(action) -> (observation, done)`` / ``reward()``; wiring it
 into the Codex / Terminal-Bench harness or Miles session server is not done.
 No torch / miles imports.
@@ -202,9 +201,9 @@ class CompactionEpisode:
 
         Input of the control mode ``--gae-variant cross_segment_whole_rollout``
         (formerly the fork's ``cross_segment``, one sample per rollout; ablation
-        9.5 only, earlier segments get no terminal reward); training uses
-        :meth:`samples` with ``--gae-variant cross_segment_per_sample``
-        (progress.md "S13 cross_segment 每段 sample").
+        only, earlier segments get no terminal reward); training uses
+        :meth:`samples` with ``--gae-variant cross_segment_per_sample`` (one
+        sample per segment).
         """
 
         return [s for s, seg in enumerate(self.segments) for _ in range(seg.trainable_tokens)]
@@ -269,7 +268,7 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
 
 def validate_compaction_segments(segments: Sequence[Any]) -> None:
     """Check the compaction records of one segmented Miles trajectory
-    (moved from the legacy engine's rollout check, rl-code-quality-cleanup 1.5).
+    (moved from the legacy engine's rollout check).
 
     Every segment carries ``metadata`` with schema version 1, one shared
     non-empty ``compaction_trajectory_id`` and one positive integer
@@ -347,11 +346,11 @@ def refresh_segment_counts(samples: Any) -> int:
     """Recompute ``segment_tokens``/``tokens_after``/``gae_length`` from the final loss masks.
 
     Segment samples (``metadata.segment_index``) count optimised tokens when
-    they are assembled; later hooks still set loss_mask 1 -> 0 (S19 #8
-    placeholder-logprob stop tokens, S17 WP6 reasoning tokens) before the
+    they are assembled; later hooks still set loss_mask 1 -> 0 (placeholder-logprob
+    stop tokens, reasoning tokens) before the
     backend converts the samples. N_{>s} and l are optimised-token counts, so
-    they are refreshed after those hooks (s19-compaction-g1-20261010g:
-    tokens_after was 1-17 tokens high). Returns the number of segment samples
+    they are refreshed after those hooks (otherwise tokens_after
+    comes out 1-17 tokens high). Returns the number of segment samples
     whose counts changed.
     """
     rollouts: dict[Any, list[Any]] = {}

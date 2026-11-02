@@ -1,4 +1,4 @@
-"""Turn each BF16 policy release into a re-quantized release for quantized samplers (S25 N7.3 + N8).
+"""Turn each BF16 policy release into a re-quantized release for quantized samplers.
 
 The trainer releases BF16 weights into ``policy-releases/`` (``ReleasingPublisher``).
 :class:`RequantReleaser` follows that directory and, for each new BF16 release,
@@ -23,7 +23,7 @@ writes nothing.
 Where it runs: as a side process on the first trainer node
 (``yeto.launch.ssh_trainer_island``), which reads the BF16 release from the
 shared store. Per-rank quantization of the trainer's own shards
-(:mod:`.shards`, N8.2) can replace the whole-checkpoint read; it is not wired
+(:mod:`.shards`) can replace the whole-checkpoint read; it is not wired
 into a trainer's release path yet.
 
 Status: CPU tests with a fake re-quantizer and with the real converter on a tiny
@@ -145,7 +145,7 @@ def requantizer(template_dir: Path, smoothing: Any, frozen: tuple[Path, str] | N
 
 def scoped_releaser(store: Any, base_dir: Path, template_dir: Path, scheme: str, *, keep: int = 2,
                     log: Callable[[str], None] = lambda m: print(m, flush=True)) -> RequantReleaser:
-    """A releaser for a scoped scheme (S26 E6 tier 2: FP8 on the in-scope linears only).
+    """A releaser for a scoped scheme (FP8 on the in-scope linears only).
 
     The template is derived from the BF16 base checkpoint ``base_dir``
     (:func:`~.requant.save_scoped_template`) into ``template_dir``, checked against
@@ -223,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     from .requant import CheckpointLayout
 
     # The scheme follows the template format (W4A8 int4 or MXFP4); it names the
-    # target directory and is written into each record, so readers can check it (N8.3).
+    # target directory and is written into each record, so readers can check it.
     layout = CheckpointLayout.load(Path(a.template))
     scheme = layout.scheme.name
     store = store_for(a.store)

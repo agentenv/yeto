@@ -1,4 +1,4 @@
-"""Spot rollout islands on any cloud (S27 G-EA).
+"""Spot rollout islands on any cloud.
 
 A spot (preemptible) island is only a rollout accelerator: it never trains.
 It needs two links to the head, both on the syncer's port:

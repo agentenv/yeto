@@ -1,5 +1,5 @@
-"""Synthetic two-segment rollouts for the GPU G1 of ``cross_segment_per_sample``
-(change ``rl-algo-critic-family`` task 6.4; progress "S13 fork G1 结果").
+"""Synthetic two-segment rollouts for the GPU check of
+``cross_segment_per_sample``.
 
 TEST ONLY. ``cross_segment_per_sample`` normally needs compacted rollouts, which
 only the Codex OpenEnv harness produces. Task 6.4 asks for the trainer-side

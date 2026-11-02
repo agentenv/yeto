@@ -1,4 +1,4 @@
-"""G3: FN attestation fingerprint (tests/multinode_gpu/fp_fn.py) is reproducible
+"""FN attestation fingerprint (tests/multinode_gpu/fp_fn.py) is reproducible
 for fnrun.sh fn32s / fn32b and pins the exact run parameters (CPU only)."""
 import sys
 from pathlib import Path

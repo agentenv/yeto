@@ -1,4 +1,4 @@
-"""S17 N14: in strict mode (--max-base-lag 0) the real Rust syncer refuses a HELLO
+"""In strict mode (--max-base-lag 0) the real Rust syncer refuses a HELLO
 whose session contract differs from the running session on that connection only.
 
 Two verl-identity islands sync; mid-run a Miles-identity island (same layout,
@@ -34,7 +34,7 @@ from test_rl_integration import _layout, _port, _push, _wait_item, syncer_binary
 ROOT = Path(__file__).resolve().parents[1]
 VERL_ID = "3b9e60e5a2c554a2826f6cef83fdeecabfc1723d6663c4d5fd23b01e08a555e2"
 MILES_ID = "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
-# S17 N17: same backend, different LR schedule (e.g. --rl-lr-schedule constant vs linear)
+# Same backend, different LR schedule (e.g. --rl-lr-schedule constant vs linear)
 LR_LINEAR = lr_schedule_sha256("linear", 3, 1e-5)
 LR_CONSTANT = lr_schedule_sha256("constant", 3, 1e-5)
 VERL_LINEAR = island_contract_sha256(VERL_ID, LR_LINEAR)
@@ -134,7 +134,7 @@ def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary,
             assert "expected session_contract_hash=" + _contract(good).hex() in miles.stderr
             assert "got session_contract_hash=" + _contract(intruder).hex() in miles.stderr
         else:
-            assert f"兼容组不同：nvidia-h100 对 {group}，容差未标定" in miles.stderr
+            assert "compat_group differs" in miles.stderr and "tolerance not calibrated" in miles.stderr
         assert process.poll() is None, "syncer must keep running"
 
         # The two verl islands finish the remaining rounds unaffected.

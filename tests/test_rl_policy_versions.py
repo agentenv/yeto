@@ -1,4 +1,4 @@
-"""P0-S: plain engine weight versions, the yeto-side label map and the
+"""Plain engine weight versions, the yeto-side label map and the
 rollout/training overlap wiring (Miles fully_async)."""
 
 from __future__ import annotations

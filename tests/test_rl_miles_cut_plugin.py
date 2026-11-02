@@ -1,4 +1,4 @@
-"""rl-infra-spec 4.2/4.3: rank-side cut shard save/restore, CPU analog of X3 (not GPU evidence)."""
+"""Rank-side cut shard save/restore, CPU analog of X3 (not GPU evidence)."""
 
 from __future__ import annotations
 
@@ -148,7 +148,7 @@ def test_unsupported_configurations(args, match):
 
 
 def test_the_fp32_cpu_offload_path_of_the_precision_aware_optimizer_is_carried():
-    # N7.1d: Megatron's --optimizer-cpu-offload requires --use-precision-aware-optimizer.
+    # Megatron's --optimizer-cpu-offload requires --use-precision-aware-optimizer.
     offload = dict(use_precision_aware_optimizer=True, optimizer_cpu_offload=True, use_distributed_optimizer=True)
     assert not config_problems(SimpleNamespace(**offload))
     assert not config_problems(SimpleNamespace(**offload, main_params_dtype="torch.float32"))
@@ -360,14 +360,14 @@ def test_rewound_trained_trainer_restores_the_cut_like_a_fresh_one(tmp_path):
 
 
 class _LayoutBackend(type(make_rank(0, full=True)._yeto_cut_backend)):
-    """A backend that records a ``param_layout`` like MilesCutBackend (R-5)."""
+    """A backend that records a ``param_layout`` like MilesCutBackend."""
 
     def param_layout(self, actor, named):
         return {"schema": "test", "params": {n: {"shape": list(p.shape)} for n, p in named}}
 
 
 def test_full_parameter_restore_with_param_layout_matches_the_saved_digest(tmp_path):
-    # GPU s27-glf-l9-a-pb: the save added param_layout to the digested state, the
+    # Found on GPU: the save added param_layout to the digested state, the
     # restore re-snapshot did not, so every full-parameter resume was refused.
     run = make_rank(seed=0, full=True)
     run._yeto_cut_backend = _LayoutBackend(None)

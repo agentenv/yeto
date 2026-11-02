@@ -67,7 +67,7 @@ for _param, _flag in PARAM_FLAGS.items():
 
 
 # --------------------------------------------------------------------------
-# critic (rl-algo-critic-family, design D2)
+# critic (rl-algo-critic-family)
 # --------------------------------------------------------------------------
 
 
@@ -77,7 +77,7 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
     Empty without a critic (default GRPO argv unchanged). gamma / lambd /
     value_clip are always explicit (never Miles' defaults). The main stage runs
     in rebuild mode, which requires ``--num-critic-only-steps 0`` (Miles
-    arguments.py:3210-3212); the warm-up is its own stage (design D5) whose
+    arguments.py:3210-3212); the warm-up is its own stage whose
     product the run configuration passes as ``--critic-load``.
     """
 
@@ -99,7 +99,7 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
 
 
 def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
-    """Fork GAE extension flags (yeto-gae-variant ce96fc060, design D6).
+    """Fork GAE extension flags (yeto-gae-variant ce96fc060).
 
     Empty for vanilla GAE with a fixed lambda, so plain PPO argv is unchanged.
     """
@@ -109,7 +109,7 @@ def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
     if a.gae_variant == "decoupled":
         argv += ["--gae-variant", "decoupled", "--gae-critic-lambd", _num(a.critic_lambd)]
     elif a.gae_variant in ("cross_segment_per_sample", "cross_segment_whole_rollout"):
-        # CompactionRL (design D8): per_sample = the paper's form (one sample per
+        # CompactionRL: per_sample = the paper's form (one sample per
         # compaction segment, local GAE x (gamma*lambda)^{tokens_after});
         # whole_rollout = explicit control mode for the 9.5 ablation. Same fork names.
         argv += ["--gae-variant", a.gae_variant]

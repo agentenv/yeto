@@ -1,4 +1,4 @@
-"""Let two sky clusters on Nebius reach each other (S27 G-DI two-cluster island).
+"""Let two sky clusters on Nebius reach each other (two-cluster island).
 
 sky gives each Nebius cluster its own security group ``sky-sg-<cluster_name_on_cloud>``.
 Its only inbound rules are "any protocol from this same group" and TCP 22 / 10022 from

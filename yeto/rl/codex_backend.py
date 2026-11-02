@@ -39,7 +39,7 @@ _QWEN38_CHAT_TEMPLATE_KWARGS: dict[str, Any] = {
     "reasoning_effort": "xhigh",
 }
 
-# LoRA surface of the FN per-expert LoRA layout (``s1-runs/s14-fnsmoke-modal.sh``:
+# LoRA surface of the FN per-expert LoRA layout (the FN smoke recipe:
 # ``--lora-targets all-linear --rl-lora-expert-rank 8``).  Profiles that do not
 # declare ``lora_targets`` / ``lora_expert_rank`` keep the legacy ``attention`` / 0.
 _FN_LORA_TARGETS = "all-linear"
@@ -49,7 +49,7 @@ DEFAULT_LORA_EXPERT_RANK = 0
 
 
 def _flash_next_profile(variant: str, chat_template: str) -> dict[str, Any]:
-    """FN codex profile (design D1): own identity, family-level ``qwen4exp`` TITO."""
+    """FN codex profile: own identity, family-level ``qwen4exp`` TITO."""
 
     repo = {"full": HF_REPO_FULL, "4layer": HF_REPO_4LAYER}[variant]
     revision = {"full": HF_REVISION_FULL, "4layer": HF_REVISION_4LAYER}[variant]
@@ -90,12 +90,12 @@ _QWEN38_NEXT_KWARGS: dict[str, Any] = {
 
 
 def _fn_profile(variant: str, model: str, revision: str) -> dict[str, Any]:
-    """rl-fn-codex-rollout D1: FN identity on the fork's ``qwen4exp`` TITO family.
+    """FN identity on the fork's ``qwen4exp`` TITO family.
 
     Both FN variants keep their own identity (label / HF repo / revision) while
     sharing the family-level ``Qwen38SmallTITOTokenizer`` fixed template, the
     same way ``qwen35_08b`` reuses ``qwen35``.  The launcher passes no
-    ``--rl-model-recipe`` for FN (``s1-runs/s14-fnsmoke-modal.sh``), so the
+    ``--rl-model-recipe`` for FN (the FN smoke recipe), so the
     recipe stays ``generic``; LoRA layout is ``all-linear`` with per-expert
     rank 8 (``--lora-targets all-linear --rl-lora-expert-rank 8``).
     """
@@ -121,7 +121,7 @@ def _fn_profile(variant: str, model: str, revision: str) -> dict[str, Any]:
     }
 
 
-# S17 WP6: reasoning block markers used by the optional "reasoning tokens do
+# Reasoning block markers used by the optional "reasoning tokens do
 # not count toward the loss" switch (``yeto/rl/harness/reasoning_loss_mask.py``).
 # Token strings, resolved to ids by the rollout tokenizer (fail closed if they
 # are not single tokens).  Profiles without markers cannot opt out.
@@ -160,7 +160,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_identifier": QWEN38_MODEL,
         "model_revision": QWEN38_REVISION,
         "identity_label": "Qwen3.8",
-        # S24 T-TB2 baseline: 49% of 27B episodes ended on one line of prose
+        # On a TB2 baseline, 49% of 27B episodes ended on one line of prose
         # before the tool call; keep it instead of failing the episode.
         "allow_prose_with_tool_call": True,
         "keeps_history_reasoning": True,
@@ -180,7 +180,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_revision": QWEN35_REVISION,
         "identity_label": "Qwen3.5",
         # ``qwen3.5_fixed.jinja`` + ``preserve_thinking: True`` keeps every
-        # historical <think> block (rl-fn-codex-rollout D2 / upstream 5.1).
+        # historical <think> block (upstream behavior).
         "keeps_history_reasoning": True,
         "reasoning_markers": _QWEN_REASONING_MARKERS,
     },

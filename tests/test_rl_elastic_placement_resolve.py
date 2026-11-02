@@ -1,4 +1,4 @@
-"""S8 M3 regression: elastic config placements (nested per-engine, n<k>:<g> slots)
+"""Regression: elastic config placements (nested per-engine, n<k>:<g> slots)
 resolve to the startup description's GPU ids instead of crashing after the commit."""
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def test_unresolvable_or_overlapping_entries_are_refused_cleanly():
 
 
 def test_single_node_island_resolves_n0_slots_without_topology():
-    """S11 H100 e1 regression: single node, 8 physical GPUs with 4 allocated
+    """H100 regression: single node, 8 physical GPUs with 4 allocated
     (--rl-island-use-gpus-per-node 4, no --rl-island-gpus-per-node -> topology None).
     T2R1S1 -> T2R2S0 from resources-1x4-h200.json must pass the post-commit
     bookkeeping instead of "rollout GPUs ['n0:2', 'n0:3'] are outside the pool"."""

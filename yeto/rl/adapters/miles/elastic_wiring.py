@@ -1,4 +1,4 @@
-"""E1 wiring for ``compose_island`` (rl-infra-spec 3.2-3.7).
+"""Elastic wiring for ``compose_island``.
 
 :func:`build_elastic` turns a resources manifest (1.6 / PR #66 ``resources``
 block: ``configs`` and ``edges``) plus a capability attestation into the
@@ -59,7 +59,7 @@ def build_elastic(
     call on the OLD set (drain, REBUILD_OLD restart) is still not bounded.
     ``None`` disables the action (journal + flag only).
 
-    ``trainer_edges`` (E3, 4.7; default None = trainer edges refused) is the
+    ``trainer_edges`` (4.7; default None = trainer edges refused) is the
     ``IslandController(trainer_edges=...)`` callable returning
     ``{"spec", "args", "global_batch_size", "micro_batch_size", "ops"}``,
     ``ops`` being a :class:`.trainer_resize.MilesTrainerOps`.
@@ -89,7 +89,7 @@ def build_elastic(
         trainer_edges=trainer_edges,
         # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
         **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
-        # rl-multinode-island Q4 (C5): --rl-elastic-checkpoint-store (None = node0-local)
+        # Q4 (C5): --rl-elastic-checkpoint-store (None = node0-local)
         **({} if not checkpoint_store else {"checkpoint_store": checkpoint_store}),
         # "elastic" = island pool options given, "legacy" = fixed roster (journal field)
         island_scheduling=island_scheduling,

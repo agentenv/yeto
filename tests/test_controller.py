@@ -260,7 +260,7 @@ def test_syncer_never_abandoned(capsys):
     assert "syncer unrecovered" in err and "still retrying" in err
 
 
-# -- fixed-roster RL recovery windows (P0 batch review) ------------------------
+# -- fixed-roster RL recovery windows -------------------------------------------
 
 from yeto.launcher import (  # noqa: E402
     FIXED_ROSTER_MAX_RELAUNCHES,
@@ -358,12 +358,57 @@ def test_modal_retries_zero_or_no_island_relaunch_disables_the_launcher_relaunch
     assert ops.relaunch_calls == [] and "l0" in ops.down_calls
 
 
-def test_launch_uses_the_effective_budget():
-    import inspect
+def _run_launcher_with(monkeypatch, tmp_path, extra=(), on_run=None):
+    """Drive launcher.run() end to end on fakes; capture the FleetController kwargs.
 
-    from yeto import launcher
+    `on_run` replaces the controller's run() (default: every island succeeded)."""
+    import yeto.launcher as launcher
+    from test_rl_algorithm_provenance import _launcher_args
+    from test_rl_launcher_island_failure import Clock, _setup
 
-    assert "recover_timeout=effective_recover_timeout(args)" in inspect.getsource(launcher)
+    record = []
+    _setup(monkeypatch, tmp_path, failing=set(), clock=Clock(), record=record)
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: [])
+    monkeypatch.setattr("yeto.launch.modal_islands.MODAL_STOP_VERIFY_DELAY_S", 0.0)
+    captured = {}
+
+    class CapturingController(launcher.FleetController):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            super().__init__(**kwargs)
+
+        def run(self):
+            if on_run is not None:
+                return on_run(self)
+            return {name: "JobStatus.SUCCEEDED" for name in self.learners}
+
+    monkeypatch.setattr(launcher, "FleetController", CapturingController)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64, *extra),
+                          gpu="modal:1xa100,modal:1xa100")
+    args.keep, args.controller_poll = False, 30.0
+    code = launcher.run(args)
+    return code, captured, args
+
+
+@pytest.fixture
+def _fake_sky_module(monkeypatch):
+    import sys
+    import types
+
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+
+
+def test_launch_uses_the_effective_budget(monkeypatch, tmp_path, _fake_sky_module):
+    from yeto.launch.modal_islands import effective_recover_timeout
+
+    # --modal-retries 0: the effective budget (0) differs from args.recover_timeout
+    _code, captured, args = _run_launcher_with(monkeypatch, tmp_path, ("--modal-retries", "0"))
+    assert args.recover_timeout != 0
+    assert captured["recover_timeout"] == effective_recover_timeout(args) == 0
 
 
 def test_stop_flag_prevents_the_relaunch(tmp_path):
@@ -425,12 +470,15 @@ def test_stop_run_cli_only_writes_the_flag(tmp_path, monkeypatch, capsys):
     assert runs.stop_flag_path("myrun") == tmp_path / "myrun" / "STOP"
     assert (tmp_path / "myrun" / "STOP").exists()
     assert not (tmp_path / "myrun" / "meta.json").exists()  # nothing else touched
-    # the launcher wires the same path into the fleet controller
-    import inspect
 
-    from yeto import launcher
 
-    assert "stop_flag=runs.stop_flag_path(args.cluster_prefix)" in inspect.getsource(launcher)
+def test_launcher_wires_the_stop_flag_of_its_run(monkeypatch, tmp_path, _fake_sky_module):
+    from yeto import runs
+
+    _code, captured, args = _run_launcher_with(monkeypatch, tmp_path)
+    # the same path `yeto stop-run <run>` writes
+    assert captured["stop_flag"] == runs.stop_flag_path(args.cluster_prefix)
+    assert captured["stop_flag"] == tmp_path / "runs" / args.cluster_prefix / "STOP"
 
 
 def test_keep_abandoned_leaves_failed_cluster_up(capsys):
@@ -473,12 +521,11 @@ def test_stop_flag_ends_a_run_whose_islands_still_run(tmp_path):
     assert ctl.learners["l0"]["state"] == "running"  # the launcher's teardown downs it
 
 
-def test_launcher_returns_the_stopped_exit_on_the_stop_flag():
-    import inspect
+def test_launcher_returns_the_stopped_exit_on_the_stop_flag(monkeypatch, tmp_path, _fake_sky_module):
+    from yeto.launch.fleet import RUN_STOPPED_EXIT, RunStopRequested
 
-    from yeto import launcher
-    from yeto.launch.fleet import RUN_STOPPED_EXIT
+    def stop(_controller):
+        raise RunStopRequested("STOP flag found")
 
-    source = inspect.getsource(launcher)
-    assert RUN_STOPPED_EXIT == 9
-    assert "except RunStopRequested as error:" in source and "return RUN_STOPPED_EXIT" in source
+    code, _captured, _args = _run_launcher_with(monkeypatch, tmp_path, on_run=stop)
+    assert code == RUN_STOPPED_EXIT == 9

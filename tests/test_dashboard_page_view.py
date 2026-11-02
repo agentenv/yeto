@@ -1,4 +1,4 @@
-"""fleet-dashboard 9.3-9.5: page_view round records, run_kind, per-node series."""
+"""Page_view round records, run_kind, per-node series."""
 
 from yeto.dashboard.reducer import Reducer
 

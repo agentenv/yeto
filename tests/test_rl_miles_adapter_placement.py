@@ -105,7 +105,7 @@ def test_request_validation():
         PlacementRequest("fixed-partition", trainer_gpus=2, rollout_gpus=3, gpus_per_engine=2)
 
 
-# -- rl-infra-spec 2.1 / 2.1a: standby and explicit bundle map (fork-M1) -------
+# -- standby and explicit bundle map (fork-M1) -------
 
 
 def _part_args(**kw):
@@ -159,7 +159,7 @@ def test_standby_placement_describes_m1_roles_and_detects_rewrites():
         MilesPlacement(req, groups)
 
 
-# -- trainer-only fixed partition (S25 T-INTEG2: full-parameter trainer reading the store) --
+# -- trainer-only fixed partition (full-parameter trainer reading the store) --
 TRAINER_ONLY = PlacementRequest("fixed-partition", trainer_gpus=24, rollout_gpus=0, gpus_per_engine=1)
 
 

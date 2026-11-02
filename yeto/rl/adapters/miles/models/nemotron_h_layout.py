@@ -20,7 +20,7 @@ latent projections are duplicated on every TP rank
 (``moe_layer.py``: ``parallel_mode="duplicated"``).
 
 Checked against a measured island layout (tests): Nemotron-3 Nano 30B-A3B at
-TP2/EP2 (S27 ``s27-gr-probe-b``) gives 3264 specs and 15,792,996,640 scalars
+TP2/EP2 gives 3264 specs and 15,792,996,640 scalars
 per rank, the two Miles per-rank manifest hashes, 60 fragments and the layout
 hash ``0ec93ba8...``.
 

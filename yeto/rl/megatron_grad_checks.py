@@ -1,4 +1,4 @@
-"""Megatron's per-bucket gradient check, on by default on a yeto island (S27 G-FL).
+"""Megatron's per-bucket gradient check, on by default on a yeto island.
 
 Megatron-Core's ``DistributedDataParallelConfig`` defaults
 ``check_for_nan_in_grad`` and ``check_for_large_grads`` to ``False``
@@ -11,7 +11,7 @@ NaN and ``multi_tensor_scale`` multiplies **every** parameter's gradient by it,
 so the optimizer writes NaN into the whole model.  bf16 training has no
 gradient scaler, so Megatron's other non-finite check (inside ``if
 self.grad_scaler:``) does not run either.  The failure is silent weight
-corruption, not a skipped step (S27 G-FJ, G-FK).
+corruption, not a skipped step.
 
 With ``check_for_nan_in_grad=True`` the same situation is loud:
 ``check_grads`` takes the L2 norm of each bucket's gradient buffer before the

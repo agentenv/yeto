@@ -1,4 +1,4 @@
-"""Synced trainer islands feed sampler islands (S25 C3).
+"""Synced trainer islands feed sampler islands.
 
 N trainer islands (``--rl-sample-role trainer`` without
 ``--rl-single-island-no-sync``) train against one syncer (strict or elastic
@@ -67,7 +67,7 @@ The merged broadcasts reach the samplers inside those versions (a local version
 contains the fragments the syncer overwrote). The release guard still keeps
 the versions increasing (a restarted trainer continues the syncer's round).
 
-Relaunch (S27 G-EQ5, gap 22): a buffer trainer that counts its versions locally
+Relaunch: a buffer trainer that counts its versions locally
 continues its version account above the releases its store already holds
 (:class:`ResumedReleases`), so it trains the groups a sampler wrote with those
 releases instead of discarding them, and its own releases keep every version
@@ -201,7 +201,7 @@ class MergedReleaseGuard:
 @dataclass(frozen=True)
 class ResumedReleases:
     """The version account a relaunched buffer trainer continues from its store
-    (S27 G-EQ5, gap 22; engine-neutral, the verl wiring is in
+    (engine-neutral, the verl wiring is in
     ``adapters.verl.buffer_ports``).
 
     A buffer trainer counts its policy versions locally from 0 in every process
@@ -211,11 +211,11 @@ class ResumedReleases:
     store already held v1..vK, and everything keyed by the version broke:
 
     * every group a sampler wrote with a release above v0 was discarded -- as a
-      version from the future or as a version nothing published (npu1: 8 groups
+      version from the future or as a version nothing published (on an Ascend run: 8 groups
       of behavior v1 dropped with ``param_versions [None, None]``, so the island
-      waited for samples that never came, VERL-ASCEND-RL.md section 36.3);
+      waited for samples that never came);
     * its next release re-used a version number the store already held with
-      other weights (npu1: r7-v1 and r8-v2 written beside r6-v3, and
+      other weights (r7-v1 and r8-v2 written beside r6-v3, and
       ``LATEST.json`` moved *back* from v3 to v2).
 
     The account continues above every release the store holds:
@@ -301,7 +301,7 @@ class LaneCursorLog:
     def __init__(self, root: str | Path, lane: "BufferLane | str",
                  commit: Callable[[], None] = lambda: None) -> None:
         """``lane``: the reader's lane, or a plain name for a reader without one
-        (S27 G-EQ3: a single buffer trainer keeps a cursor too)."""
+        (a single buffer trainer keeps a cursor too)."""
         name = lane if isinstance(lane, str) else lane.name()
         self.path = Path(root) / LANES_DIR / f"{name}.jsonl"
         self.commit = commit
@@ -374,7 +374,7 @@ def lane_cursor_log(buffer: Any, learner_id: int | None = None
     one, else in the store directory (committed after each line).
 
     A lane reader gets its lane's log. A reader **without** a lane gets
-    ``solo<learner_id>`` when ``learner_id`` is given (S27 G-EQ3: a single buffer
+    ``solo<learner_id>`` when ``learner_id`` is given (a single buffer
     trainer that restarts then continues after the groups it already trained,
     instead of reading the buffer from the first one again); None when it is not,
     which is the behaviour every caller had before.

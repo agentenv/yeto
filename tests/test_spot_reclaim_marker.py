@@ -1,4 +1,4 @@
-"""rl-spot-cost-saving 4.1 follow-up (S19 s19-agentic5-b-20261010b): reclaim notice as a
+"""rl-spot-cost-saving 4.1 follow-up: reclaim notice as a
 marker file watched by a learner thread; log-independent Modal container guard;
 near-zero cross-version ratio diagnostics."""
 
@@ -148,7 +148,7 @@ def test_container_set_poller_waits_for_all_islands_and_skips_list_errors():
 
 
 def test_container_set_poller_late_first_container_is_not_a_reschedule():
-    # S27 s27-gr-i: island 0 runs; island 1's input gets a task that never prints its
+    # Seen on a run: island 0 runs; island 1's input gets a task that never prints its
     # container line, the task leaves, and a later task is island 1's first container.
     g, changes, claims = _poller([{"ta-0"}, {"ta-0", "ta-q"}, {"ta-0", "ta-q"}, {"ta-0"},
                                   {"ta-0", "ta-late"}, {"ta-0", "ta-late"}], 2)
@@ -177,7 +177,7 @@ def test_container_set_poller_two_unclaimed_containers_for_one_free_slot_trip_af
 
 
 def test_container_set_poller_extra_containers_beside_claimed_ones_do_not_trip():
-    # S27 s27-ch-d0a: both containers of island 0 claimed and training; two extra
+    # Seen on a run: both containers of island 0 claimed and training; two extra
     # containers of the function appear (no island line) and later leave
     clock = _Clock()
     both = {"ta-r0", "ta-r1"}
@@ -195,10 +195,10 @@ def test_container_set_poller_extra_containers_beside_claimed_ones_do_not_trip()
 
 
 def test_container_set_poller_multi_island_reschedule_after_all_claimed():
-    # the S19 shape with two islands: both islands printed their lines, island 0's
-    # container leaves and a third container appears. (S27 s27-gr-h was first read as
+    # the original reclaim shape with two islands: both islands printed their lines, island 0's
+    # container leaves and a third container appears. (One run was first read as
     # this case; its Modal log shows island 0 alive until the app stop and the third
-    # container idle in island 1's function, EXTRA-CONTAINER.md.)
+    # container idle in island 1's function.)
     lists = [{"ta-1"}, {"ta-0", "ta-1"}, {"ta-0", "ta-1"}, {"ta-1", "ta-new"}]
     g, changes, claims = _poller(lists, 2)
     g.poll_once()
@@ -240,7 +240,7 @@ def test_container_set_poller_multi_node_islands_count_every_rank():
 
 
 def test_container_set_poller_replacement_of_a_claimed_slot_trips_even_if_old_gone():
-    # the S19 case: the old container left, the new one never printed its line
+    # the original reclaim case: the old container left, the new one never printed its line
     g, changes, claims = _poller([{"ta-0", "ta-1"}, {"ta-1"}, {"ta-1", "ta-0b"}], 2,
                                  {"ta-0": ("0", "0"), "ta-1": ("1", "0")})
     g.poll_once()
@@ -250,7 +250,7 @@ def test_container_set_poller_replacement_of_a_claimed_slot_trips_even_if_old_go
     assert g.tripped and "ta-0b" in changes[0]
 
 
-# S27 s27-ek-b (2026-10-25): both islands finalized; at 14:43:25Z an idle container of
+# Seen on a run: both islands finalized; then an idle container of
 # island 1's function started (no input); island 1's container left at its normal end;
 # the guard failed the completed run with exit 7.
 EK_I0, EK_I1, EK_X = ("ta-01M5SQHXHTE3G91GN7YZSGMPER", "ta-01M5SQHXNQ4FPENB16T90SWYTR",
@@ -419,7 +419,7 @@ def test_no_near_zero_keeps_the_key_set():
 
 
 def test_reclaim_uses_the_export_cached_at_train_start(tmp_path):
-    """S19 s19-agentic5-r-20261010c: the rollout actor was gone within 1 s of the
+    """On a spot run the rollout actor was gone within 1 s of the
     signal; the reclaim save must not need it while the in-flight set is frozen."""
     calls = []
 

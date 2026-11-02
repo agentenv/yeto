@@ -18,19 +18,19 @@ from collections.abc import Sequence
 
 # ``--rl-engine`` keeps accepting its one value so existing commands parse.
 RL_ENGINES = ("ports",)
-# P0-D8: one full-parameter sync; the preset only picks its profile (the
+# one full-parameter sync; the preset only picks its profile (the
 # strict whole-model sweep, or SAO's actor + critic streaming).
 # ``full-parameter`` names the transport (every parameter of the synced state
 # is swept), not which parameters train: DeepSeek V4 expert-full rides it too
-# (P0-1.7b.2-Q2).  ``dense-full`` is its old name, kept as an alias.
+# too.  ``dense-full`` is its old name, kept as an alias.
 FULL_PARAMETER_SYNC_PRESET = "full-parameter"
 SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
 FULL_PARAMETER_SYNC_PRESETS = frozenset({FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
 SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET)
 SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
-# S27 P1: the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
+# the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
 RL_MATRIX_MERGES = ("avg", "rda")
-# S27 P2: how the full-parameter preset schedules its fragment rounds. "sweep"
+# how the full-parameter preset schedules its fragment rounds. "sweep"
 # is the strict policy sweep (every island per round, plain average, the
 # control); "async" runs asynchronous sharded fragment rounds.
 FULL_PARAMETER_ROUNDS = ("sweep", "async")
@@ -47,7 +47,7 @@ RL_SYNC_MODES = ("async", "strict")
 ASYNC_GRACE_CAP_MS = 300_000
 # The async full-parameter mode's terminal grace: the last round of each
 # fragment waits this long at most for every island, since no later round of
-# that fragment can carry a late delta into the final parameters (S27 G-CG).
+# that fragment can carry a late delta into the final parameters.
 ASYNC_TERMINAL_GRACE_MS = 120_000
 # The async mode's outer step needs enough local progress per merge: with
 # fewer than this many local RL rounds per sync (H), the default outer step is
@@ -148,7 +148,7 @@ def ports_rejections(
     if sync_preset not in SYNC_PRESETS:
         # Input check: no other sync preset exists.
         reasons.append(f"sync preset {sync_preset!r}")
-    # P0 1.7b.2: expert-full is a LoRA hybrid; only the full-parameter sync
+    # expert-full is a LoRA hybrid; only the full-parameter sync
     # carries its clone-expert weights.
     if int(expert_full_count or 0) > 0 and sync_preset != FULL_PARAMETER_SYNC_PRESET:
         reasons.append(f"expert-full tuning without --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
@@ -168,7 +168,7 @@ def ports_rejections(
     if facts.rollout_gpus_flag:
         reasons.append("fixed partition via --rollout-num-gpus in extra argv (use --rl-placement fixed-partition)")
     if placement == "fixed-partition":
-        # rl-infra-spec 2.1: LoRA fixed partition (partitioned-serial driver).
+        # LoRA fixed partition (partitioned-serial driver).
         if rollout_num_gpus is None or int(rollout_num_gpus) < 1:
             reasons.append("fixed partition needs --rollout-num-gpus >= 1")
     elif rollout_num_gpus is not None:

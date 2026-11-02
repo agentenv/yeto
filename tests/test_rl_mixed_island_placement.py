@@ -146,7 +146,7 @@ def test_each_island_gets_its_own_shape_and_command(monkeypatch):
     assert _value(partitioned, "--rl-placement") == "fixed-partition"
     assert _value(partitioned, "--rollout-num-gpus") == "1"
     assert _value(partitioned, "--actor-num-gpus-per-node") == "1"
-    # same algorithm on both islands (P4-Q4: placement capabilities stay out of the hash)
+    # same algorithm on both islands (placement capabilities stay out of the hash)
     assert (_value(colocated, "--rl-expected-algorithm-sha256")
             == _value(partitioned, "--rl-expected-algorithm-sha256")
             == args.rl_expected_algorithm_sha256)
@@ -172,7 +172,7 @@ def test_uniform_fixed_partition_command_is_unchanged_by_this_change(monkeypatch
 
 
 def test_policy_age_overlap_differs_by_island_placement():
-    """P0-S: with --rl-max-policy-age N>0 a fixed-partition island overlaps rollout
+    """With --rl-max-policy-age N>0 a fixed-partition island overlaps rollout
     and training (Miles fully_async), a colocated island carries over at the cut-off
     (--partial-rollout). In a mixed run the two islands differ, by design."""
     from tests.test_rl_miles_adapter_config import make_config, sub

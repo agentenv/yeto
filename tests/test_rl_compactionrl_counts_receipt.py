@@ -1,4 +1,4 @@
-"""s19-compaction-g1-20261010g: receipt ids per trajectory; segment counts follow the final loss masks."""
+"""Receipt ids per trajectory; segment counts follow the final loss masks."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def test_hook_refreshes_after_the_placeholder_mask(monkeypatch):
     seg0, seg1 = _seg(0, [1, 1, 1]), _seg(1, [1, 1])
     seg0.metadata.update(segment_tokens=3, tokens_after=2, gae_length=5)
 
-    def fake_mask(data, **_):  # S19 #8 masks a placeholder stop token in segment 1 after assembly
+    def fake_mask(data, **_):  # the placeholder-logprob rule masks a placeholder stop token in segment 1 after assembly
         seg1.loss_mask[-1] = 0
         return 1
 

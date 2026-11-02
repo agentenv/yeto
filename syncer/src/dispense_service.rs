@@ -1,4 +1,4 @@
-//! Task dispenser connections (S27 P2): the wire codec of the TASK_*
+//! Task dispenser connections: the wire codec of the TASK_*
 //! messages (`protocol.rs`), the dispenser shared by every connection, its
 //! `task-dispense.jsonl` log and its checkpoint record.
 //!
@@ -48,7 +48,7 @@ pub struct TaskHello {
     pub version: u16,
 }
 
-/// The TASK_HELLO body (without the HMAC). Version 1 (P2) when the data is
+/// The TASK_HELLO body (without the HMAC). Version 1 when the data is
 /// one plain stream and the island accepts it; version 2 otherwise:
 /// `u16 version | u32 learner_id | u64 incarnation | [32] fingerprint |
 /// u16 n | n x (u64 rows, u64 weight, u16 name_len, name) | u16 m |
@@ -450,7 +450,7 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Golden bytes shared with `tests/test_s27_dispense.py` (Python codec).
+    /// Golden bytes shared with `tests/test_dispense_syncer.py` (Python codec).
     #[test]
     fn wire_golden_vectors() {
         let hello = TaskHello {
@@ -506,7 +506,7 @@ mod tests {
         );
     }
 
-    /// TASK_HELLO version 2 (streams, S27 P3); shared with `tests/test_s27_dispense_p34.py`.
+    /// TASK_HELLO version 2 (streams); shared with `tests/test_dispense_data_mix_samplers.py`.
     #[test]
     fn wire_golden_vectors_with_streams() {
         let hello = TaskHello {

@@ -4,16 +4,9 @@ This tutorial turns local Codex traces into Yeto chat JSONL, optionally backfill
 missing reasoning with an OpenAI-compatible teacher, trains a Gemma chat model,
 and runs a small Codex-style qualitative eval.
 
-The best result from our first pass was:
-
-- model: `google/gemma-4-12B-it`
-- data: local Codex sessions converted with DeepSeek teacher backfill
-- training: full SFT, assistant-only, target-aware packed blocks
-- hardware: 8x H100 80GB
-- output: `/tmp/gemma4-12b-targetpacked-full-sft-500-lr1e-6`
-
-Qwen3-0.6B LoRA is useful as a cheap local smoke test, but it was much more
-generic than the Gemma full-SFT run.
+The main recipe is a full SFT of `google/gemma-4-12B-it` on 8x H100 80GB
+(assistant-only loss, target-aware packed blocks). Qwen3-0.6B LoRA is a cheap
+local smoke test for the pipeline, not a quality target.
 
 ## 0. Prereqs
 
@@ -50,7 +43,7 @@ curl "$BASE_URL/models" \
   -H "Content-Type: application/json"
 ```
 
-The run we used pointed at `deepseek-v4-flash`.
+Pass the model name the endpoint serves as `--teacher-model`.
 
 ## 2. Convert Codex Traces
 
@@ -62,16 +55,14 @@ from visible context.
 ```bash
 python -m yeto.codex_traces \
   --input "$HOME/.codex/sessions" \
-  --output /tmp/codex-full-deepseek-teacher-yeto.jsonl \
+  --output /tmp/codex-teacher-yeto.jsonl \
   --include-thinking \
   --reasoning-policy teacher-backfill \
   --teacher-base-url "$BASE_URL" \
   --teacher-api-key "$AUTH_TOKEN" \
-  --teacher-model deepseek-v4-flash \
-  --teacher-max-output-tokens 96 \
-  --teacher-timeout 120 \
-  --teacher-retries 5 \
-  --teacher-on-error skip
+  --teacher-model <teacher-model> \
+  --teacher-api-format chat-completions \
+  --teacher-max-output-tokens 96
 ```
 
 If you do not have a teacher yet, use `--reasoning-policy skip` instead:
@@ -89,7 +80,7 @@ Sanity-check the output:
 ```bash
 python - <<'PY'
 import json
-path = "/tmp/codex-full-deepseek-teacher-yeto.jsonl"
+path = "/tmp/codex-teacher-yeto.jsonl"
 rows = [json.loads(line) for line in open(path)]
 print("rows", len(rows))
 print("first metadata", rows[0].get("metadata", {}))
@@ -105,15 +96,14 @@ This catches the class of failures where almost every block has zero loss.
 ```bash
 python tutorial/hello-world/probe_target_packing.py \
   --model google/gemma-4-12B-it \
-  --data /tmp/codex-full-deepseek-teacher-yeto.jsonl \
+  --data /tmp/codex-teacher-yeto.jsonl \
   --seq-len 512 \
   --blocks 100
 ```
 
 A healthy run should report `zero_blocks 0` and a non-trivial target fraction.
-In our fixed Qwen smoke path, the fraction was about `0.73`; before the packing
-fix, the model saw mostly zero-loss blocks and training looked successful while
-learning almost nothing.
+If most blocks have zero loss, training looks successful while learning almost
+nothing.
 
 ## 4. Gemma Full-SFT Smoke
 
@@ -121,7 +111,7 @@ Run a short 20-step smoke first. This confirms the tokenizer, FSDP, target
 packing, and checkpoint path all work before spending time on the real run.
 
 ```bash
-cd /root/yeto
+cd /path/to/yeto
 
 MASTER_ADDR=127.0.0.1 \
 MASTER_PORT=29511 \
@@ -129,7 +119,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 torchrun --nproc_per_node=8 --master_port=29511 \
   -m yeto.learner \
   --model google/gemma-4-12B-it \
-  --data /tmp/codex-full-deepseek-teacher-yeto.jsonl \
+  --data /tmp/codex-teacher-yeto.jsonl \
   --syncer none \
   --learner-id 0 \
   --num-learners 1 \
@@ -156,7 +146,7 @@ You want to see real positive losses and a final `saved model to ...` line.
 Once the smoke passes, run the 500-step job:
 
 ```bash
-cd /root/yeto
+cd /path/to/yeto
 
 MASTER_ADDR=127.0.0.1 \
 MASTER_PORT=29512 \
@@ -164,7 +154,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 torchrun --nproc_per_node=8 --master_port=29512 \
   -m yeto.learner \
   --model google/gemma-4-12B-it \
-  --data /tmp/codex-full-deepseek-teacher-yeto.jsonl \
+  --data /tmp/codex-teacher-yeto.jsonl \
   --syncer none \
   --learner-id 0 \
   --num-learners 1 \
@@ -184,11 +174,7 @@ torchrun --nproc_per_node=8 --master_port=29512 \
   --output-dir /tmp/gemma4-12b-targetpacked-full-sft-500-lr1e-6
 ```
 
-Our run ended with:
-
-```text
-saved model to /tmp/gemma4-12b-targetpacked-full-sft-500-lr1e-6
-```
+The run ends with a `saved model to <output-dir>` line.
 
 ## 6. Evaluate
 
@@ -217,7 +203,7 @@ for i, line in enumerate(open(path), 1):
 PY
 ```
 
-What we looked for:
+What to look for:
 
 - no leaked `<think>` blocks in normal assistant responses
 - answers that sound more like code-review/debugging help than generic wiki text
@@ -233,7 +219,7 @@ but do not treat it as the final quality target.
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m yeto.learner \
   --model Qwen/Qwen3-0.6B \
-  --data /tmp/codex-full-deepseek-teacher-yeto.jsonl \
+  --data /tmp/codex-teacher-yeto.jsonl \
   --syncer none \
   --learner-id 0 \
   --num-learners 1 \
@@ -258,15 +244,15 @@ the model is probably not seeing enough weighted assistant target tokens.
 
 ## 8. Save Artifacts
 
-The full Gemma checkpoint is large. Prefer keeping the cloud volume if you only
-need it tomorrow. If you must copy it down, use resumable transfer:
+The full Gemma checkpoint is large. Prefer keeping it on the cloud volume. If
+you must copy it down, use a resumable transfer:
 
 ```bash
-tar -cf /root/gemma4-12b-targetpacked-full-sft-500-lr1e-6.tar \
+tar -cf ~/gemma4-12b-targetpacked-full-sft-500-lr1e-6.tar \
   -C /tmp gemma4-12b-targetpacked-full-sft-500-lr1e-6
 
 rsync -avP --inplace \
-  root@HOST:/root/gemma4-12b-targetpacked-full-sft-500-lr1e-6.tar \
+  <user>@<host>:gemma4-12b-targetpacked-full-sft-500-lr1e-6.tar \
   ~/Downloads/
 ```
 

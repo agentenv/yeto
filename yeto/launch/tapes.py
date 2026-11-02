@@ -38,7 +38,7 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
     """A no-sync sky island whose echoed tape stayed incomplete: fetch the
     island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
     the echo mirrors) over the ssh alias sky wrote and complete the local tape
-    from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
+    from them. 2x1 L40S runs showed ``sky.tail_logs``
     delivering the setup lines but no run-phase line at all (root cause: the
     heartbeat ``None`` ended ``_tail``'s loop, see there; fixed, kept as the
     fallback), so the stream alone cannot be the only source. Returns whether the tape is finalized;
@@ -74,7 +74,7 @@ def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
     own tape file before calling it incomplete. Returns the names whose tape is
     still incomplete (``.incomplete`` marker written) -- the launcher's exit 3.
 
-    S14/A19 (FINAL-REPORT-S7 §6.1, -5r1 r7): a SUCCEEDED job ended with exit 3
+    A SUCCEEDED job ended with exit 3
     because ``sky.tail_logs`` stopped delivering lines part-way (58 of 146
     records, stream silent after a learner restart) and that run predated the
     island-file recovery. The island file is now consulted for every unfinalized
@@ -135,7 +135,7 @@ _ISLAND_NAME_RE = re.compile(r"-l(\d+)-")
 # rl_learner_finalized. INFRA_FAILED, TRAINING_FAILED, CONFIG_MISMATCH, unknown
 # codes and the pre-reason-code "requested" stay failures (syncer and launcher
 # ship from one build; older runs are not resumed).
-# "fenced" (S29 D4): the member belongs to a run that is gone, not this one.
+# "fenced": the member belongs to a run that is gone, not this one.
 EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired", "fenced"})
 
 
@@ -145,7 +145,7 @@ def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
 
     Reads the syncer event tape (from ``offset``: this run's part only) and returns
     ``{island_id: reason}`` for every island whose last pool record is ``pool_leave``
-    with a reason in ``EXCUSED_LEAVE_REASONS``. User ruling S16 §6.6: such an island
+    with a reason in ``EXCUSED_LEAVE_REASONS``. Such an island
     owes no ``rl_learner_finalized`` record; the run summary reports it as a mid-run
     departure instead of the launcher's exit 3. An island that left with a failure
     code is not returned, so its missing record still fails the run. Unreadable

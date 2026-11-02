@@ -85,7 +85,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
         def cancel(self, call_id):
             record.append(("cancel", call_id))
 
-        def app_status(self):  # provider view after stop (P0 teardown check)
+        def app_status(self):  # provider view after stop (teardown check)
             return None if getattr(self, "_stopped", False) else ("deployed", 1)
 
         def stop_app(self):
@@ -134,7 +134,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     sky = sys.modules["sky"]
     sky.launch = lambda task, **kw: f"rid-{kw.get('cluster_name')}"
     sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
-    # the launcher probes every syncer port before starting islands (s13-g3b)
+    # the launcher probes every syncer port before starting islands
     monkeypatch.setattr("yeto.launch.syncer.tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
 
 
@@ -239,7 +239,7 @@ def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_p
 
 
 def test_modal_app_stopping_for_a_minute_is_confirmed(monkeypatch, tmp_path):
-    """S27 (8 runs, EXTRA-CONTAINER.md): Modal took 17-60 s from the app stop to
+    """Measured over 8 runs: Modal took 17-60 s from the app stop to
     "stopped, 0 tasks" (30 s cancellation grace + 30 s runner shutdown grace); 5 checks
     about 5 s apart reported a stopping app as not stopped and the run exited 5."""
     calls = []
@@ -299,7 +299,7 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
     assert manifest["rl_image"] == rl.MILES_NEXT_IMAGE  # the ports default, no override
     assert manifest["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert manifest["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
-    # rl-identity-tiering L9.1 dual write (transition: digest = source tree hash)
+    # dual write (transition: digest = source tree hash)
     from yeto.rl.engine.algorithm import AlgorithmSpec
 
     assert manifest["code_pack_digest"] == manifest["source_sha256"] == args.source_sha256
@@ -311,7 +311,7 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
 
 
 def test_stalled_run_exits_6_and_tears_down(monkeypatch, tmp_path, capsys):
-    """INFRA 2.4 s29: the syncer connection died; islands keep RUNNING with no new event."""
+    """The syncer connection died; islands keep RUNNING with no new event."""
     from yeto.rl import event_echo
 
     record, clock = [], Clock()
@@ -365,7 +365,7 @@ def test_stall_detection_disabled_with_zero(monkeypatch, tmp_path):
 
 
 def _run_single_modal_no_sync(monkeypatch, tmp_path, *, ok, output=None, finalized=True):
-    """S17 N16: one Modal island, --rl-single-island-no-sync (V1 verl, s17-g1-base)."""
+    """One Modal island, --rl-single-island-no-sync (verl)."""
     from yeto.rl import event_echo
 
     record, clock = [], Clock()
@@ -403,3 +403,32 @@ def test_single_modal_no_sync_failure_semantics_unchanged(monkeypatch, tmp_path)
     assert _run_single_modal_no_sync(monkeypatch, tmp_path, ok=False, finalized=False) == 4
     assert _run_single_modal_no_sync(monkeypatch, tmp_path / "b", ok=True,
                                      finalized=False) == launcher.NO_SYNC_INCOMPLETE_EXIT
+
+
+@pytest.mark.parametrize("no_sync", [True, False])
+def test_launcher_run_skips_syncer_in_no_sync_mode(monkeypatch, tmp_path, no_sync):
+    """--rl-single-island-no-sync: no syncer task, no syncer cluster launched."""
+    import sys
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
+    syncer_tasks, launched, announced = [], [], []
+    monkeypatch.setattr(launcher, "make_syncer_task",
+                        lambda *a, **k: syncer_tasks.append(a) or object())
+    sky = sys.modules["sky"]
+    monkeypatch.setattr(sky, "launch",
+                        lambda task, **kw: launched.append(kw["cluster_name"])
+                        or f"rid-{kw['cluster_name']}")
+    one = "aws:1xa100@us-east-1"
+    extra = ("--controller", "local", "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64)
+    if no_sync:
+        extra += ("--rl-single-island-no-sync",)
+    args = _launcher_args("ports", extra, gpu=one if no_sync else f"{one},{one}")
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    assert launcher.run(args, on_clusters=announced.extend) == launcher.ISLAND_FAILED_EXIT
+    syncers = [n for n in launched + announced if n.endswith("-syncer")]
+    if no_sync:
+        assert syncer_tasks == [] and syncers == []
+        assert launched  # the island itself was launched
+    else:
+        assert len(syncer_tasks) == 1 and syncers

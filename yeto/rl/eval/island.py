@@ -1,10 +1,10 @@
-"""Eval island runner (rl-eval-difficulty-buckets D11.1/D11.3/D11.4, tasks 5.1-5.6).
+"""Eval island runner.
 
 An inference-only island: it never joins the merge pool and never submits a
 delta. It drains the store's queue of policy versions in order; per version it
 
 1. loads the manifest and checks every file's sha256 (fail closed);
-2. refuses a version whose sampling settings differ from the plan (D3: another
+2. refuses a version whose sampling settings differ from the plan (another
    ruler, the run stops);
 3. loads base + policy through the injected ``loader`` and requires the served
    token to equal the manifest's ``rl/policy_token``;
@@ -20,7 +20,7 @@ Ports (all injectable, CPU tests use fakes):
 * ``attempt(task, trial, *, policy_version, policy_token) -> mapping`` with
   ``reward``, ``success``, ``end_reason`` and optionally ``turns``, ``tokens``,
   ``trajectory_id``. Raise :class:`Preempted` when the inference side is gone;
-  any other exception is recorded as ``end_reason=infra_error`` (D6.d).
+  any other exception is recorded as ``end_reason=infra_error``.
 """
 
 from __future__ import annotations
@@ -36,9 +36,9 @@ from . import stats
 from .store import EvalIntegrityError, EvalStore, iter_results
 
 EVAL_EVENT = "rl_eval"
-EVAL_ISLAND_ROLE = "eval"  # D11.1: island ledger role; never a training/merge member
-DEFAULT_TRIALS_V0 = 4      # D2: TB2 version 0
-DEFAULT_TRIALS = 2         # D2: TB2 later versions
+EVAL_ISLAND_ROLE = "eval"  # island ledger role; never a training/merge member
+DEFAULT_TRIALS_V0 = 4      # TB2 version 0
+DEFAULT_TRIALS = 2         # TB2 later versions
 
 
 class Preempted(RuntimeError):
@@ -46,7 +46,7 @@ class Preempted(RuntimeError):
 
 
 class EvalSettingError(RuntimeError):
-    """The version was produced under different sampling settings (D3)."""
+    """The version was produced under different sampling settings."""
 
 
 class PolicyLoader(Protocol):
@@ -239,7 +239,7 @@ class EvalIsland:
     # -- the queue ----------------------------------------------------------
     def run(self, *, idle: Callable[[], bool] | None = None, poll_s: float = 30.0,
             sleep: Callable[[float], None] = time.sleep) -> list[int]:
-        """Drain the queue oldest first (no version dropped, D11.4).
+        """Drain the queue oldest first (no version dropped).
 
         ``idle()`` is asked when the queue is empty: True = stop (training is
         finished and wrote its last version), False = wait ``poll_s`` and look

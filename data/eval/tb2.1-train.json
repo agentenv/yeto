@@ -2,7 +2,7 @@
  "schema": "yeto-train-split/1",
  "benchmark": "tb2",
  "benchmark_version": "tb2.1@7131e43",
- "holdout_sha256": "adfddc9f2615dfdb3b3e2bc0ce04f1bb6dc4b6948735dd6ecb565d25163425a4",
+ "holdout_sha256": "be41a01a0cd061a8dcd519ee4f37a33e5407989977438cb7e7a85a4d0b5fc424",
  "excluded": [
   {
    "task_id": "adaptive-rejection-sampler",

@@ -1,4 +1,4 @@
-"""``PolicyState`` port over the actor ``run_plugin`` entry point (task 3.4, D4).
+"""``PolicyState`` port over the actor ``run_plugin`` entry point .
 
 Assumes the ``michaellchung/miles`` ``yeto/ports`` patch (task 1.4)::
 
@@ -34,7 +34,7 @@ class PolicyStateError(RuntimeError):
 
 
 def require_run_plugin(controller_cls: Any = None) -> None:
-    """Refuse ports startup when the pinned Miles lacks ``run_plugin`` (D4).
+    """Refuse ports startup when the pinned Miles lacks ``run_plugin``.
 
     Runs before any upstream component is created (no model is loaded). The
     current ``MILES_NEXT_COMMIT`` is still the bare upstream commit, which
@@ -61,9 +61,9 @@ def require_run_plugin(controller_cls: Any = None) -> None:
 class MilesPolicyState:
     """Export/apply the LoRA trainable state of the single-cell actor group."""
 
-    # E1: export_digest(deferred=True) is supported (LoRA digest path)
+    # export_digest(deferred=True) is supported (LoRA digest path)
     supports_deferred_digest = True
-    supports_unverified_rounds = True  # E1: export_identity
+    supports_unverified_rounds = True  # export_identity
 
     def __init__(
         self,
@@ -127,7 +127,7 @@ class MilesPolicyState:
         Ray.  Returns a :class:`TrainerResidentState` whose tensors stay in the trainer
         (``materialize`` falls back to :meth:`export`).
 
-        ``deferred`` (E1): the trainer returns once the tensors are staged and hashes
+        ``deferred``: the trainer returns once the tensors are staged and hashes
         them in the background (e.g. while it offloads); the state's digest is a
         :class:`~yeto.rl.engine.policy_digest.DeferredDigest` collected on first read."""
 
@@ -148,7 +148,7 @@ class MilesPolicyState:
         return state
 
     def export_identity(self, *, policy_version: int | None = None):
-        """E1: the resident state of a round whose publication is not verified: the
+        """The resident state of a round whose publication is not verified: the
         trainer reports only its weights version (no export, no hash); the identity is
         :func:`~yeto.rl.engine.policy_digest.unverified_identity`. The layout is the last
         verified digest's (None before any: the caller verifies that round)."""
@@ -176,7 +176,7 @@ class MilesPolicyState:
         return PolicyDigest.from_wire(results[0]["digest"])
 
     def weights_version(self) -> dict[str, Any]:
-        """The main trainer rank's weights version ``{process_id, version}`` (D3)."""
+        """The main trainer rank's weights version ``{process_id, version}``."""
 
         results = [r for r in self._plugin(WEIGHTS_VERSION, {}) if r is not None]
         if len(results) != 1:
@@ -184,7 +184,7 @@ class MilesPolicyState:
         return dict(results[0])
 
     def check_holds(self, state: Any) -> None:
-        """rl-publish-fastpath D3: the trainer still holds ``state`` (a trainer-resident
+        """rl-publish-fastpath: the trainer still holds ``state`` (a trainer-resident
         handle).  Same trainer process: compare weights versions only (no export).
         Trainer process replaced since the handle was taken (rebuild / resize): its
         counter restarted, so fall back to the content check (trainer-side re-hash).
@@ -339,7 +339,7 @@ class MilesPolicyState:
 
 
 class MilesFullParameterLocalPolicyState(MilesPolicyState):
-    """``PolicyState`` of a no-sync full-parameter island (L4.6 sampler/trainer).
+    """``PolicyState`` of a no-sync full-parameter island (sampler/trainer).
 
     The island has no outer sync, so nothing outside the trainer reads the
     weights: the rollout engines get them through Miles ``update_weights``.
@@ -350,7 +350,7 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
     """
 
     supports_deferred_digest = False  # its export_digest hashes every rank's shard eagerly
-    # E1: every publication hashes the shards; S27 C5: --rl-verify-every N turns this on
+    # every publication hashes the shards; --rl-verify-every N turns this on
     # (allow_unverified_rounds) and the other rounds publish export_identity
     supports_unverified_rounds = False
 
@@ -393,12 +393,12 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
         )
 
     def allow_unverified_rounds(self) -> None:
-        """S27 C5 (``--rl-verify-every N``): publications the driver does not verify
+        """``--rl-verify-every N``: publications the driver does not verify
         use :meth:`export_identity` (no shard hashing, about 8.4 s a round on Nano)."""
         self.supports_unverified_rounds = True
 
     def export_identity(self, *, policy_version: int | None = None):
-        """S27 C5: the resident state of a round whose publication is not verified: the
+        """The resident state of a round whose publication is not verified: the
         main rank reports its weights version (no shard hash); the identity is
         :func:`~yeto.rl.engine.policy_digest.unverified_identity`. None before the first
         verified digest (the caller then verifies that round)."""

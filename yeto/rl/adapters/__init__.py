@@ -1,4 +1,4 @@
-"""Backend adapters (yeto-framework-decoupling design D2).
+"""Backend adapters (yeto-framework-decoupling design).
 
 Each sub-package translates yeto's neutral core (``yeto.rl.engine``,
 ``yeto.rl.rewards``, ``yeto.rl.algos``, ``yeto.rl.harness``) into one training

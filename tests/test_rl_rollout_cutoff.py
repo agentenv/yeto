@@ -48,7 +48,7 @@ def test_no_cutoff_reported_emits_nothing():
 
 
 def test_fake_engine_target_24_over_sampled_48_trains_exactly_24_current(tmp_path):
-    """Spec 多发请求与截止: target 24 trajectories (6 groups x 4), over-sampled 48
+    """Spec over-sampling and cutoff: target 24 trajectories (6 groups x 4), over-sampled 48
     (12 groups), limit 0 -> exactly 24 trained, all current-version; the cut-off
     event reports the discarded trajectories and their generated tokens."""
     import torch

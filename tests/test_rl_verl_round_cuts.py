@@ -1,4 +1,4 @@
-"""S25 N7.6b (CPU): the verl island's round-cut controller.
+"""CPU: the verl island's round-cut controller.
 
 The real cut controller (ResumeController + RoundCutCheckpoint on LocalOnlySync,
 wired by ``adapters.verl.round_cuts``) and the real verl cut trainer
@@ -223,14 +223,14 @@ def test_resume_config_from_flags():
         round_cuts.resume_config(_args(rl_cut_every=2))
     with pytest.raises(ValueError, match="--rl-single-island-no-sync"):
         round_cuts.resume_config(_args(rl_resume_store="/s", rl_single_island_no_sync=False))
-    # S26 E9.2: the fully_async path (--rl-max-policy-age > 0) cuts too
+    # The fully_async path (--rl-max-policy-age > 0) cuts too
     assert round_cuts.resume_config(_args(rl_resume_store="/s", rl_max_policy_age=2))["store"] == "/s"
     with pytest.raises(ValueError, match="must be >= 1"):
         round_cuts.resume_config(_args(rl_resume_store="/s", rl_cut_keep=0))
 
 
 def test_buffer_trainer_store_is_not_a_cut_store():
-    # S25 C2 x N7.6b: a verl buffer trainer's --rl-resume-store is its sample buffer
+    # A verl buffer trainer's --rl-resume-store is its sample buffer
     trainer = dict(rl_sample_role="trainer", rl_resume_store="/s", rl_max_policy_age=1)
     assert round_cuts.resume_config(_args(**trainer)) is None
     with pytest.raises(ValueError, match="not wired for a verl buffer trainer"):

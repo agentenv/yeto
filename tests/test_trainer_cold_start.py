@@ -1,5 +1,5 @@
-"""rl-trainer-cold-start-cost L0 (start phases), L2.3/L2.4 (image manifest
-instead of imports; peft in the image) and L2.5 (model prefetch).  CPU only."""
+"""Trainer cold start: start phases, image manifest instead of imports,
+peft in the image and model prefetch.  CPU only."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class _Collect:
         return [f for e, f in self.events if e == name]
 
 
-# ------------------------------------------------------------ L0.1 phases
+# ------------------------------------------------------------ phases
 
 
 def _fake_start(tmp_path, *, with_shell=True):
@@ -123,7 +123,7 @@ def test_island_task_scripts_carry_the_marks(monkeypatch):
     assert abs(float(task.envs[sp.SUBMITTED_ENV]) - time.time()) < 600
 
 
-# ------------------------------------------------------- L0.2 run manifest
+# ------------------------------------------------------- run manifest
 
 
 def test_summary_goes_into_the_run_manifest_and_t_s_reads_back(tmp_path, monkeypatch):
@@ -181,7 +181,7 @@ def test_sky_islands_record_t_s_from_teardown_diagnostics(tmp_path, monkeypatch)
     assert launch_manifest._record_sky_trainer_start(args, ["r-9"], str(diag)) is None
 
 
-# --------------------------------------------- L2.3 manifest, not imports
+# --------------------------------------------- manifest, not imports
 
 
 def _run_check(tmp_path, manifest, package="peft", key="version", want=rl.MILES_PEFT_VERSION,
@@ -261,7 +261,7 @@ def test_setup_events_reach_the_tape_once(tmp_path):
     assert event["source"] == "setup" and event["package"] == "peft"
 
 
-# ------------------------------------------------- L2.4 peft in the image
+# ------------------------------------------------- peft in the image
 
 
 def test_build_script_puts_peft_into_the_image_and_the_manifest():
@@ -302,7 +302,7 @@ def test_layer_unpacks_a_pure_python_wheel(tmp_path):
                                       {"y-1.data/scripts/y": b"", "y-1.dist-info/RECORD": b""}))
 
 
-# --------------------------------------------------------- L2.5 prefetch
+# --------------------------------------------------------- prefetch
 
 
 def _run_prefetch(tmp_path, exit_code: int):

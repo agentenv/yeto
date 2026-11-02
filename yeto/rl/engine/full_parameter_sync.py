@@ -1,4 +1,4 @@
-"""One full-parameter synchronization for every algorithm (P0-D8).
+"""One full-parameter synchronization for every algorithm.
 
 An algorithm declares its trainable roles (GRPO: ``actor``; SAO/PPO:
 ``actor`` and ``critic``).  Each role owns one :class:`RoleStream`: one syncer
@@ -22,7 +22,7 @@ The dense strict sweep is a restricted profile of the same rules
 one local step in flight together, and broadcasts applied only as a complete
 sweep.
 
-The asynchronous full-parameter rounds (S27 P2) are the
+The asynchronous full-parameter rounds are the
 streaming profile with :attr:`FullParameterSyncProfile.partial_quorum`: the
 syncer may close a fragment round with a quorum K below the island count.
 Rule 3 then also covers broadcasts this island did not contribute to (late,
@@ -140,7 +140,7 @@ class RoleStream(Protocol):
     #   (the stream never delivers an older version of a fragment after a
     #   newer one) lets apply_staged_broadcast(..., catch_up=True) overwrite a
     #   fragment with a version that skips older ones (re-JOIN catch-up).
-    # S26 E3 sync/train overlap (profile.overlap) only:
+    # Sync/train overlap (profile.overlap) only:
     #   complete_local_round(..., hold_submission=True) keeps the round base and
     #   the previous submission; apply_staged_broadcast(..., rebase=True) applies
     #   G + (current - base) with G as the anchor; finish_rebase() makes the
@@ -168,12 +168,12 @@ class FullParameterSyncProfile:
     wait_timeout: float
     poll_seconds: float
     sweep: bool = False
-    # S26 E3: train round k+1 while sweep k syncs; rebase at the next boundary.
+    # Train round k+1 while sweep k syncs; rebase at the next boundary.
     overlap: bool = False
-    # S27 P2: the syncer closes rounds with quorum K <= islands, so a fragment
+    # The syncer closes rounds with quorum K <= islands, so a fragment
     # broadcast may arrive without this island's submission (overwrite it).
     partial_quorum: bool = False
-    # S27 G-AG lead cap K (streaming only; None = off, the old behaviour): an
+    # Lead cap K (streaming only; None = off, the old behaviour): an
     # island trains at most K - 1 local rounds on top of an unmerged push of
     # its own; K = 1 starts no round while one is unmerged (RolePairing.wait_for_lead).
     max_local_rounds_ahead: int | None = None
@@ -253,7 +253,7 @@ class PairedSubmission:
     # The island's local round (RolePairing.local_round) when it retained the
     # pair: the round whose cut the pair pushes (lead cap).
     local_round: int = 0
-    # Background push (S27 G-AP): the worker job pushing this pair, until
+    # Background push: the worker job pushing this pair, until
     # the pairing harvests it.
     job: _PushJob | None = None
 
@@ -309,7 +309,7 @@ class RolePairing:
         self.lead_waits = 0
         self.lead_wait_seconds = 0.0
         self.lead_wait_escapes = 0
-        # Background pushes (S27 G-AP), decided at the first submit (a role
+        # Background pushes, decided at the first submit (a role
         # knows whether it can encode ahead once it is initialized); None
         # keeps every push on this thread.
         self._pusher: _BackgroundPusher | None = None
@@ -458,7 +458,7 @@ class RolePairing:
 
     async def prepare_submissions(self) -> None:
         """Materialize the deferred fragments the next :meth:`submit_ready`
-        would push (S27 G-AA deferred capture).
+        would push (deferred capture).
 
         The plan repeats ``submit_ready``'s choice (shared, not closed, within
         the free pipeline capacity) over candidates that include deferred
@@ -584,7 +584,7 @@ class RolePairing:
                 # a replay answers a reopened round (new attempt).
                 pair.retained_at = time.monotonic()
 
-    # -- background pushes (S27 G-AP) -------------------------------------------
+    # -- background pushes -------------------------------------------
 
     def _push_in_background(self, pair: PairedSubmission, candidates: Mapping[str, Any]) -> None:
         """Hand ``candidates`` (role -> candidate of ``pair``) to a worker.
@@ -733,7 +733,7 @@ class RolePairing:
             *(set(stream.staged_fragment_versions) for stream in self.streams.values())
         )
         monotonic = all(getattr(stream, "monotonic_broadcasts", False) for stream in self.streams.values())
-        # One trainer apply per batch of distinct fragments (S27 G-AA).  The
+        # One trainer apply per batch of distinct fragments.  The
         # order of decisions is unchanged: a fragment seen twice first flushes
         # the batch, so its second version is judged against the applied one.
         batch: list[_PlannedApply] | None = [] if self._batches_applies() else None
@@ -888,7 +888,7 @@ class RolePairing:
         self.journal.append(dict(pair.submissions))
         self._release(pair)
 
-    # -- local-round lead cap (S27 G-AG) -----------------------------------------
+    # -- local-round lead cap -----------------------------------------
 
     def lead_blockers(self) -> list[PairedSubmission]:
         """In-flight pairs that stop the next local round under the lead cap K.
@@ -1024,7 +1024,7 @@ def _candidate_map(candidates: Sequence[Any], *, role: str) -> dict[LogicalKey, 
 
 
 BATCH_APPLY_ENV = "YETO_FULL_PARAMETER_BATCH_APPLY"
-# S27 G-AG: threads that compute the next pushes' deltas and wire encodings
+# Threads that compute the next pushes' deltas and wire encodings
 # while the current one is enqueued (1 = compute each push in turn, as before).
 PUSH_WORKERS_ENV = "YETO_FULL_PARAMETER_PUSH_WORKERS"
 DEFAULT_PUSH_WORKERS = 3
@@ -1049,7 +1049,7 @@ def _push_pool(workers: int) -> Any:
 
 class _PushPrefetch:
     """Compute the deltas and wire encodings of the next planned pushes on
-    worker threads (S27 G-AG) while the pushing thread enqueues them in plan
+    worker threads while the pushing thread enqueues them in plan
     order.
 
     Only when every role can (``encodes_ahead``) and
@@ -1109,7 +1109,7 @@ class _PushPrefetch:
 # Lead cap: poll interval of the boundary wait (the wait lasts a peer's round).
 LEAD_WAIT_POLL_S = 0.05
 
-# S27 G-AP background pushes: "0" keeps every push on the coordinator thread.
+# Background pushes: "0" keeps every push on the coordinator thread.
 BACKGROUND_PUSH_ENV = "YETO_FULL_PARAMETER_BACKGROUND_PUSH"
 # CPU priority (nice increment) of the background push threads: training,
 # whose optimizer may run on the CPU, keeps the cores it needs.
@@ -1146,11 +1146,11 @@ def push_nice() -> int:
 
 
 class _BackgroundPusher:
-    """Push preparation and upload on worker threads (S27 G-AP).
+    """Push preparation and upload on worker threads.
 
     The synchronous push made the island wait at every boundary while it
     computed each pushed fragment's delta and wire encoding and queued the
-    bytes (s27-gr-j: 150-250 s of 450-600 s rounds on a 30B model).  A job
+    bytes (measured: 150-250 s of 450-600 s rounds on a 30B model).  A job
     does that for one pair (``prepare_push`` + ``send_prepared`` for every
     role) while the island trains on.  The pairing keeps every table: it
     submits jobs, keeps a pair's operands pinned while its job runs, and
@@ -1268,7 +1268,7 @@ class FullParameterSync(RoundCutHooks):
     immutable trajectory evidence of the round the trainer just consumed.
     """
 
-    # S27 G-ED: the local round counter starts at 0 in every process (start()),
+    # The local round counter starts at 0 in every process (start()),
     # so a ledger restored from an earlier process's island cut does not apply
     # (yeto.rl.engine.ledger.island_cut_ledger).
     local_rounds_restart = True
@@ -1290,24 +1290,24 @@ class FullParameterSync(RoundCutHooks):
         self.terminal = False
         self.finished = False
         self.closed = False
-        # S27 P2: the island ended because its data ended (``end_on_data``)
+        # The island ended because its data ended (``end_on_data``)
         self.data_ended = False
         self._driver: IslandDriver | None = None
-        self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
+        self._timing = SyncTiming(None, None)  # set by each boundary
         # Overlap: fragment versions before the sweep still in flight.
         self._pending_sweep: tuple[int, ...] | None = None
-        # S26 E3b: actor data-stream counters at the previous boundary.
+        # Actor data-stream counters at the previous boundary.
         self._upload_before: tuple | None = None
         # Partial quorum: overwritten rounds at the previous boundary.
         self._overwritten_before = 0
         self._lead_wait_s = 0.0  # lead cap: this boundary's wait
         self._push_timing_before: dict[str, float] | None = None
-        # S27 G-AP: seconds of each part of this boundary, and the background
+        # Seconds of each part of this boundary, and the background
         # push counters at the previous boundary.
         self._phase_seconds: dict[str, float] = {}
         self._push_jobs_before: dict[str, float] = {}
         self._verify_ahead_before: dict[str, int] = {}
-        # S27 task assignment: this process joined a pool that was already running
+        # This process joined a pool that was already running
         # (fragments newer than version 0, or a peer recovery), so the island ran
         # before; the driver then continues at its recorded data position
         # (``data_position`` module doc). Set by ``start``.
@@ -1315,7 +1315,7 @@ class FullParameterSync(RoundCutHooks):
 
     @property
     def ends_on_data_end(self) -> bool:
-        """S27 P2 / S26 E9.3: whether this island may end on its own when its
+        """Whether this island may end on its own when its
         data ends. Asynchronous rounds (partial quorum): yes, it leaves without
         the final cut, the other islands go on and the syncer keeps the merged
         state. A strict sweep needs every island in every round: no."""
@@ -1346,7 +1346,7 @@ class FullParameterSync(RoundCutHooks):
         outcome = getattr(self.actor, "recovery_outcome", None)
         if outcome is not None:
             samples = getattr(self.actor, "recovered_scheduler_samples", None)
-            # S27 G-ED: the restored trainer's LR scheduler continues the donor's;
+            # The restored trainer's LR scheduler continues the donor's;
             # the island's round cuts count their progress from there (round_cut.CutSource)
             driver.recovered_scheduler_samples = samples
             driver.emit("rl_peer_recovery", path=outcome.path, donor=outcome.donor, t_s=outcome.t_s,
@@ -1419,18 +1419,18 @@ class FullParameterSync(RoundCutHooks):
         }
 
     def _boundary_fields(self) -> dict[str, object]:
-        """S27 G-AP: where this boundary's time went (``sync/boundary_<part>_s``:
+        """Where this boundary's time went (``sync/boundary_<part>_s``:
         capture = record + capture of the local round, apply, materialize,
         submit, apply_after_submit, wait = peer snapshots, lead cap and sweep
         waits) and the background pushes (submitted / harvested this
         boundary, still running, and the worker seconds they took)."""
         fields: dict[str, object] = {f"sync/boundary_{name}_s": round(value, 3)
                                      for name, value in self._phase_seconds.items()}
-        # S27 G-AY: only on a round whose capture read no master (the policy
+        # Only on a round whose capture read no master (the policy
         # hash of that round is a label, not a content hash).
         if getattr(self.actor, "last_capture_lazy", False) is True:
             fields["sync/capture_lazy"] = True
-        # S27 G-CG: replaced fragments this boundary's applies named as checked
+        # Replaced fragments this boundary's applies named as checked
         # off the trainer, and those whose check was still running.
         verify = getattr(self.actor, "verify_ahead_counters", None)
         if isinstance(verify, dict):
@@ -1450,7 +1450,7 @@ class FullParameterSync(RoundCutHooks):
         return fields
 
     def _push_timing_fields(self) -> dict[str, object]:
-        """The actor's push time split of this boundary (S27 G-AG): delta
+        """The actor's push time split of this boundary: delta
         computation, error feedback, wire encoding and enqueue, summed over
         the fragments it pushed; streams without the counters add nothing."""
         totals = getattr(self.actor, "push_timing_totals", None)
@@ -1546,7 +1546,7 @@ class FullParameterSync(RoundCutHooks):
         return bind(policy_hash) if callable(bind) else bind_round_policy(evidence, policy_hash)
 
     async def _serve_peer_snapshots(self) -> None:
-        """S27 E-3: a donor answers snapshot requests here, after this
+        """A donor answers snapshot requests here, after this
         boundary's broadcasts are applied and before the next local round (a
         safe point). Streams without peer recovery have no such method."""
         served = 0
@@ -1558,7 +1558,7 @@ class FullParameterSync(RoundCutHooks):
             self._driver.emit("rl_peer_snapshot_served", count=served)
 
     async def _overlap_boundary(self, rollout_id: int) -> bool:
-        """Streaming-DiLoCo overlap (S26 E3; one more outer step of staleness).
+        """Streaming-DiLoCo overlap (one more outer step of staleness).
 
         Round k's delta (``current - base``) is pushed at boundary k and the
         island trains round k+1 at once. At boundary k+1 the island first
@@ -1659,7 +1659,7 @@ class FullParameterSync(RoundCutHooks):
         del rollout_id, policy_hash
         if self.terminal:
             self.finished = self.pairing.acknowledge_final()
-            # S27 G-AY: only when the islands ACK the final manifest without
+            # Only when the islands ACK the final manifest without
             # downloading the final parameters (they stay with the syncer).
             final_cut = getattr(getattr(self.actor, "config", None), "final_cut", "download")
             driver.emit("rl_full_parameter_final_ack", acknowledged=self.finished,
@@ -1672,7 +1672,7 @@ class FullParameterSync(RoundCutHooks):
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
         """Close every role once.  Full-parameter syncers run in legacy mode,
-        which has no LEAVE message, so the P5 reason code is only recorded."""
+        which has no LEAVE message, so the leave reason code is only recorded."""
 
         if self.closed:
             return
@@ -1693,7 +1693,7 @@ class FullParameterSync(RoundCutHooks):
 class FullParameterPolicyState:
     """``PolicyState`` of a full-parameter island: the actor stream's cut.
 
-    Tensors never leave the trainer (P0-D1).  Applying a cut happens only
+    Tensors never leave the trainer.  Applying a cut happens only
     inside the role streams, so :meth:`apply` refuses.
     """
 

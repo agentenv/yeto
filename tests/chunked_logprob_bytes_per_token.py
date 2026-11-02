@@ -1,6 +1,6 @@
-"""Bytes of activation per token that the chunked log-prob removes (S28 FCE).
+"""Bytes of activation per token that the chunked log-prob removes.
 
-Run by ``tests/test_s28_chunked_logprob.py`` in an interpreter that has Megatron-Core
+Run by ``tests/test_chunked_logprob.py`` in an interpreter that has Megatron-Core
 (``YETO_MEGATRON_LM_PATH``) and verl's import closure (``YETO_VERL_FORK_PATH``, plus
 ``YETO_VERL_EXTRA_SITE``); not collected by pytest. Standalone:
 ``python chunked_logprob_bytes_per_token.py <out.json> [--tokens N N N] [--chunk N]``.
@@ -17,8 +17,7 @@ Two numbers per path, both as a slope against the token count, so that every ter
 does not grow with the sequence (the weight, its gradient, one chunk's buffers) drops out:
 
 * ``retained``  -- bytes still referenced when the forward returns, i.e. the activation
-  kept for the backward. This is the quantity the island's activation accounting adds up
-  (``SESSION28/G-120C.md`` §9).
+  kept for the backward. This is the quantity the island's activation accounting adds up.
 * ``peak``      -- bytes at the high-water mark over forward and backward together.
 """
 

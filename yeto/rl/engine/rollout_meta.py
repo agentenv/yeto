@@ -1,4 +1,4 @@
-"""Neutral rollout-side metadata port (yeto-framework-decoupling 4.11, design D11).
+"""Neutral rollout-side metadata port.
 
 Runs in the *rollout* process (and codex subprocesses): algorithm extensions
 and harness code read the policy token the driver published and report

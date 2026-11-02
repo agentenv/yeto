@@ -1,4 +1,4 @@
-"""S28 CP2: the THD ``seq_idx`` patch must pass the global pack length at every CP size.
+"""CP2: the THD ``seq_idx`` patch must pass the global pack length at every CP size.
 
 Megatron-core's Mamba context parallel is all-to-all, not a sequence split:
 ``MambaContextParallel.pre_conv_ssm`` (``megatron/core/ssm/mamba_context_parallel.py``)
@@ -7,8 +7,8 @@ convolution and the SSM scan see every token of the pack and ``seq_idx`` has to 
 global pack. The patch used to return ``{}`` when ``cp_size != 1``, which left ``seq_idx``
 unset and let one packed sample's Mamba state flow into the next.
 
-The numerical evidence sits outside pytest, because it needs torch and 2 to 4 gloo ranks:
-``~/work/s1-runs/s28-g120/cp_seqidx_check.py``, log ``/tmp/cp2-check.log``.
+The numerical evidence sits outside pytest, because it needs torch and 2 to 4 gloo ranks
+(a standalone check script run outside the repository).
 """
 
 from yeto.rl.adapters.verl import patch_verl

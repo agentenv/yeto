@@ -71,7 +71,7 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
 
 
 def test_buffer_trainer_gets_every_island_card_over_its_nodes():
-    """S27 G-EZ2 (npu1): a buffer trainer's pool was [1] * 1 whatever the island
+    """A buffer trainer's pool was [1] * 1 whatever the island
     held; one WorkerDict came up on a 16-card, two-node island."""
     import yeto.rl.adapters.verl.config as vconf
 
@@ -123,7 +123,7 @@ def test_verl_declares_stage_two_up_to_limit_four():
         "async_training.trigger_parameter_sync_step=1", "async_training.require_batches=1")
     with pytest.raises(PolicyAgeError, match="supports up to stage 2"):
         policy_age_overrides(5, groups_per_round=8)
-    # L6.9: A_hard = 2 maps to staleness_threshold 2 (decoupled PPO needs >= 2)
+    # A_hard = 2 maps to staleness_threshold 2 (decoupled PPO needs >= 2)
     assert "async_training.staleness_threshold=2.0" in policy_age_overrides(2, groups_per_round=8)
     sync_caps = verl_capabilities("sha256:" + "0" * 64)
     assert sync_caps.execution.max_policy_staleness == 0 and sync_caps.placements == {"colocated"}
@@ -185,7 +185,7 @@ def test_round_keeps_within_limit_and_discards_over_age_and_unknown():
 
 
 def test_kept_groups_never_exceed_the_limit_when_verl_runs_one_round_ahead():
-    """S19 10-10: staleness_threshold = N lets a queued sample wait N + 1 versions
+    """staleness_threshold = N lets a queued sample wait N + 1 versions
     (queue_version_lag); the limit is then enforced only by yeto's per-group
     discard.  Every kept group's oldest token version is >= current - limit; every
     group older than that is discarded (F4/F5 rely on this)."""
@@ -375,7 +375,7 @@ def test_driver_runs_fully_async_rounds_with_carry_over_and_discard(tmp_path):
     events = _events(tmp_path / "tape.jsonl")
     carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
     assert [e["rollout_id"] for e in carry] == [0, 1, 2]
-    # the profile stays partitioned-serial; the overlapped rounds say so (P0-S-fix B)
+    # the profile stays partitioned-serial; the overlapped rounds say so
     assert {e["execution_mode"] for e in carry} == {"partitioned-overlap"}
     assert carry[1]["carried_in_groups"] == 1 and carry[1]["resumed_trajectories"] == 2
     assert carry[1]["cross_version_tokens"] == 4  # 2 tokens at v0 x 2 responses
@@ -418,7 +418,7 @@ def test_publication_mismatch_on_the_rollouter_replica_fails(tmp_path):
 
 
 def test_push_that_never_returns_ends_the_island_unverifiable(tmp_path):
-    """S19 async5: the rollouter's vLLM died in the first push and the island hung
+    """The rollouter's vLLM died in the first push and the island hung
     33 min; the push now has a timeout and the publication is LORA_UNVERIFIABLE."""
     import json
 
@@ -447,14 +447,14 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
 
     from yeto.rl.adapters.verl import patch_verl
 
-    fork = Path(os.path.expanduser("~/work/verl-fork-acad9875"))
+    fork = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent"))
     if not (fork / patch_verl.CALLS_TARGET).is_file():
         pytest.skip("verl fork checkout not present")
     for target, *_ in patch_verl.PROFILES["fsdp"]:
         (tmp_path / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(fork / target, tmp_path / target)
     patch_verl.apply(tmp_path)
-    zmq = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # S27 G-EK: zmq SUB fix in the fsdp profile
+    zmq = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # zmq SUB fix in the fsdp profile
     compile(zmq, "nccl_checkpoint_engine.py", "exec")
     assert zmq.count("_yeto_sub_key") == 2 and zmq.count("time.sleep(1.0)  # yeto") == 1
     text = (tmp_path / patch_verl.CALLS_TARGET).read_text()
@@ -469,7 +469,7 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
 
 
 def test_fully_async_hydra_entry_uses_an_absolute_config_dir(tmp_path, monkeypatch):
-    """S19 GPU run s19-verl64b-async1-20261009a: verl's relative config_path failed
+    """In a GPU run verl's relative config_path failed
     when fully_async_main was imported (config/ has no __init__.py)."""
     import sys
     import types
@@ -534,7 +534,7 @@ def _composed(overrides):
 
 
 def test_fully_async_overrides_pass_every_fork_startup_assert():
-    """s19-verl64b-async3-20261009a: FullyAsyncRollouter asserted
+    """In a GPU run FullyAsyncRollouter asserted
     train_batch_size == 0.  All startup asserts are checked together now."""
     import yeto.rl.adapters.verl.config as vconf
 
@@ -567,10 +567,10 @@ def test_startup_problems_flag_each_broken_key():
         assert far.fully_async_startup_problems(_composed([*good, bad])) == [name], bad
 
 
-_FORK = Path(os.path.expanduser("~/work/verl-fork-acad9875/verl/experimental/fully_async_policy"))
+_FORK = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent")) / "verl/experimental/fully_async_policy"
 
 
-@pytest.mark.skipif(not _FORK.is_dir(), reason="local verl fork checkout not present")
+@pytest.mark.skipif(not _FORK.is_dir(), reason="verl fork checkout not present (set YETO_VERL_SRC)")
 def test_mirror_covers_every_config_assert_in_the_fork_startup_path():
     lines = []
     for name in ("fully_async_rollouter.py", "fully_async_trainer.py"):

@@ -12,13 +12,13 @@ if os.environ.get("YETO_DSV4_EXPERT_CLONE") == "1":
     install()
 
 if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA_PORTS") == "1":
-    # Clone-only expert LoRA on the ports Miles layout (P0 1.7b.2b).
+    # Clone-only expert LoRA on the ports Miles layout.
     from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install_clone_only
 
     install_clone_only()
 
 if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
-    # Expert-full on the ports Miles layout (P0 1.7b.2).
+    # Expert-full on the ports Miles layout.
     from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install
 
     install()

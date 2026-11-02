@@ -1,4 +1,4 @@
-"""rl-infra-spec 6.6 CPU replay: four scenarios x groups (no GPU)."""
+"""CPU replay: four scenarios x groups (no GPU)."""
 import json
 
 import pytest

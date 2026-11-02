@@ -1,4 +1,4 @@
-"""Cloud layer: the eval island on Modal (rl-eval-difficulty-buckets 5.7/5.8, D11.6/D11.7).
+"""Cloud layer: the eval island on Modal (rl-eval-difficulty-buckets).
 
 First version: Modal only. The authoritative eval store is a Modal Volume
 (policy files + manifests, the queue, the unit logs). This module holds
@@ -10,7 +10,7 @@ First version: Modal only. The authoritative eval store is a Modal Volume
 * :class:`EvalIslandLauncher` -- the scheduler side: start one eval-island GPU
   function, restart it on Modal after a preemption (the unit log resumes where
   it stopped), one ``rl_eval_island`` event per start. One island at a time
-  (D11.6: a second island only with user approval; not implemented);
+  (a second island only with user approval; not implemented);
 * :func:`island_main` -- what runs inside the eval-island container: mount the
   Volume, build the plan, ``EvalIsland(...).run()``. The loader / attempt
   bindings are dotted factories (``YETO_EVAL_LOADER`` / ``YETO_EVAL_ATTEMPT``).
@@ -289,7 +289,7 @@ class EvalFunctionSpec:
         from yeto.rl.eval.island import EVAL_ISLAND_ROLE
 
         # No PYTHONPATH here: Modal's own runtime path lives in PYTHONPATH and an
-        # override breaks the container entrypoint (S17 N11 first try: no grpclib).
+        # override breaks the container entrypoint (seen as "No module named 'grpclib'").
         return {"HOME": "/root", "PYTHONUNBUFFERED": "1",
                 "YETO_HARNESS_TB2_TASKS_DIR": TB2_MOUNT, STORE_ENV: EVAL_STORE_MOUNT,
                 MOUNTED_ENV: "1", VOLUME_ENV: self.volume, **island_role_env(EVAL_ISLAND_ROLE),

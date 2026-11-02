@@ -1,4 +1,4 @@
-"""P0-S: prompts of Miles fully_async rollouts are accounted for and, at a
+"""Prompts of Miles fully_async rollouts are accounted for and, at a
 cut, returned to the data buffer so the resumed run generates them again."""
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ def test_round_counts_report_draws_and_miles_stale_drops(executor):
 
 
 def test_stale_drops_follow_miles_per_step_reset(executor):
-    """Miles' get_metrics zeroes the counter after each round's hook (G2 ps1:
-    a running-total delta turned 9, 0, 10, 0 into 9, -9, 10, -10)."""
+    """Miles' get_metrics zeroes the counter after each round's hook (a
+    running-total delta turned 9, 0, 10, 0 into 9, -9, 10, -10)."""
     ledger = prompts.current()
     output = SimpleNamespace(_metric_stale_groups=0)
     executor.generate_rollout._output = output
@@ -102,7 +102,7 @@ def test_cut_records_every_untrained_prompt_and_keeps_the_worker_running(executo
         _task_of(worker), loop).result()
     try:
         exported = export_in_flight(executor)
-        # E1: the worker keeps generating ahead across the cut
+        # the worker keeps generating ahead across the cut
         assert executor.generate_rollout._worker is not None
         assert not executor.generate_rollout._worker.done()
     finally:
@@ -217,7 +217,7 @@ class _FullyAsyncFn:
 
 
 def test_cut_cancels_the_generation_the_stopped_worker_submitted(executor):
-    """S24 T-TB2 j: stopping only the worker left its group tasks generating while the
+    """Stopping only the worker left its group tasks generating while the
     next worker submitted a full budget again (in flight 29 -> 146 over four cuts)."""
     rollout_fn = _FullyAsyncFn()
     other = _FullyAsyncFn()  # another rollout function's generation is not touched

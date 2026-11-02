@@ -1,4 +1,4 @@
-"""Miles island-entry flag spellings the launcher emits (yeto-framework-decoupling 5.5, audit P2).
+"""Miles island-entry flag spellings the launcher emits (yeto-framework-decoupling 5.5).
 
 The launcher computes the island layout neutrally (``yeto.rl.engine.multinode``:
 nodes x GPUs, role -> logical slot map); how that layout is spelled on the

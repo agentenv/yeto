@@ -31,8 +31,8 @@ def test_bridges_docstring_has_the_sync_mode_table():
 def test_no_second_bridge_or_critic_sync_in_production_code():
     """2.1/2.7: the dead elastic bridge, its factory and the in-process
     two-role critic average are gone; PPO-family critic sync is
-    DualStrictAvgSync only.  (StrictRlBridge stays until the legacy engine is
-    deleted, task 1.10; StrictAvgSync delegates to it.)"""
+    DualStrictAvgSync only.  (StrictRlBridge stays: StrictAvgSync delegates
+    to it.)"""
     hits = []
     for path in sorted((REPO / "yeto").rglob("*.py")):
         text = path.read_text(encoding="utf-8")

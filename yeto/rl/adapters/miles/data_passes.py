@@ -1,4 +1,4 @@
-"""Miles: every pass over an island's rows after the first is reshuffled (S27 task assignment).
+"""Miles: every pass over an island's rows after the first is reshuffled (task assignment).
 
 The rule is ``data_split.pass_order``: pass 0 is the island's rows in data
 order, pass ``p >= 1`` a shuffle seeded by the run seed and ``p``. Miles'

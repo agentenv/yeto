@@ -10,9 +10,9 @@ IR-2/IR-4 wiring (``GatewayConfig.harness_board``, a ``tool_wait.HarnessBoard``
 or its actor handle): ``allow_new_session(member)`` is asked before every
 ``create_session`` (drain closes admission -> ``AdmissionClosed``, the caller
 re-targets or waits for undrain; the trajectory is *not* invalidated),
-``enter_session``/``exit_session`` bracket each backend session, and the D5
+``enter_session``/``exit_session`` bracket each backend session, and the session
 counters are mirrored with ``record_session_mismatch`` /
-``record_chain_break(reason)`` so the 1.7 load sample sees them.
+``record_chain_break(reason)`` so the load sample sees them.
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ class GatewayConfig:
     @classmethod
     def from_codex_profile(cls, profile_name: str, signed_sampling: dict[str, Any], **overrides: Any) -> "GatewayConfig":
         """Build a config whose ``model`` / ``allowed_append_roles`` / ``keeps_history_reasoning``
-        come from the signed codex backend profile (rl-fn-codex-rollout D2, upstream 5.1).
+        come from the signed codex backend profile (rl-fn-codex-rollout).
 
         ``keeps_history_reasoning`` cannot be overridden: it is the profile's
         declaration about its fixed TITO template, not a runtime knob.

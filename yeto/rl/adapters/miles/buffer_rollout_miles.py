@@ -1,4 +1,4 @@
-"""Miles rollout functions for the durable sample buffer (L4.5).
+"""Miles rollout functions for the durable sample buffer.
 
 Loaded by Miles in the rollout executor process (``--rollout-function-path``, set
 by :func:`.buffer_rollout.rollout_argv`); the contract and the logic live in
@@ -86,7 +86,7 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
                                           incarnation=incarnation, resume=self.resumable,
                                           reclaimed=lambda: reclaim_requested(os.environ))
         self._shuffle = bool(getattr(input.args, "rollout_shuffle", False))  # the seek re-shuffles
-        # several sampler islands draw disjoint slots of the data (S26 E9.3); before any seek
+        # several sampler islands draw disjoint slots of the data; before any seek
         apply_data_slot(self.data_source, DataSlot.parse(os.environ.get(DATA_SLOT_ENV)),
                         shuffle=self._shuffle)
 
@@ -131,7 +131,7 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
             positions.append(position if isinstance(position, int) and not isinstance(position, bool)
                              else None)
         written = self._rounds.write_round(rollout_id, finished, cursor, positions)
-        # S27 P4: the rows of the groups now in the buffer are done for the dispenser
+        # the rows of the groups now in the buffer are done for the dispenser
         dispense_written(rollout_id, [p for p in positions[:written] if p is not None])
 
 
@@ -150,7 +150,7 @@ class _BufferRound:
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
-        # S27 G-EA: with YETO_SAMPLE_RELAY_ADDR the spot samplers' groups arrive through
+        # with YETO_SAMPLE_RELAY_ADDR the spot samplers' groups arrive through
         # the head's relay; the pump appends them to this (local) buffer. Unset: no pump.
         from yeto.rl.spot_rollout.relay_buffer import maybe_start_relay_pump
 
@@ -183,7 +183,7 @@ class _BufferRound:
                               **({"buffer_stale_positions": row_runs(stale)}
                                  if (stale := getattr(report, "stale_positions", None)) else {}))
         if getattr(self, "relay_pump", None) is not None:
-            # S27 G-EM: the round's evidence names external merged cuts and bounds
+            # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on
             if report.gate_version is None:
                 raise SampleBufferRolloutError(f"rollout {input.rollout_id}: a relay trainer "
@@ -225,7 +225,7 @@ class BufferReaderRolloutFn(BaseRolloutFn):
 
 
 class ConvertibleRolloutFn(BufferWriterRolloutFn):
-    """Convertible node (rl-trainer-start-stop L7.5): in ``sampler`` mode Miles
+    """Convertible node: in ``sampler`` mode Miles
     generates the round and every group goes to this node's shard of the index;
     in ``trainer`` mode the round is read from the buffer like
     :class:`BufferReaderRolloutFn`. The node switches the mode in this process

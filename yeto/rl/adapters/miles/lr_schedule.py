@@ -25,7 +25,7 @@ def lr_schedule_argv(schedule: "LrSchedule | None") -> tuple[str, ...]:
 
 
 def miles_lr_schedule_sha256(miles_args) -> str | None:
-    """S17 N17: engine-neutral hash of the LR schedule a Miles namespace applies
+    """Engine-neutral hash of the LR schedule a Miles namespace applies
     (``--lr``, ``--lr-decay-style``, ``--lr-decay-iters``, ``--lr-warmup-iters``,
     ``--min-lr``).  It goes into the ExecutionProfile contract hash and is bound
     into the identity the syncer compares, so islands with different schedules

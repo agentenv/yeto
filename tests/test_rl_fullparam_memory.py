@@ -1,4 +1,4 @@
-"""S25 N7.1: full-parameter memory estimate and the refusal before launch."""
+"""Full-parameter memory estimate and the refusal before launch."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from yeto.rl.fullparam.memory import (
     sweep,
 )
 
-# GLM5.3-Flash text model counted on the meta device (transformers 5.16.1, 2026-10-16).
+# GLM5.3-Flash text model counted on the meta device (transformers 5.16.1).
 GLM = ModelShape(params=313_326_799_870, largest_layer_params=7_412_629_750, num_layers=45, hidden_size=4096,
                  vocab_size=154_880, residual_streams=4, head_counts=(32, 64), dsa_layers=11, index_heads=32,
                  index_kpool=4)
@@ -118,7 +118,7 @@ def test_shape_from_hf_config_counts_a_tiny_model():
     assert shape.head_counts == (2, 4) and shape.dsa_layers == 0 and GIB == 1024**3
 
 
-# --- N7.1b Megatron variant -------------------------------------------------
+# --- Megatron variant -------------------------------------------------
 
 # Synthetic MoE: 1000 params, 600 of them in 8 routed experts, 4 layers.
 MOE = ModelShape(params=1000, largest_layer_params=250, num_layers=4, hidden_size=8, vocab_size=16,
@@ -154,8 +154,8 @@ def test_megatron_uneven_pipeline_uses_the_largest_stage():
 
 def test_megatron_output_is_labelled_derived():
     summary = estimate(MOE, MEG).summary()
-    assert summary["basis"] == "推算" and summary["framework"] == "megatron"
-    assert estimate(GLM, PPU).summary()["basis"] == "推算"
+    assert summary["basis"] == "estimated" and summary["framework"] == "megatron"
+    assert estimate(GLM, PPU).summary()["basis"] == "estimated"
 
 
 @pytest.mark.parametrize("change, match", [
@@ -173,7 +173,7 @@ def test_malformed_megatron_plans_are_refused(change, match):
 
 
 def test_megatron_optimizer_offload_moves_state_and_master_to_the_host():
-    # N7.1c: fraction F of (8 B Adam + 4 B master) leaves the card; host = per card x cards_per_node.
+    # Fraction F of (8 B Adam + 4 B master) leaves the card; host = per card x cards_per_node.
     dense, experts = 400 / 2 / 2, 600 / 4 / 2
     owned = dense / 4 + experts / 2
     full = estimate(MOE, replace(MEG, optimizer_offload_fraction=1.0))

@@ -1,9 +1,9 @@
-"""Convertible nodes across a process boundary (rl-trainer-start-stop L7.5).
+"""Convertible nodes across a process boundary.
 
 A *convertible pool* is a launch whose islands are all declared convertible
 (``--rl-node-class islandM=convertible``). Every island boots as a rollout node
 of the run: it generates rounds into the durable sample buffer. The head's
-trainer loop (S1) decides when a wave of samples is worth training; then the
+trainer loop decides when a wave of samples is worth training; then the
 best node by the selection rule (:func:`.convertible.select_group`) converts
 to trainer in place, trains from the buffer, and converts back to rollout with
 the trained weights loaded in its engines. No island is started or stopped for
@@ -19,13 +19,13 @@ Channels, all in the run's checkpoint store (the store every island mounts;
 * ``events.jsonl`` (node -> head): ``rl_trainer_lifecycle`` events of each
   trainer incarnation, the ``node_conversion`` receipts, and a
   ``trainer_start_summary`` per incarnation (``total_s`` = command seen ->
-  trainer ready; the S1 scheduler reads it as ``T_s``);
+  trainer ready; the trainer scheduler reads it as ``T_s``);
 * ``status.json`` (node -> head, rewritten every few seconds): role, in-flight
   requests, measured rollout capacity, served version, generation done.
 
 One file for the whole pool, ``convertible/backlog.json`` (head -> nodes,
 rewritten at every backlog count): the groups the trainer can train that it has
-not read yet (the count S1 starts a trainer on). A node does not start a rollout
+not read yet (the count the trainer scheduler starts a trainer on). A node does not start a rollout
 round while this backlog is at its cap (:class:`PoolBacklogGate`), so the nodes
 do not run through their rounds ahead of the trainer: while one node trains, the
 others still have rounds left to generate.
@@ -183,8 +183,8 @@ WRITE_RETRY_DELAY_S = 1.0
 def write_retrying(files: StoreFiles, rel: str, data: bytes, *,
                    wait: Callable[[float], Any] = threading.Event().wait) -> None:
     """``files.write`` retried on an OS error: a Modal Volume mount refused the
-    rename of the temporary file now and then (``PermissionError``, GPU run
-    s24-conv-20261015b) while the container reloaded the volume."""
+    rename of the temporary file now and then (``PermissionError``, seen on
+    a GPU run) while the container reloaded the volume."""
     for attempt in range(WRITE_ATTEMPTS):
         try:
             files.write(rel, data)
@@ -209,7 +209,7 @@ class PoolBacklogGate:
     is below ``max_groups``. The backlog is the head's last count plus the groups
     the nodes appended to their shards since that count: the head counts only
     between trainer rounds, and a count from before the newest rounds let a fast
-    node run past the cap (GPU run s24-final-conv-20261019d). Groups the trainer
+    node run past the cap (seen on a GPU run). Groups the trainer
     read since the count still count (the cap errs on the side of waiting). No
     record (no count yet) or one older than ``stale_s`` (the head is gone) does
     not hold the node. ``last`` is the record read by the last call; ``backlog``
@@ -637,7 +637,7 @@ class ConvertibleIslands:
 
 class ConvertibleGate:
     """A :class:`~.trainer_lifecycle.TrainerScheduler` decorator: a ``Start`` of
-    the inner scheduler (S1) holds when no convertible node may convert (none
+    the inner scheduler holds when no convertible node may convert (none
     eligible, or it would be the last rollout node). Otherwise the selection is
     kept for the launch that follows, so the node the journal names is the node
     that converts."""

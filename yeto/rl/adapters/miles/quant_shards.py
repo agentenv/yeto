@@ -1,10 +1,10 @@
-"""Megatron (Miles) expert weights -> re-quantization source slices (S25 N8.2 / N8.5b adapter).
+"""Megatron (Miles) expert weights -> re-quantization source slices.
 
 Megatron holds the routed experts of a rank as one weight per local expert:
 
 * grouped GEMM (TE ``TEGroupedMLP``): ``decoder.layers.<l>.mlp.experts.linear_fc1.weight<e>``
   ``[2I, H]`` and ``...linear_fc2.weight<e>`` ``[H, I]``;
-* sequential MLP (the ``--transformer-impl local`` fallback, N7.5):
+* sequential MLP (the ``--transformer-impl local`` fallback):
   ``decoder.layers.<l>.mlp.experts.local_experts.<e>.linear_fc{1,2}.weight``.
 
 ``<l>`` is the layer index inside the pipeline stage and ``<e>`` the local
@@ -20,7 +20,7 @@ renames them to the checkpoint names (``model.language_model.layers.*``; module 
 :mod:`yeto.rl.quant.shards`, "Ownership").
 
 Both functions hand host (CPU) copies to the quantizer: the CPU path is the one
-checked byte for byte against the single-process converter (GPU T-G3, 2026-10-20);
+checked byte for byte against the single-process converter on GPU;
 a GPU expert slice with W4A8 AWQ failed there (factors on the host), and GPU
 quantization bytes were not compared for W4A8.
 
@@ -28,7 +28,7 @@ Limits (explicit errors): expert tensor parallelism must be 1 (a column split of
 ``linear_fc2`` would cut the W4A8 per-row scale). Status: CPU tests with
 synthetic Megatron names; on 2xH100 inside a real Miles/Megatron glm5_next
 (TP2, EP2; TE grouped and local sequential experts) the merged W4A8 (R2 AWQ)
-and MXFP4 outputs equal the single-process output byte for byte (T-G3).
+and MXFP4 outputs equal the single-process output byte for byte.
 """
 
 from __future__ import annotations

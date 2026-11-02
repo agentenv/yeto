@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yeto 看板</title>
+<title>yeto dashboard</title>
 <style>
 :root{
   --bg:#F3EEE7;--panel:#FBF8F3;--ink:#2A221C;--ink2:#7A6B5E;--line:#E4DACD;--accent:#C8641E;
@@ -89,65 +89,65 @@ h3{font-size:13px;margin:14px 0 6px}
 </head>
 <body>
 <div class="app">
-<nav aria-label="页面导航">
-  <div class="brand">yeto 看板</div>
-  <a href="#overview">概览</a><a href="#islandWall" id="navWall">岛</a><a href="#rounds">每轮</a><a href="#util">生成利用率</a><a href="#nodes">节点</a><a href="#cost">成本</a>
-  <a href="#events">事件</a><a href="#cmds">常用命令</a><a href="#unused">未使用面板</a>
+<nav aria-label="Page navigation">
+  <div class="brand">yeto dashboard</div>
+  <a href="#overview">Overview</a><a href="#islandWall" id="navWall">Islands</a><a href="#rounds">Per round</a><a href="#util">Generation utilization</a><a href="#nodes">Nodes</a><a href="#cost">Cost</a>
+  <a href="#events">Events</a><a href="#cmds">Commands</a><a href="#unused">Unused panels</a>
   <div class="sub" id="navSub"></div>
 </nav>
 <main>
 <header id="overview">
-  <div><h1 id="title">yeto 看板</h1><div class="note" id="sub"></div></div>
-  <div><button class="btn" id="layoutBtn" title="按 run_kind 自动选择；点按可临时看另一种布局">布局：自动</button>
-  <button class="btn" id="themeBtn">主题：跟随系统</button></div>
+  <div><h1 id="title">yeto dashboard</h1><div class="note" id="sub"></div></div>
+  <div><button class="btn" id="layoutBtn" title="Chosen from run_kind; click to view the other layout temporarily">Layout: auto</button>
+  <button class="btn" id="themeBtn">Theme: system</button></div>
 </header>
-<section class="kpis" id="kpis" aria-label="关键数字"></section>
+<section class="kpis" id="kpis" aria-label="Key figures"></section>
 <section class="panel alerts" id="alertBox" hidden></section>
 
-<section class="panel" id="islandWall" hidden><h2>岛卡片墙 <span class="note">（点选一个岛，下方各图切到该岛）</span></h2><div class="wall" id="wall"></div></section>
-<section class="panel" id="spotBox" hidden><h2>回收事件与重开建议</h2><div id="spot"></div></section>
-<section class="panel" id="syncerBox" hidden><h2>Syncer 合并（按全局轮）</h2><div id="syncer"></div></section>
+<section class="panel" id="islandWall" hidden><h2>Island wall <span class="note">(pick an island to switch the charts below to it)</span></h2><div class="wall" id="wall"></div></section>
+<section class="panel" id="spotBox" hidden><h2>Reclaim events and relaunch advice</h2><div id="spot"></div></section>
+<section class="panel" id="syncerBox" hidden><h2>Syncer merges (by global round)</h2><div id="syncer"></div></section>
 
-<section class="panel" id="rounds" tabindex="0" aria-label="每轮图表，左右键切换轮次">
-  <h2>每轮 <span class="note" id="roundsIsl"></span> <span class="note">（悬停、点按或左右键逐轮；三图联动）</span></h2>
+<section class="panel" id="rounds" tabindex="0" aria-label="Per-round charts; left/right arrows switch rounds">
+  <h2>Per round <span class="note" id="roundsIsl"></span> <span class="note">(hover, click or use left/right arrows to step rounds; the three charts move together)</span></h2>
   <div class="grid2">
     <div><div class="tabs" id="tabs"></div><div class="legend" id="legMetric"></div>
-      <div id="cMetric"></div><div class="note">每轮题目不同，看不出趋势前别解读成“下滑”。</div></div>
+      <div id="cMetric"></div><div class="note">Each round has different tasks; do not read a dip as a decline before a trend shows.</div></div>
     <div><div class="legend" id="legDur"></div><div id="cDur"></div></div>
   </div>
-  <h2 style="margin-top:14px">阶段时间线（墙钟）</h2>
+  <h2 style="margin-top:14px">Phase timeline (wall clock)</h2>
   <div class="legend" id="legTl"></div><div id="cTl"></div>
   <div class="tip" id="tip"></div>
 </section>
 
-<section class="panel" id="util" aria-label="生成阶段利用率">
-  <h2>生成阶段利用率 <span class="note" id="utilIsl"></span></h2>
-  <div id="utilEmpty" class="note" hidden>无数据（磁带没有 rl_rollout_cutoff / rl_trajectory_reward 计时字段 / rl_load_sample）</div>
+<section class="panel" id="util" aria-label="Generation-phase utilization">
+  <h2>Generation-phase utilization <span class="note" id="utilIsl"></span></h2>
+  <div id="utilEmpty" class="note" hidden>no data (the tapes have no rl_rollout_cutoff / rl_trajectory_reward timing fields / rl_load_sample)</div>
   <div id="utilBody">
     <div class="tabs" id="utilCtl"></div>
-    <h3>截止丢弃 / 续跑（每轮）</h3><div class="ucols" id="uCut"></div>
-    <h3>生成段内轨迹完成曲线 <span class="note">（横轴：生成段开始后秒数；纵轴：已完成轨迹数；虚线：截止 = 生成段结束）</span></h3>
+    <h3>Cutoff drop / carry-over (per round)</h3><div class="ucols" id="uCut"></div>
+    <h3>Trajectory completion curve <span class="note">(x: seconds since the generation span started; y: completed trajectories; dashed line: cutoff = end of the generation span)</span></h3>
     <div class="legend" id="legDone"></div><div class="ucols" id="uDone"></div>
-    <h3>四段耗时（各轨迹合计） <span class="note">（模型生成 / 工具执行 / 判分 / 沙箱启动；右侧为工具执行占比）</span></h3>
+    <h3>Four-part timing (summed over trajectories) <span class="note">(generation / tool execution / judging / sandbox startup; tool-execution share on the right)</span></h3>
     <div class="legend" id="legPh"></div><div class="ucols" id="uPh"></div>
-    <h3>本轮每条轨迹 <span class="note" id="uTrNote"></span></h3><div class="ucols" id="uTr"></div>
-    <h3>KV 占用与排队 <span class="note">（实线：KV 占用 %，左轴；点线：排队请求数，右轴；底色：生成段）</span></h3>
+    <h3>Trajectories of this round <span class="note" id="uTrNote"></span></h3><div class="ucols" id="uTr"></div>
+    <h3>KV usage and queueing <span class="note">(solid: KV usage %, left axis; dotted: queued requests, right axis; shading: generation span)</span></h3>
     <div class="legend" id="legLoad"></div><div class="ucols" id="uLoad"></div>
-    <div id="uCarryBox" hidden><h3>续跑轨迹跨轮（阶段 2）</h3><div class="ucols" id="uCarry"></div></div>
+    <div id="uCarryBox" hidden><h3>Carried-over trajectories across rounds</h3><div class="ucols" id="uCarry"></div></div>
   </div>
 </section>
 
 <div class="grid2">
-<section class="panel" id="nodes"><h2>节点 GPU 显存（每节点各卡均值，GiB）</h2>
+<section class="panel" id="nodes"><h2>Node GPU memory (mean over each node's GPUs, GiB)</h2>
   <div class="legend" id="legNodes"></div><div id="cNodes"></div><div class="note" id="nodesNote"></div></section>
-<section class="panel"><h2>岛健康</h2><div id="islands"></div></section>
+<section class="panel"><h2>Island health</h2><div id="islands"></div></section>
 </div>
 <div class="grid2">
-<section class="panel" id="cost"><h2>成本（估算，非账单）</h2><div id="costBox"></div></section>
-<section class="panel" id="events"><h2>事件流</h2><div class="ev" id="evs"></div></section>
+<section class="panel" id="cost"><h2>Cost (estimate, not billing data)</h2><div id="costBox"></div></section>
+<section class="panel" id="events"><h2>Event stream</h2><div class="ev" id="evs"></div></section>
 </div>
-<section class="panel" id="cmds"><h2>常用命令</h2><div id="cmdBox"></div></section>
-<section class="panel" id="unused"><h2>本次运行未使用的面板</h2><div id="foldBox"></div></section>
+<section class="panel" id="cmds"><h2>Commands</h2><div id="cmdBox"></div></section>
+<section class="panel" id="unused"><h2>Panels not used in this run</h2><div id="foldBox"></div></section>
 </main>
 </div>
 <!--YETO-DATA-->

@@ -239,7 +239,7 @@ def test_governor_fallback_lowers_the_rollout_limit_through_the_sink(sink, tmp_p
 def test_miles_stage_two_support_and_single_turn_check():
     from yeto.rl.adapters.miles.policy_age import SUPPORT, check_task, policy_age_argv
 
-    # agentic-rollout-utilization 5 (stage 3); L6.9 raised the cap to 4 (A_hard >= 2)
+    # agentic-rollout-utilization 5 (stage 3); later raised the cap to 4 (A_hard >= 2)
     assert (SUPPORT.stage, SUPPORT.max_policy_age) == (3, 4)
     SUPPORT.check(1)
     SUPPORT.check(2)
@@ -307,7 +307,7 @@ def test_driver_reports_carry_over_and_governs_on_the_rollout_estimate(tmp_path)
 
 
 def test_an_overlapped_rollout_labels_its_carry_over_event(tmp_path):
-    """P0-S-fix B: the fully_async round's own mode replaces the profile label."""
+    """The fully_async round's own mode replaces the profile label."""
     import dataclasses
 
     from tests.test_rl_policy_age import _driver
@@ -351,7 +351,7 @@ def test_trajectory_records_carry_start_round_and_segments(sink):
 
 
 def test_deferred_cross_version_estimate_arrives_as_a_late_record(sink, tmp_path):
-    """E1 (fully_async): the estimate runs in the background and reaches the sink as
+    """fully_async: the estimate runs in the background and reaches the sink as
     a late record of its rollout id; the round's fields only say it was deferred."""
     import glob
     import json
@@ -381,7 +381,7 @@ def test_deferred_cross_version_estimate_arrives_as_a_late_record(sink, tmp_path
 
 
 def test_driver_governs_on_a_late_rollout_estimate(tmp_path):
-    """E1: a fully_async round's estimate arrives after its train step; the policy-age
+    """A fully_async round's estimate arrives after its train step; the policy-age
     governor still sees it."""
     from tests.test_rl_policy_age import _driver
 

@@ -1,4 +1,4 @@
-"""yeto's own Codex model provider (S26 R3).
+"""yeto's own Codex model provider.
 
 The gate relay holds a Codex request while the turn gate is closed and
 writes ``: held`` SSE comments meanwhile.  Codex does not count comments as
@@ -14,8 +14,7 @@ an idle timeout longer than the longest hold, and selects it with
 (``codex-rs/model-provider-info/src/lib.rs``: ``base_url``, ``env_key``,
 ``wire_api``, ``stream_idle_timeout_ms``; ``"chat"`` is rejected there).
 
-The provider also sets its retry counts explicitly (S27 G-EF, G-EB section
-7.2): ``request_max_retries`` (a failed HTTP request, e.g. a 502 or 503 from
+The provider also sets its retry counts explicitly: ``request_max_retries`` (a failed HTTP request, e.g. a 502 or 503 from
 the session server) and ``stream_max_retries`` (a stream cut before it
 completed).  Codex's own defaults are small (4 and 5 by its configuration
 documentation; not read from the binary), and a model call that fails after them ends the Codex process, so the whole

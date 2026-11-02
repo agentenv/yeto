@@ -1,4 +1,4 @@
-"""Node inventory for machines yeto reaches by SSH (rl-ssh-node-pool D1).
+"""Node inventory for machines yeto reaches by SSH.
 
 One file describes every node the launcher may use, on-premises or rented:
 the SSH target, an optional jump host, the device family, the CPU
@@ -7,7 +7,7 @@ memory (the trainer offload plan reads it), the fabric, shared mounts, the
 container image and an optional declared price. The core stays neutral:
 provider differences live in the file.
 
-``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image (S25 N1.6): a node
+``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image: a node
 without ``image`` takes ``images[cpu_arch]`` from the top of the file, and a
 node whose image is a yeto catalog image of another architecture or device
 family is refused (``yeto.launch.engine_images``). The trainer preflight also
@@ -16,7 +16,7 @@ compares ``uname -m`` with ``cpu_arch``.
 Example::
 
     images:
-      aarch64: REGISTRY/yeto-npu-sampler:TAG
+      aarch64: REGISTRY/IMAGE:TAG
       x86_64: REGISTRY/yeto-ppu-train:TAG
     nodes:
       - name: ascend00
@@ -108,7 +108,7 @@ class Node:
         """``ssh`` options that reach this node, ``ProxyJump`` included.
 
         The executor passes these on the command line; it never writes to the
-        user's SSH configuration (D4).
+        user's SSH configuration.
         """
         return ["-o", f"ProxyJump={self.proxy_jump}"] if self.proxy_jump else []
 
@@ -196,7 +196,7 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
     for key in _REQUIRED:
         if raw.get(key) is None:
             raise InventoryError(f"node {name}: {key} is required; the inventory states no "
-                                 f"default (rl-ssh-node-pool D2)")
+                                 f"default")
     family = _require_text(raw["device_family"], name, "device_family")
     if family not in DEVICE_FAMILIES:
         raise InventoryError(f"node {name}: device_family {family!r} is unknown "

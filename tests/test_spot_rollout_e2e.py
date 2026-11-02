@@ -1,4 +1,4 @@
-"""S27 G-EA end to end on CPU: real syncer, one learner, a stand-in spot sampler.
+"""End to end on CPU: real syncer, one learner, a stand-in spot sampler.
 
 The spot sampler is the real entry (``python -m yeto.rl.spot_rollout.sampler``)
 with the fake engine and an identity Megatron -> HF converter. The learner
@@ -8,7 +8,7 @@ trainer side is the relay pump into a local sample buffer, read with the
 trainer's ``BatchReader`` (policy age gate). The sampler is killed with
 SIGKILL (a reclaim without notice) and a new incarnation starts.
 
-S27 G-EM: every sample the pump delivers names the merged cut that generated
+Every sample the pump delivers names the merged cut that generated
 it (the digest the sampler loaded for that version; the base checkpoint digest
 for version 0), and the second sampler leaves by itself on the syncer's
 end-of-run notice (its ``syncer_lost_s`` is far longer than the wait).

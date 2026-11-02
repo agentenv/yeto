@@ -169,7 +169,7 @@ def run_meta_near(path: str | os.PathLike, max_up: int = 4) -> dict | None:
 
 
 def infer_run_name(sources: list[str], island_names: list[str] | None = None) -> str | None:
-    """Run name when ``--run`` was not given (tasks 8.3): the run directory's
+    """Run name when ``--run`` was not given: the run directory's
     meta.json, else a ``yeto-<run>`` Modal tape dir, else an island name /
     learner tape file ``<run>-l<N>[-<cloud>]``. None when nothing matches."""
     for s in sources:
@@ -200,10 +200,10 @@ def node_hint(path: Path) -> str | None:
     return None
 
 
-# -- our own stop of a run (tasks 9.9) ------------------------------------------------
+# -- our own stop of a run ------------------------------------------------
 # Authority, in order: (1) ``STOP_ISSUED_utc.txt`` lines "<utc> <cause>" written by the
-# run's stop scripts right BEFORE they stop the cloud app (s1-runs/s17-gate-stop.sh and
-# the early/watchdog stoppers); (2) for runs older than that file, the legacy marker files
+# run's stop scripts right BEFORE they stop the cloud app (the gate,
+# early and watchdog stoppers); (2) for runs older than that file, the legacy marker files
 # GATE*_STOPPED / EARLY_STOPPED_TIME / WATCHDOG_FIRED, whose content (a utc stamp) or
 # mtime is when the stop command RETURNED -- an upper bound on the issue time, so an
 # island failure in the few seconds before it is conservatively NOT counted as ours.

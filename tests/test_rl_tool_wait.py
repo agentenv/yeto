@@ -1,4 +1,4 @@
-"""rl-infra-spec 1.7 / 3.3 X5: instantaneous tool-wait trajectory count (CPU)."""
+"""Instantaneous tool-wait trajectory count (CPU)."""
 
 from __future__ import annotations
 

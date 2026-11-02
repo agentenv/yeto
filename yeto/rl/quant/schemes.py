@@ -1,4 +1,4 @@
-"""Names of the weight schemes a policy release can carry (S25 N8.3).
+"""Names of the weight schemes a policy release can carry.
 
 This module is the one place for the scheme tags. The writer side
 (:mod:`.requant`, :mod:`.release`) and the reader side (the sampler's
@@ -7,17 +7,17 @@ sampler process can use it without the quantization code.
 
 * :data:`BF16`: trained weights as the trainer releases them.
 * :data:`W4A8_INT4_CHANNEL`: routed experts int4 per output channel, BF16
-  scales, 8-bit dynamic activations (the original W4A8 artefact, N8.1).
+  scales, 8-bit dynamic activations (the original W4A8 artefact).
 * :data:`MXFP4_G32_RTN`: routed experts MXFP4, one E8M0 scale per 32 inputs,
-  round to nearest without AWQ (N8.5).
+  round to nearest without AWQ.
 * :data:`FP8_FFN_CHANNEL`: FP8 E4M3 per output channel with dynamic per-token
   FP8 activations (W8A8) on the in-scope linears only (FFN of a dense model,
-  routed experts of a MoE model; S26 E6 tier 2, :mod:`.scope`).
+  routed experts of a MoE model; :mod:`.scope`).
 
 Release directories are named by scheme (:func:`release_dir_for`):
 ``policy-releases`` for BF16, ``policy-releases-<scheme>`` for a re-quantized
 scheme. The W4A8 scheme keeps its older name ``policy-releases-w4a8``, so
-stores written before N8.3 stay readable.
+older stores stay readable.
 """
 
 from __future__ import annotations

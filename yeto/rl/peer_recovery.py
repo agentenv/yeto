@@ -1,4 +1,4 @@
-"""Island side of peer recovery (S27 E-3).
+"""Island side of peer recovery.
 
 An island that lost its trainer state (process or node gone) starts a fresh
 trainer and connects with ``SyncerClient(..., recover=True)``. The syncer
@@ -88,9 +88,9 @@ ARRAY_STATE = "state.npz"
 DEFAULT_TTL_S = 3600.0
 DEFAULT_SWEEP_EVERY_S = 300.0
 DEFAULT_HASH_WORKERS = 8  # one Megatron rank shard per thread on an 8-GPU trainer
-# S27 G-EL: a manifest that is not visible yet is read again after store reloads
+# A manifest that is not visible yet is read again after store reloads
 # with backoff (2, 4, 8, 16, 30, 30 ... s) for up to this long in total; 0: refuse
-# at once (the behavior before). Hardening only: in s27-elastic-a the manifest was
+# at once (the behavior before). Hardening only: in one elastic run the manifest was
 # missing because the snapshot was on the donor's local disk (a launch bug).
 DEFAULT_MANIFEST_WAIT_S = 120.0
 MANIFEST_RETRY_FIRST_S = 2.0
@@ -144,7 +144,7 @@ class FileRecoverableIsland(Protocol):
         ``versions``). Return the versions to report as held: ``versions``, or
         None to have the syncer resend every fragment."""
 
-    # Optional (S27 G-EL), all three or none: a donor that takes its state at the
+    # Optional, all three or none: a donor that takes its state at the
     # safe point and writes the files while it trains on (DonorService ``capture``).
     #
     # start_recovery_snapshot(directory) -> handle: copy the state (host memory)
@@ -636,13 +636,13 @@ class DonorService:
     the next one); the training loop never sees that error. Every ``sweep_every_s``
     it also removes snapshots older than ``ttl_s`` from the store (any island's).
 
-    ``capture`` (S27 G-EL; None: on when the island implements the optional
+    ``capture`` (None: on when the island implements the optional
     capture-then-write methods, see :class:`FileRecoverableIsland`): at the safe
     point the island only copies its state to host memory and starts writing
     the files; the service asks at later safe points whether they are written
     (never waits), then hashes, commits and answers in the background. Training
     pauses only for the copy (Nemotron Nano: the inline write paused the donor
-    for 545.6 s in s27-elastic-a). False: the island writes the files at the
+    for 545.6 s in one elastic run). False: the island writes the files at the
     safe point (the behavior before).
 
     :attr:`timings` has one row per finished snapshot: ``write_s`` (training

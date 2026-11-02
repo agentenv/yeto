@@ -1,13 +1,13 @@
 """Fill transformers' remote-code module cache on every island node before any engine starts.
 
-S27 G-CK. For a ``trust_remote_code`` model, transformers copies the model directory's
+For a ``trust_remote_code`` model, transformers copies the model directory's
 ``*.py`` files into a node-local module cache (``HF_MODULES_CACHE``, default
 ``~/.cache/huggingface/modules``) and imports them from there. The copy is not atomic
 (``shutil.copyfile`` truncates and rewrites the target) and transformers' own lock only
 covers threads of one process. Several SGLang engines (and the TP ranks of each) start
 on one node at the same time, so one process can import a file that another process is
-rewriting, and the class is missing from the module: s27-ch-d1 ``configuration_nemotron_h``,
-s27-bc-a ``processing_nemotron_h_omni``, s27-bc-b ``image_processing_nemotron_h_omni``.
+rewriting, and the class is missing from the module (seen for ``configuration_nemotron_h``,
+``processing_nemotron_h_omni`` and ``image_processing_nemotron_h_omni``).
 
 transformers copies a module file only when the cached copy is missing or differs from
 the source. Once the cache holds a complete copy of every file, the engines only compare

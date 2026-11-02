@@ -112,9 +112,9 @@ def export_in_flight(executor: Any) -> dict[str, Any]:
     data buffer length they account for (fully_async: also ``data_cursor``, the
     data source position read together with them)."""
     if getattr(getattr(executor, "args", None), "fully_async", False):
-        # P0-S decision 3: background generation is never saved; the cut carries
+        # Background generation is never saved; the cut carries
         # every drawn, untrained prompt (reset) like a buffered group, so the
-        # resumed run generates it again. E1: read without stopping the worker
+        # resumed run generates it again. Read without stopping the worker
         # (the live run keeps generating ahead); the cursor comes from the same
         # read, so the cut's cursor and groups agree.
         from .fully_async_prompts import snapshot_untrained

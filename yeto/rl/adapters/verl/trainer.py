@@ -3,7 +3,7 @@
 ``yeto_sync`` = verl's ``PPOTrainerSync`` with the two publication hooks
 removed (yeto publishes after the outer sync, through ``VerlPublisher``) and
 the yeto mismatch criteria attached right after verl recomputes the old
-log-probs (design D7: the criterion is computed by yeto in the Miles
+log-probs (the criterion is computed by yeto in the Miles
 convention; verl's ``rollout_corr/*`` are only archived).
 """
 
@@ -15,7 +15,7 @@ import time
 
 from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 
-# S27 G-EQ2 (npu1): ``verl.trainer.ppo.v1`` is the user's fork only. A vendor
+# ``verl.trainer.ppo.v1`` is the user's fork only. A vendor
 # verl build -- the official Ascend image
 # quay.nju.edu.cn/ascend/verl:verl-8.5.2-910b-ubuntu22.04-py3.11-qwen3-5 ships
 # verl 0.8.0.dev -- has no v1 package, so importing it at module level took the
@@ -39,9 +39,9 @@ def require_sync_trainer() -> None:
     """Refuse a sync island on a verl build without the fork's v1 sync trainer."""
     if SYNC_TRAINER_IMPORT_ERROR is not None:
         raise SystemExit(
-            "这个 verl 版本没有 verl.trainer.ppo.v1（分叉独有）："
-            f"{SYNC_TRAINER_IMPORT_ERROR}。同步岛需要它；"
-            "缓冲训练岛（--rl-sample-role trainer）和 fully_async 岛不需要")
+            "this verl build has no verl.trainer.ppo.v1 (fork only): "
+            f"{SYNC_TRAINER_IMPORT_ERROR}. The sync island needs it; "
+            "the buffer trainer island (--rl-sample-role trainer) and the fully_async island do not")
 
 
 if SYNC_TRAINER_IMPORT_ERROR is None:
@@ -85,7 +85,7 @@ def _fingerprint(cfg: dict) -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-# TEST ONLY (V2 leave/rejoin; S27 G-EC moved it to the CPU-testable .driver_extras).
+# TEST ONLY (leave/rejoin; lives in the CPU-testable .driver_extras).
 from .driver_extras import TestExitPublisher as _TestExitPublisher  # noqa: E402
 
 
@@ -115,12 +115,12 @@ def check_asserted(asserted: dict, cfg: dict) -> dict:
         if want is not None and norm(got) != norm(want):
             bad.append(f"{key}: want {want!r} got {got!r}")
     if bad:
-        raise RuntimeError("verl 初始化断言失败: " + "; ".join(bad))
+        raise RuntimeError("verl initialisation assertions failed: " + "; ".join(bad))
     return report
 
 
 def publish_selftest(island, publisher, policy_state, specs) -> dict:
-    """rl-verl-backend 2.2 acceptance, before the first real publication:
+    """Acceptance check before the first real publication:
 
     1. export -> apply -> export is bitwise equal;
     2. tamper: the trainer holds the exported tensors with one tensor shifted, the
@@ -204,17 +204,17 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
 
 
 def _full_parameter_ports(island, plan: dict, identity_sha256: str):
-    """(sync, policy state, publisher) of a full-parameter island (S27 B10).
+    """(sync, policy state, publisher) of a full-parameter island.
 
     With an outer sync (``plan["full_parameter"]``): the engine-neutral
     ``FullParameterSync`` over the verl role stream.  Without one
     (``--rl-single-island-no-sync``): the local-only sync over a policy state
-    that exports whole cuts.  Round cuts (``plan["resume"]``, S27 G-ED) are
+    that exports whole cuts.  Round cuts (``plan["resume"]``) are
     wired by ``run_island`` as on a LoRA island: the FSDP2 rank files hold every
     parameter shard and its Adam state.  The LoRA publish self-test does not
     apply to a full-parameter island and is refused.
 
-    S27 G-EK: with ``plan["separate"]`` the trainer has its own cards and the
+    With ``plan["separate"]`` the trainer has its own cards and the
     rollout runs on standalone vLLM servers; the policy state and the stream read
     the cut from the trainer workers as before (``VerlIsland.call_workers`` reaches
     the trainer pool only), and the publication goes over verl's NCCL checkpoint
@@ -231,7 +231,7 @@ def _full_parameter_ports(island, plan: dict, identity_sha256: str):
 
 
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
-    require_sync_trainer()  # S27 G-EQ2: a vendor verl build has no v1 sync trainer
+    require_sync_trainer()  # A vendor verl build has no v1 sync trainer
     from verl.utils.skip import SkipManager
     from verl.utils.tracking import Tracking
 
@@ -268,7 +268,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     learner_id = int(plan["learner_id"])
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
     full = plan.get("parameter_mode") == "full"
-    if full:  # S27 B10: the model config is the identity; the layout is the fragment layout
+    if full:  # The model config is the identity; the layout is the fragment layout
         from .full_parameter_stream import full_parameter_identity
 
         specs = ()
@@ -292,8 +292,8 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
     identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
-    # S27 G-EV: a policy-age limit (rollout ahead) is part of the island's contract, as on
-    # Miles (agentic-rollout-utilization 2.1); limit 0 leaves the identity unchanged
+    # A policy-age limit (rollout ahead) is part of the island's contract, as on
+    # Miles; limit 0 leaves the identity unchanged
     from yeto.rl.engine.policy_age import bind_policy_age
 
     identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
@@ -311,16 +311,16 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                  "parameter_mode": "full" if full else "lora", "init_seconds": time.time() - t0})
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
-    # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
+    # Round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver_options = {"placement": VerlPlacement(), "capabilities": _capabilities(_fingerprint(cfg))}
-    if full:  # S27 G-EK: verl's separate mode (trainer and rollout cards apart)
+    if full:  # verl's separate mode (trainer and rollout cards apart)
         from .separate import driver_options as separate_driver_options
 
         driver_options.update(separate_driver_options(plan, spec, driver_options["capabilities"]))
     dispense = None
-    if plan.get("dispense"):  # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+    if plan.get("dispense"):  # The rows come from the task dispenser
         from .task_dispense import install as install_dispense
 
         dispense = install_dispense(trainer, plan["dispense"],
@@ -333,21 +333,21 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                                      rejoined=lambda: bool(getattr(sync, "joined_running_pool", False))),
         algorithm=spec, sync=sync, events=tape, ledger=None if resume is None else resume.ledger,
         **driver_options,
-        **eval_port.driver_options(trainer, plan))  # S27 G-EN: heldout eval (none without a plan section)
-    driver.data_slot = plan.get("data_slot")  # S27 task assignment ("dispense" with the dispenser)
-    from .train_options import wire_debug, wire_verify  # S27 G-EU (VERL-PARITY #25, #26, #35)
+        **eval_port.driver_options(trainer, plan))  # Heldout eval (none without a plan section)
+    driver.data_slot = plan.get("data_slot")  # task assignment ("dispense" with the dispenser)
+    from .train_options import wire_debug, wire_verify
 
     wire_verify(driver, policy_state, plan)
     wire_debug(island, plan)
     if dispense is not None and plan["dispense"].get("data_streams"):
-        driver.data_streams = plan["dispense"]["data_streams"]  # S27 P3 streams (rl_driver_start)
-    if full:  # S27 G-DS: data positions and HF exports (.driver_extras)
+        driver.data_streams = plan["dispense"]["data_streams"]  # data streams (rl_driver_start)
+    if full:  # Data positions and HF exports (.driver_extras)
         from .driver_extras import wire_full_parameter_extras
         from .separate import wire_rollout_ahead
 
         wire_full_parameter_extras(driver, island, plan)
-        wire_rollout_ahead(driver, plan)  # S27 G-EV: --rl-rollout-ahead 1 (0: serial rounds)
-    if full and plan.get("separate"):  # S27 G-EW: engine outage (VERL-PARITY #16; nothing without the budget)
+        wire_rollout_ahead(driver, plan)  # --rl-rollout-ahead 1 (0: serial rounds)
+    if full and plan.get("separate"):  # engine outage (nothing without the budget)
         from .engine_recovery import arm_verl_engine_outage
         from .full_parameter_stream import _LoopRunner
 
@@ -368,21 +368,21 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
 def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buffer_ports=None,
                            seek_rollouter=None) -> dict:
-    """agentic-rollout-utilization 6.4b: the yeto driver over the fully_async ports.
+    """The yeto driver over the fully_async ports.
 
     ``call(method, *args)`` reaches the trainer actor; ``start_rollouter`` starts the
     rollouter's generation loop (called once, after the first verified publication).
 
-    ``buffer_ports(island)``: a buffer trainer (S25 C2, ``buffer_ports.install_buffer_ports``
+    ``buffer_ports(island)``: a buffer trainer (``buffer_ports.install_buffer_ports``
     bound to the run's buffer and release store) returns ``(rollout, publisher,
     placement)``; the trainer port and the policy state stay the fully_async ones.
 
     ``seek_rollouter(prompts)``: skips prompts of the rollouter's data before it
-    starts (round cuts with ``--rl-resume-store``, S26 E9.2; :mod:`.fully_async_cut`).
+    starts (round cuts with ``--rl-resume-store``, :mod:`.fully_async_cut`).
 
-    A full-parameter plan (S27 G-EW, :mod:`.fully_async_full`): the identity, the
+    A full-parameter plan (:mod:`.fully_async_full`): the identity, the
     sync and the policy state of the synchronous full-parameter island over the
-    trainer actor's workers; only the buffer trainer publishes it (VERL-PARITY #14)."""
+    trainer actor's workers; only the buffer trainer publishes it."""
     from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.driver import EventTape, IslandDriver
@@ -403,7 +403,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     learner_id = int(plan["learner_id"])
     limit = int(plan["max_policy_age"])
     asserted = check_asserted(plan.get("asserted") or {}, cfg)
-    full = is_full_parameter(plan)  # S27 G-EW
+    full = is_full_parameter(plan)
     if full:
         specs = ()
         layout_hash, lora_hash = full_parameter_hashes(plan)
@@ -424,17 +424,17 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     call("yeto_configure", float(plan.get("tis_upper", 2.0)), list(plan["thresholds_key"]))
     from yeto.hw.catalog import runtime_versions
 
-    # 7.7a: unset -> error. S27 G-FN: a Megatron engine island declares the Megatron
+    # 7.7a: unset -> error. A Megatron engine island declares the Megatron
     # parameter-name map here, as the synchronous Megatron island does (megatron_ports).
     identity = backend_identity(compat_group=plan.get("compat_group"),
                                 **({"train_backend": "megatron"} if plan.get("engine") == "megatron"
                                    else {}))
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     identity_sha = bind_policy_age(identity.sha256(), limit)
-    if full:  # S27 G-EW: sets island.full_group (and the local layout hash without a syncer)
+    if full:  # Sets island.full_group (and the local layout hash without a syncer)
         sync, policy_state = full_parameter_ports(island, plan, backend_identity_sha256=identity_sha)
         layout_hash = island.layout_hash
-    if plan.get("engine") == "megatron":  # S27 G-FN (B4): the Megatron island's readbacks
+    if plan.get("engine") == "megatron":  # The Megatron island's readbacks
         from .megatron_ports import island_megatron_checks
 
         island_megatron_checks(island, plan, tape)
@@ -452,7 +452,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
     if buffer_ports is None:
-        # S27 G-EV (VERL-PARITY #11): a full-parameter island pushes its whole weights to
+        # A full-parameter island pushes its whole weights to
         # the rollouter (no LoRA read-back); a LoRA island keeps the read-back publisher
         publisher = (FullyAsyncFullParameterPublisher(island) if full
                      else FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))))
@@ -461,26 +461,26 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         rollout, publisher, placement = buffer_ports(island)
     if buffer_ports is not None and plan.get("resume"):
         raise ValueError("round cuts are not wired for a verl buffer trainer")
-    # S26 E9.2: round cuts as on the sync path; restored before the driver is built
+    # Round cuts as on the sync path; restored before the driver is built
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
     driver = IslandDriver(
         learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
         policy_state=policy_state, publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile, ledger=None if resume is None else resume.ledger)
-    driver.data_slot = plan.get("data_slot")  # S27 task assignment
-    if full:  # S27 G-EW: observation only (exports and data positions are refused, .fully_async_full)
+    driver.data_slot = plan.get("data_slot")  # task assignment
+    if full:  # Observation only (exports and data positions are refused, .fully_async_full)
         from .driver_extras import wire_full_parameter_extras
 
         wire_full_parameter_extras(driver, island, plan)
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
-    # S28 G-120C: --rl-verify-every N on the fully_async path. island_entry has always
+    # --rl-verify-every N on the fully_async path. island_entry has always
     # planned it (train_options.verify_plan), but only the synchronous (:340) and the
     # Megatron engine (megatron_ports.py) drivers wired it, so on a buffer trainer the
     # flag was planned and then silently ignored: every round hashed the whole 120B
-    # trainer (449 GiB of FP32 masters, about 27 min on 24 Ascend 910B3, run g120c-rl2).
+    # trainer (449 GiB of FP32 masters, about 27 min on 24 Ascend 910B3).
     from .train_options import wire_verify
 
     wire_verify(driver, policy_state, plan)

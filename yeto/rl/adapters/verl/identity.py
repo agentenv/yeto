@@ -1,9 +1,9 @@
-"""Backend identity of the verl adapter (decoupling 6.1; rl-verl-backend D6).
+"""Backend identity of the verl adapter (decoupling 6.1; rl-verl-backend).
 
 Engine ``verl``, the pinned fork commit, the device family of the card this
 island runs on (``nvidia`` on CUDA, ``ascend`` on an NPU) and the hash of the
 parameter-name map (``param_names.PARAM_MAP``).  A verl island and a Miles island therefore never
-share a syncer session contract (first version forbids mixing, D6).
+share a syncer session contract (the first version forbids mixing).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ ENGINE = "verl"
 # ``yeto.hw.catalog.device_family()``.
 DEVICE_FAMILY = "nvidia"
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
-# S27 G-DC: the Megatron engine (verl ``model_engine=megatron``) names parameters
+# The Megatron engine (verl ``model_engine=megatron``) names parameters
 # by Megatron-Core module path; Megatron-Bridge maps them to the HF names the
 # rollout loads. A Megatron island and an FSDP2 island therefore never share a
 # session contract.

@@ -48,12 +48,12 @@ def _driver(tmp_path, caps, engine):
     )
 
 
-def test_ppo_refused_without_allowance_with_g1_hint(tmp_path):
+def test_ppo_refused_without_allowance_with_unverified_hint(tmp_path):
     engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, critic=True)
     with pytest.raises(CapabilityMismatch, match="--rl-allow-unverified-mechanism execution:critic"):
         _driver(tmp_path, fake_capabilities(), engine).run()
     assert engine.calls == []
-    # the Miles adapter does not declare the critic before G1 (design D3)
+    # the Miles adapter does not declare the critic yet (by design)
     caps = miles_capabilities("sha256:" + "0" * 64)
     assert caps.execution.critic is False and "ppo" not in caps.advantage_estimators
     with pytest.raises(CapabilityMismatch, match="execution:critic"):
@@ -274,7 +274,7 @@ def test_critic_round_receipt_from_the_critic_processes():
 
 
 def test_critic_round_receipt_accepts_hl_gauss_value_head():
-    # S14 8.4 G1 blocker: SAO HL-Gauss critic has a [value_num_bins, hidden] head
+    # SAO HL-Gauss critic has a [value_num_bins, hidden] head
     # (fork model_provider._value_head_output_size); the receipt must find it.
     log, released = [], []
     critic = _Group("critic", log, losses=[{"metrics": {"value_loss": 0.4}}], head_rows=51)
@@ -295,7 +295,7 @@ def test_critic_round_receipt_accepts_hl_gauss_value_head():
 
 
 def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypatch):
-    """s13-g1-modal-20261007b: at --micro-batch-size 1 with PPO gamma=lambd=1 every
+    """At --micro-batch-size 1 with PPO gamma=lambd=1 every
     micro-batch holds one sample whose returns are one constant (Var(G)=0), so a
     per-micro-batch EV is always None. The recorder pools the step's micro-batches
     and the step-loss record carries the step-level explained_variance."""
@@ -361,7 +361,7 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
 
 
 def test_explained_variance_is_none_when_returns_are_rounding_noise():
-    """s14-forkg1-sao-20261007a round 5: all rewards 0, fp32 returns ~1e-8,
+    """Seen in a GPU run: all rewards 0, fp32 returns ~1e-8,
     EV -3.3e12. Rounding-level return spread is no spread: EV is None."""
     import torch
 

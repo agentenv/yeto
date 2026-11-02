@@ -1,4 +1,4 @@
-"""Gloo TP ranks for ``tests/test_s28_chunked_logprob.py`` (S28 FCE); not collected by pytest.
+"""Gloo TP ranks for ``tests/test_chunked_logprob.py``; not collected by pytest.
 
 ``python chunked_logprob_tp_worker.py <tp> <dtype> <out.json>`` spawns ``tp`` gloo ranks.
 Every rank builds the same full ``[V, H]`` weight and ``[T, H]`` hidden states (same
@@ -15,7 +15,7 @@ A fourth argument picks the implementation: ``torch`` (the default,
 :class:`ChunkedVocabParallelLogprob`) or ``npu`` (:class:`ChunkedNpuLogprob`). The Ascend
 class runs here because its temperature path is plain torch -- only its temperature-1.0
 forward calls a CANN operator -- so this worker covers its shard combination and its
-backward on the CPU, where an fp64 reference is available. (S28 G-FCK.)
+backward on the CPU, where an fp64 reference is available.
 
 Prints nothing; writes ``{"ok": ..., "max_abs": {...}}`` from rank 0.
 """

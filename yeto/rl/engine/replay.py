@@ -1,4 +1,4 @@
-"""rl-infra-spec 6.6 (CPU side): four-scenario trace replay.
+"""CPU side: four-scenario trace replay.
 
 Compares, under the SAME update budget (number of rounds) and the SAME pool:
 

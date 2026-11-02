@@ -1,4 +1,4 @@
-"""S27 E-4c: a killed full-parameter island process restarts and re-joins a
+"""A killed full-parameter island process restarts and re-joins a
 running asynchronous pool. Real Rust syncer, no Ray.
 
 The restarted process dials with a new connection generation. The syncer
@@ -121,7 +121,7 @@ def test_a_restarted_island_catches_up_and_finishes(syncer_binary, tmp_path):
 @needs_cargo
 @pytest.mark.usefixtures("_hmac_key")
 def test_heartbeats_keep_the_lease_while_the_pool_waits_for_init(syncer_binary, tmp_path):
-    """s27-x2-pause-a: an island that connected first lost its lease while
+    """An island that connected first lost its lease while
     the other island was still starting (no INIT yet), because the syncer
     ignored heartbeats before the initial cut. Here the INIT comes after
     2.5 leases; the first island's heartbeats keep it in the pool."""

@@ -68,14 +68,14 @@ class BridgeConfig:
     audit_dir: str | None = None
     wan_streams: int = 4
     send_initial_params: bool = True
-    # Decoupling 6.2 (design D7): the syncer session contract binds the tensor
+    # the syncer session contract binds the tensor
     # layout to this backend identity hash; None keeps the layout-only contract.
     backend_identity_sha256: str | None = None
-    # S17 N17: lr_schedule_sha256() of the island; bound into the identity the
+    # lr_schedule_sha256() of the island; bound into the identity the
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
-    # rl-identity-tiering L9.7 (island contract v3): AlgorithmSpec.semantic_sha256()
+    # Island contract v3: AlgorithmSpec.semantic_sha256()
     # of the island and the run code pack digest, the third and fourth parts of
     # that identity.  None = not declared.
     algorithm_semantic_sha256: str | None = None
@@ -83,7 +83,7 @@ class BridgeConfig:
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
-    # S26 E3: receive BCAST as bf16 deltas against the shared f32 anchor
+    # receive BCAST as bf16 deltas against the shared f32 anchor
     # (session flag; the syncer runs --bcast-delta-full-every). The client
     # hands this bridge the reconstructed f32 anchor, so nothing else changes.
     # An anchor mismatch drops the connection; with max_reconnects=0 the

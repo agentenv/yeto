@@ -159,11 +159,11 @@ def test_fault_injection_turns_a_relaunch_into_a_catch_up_rejoin(tmp_path, capsy
     assert "re-run 2 rejoins by catch-up" in capsys.readouterr().err
 
 
-# -- S27 G-EL: an explicit store reaches the island as a path under its mount ----
+# -- an explicit store reaches the island as a path under its mount ----
 
 
 def test_explicit_modal_volume_store_becomes_the_island_mount_path():
-    """s27-elastic-a: the URI reached the island as it was, and the island took it
+    """The URI reached the island as it was, and the island took it
     for a relative directory on its local disk (the donor snapshot never left the
     donor container). It must become the Volume mount path, as the checkpoint
     store and the data positions do."""

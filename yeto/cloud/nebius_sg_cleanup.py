@@ -1,9 +1,9 @@
-"""Delete a run's leaked SkyPilot security groups on Nebius (S19 real-spot A2).
+"""Delete a run's leaked SkyPilot security groups on Nebius.
 
 sky names each cluster's group ``sky-sg-<cluster_name_on_cloud>`` and deletes it on
 ``sky down``. Groups leak when an instance is removed some other way (yeto's
 delete-by-name fallback, a head that died first) or when sky's delete gives up;
-the network quota is 128 groups and S19 hit it ("max-security-groups-count 129 of
+the network quota is 128 groups and a spot run once hit it ("max-security-groups-count 129 of
 128") with 125 leaked groups and 0 instances.
 
 :func:`delete_run_security_groups` deletes only groups whose name starts with

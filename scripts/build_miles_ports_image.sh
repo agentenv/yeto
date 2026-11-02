@@ -7,21 +7,22 @@
 #   scripts/build_miles_ports_image.sh [--push]
 #
 # Inputs (env, defaults = this checkout's pins):
-#   MILES_SRC / SGLANG_SRC   local clones containing the commits
+#   MILES_SRC / SGLANG_SRC   required: local clones containing the commits
 #   MEGATRON_LM_SRC          clone containing the base's Megatron-LM commit
 #                            (default: shallow fetch into $OUT/megatron-lm)
 #   MILES_COMMIT / SGLANG_COMMIT  override the pinned fork commits
 #   CRANE                    crane binary (go-containerregistry >= 0.20)
-#   DEST_REPO                ghcr.io/michaellchung/yeto-miles-ports (private)
+#   DEST_REPO                required: target image repository,
+#                            e.g. ghcr.io/<owner>/yeto-miles-ports
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
 # Writes: $OUT/{layer.tar,image-manifest.json,build-record.json}
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PUSH=0; [ "${1:-}" = "--push" ] && PUSH=1
 CRANE=${CRANE:-crane}
-MILES_SRC=${MILES_SRC:-$HOME/work/miles-next}
-SGLANG_SRC=${SGLANG_SRC:-$HOME/work/sglang-next}
-DEST_REPO=${DEST_REPO:-ghcr.io/michaellchung/yeto-miles-ports}
+MILES_SRC=${MILES_SRC:?set MILES_SRC to a local Miles fork clone that contains the pinned commit}
+SGLANG_SRC=${SGLANG_SRC:?set SGLANG_SRC to a local SGLang fork clone that contains the pinned commit}
+DEST_REPO=${DEST_REPO:?set DEST_REPO to the target image repository, e.g. ghcr.io/<owner>/yeto-miles-ports}
 OUT=${OUT:-$(mktemp -d /tmp/img-build-XXXXXX)}
 
 # radixark/miles multi-arch index (upstream docker/Dockerfile at radixark
@@ -90,7 +91,7 @@ fi
 git -C "$MEGATRON_LM_SRC" cat-file -e "$MEGATRON_LM_COMMIT^{commit}"
 
 # peft (pinned MILES_PEFT_VERSION) goes into the image, so island setup
-# neither installs nor imports it (rl-trainer-cold-start-cost L2.3/L2.4):
+# neither installs nor imports it:
 # the pure-Python wheel is unpacked into the base's site-packages, no deps
 # (the island setup used to pip-install it into the same environment).
 PIP=${PIP:-python3 -m pip}

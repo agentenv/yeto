@@ -1471,5 +1471,5 @@ def run_inner_loop(
 if __name__ == "__main__":
     from yeto.island_credential_guard import check_island_credentials
 
-    check_island_credentials()  # secret-handling-hardening D4
+    check_island_credentials()  # secret-handling-hardening
     main()

@@ -1,4 +1,4 @@
-"""Legal age-0 train/inference overlap: eval || train/outer_sync (rl-infra-spec 2.3).
+"""Legal age-0 train/inference overlap: eval || train/outer_sync.
 
 Under the only certified contract (on-policy, ``max_policy_age == 0``) next-round
 generation needs this round's published policy, so generation can never overlap
@@ -71,7 +71,7 @@ def overlap_refusal(profile: ExecutionProfile | None) -> str | None:
     if profile.allowed_overlap != IMPLEMENTED_OVERLAP:
         return (
             f"allowed_overlap {sorted(profile.allowed_overlap)} is not the implemented "
-            f"set {sorted(IMPLEMENTED_OVERLAP)} (rl-infra-spec 2.3: only eval||train and "
+            f"set {sorted(IMPLEMENTED_OVERLAP)} (only eval||train and "
             "eval||outer_sync exist on the ports path)"
         )
     if profile.max_inflight_batches != 1:

@@ -1,4 +1,4 @@
-"""verl recipe for the NVIDIA Nemotron-H family (role ``nemotron_h_recipe``; S27 G-DC, V10).
+"""verl recipe for the NVIDIA Nemotron-H family (role ``nemotron_h_recipe``).
 
 On verl the Megatron engine builds the model itself from the Megatron-Bridge
 provider of the HF checkpoint (``use_mbridge``), so there is no Megatron argv
@@ -40,7 +40,7 @@ def check_provider(provider: Any, *, parameter_mode: str) -> None:
         raise NemotronHRecipeError("hybrid pattern has MoE layers (E) but the provider has no experts")
     architectures = tuple(_value(provider, "architectures", ()) or ())
     if set(architectures) & set(VL_ARCHITECTURES):
-        raise NemotronHRecipeError("verl 不冻结视觉部分（freeze_vision_tower 无代码读取）；VL 模型请用 Miles")
+        raise NemotronHRecipeError("verl does not freeze the vision tower (no code reads freeze_vision_tower); use Miles for VL models")
     if int(_value(provider, "mtp_num_layers", 0) or 0) and parameter_mode == "full":
         raise NemotronHRecipeError(
             "the Nemotron-H provider has an MTP block: the verl Megatron island would train it "

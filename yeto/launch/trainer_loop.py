@@ -1,4 +1,4 @@
-"""Trainer scheduler loop on the head (rl-trainer-start-stop L5.3b).
+"""Trainer scheduler loop on the head.
 
 ``--rl-trainer-scheduler s1`` runs :class:`~yeto.rl.engine.trainer_loop.TrainerLoop`
 on its own thread next to the fleet controller's poll loop. Off (the default), the
@@ -24,8 +24,8 @@ head reads the cuts and the buffer and writes the trainer commands in the
 sampler island reach (``storage.store_unreachable_reason``). :func:`check` refuses anything
 else before any launch.
 
-A convertible pool (every island declared ``--rl-node-class islandM=convertible``,
-rl-trainer-start-stop L7.5) turns the loop on by the declaration alone: no island is
+A convertible pool (every island declared ``--rl-node-class islandM=convertible``)
+turns the loop on by the declaration alone: no island is
 held back, a convertible node becomes the trainer (``yeto.launch.convertible_pool``),
 and ``T_s`` defaults to the conversion time
 (:data:`~.convertible_pool.DEFAULT_CONVERT_START_SECONDS`) until one is measured.
@@ -54,8 +54,8 @@ from yeto.rl.engine.trainer_scheduler import S1Config, S1Scheduler
 from .trainer_island import CloudTrainerBinding, TrainerIsland
 
 OFF = "off"
-S1 = "s1"
-MODES = (OFF, S1)
+BACKLOG = "s1"
+MODES = (OFF, BACKLOG)
 DEFAULT_INTERVAL_S = 30.0
 DEFAULT_START_SECONDS = 600.0
 DEFAULT_DRAIN_SECONDS = 3600.0
@@ -86,8 +86,8 @@ binding_factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding] | No
 def add_arguments(group) -> None:
     group.add_argument(
         "--rl-trainer-scheduler", choices=MODES, default=OFF,
-        help="start and stop the trainer island by scheduler S1 from the sample-buffer "
-        "backlog (rl-trainer-start-stop); off (default) keeps the trainer up for the run")
+        help="start and stop the trainer island by the backlog scheduler ('s1') from the sample-buffer "
+        "backlog; off (default) keeps the trainer up for the run")
     group.add_argument(
         "--rl-trainer-scheduler-interval", type=float, default=DEFAULT_INTERVAL_S,
         help="seconds between two scheduler decisions on the head")
@@ -130,8 +130,8 @@ def add_arguments(group) -> None:
         "for check runs; the measured start is still journaled)")
     group.add_argument(
         "--rl-node-class", action="append", default=[], metavar="NAME=CLASS[:spot][:PRECISION]",
-        help="node class of one node (rollout, trainer, convertible; rl-trainer-start-stop "
-        "D7). A node without ':spot' follows --spot/--on-demand. A convertible node must be "
+        help="node class of one node (rollout, trainer, convertible). "
+        "A node without ':spot' follows --spot/--on-demand. A convertible node must be "
         f"on-demand and at the trainer precision ({TRAINER_PRECISION}). Repeat per node. "
         "Declaring every --gpu island convertible (NAME islandM) runs a convertible pool: "
         "the trainer scheduler converts the best node to trainer and back, no other switch")
@@ -151,7 +151,7 @@ def node_specs(args) -> list[NodeSpec]:
 
 
 def check_node_classes(args) -> list[NodeSpec]:
-    """Refuse a launch whose node classes break the class rule (L7.1)."""
+    """Refuse a launch whose node classes break the class rule."""
     try:
         specs = node_specs(args)
         validate_nodes(specs, trainer_precision=TRAINER_PRECISION)
@@ -172,9 +172,9 @@ def enabled(args) -> bool:
 
 
 def scheduler_mode(args) -> str:
-    """The scheduler that decides (S1 is the only one; a convertible pool uses it)."""
+    """The scheduler that decides (the backlog scheduler is the only one; a convertible pool uses it)."""
     mode = getattr(args, "rl_trainer_scheduler", OFF) or OFF
-    return S1 if mode == OFF and convertible_pool(args) else mode
+    return BACKLOG if mode == OFF and convertible_pool(args) else mode
 
 
 def start_seconds(args) -> float:
@@ -270,7 +270,7 @@ def _check_trainer_island(args) -> None:
 
 
 def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
-    """Scheduler S1 + lifecycle + loop over ``journal``; restored from its records."""
+    """Backlog scheduler + lifecycle + loop over ``journal``; restored from its records."""
     records = journal.records
     scheduler = S1Scheduler(
         S1Config(a_hard=int(getattr(args, "rl_max_policy_age", 0) or 0),

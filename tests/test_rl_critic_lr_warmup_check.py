@@ -1,4 +1,4 @@
-"""critic_lr_warmup launch check (S13 G1 SAO: warmup 10 vs decay 3 -> Megatron assert)."""
+"""critic_lr_warmup launch check (SAO: warmup 10 vs decay 3 -> Megatron assert)."""
 
 from yeto.rl.algos.critic import critic_lr_warmup_problems
 from yeto.rl.algos.sao import sao_algorithm_spec

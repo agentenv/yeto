@@ -47,7 +47,7 @@ def check_global_batch(global_batch: int, data_parallel: int) -> None:
 
 
 def check_island_env(*, placement: str, env_pairs) -> None:
-    """S27 G-EF: a colocated island runs Miles' ``--offload-train`` (the adapter
+    """A colocated island runs Miles' ``--offload-train`` (the adapter
     forces it), whose torch_memory_saver refuses to start when PyTorch's
     allocator uses expandable segments (``torch_memory_saver.entrypoint``:
     "expandable_segments is not supported yet"). Refused before any GPU starts.

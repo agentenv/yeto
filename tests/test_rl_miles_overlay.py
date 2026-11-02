@@ -1,4 +1,4 @@
-"""S13 Miles overlay (critic family on image c35702e): CPU only, no Ray."""
+"""Miles overlay (critic family on image c35702e): CPU only, no Ray."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def test_auto_is_off_without_fork_flags(spec):
 def test_auto_turns_on_for_critic_family_specs(make):
     args = _args(make())
     assert mo.spec_fork_flags(args.rl_algorithm_spec_json)
-    # S19 #1: the pinned image already contains the critic-family flags -> no overlay
+    # The pinned image already contains the critic-family flags -> no overlay
     assert MILES_NEXT_COMMIT != mo.CRITIC_C357_BASE_COMMIT
     assert mo.resolve_overlay(args) is None
     assert mo.resolve_overlay(_args(make(), rl_miles_overlay="off")) is None
@@ -132,7 +132,7 @@ def test_runtime_manifest_flags_overlay(tmp_path, monkeypatch):
 
 
 def test_learner_accepts_dirty_miles_only_as_the_exact_overlay_tree(tmp_path, monkeypatch):
-    """S13 forkg1: verify_miles_revision's clean check refused the overlaid ~/miles."""
+    """verify_miles_revision's clean check refused the overlaid ~/miles."""
     import json as _json
     import subprocess as sp
 
@@ -169,9 +169,10 @@ def test_result_tree_pin_matches_fork_commit():
 
     from yeto.rl.adapters.miles import overlay as O
 
-    fork = Path(os.path.expanduser("~/work/miles-critic-c357"))
-    if not fork.is_dir():
-        pytest.skip("fork checkout not present")
+    fork_dir = os.environ.get("YETO_TEST_MILES_CRITIC_CHECKOUT")
+    if not fork_dir or not Path(fork_dir).is_dir():
+        pytest.skip("YETO_TEST_MILES_CRITIC_CHECKOUT (critic fork checkout) not set")
+    fork = Path(fork_dir)
     tree = sp.run(["git", "-C", str(fork), "rev-parse", f"{O.CRITIC_C357_RESULT_COMMIT}^{{tree}}"],
                   check=True, capture_output=True, text=True).stdout.strip()
     assert tree == O.CRITIC_C357_RESULT_TREE

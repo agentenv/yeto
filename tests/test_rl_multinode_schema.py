@@ -148,7 +148,7 @@ def test_node_rules_in_cfg():
 
 
 def test_ep_and_pp_may_span_nodes_tp_stays_in_node():
-    # Q1/Q3 ruling 2026-10-04: EP/PP groups may cross nodes; tp*cp is the in-node group.
+    # EP/PP groups may cross nodes; tp*cp is the in-node group.
     good = _cfg({"trainer": list(range(8)), "rollout": [list(range(8, 16))], "standby": []})
     good["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 4}
     assert caps.parse_configs(good)["T8R8S0"].dims["ep"] == 4

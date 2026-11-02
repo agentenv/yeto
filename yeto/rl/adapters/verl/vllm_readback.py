@@ -1,4 +1,4 @@
-"""Runs inside the vLLM worker process (rl-verl-backend 2.2, design D5).
+"""Runs inside the vLLM worker process (rl-verl-backend 2.2).
 
 Called by the one-line hook the image adds after verl's ``add_lora`` in
 ``verl/workers/rollout/vllm_rollout/utils.py`` (``image.PATCHES``).  It reads
@@ -94,8 +94,8 @@ def after_add_lora(worker, lora_int_id: int, expected_shapes: dict | None = None
 
         result = {"error": f"{type(exc).__name__}: {exc}", "trace": traceback.format_exc()[-2000:]}
     result.update({"version": version, "pid": os.getpid(), "seconds": round(time.time() - t0, 3)})
-    # One tmp file per process: an island with several vLLM replicas (one per card,
-    # S26 E9 e9b-g3-a) runs this in every replica at the same time, and a shared
+    # One tmp file per process: an island with several vLLM replicas (one per card)
+    # runs this in every replica at the same time, and a shared
     # tmp name made the second os.replace fail inside vLLM (FileNotFoundError).
     # The replicas hold the same adapter; the last complete record wins.
     tmp = f"{path}.{os.getpid()}.tmp"

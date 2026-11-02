@@ -1,7 +1,7 @@
-"""rl-trainer-start-stop L5.3b (CPU, fakes): the scheduler in the controller loop.
+"""CPU, fakes: the scheduler in the controller loop.
 
 A fake cloud (the island builder: a fresh fake trainer per incarnation, released
-on stop) and the real file sample buffer, scheduler S1 and controller journal.
+on stop) and the real file sample buffer, scheduler and controller journal.
 The head restarts in the middle: a new loop over the same journal continues."""
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ def test_start_stop_cycles_across_a_head_restart(tmp_path):
 
 
 def test_restart_continues_the_idle_time(tmp_path):
-    """D8: the idle time spent before the head restart counts after it."""
+    """The idle time spent before the head restart counts after it."""
     clock = _Clock()
     cloud = _FakeCloud(tmp_path)
     head = _Head(tmp_path, cloud, clock)

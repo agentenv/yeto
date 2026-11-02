@@ -1,9 +1,9 @@
-"""Correctness check of the convertible nodes (rl-trainer-start-stop D7 / L7), CPU.
+"""Correctness check of the convertible nodes (rl-trainer-start-stop), CPU.
 
 * the node core (:class:`ConvertibleNode`) over several rollout -> trainer ->
   rollout round trips: call order, the engine checksum against the published one
-  on every way back, the P0-S cut rule;
-* a convertible pool end to end with the real head (S1, the convertible gate,
+  on every way back, the in-flight cut rule;
+* a convertible pool end to end with the real head (trainer starts, the convertible gate,
   the remote lifecycle, the merged backlog), the real node agents, the real
   island trainer agent and driver lifecycle over a fake engine, and the real
   file sample buffer with node shards: three round trips, a hand-over of the
@@ -165,7 +165,7 @@ def _segment(trajectory, k, version):
 
 class SegmentedSampler:
     """Long trajectories of ``segments`` parts each. A conversion cuts the ones in
-    flight (P0-S): their finished segments are returned, the unfinished rest is
+    flight: their finished segments are returned, the unfinished rest is
     dropped and the trajectory is generated again from its start, under a new
     attempt id, so no sample id repeats."""
 
@@ -388,7 +388,7 @@ def _node_events(files, name):
 
 
 def test_pool_three_round_trips_hand_the_trainer_over_and_train_each_sample_once(tmp_path):
-    """Two convertible nodes. S1 starts a trainer three times on its own; the gate
+    """Two convertible nodes. The head starts a trainer three times on its own; the gate
     converts n1, then n0 (restores n1's cut: hand-over between nodes), then n1
     again (its rollout process already read the buffer in its first stint).
     Each time the node comes back with the trained version and the engine
@@ -674,7 +674,7 @@ class _Volume:
 
 
 class _CutSession:
-    """The driver's sync session with the E1 cut preparation: a prepared cut holds
+    """The driver's sync session with the early cut preparation: a prepared cut holds
     the writer guard until its safe point."""
 
     def __init__(self, volume):
@@ -697,8 +697,8 @@ class _Driver:
 
 
 def test_a_trainer_parked_after_its_publication_holds_no_store_writer_guard():
-    """GPU run s27-eg-a1: the convertible node's trainer trained its round, prepared
-    the next cut (E1: before the colocated trainer offloads) and parked after the
+    """A GPU run: the convertible node's trainer trained its round, prepared
+    the next cut (early: before the colocated trainer offloads) and parked after the
     publication, waiting for the head's next ``run``. The prepared cut held the
     Volume writer guard, so every reload was skipped and the command never became
     visible: both sides waited. The lifecycle now skips the preparation when the
@@ -736,7 +736,7 @@ def test_a_trainer_parked_after_its_publication_holds_no_store_writer_guard():
 
 # ---------------------------------------------------------------- the next stint starts on a quiet Volume
 def test_leaving_trainer_mode_stops_the_buffer_read_ahead(tmp_path):
-    """GPU run s27-eg-b1: after its first stint the node's buffer reader kept
+    """A GPU run: after its first stint the node's buffer reader kept
     reading ahead for the next round, polling the index (a Volume reload per
     poll) through the rollout; the node's second stint then failed creating the
     store directory on the remounted Volume (PermissionError). Back to sampler

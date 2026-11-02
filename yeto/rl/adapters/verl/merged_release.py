@@ -1,4 +1,4 @@
-"""A verl policy as a full HF checkpoint for a sampler island (S25 C2; full parameters S27 G-EK).
+"""A verl policy as a full HF checkpoint for a sampler island (LoRA merged or full parameters).
 
 The engine sampler island loads full checkpoints only (``SamplerEngine.load``:
 the SGLang and vllm-ascend adapters reload weights from a model directory). A
@@ -18,7 +18,7 @@ Rounding: a bf16 base keeps about 8 bits of mantissa, so a LoRA delta far below
 merged weights, not the trainer's exact ``W + BA``; the trainer's log-prob
 recomputation shows the difference as off-policy mismatch.
 
-Full parameters (S27 G-EK, VERL-PARITY #14): :func:`write_full_checkpoint` puts a
+Full parameters (VERL-PARITY #14): :func:`write_full_checkpoint` puts a
 full-parameter trainer's weights into a release directory with the island's HF
 writer (``hf_export.VerlHfWriter``: the FP32 masters read from the trainer
 workers, cast to the model's dtype, the base's non-weight files copied). Nothing

@@ -1,4 +1,4 @@
-"""Island side of the task dispenser (S27 P2): which rows of ``--data`` this island trains.
+"""Island side of the task dispenser: which rows of ``--data`` this island trains.
 
 With ``--rl-data-split dispense`` the actor syncer runs a dispenser
 (``syncer/src/dispense.rs``) and every training island takes its rows from it
@@ -24,7 +24,7 @@ instead of from a fixed slot. Plain rules:
   reports the data as ended). Reports wait in a queue until the head answers.
 * The data ends only when the dispenser says so (``--rl-data-passes``);
   :meth:`TaskSource.take` then raises :class:`DispenseEnded`.
-* Streams (S27 P3, :class:`StreamTable`): with ``--data-mix`` (several source
+* Streams (:class:`StreamTable`): with ``--data-mix`` (several source
   data sets with weights) or task labels (a row's ``task_label``), the rows
   are split into streams, one per (source, label). A position then carries
   its stream in its high bits (``position >> STREAM_SHIFT``) and counts the
@@ -34,11 +34,11 @@ instead of from a fixed slot. Plain rules:
   weights (within one position of the mix when every island takes every
   stream) and gives an island with task labels (``--rl-island-task-labels``)
   only the positions of its labels. One stream without a label and a mix is
-  exactly P2 (the wire then speaks protocol version 1).
+  exactly the single-stream dispenser (the wire then speaks protocol version 1).
 
 Wire format: ``docs/PROTOCOL.md`` "Task dispenser"; the golden bytes are
 pinned on both sides (``syncer/src/dispense_service.rs`` and
-``tests/test_s27_dispense.py``). Import-light: runs inside the Miles rollout
+``tests/test_dispense_syncer.py``). Import-light: runs inside the Miles rollout
 executor process; nothing here imports torch, numpy or Miles.
 """
 
@@ -71,10 +71,10 @@ MSG_TASK_REPORT = 54
 MSG_TASK_ACK = 55
 MSG_TASK_HEARTBEAT = 56
 TASK_PROTOCOL_VERSION = 1
-TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams (S27 P3)
+TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams
 TASK_HELLO_MAC_DOMAIN = b"yeto-task-hello-mac-v1\0"
 
-# streams (S27 P3; syncer/src/dispense.rs)
+# streams (syncer/src/dispense.rs)
 STREAM_SHIFT = 40
 STREAM_POSITIONS = 1 << STREAM_SHIFT
 MAX_STREAMS = 256
@@ -88,7 +88,7 @@ DATA_SOURCE_KEY = "yeto_data_source"
 UNLABELED = "-"
 # the weight scale of a --data-mix stream (weights are integers on the wire)
 MIX_WEIGHT_SCALE = 1 << 50
-# sampler islands (S27 P4): holder ids from here up, apart from the training
+# sampler islands: holder ids from here up, apart from the training
 # islands' learner ids (:func:`sampler_holder_id`)
 SAMPLER_HOLDER_BASE = 1 << 31
 
@@ -148,7 +148,7 @@ def encode_task_hello(learner_id: int, incarnation: int, rows: int, fingerprint:
 def encode_task_hello_streams(learner_id: int, incarnation: int, fingerprint: bytes,
                               streams: Sequence[tuple[int, int, str]],
                               accept: Sequence[int] | None) -> bytes:
-    """TASK_HELLO version 2 (S27 P3): ``streams`` are ``(rows, weight, name)``;
+    """TASK_HELLO version 2: ``streams`` are ``(rows, weight, name)``;
     ``accept`` the stream ids this island takes (None: every stream)."""
     if len(fingerprint) != 32:
         raise ValueError("the data fingerprint must be 32 bytes")
@@ -429,7 +429,7 @@ class StreamTable:
             if sources != [0]:
                 raise ValueError(f"rows of sources {sources} without --data-mix weights")
             if ordered == [(0, "")]:
-                weights = [1]  # the plain P2 stream
+                weights = [1]  # the plain single stream
             else:
                 weights = [len(groups[key]) for key in ordered]
         else:
@@ -472,7 +472,7 @@ class StreamTable:
 
     @property
     def single(self) -> bool:
-        """The plain P2 data: one stream, no label, no mix (wire version 1)."""
+        """The plain single-stream data: one stream, no label, no mix (wire version 1)."""
         only = self.streams[0]
         return len(self.streams) == 1 and only.weight == 1 and not only.name
 
@@ -517,7 +517,7 @@ class StreamTable:
 
 class PositionMap:
     """Position -> row of the prompt file (module doc). Caches the two latest
-    pass orders of each stream. ``PositionMap(rows, seed=...)``: the P2 data
+    pass orders of each stream. ``PositionMap(rows, seed=...)``: the single-stream data
     (one stream of ``rows`` rows); ``table``: a :class:`StreamTable`."""
 
     def __init__(self, rows: int | None = None, *, seed: int, table: StreamTable | None = None) -> None:
@@ -584,9 +584,9 @@ class DispenseConnection:
                  fingerprint: bytes, key: bytes | None, timeout_s: float = 30.0,
                  streams: Sequence[tuple[int, int, str]] | None = None,
                  accept: Sequence[int] | None = None) -> None:
-        """``streams``/``accept`` (S27 P3): the data's streams and this island's
+        """``streams``/``accept``: the data's streams and this island's
         accepted stream ids; without them (or for the plain single stream that
-        every island takes) the TASK_HELLO is the P2 one (version 1)."""
+        every island takes) the TASK_HELLO is the single-stream one (version 1)."""
         plain = streams is None or (len(streams) == 1 and int(streams[0][1]) == 1 and not streams[0][2])
         if plain and accept is None:
             version, body = TASK_PROTOCOL_VERSION, encode_task_hello(learner_id, incarnation, rows, fingerprint)
@@ -935,7 +935,7 @@ class TaskSource:
                     self._conn.close()
                 self._conn = None
                 if is_superseded(error):
-                    # S27: a newer process of this island joined (on any channel
+                    # A newer process of this island joined (on any channel
                     # of the head's member table); this one stops for good.
                     # emit before waking takers so the event is recorded by the
                     # time take() raises the fence
@@ -990,7 +990,7 @@ class DispensedRows:
     the sample buffer) and :meth:`close`. :meth:`held_back` names positions the
     backend put back into its own buffer (not dropped); :meth:`_hook_round`
     the round a filter call belongs to. Rules: ``adapters.miles.task_dispense``
-    module doc (the P2 Miles port, the first one)."""
+    module doc (the single-stream Miles port, the first one)."""
 
     def __init__(self, tasks: TaskSource, positions: PositionMap) -> None:
         self.tasks = tasks
@@ -1095,7 +1095,7 @@ class DispensedRows:
     def written(self, rollout_id: int, positions: Iterable[int], *,
                 timeout_s: float = COMMIT_ACK_TIMEOUT_S, unwritten: str = "drop",
                 keep: Iterable[int] = ()) -> dict[str, Any]:
-        """Sampler island (S27 P4): the groups of ``positions`` are in the sample
+        """Sampler island: the groups of ``positions`` are in the sample
         buffer, so their rows are done: report them trained (the sampler's
         "trained" is "written for the trainers") and wait (``timeout_s``) for
         the dispenser's answer. Every other position of the round that is still
@@ -1134,7 +1134,7 @@ class DispensedRows:
 
 class DispensedPrompts(DispensedRows):
     """The engine sampler's prompts (``engine_sampler_entry.JsonlPrompts``'s
-    interface) from the task dispenser (S27 P4): a sampler island of any
+    interface) from the task dispenser: a sampler island of any
     backend (the verl sampler island, the engine sampler) takes one block of
     positions per round, maps them to rows of its prompt file and reports a
     position trained once its group is in the sample buffer (``EngineRound``
@@ -1207,8 +1207,8 @@ def open_task_source(path: str | os.PathLike[str], config: Mapping[str, Any], *,
     """The started :class:`TaskSource` and the :class:`PositionMap` of one island
     process whose rows are the lines of the prompt file ``path`` (row count and
     fingerprint from the file). ``config``: ``address``, ``learner_id``, ``seed``,
-    ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for the streams
-    (S27 P3). Shared by the engine sampler (:class:`DispensedPrompts`, S27 P4) and
+    ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for the streams.
+    Shared by the engine sampler (:class:`DispensedPrompts`) and
     the verl training island (``adapters.verl.task_dispense``). ``incarnation``:
     the holder's incarnation source (None: a new random one per process)."""
     rows, digest = file_fingerprint(path)

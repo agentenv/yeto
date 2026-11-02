@@ -1,4 +1,4 @@
-"""Miles rollout through the durable sample buffer (rl-trainer-start-stop L4.5).
+"""Miles rollout through the durable sample buffer.
 
 Two Miles rollout functions (``--rollout-function-path``, classes in
 :mod:`.buffer_rollout_miles`) connect a sampler island and a trainer island
@@ -8,9 +8,9 @@ through a :class:`~yeto.rl.engine.sample_buffer.FileSampleBuffer`:
   group is written to the buffer as one payload plus one index entry
   (:class:`GroupWriter`). The payload keeps each sample whole, so the per-token
   behavior log-probs (``rollout_log_probs``) and the per-token engine versions
-  (``weight_versions``) reach the trainer for the D2 version gate and decoupled
+  (``weight_versions``) reach the trainer for the version gate and decoupled
   PPO. The entry's ``behavior_version`` is the OLDEST engine version in the group
-  (the start version; P0-S schema 4).
+  (the start version; schema 4).
 * trainer (``BufferReaderRolloutFn``): the round is selected from the buffer, not
   generated (:class:`BatchReader`). Groups older than ``max_policy_age`` versions
   are passed over (consumed, not trained) and counted.
@@ -53,7 +53,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-# The payload format and the group writer are engine-neutral (S25 N2.3: the
+# The payload format and the group writer are engine-neutral (the
 # engine sampler island writes the same payloads); re-exported here.
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     PAYLOAD_SCHEMA,
@@ -84,18 +84,18 @@ WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
-# S25 C1: several sampler islands on one shared directory (a Modal Volume): each
+# Several sampler islands on one shared directory (a Modal Volume): each
 # sampler writes its own shard, the trainer merges these shards (comma list)
 SHARDS_ENV = "YETO_SAMPLE_BUFFER_SHARDS"
-DATA_SLOT_ENV = "YETO_SAMPLE_BUFFER_DATA_SLOT"  # sampler: "index/count" of the prompt data (S26 E9.3)
+DATA_SLOT_ENV = "YETO_SAMPLE_BUFFER_DATA_SLOT"  # sampler: "index/count" of the prompt data
 INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before Ray starts
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
                SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
-               # S27 G-EA: the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
+               # the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
                "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH",
-               # S29 D15: the pump's boat orphan watchdog (yeto.rl.harness.harbor.boat_labels)
+               # the pump's boat orphan watchdog (yeto.rl.harness.harbor.boat_labels)
                "YETO_BOAT_RUN_ID", "YETO_BOAT_ORPHAN_LEASE_S", "BOAT_API_KEY")
 
 DEFAULT_WAIT_S = 3600.0
@@ -202,7 +202,7 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
 
     env = os.environ if environ is None else environ
     if sampler:
-        # S27 G-EA: a spot sampler writes its groups to the head's relay (env unset: no change)
+        # a spot sampler writes its groups to the head's relay (env unset: no change)
         from yeto.rl.spot_rollout.relay_buffer import relay_sampler_buffer
 
         relay = relay_sampler_buffer(env)
@@ -262,7 +262,7 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
 
 # ---------------------------------------------------------------------- sampler side
 def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
-    """Keep only ``slot``'s rows in a Miles ``RolloutDataSource`` (S26 E9.3).
+    """Keep only ``slot``'s rows in a Miles ``RolloutDataSource``.
 
     Called once, before the first round and before a resume seek: the dataset's
     original rows become the slot's rows, and the current epoch's order is made
@@ -314,7 +314,7 @@ def seek_data_source(data_source: Any, cursor: Mapping[str, int], *, shuffle: bo
 
 
 class SamplerRoundWriter:
-    """The sampler's buffer writes, resumable across incarnations (S25 C1).
+    """The sampler's buffer writes, resumable across incarnations.
 
     Opened in the rollout process. On open it reads where this sampler's earlier
     incarnations got to (:func:`~yeto.rl.engine.sampler_resume.resume_point`);
@@ -355,14 +355,14 @@ class SamplerRoundWriter:
                     positions: Sequence[int | None] | None = None) -> int:
         """Write ``groups`` (``(group key, samples)``, aborted groups already left
         out) of round ``rollout_id``, with one store commit at the end; returns the
-        groups written (the first ones, in order). ``positions`` (S27 P4): each
+        groups written (the first ones, in order). ``positions``: each
         group's task-dispenser position, kept in its round record."""
         from yeto.rl.engine.sampler_resume import SamplerRound
 
         if self.guard is not None:
             self.guard.check(rollout_id)
         written = 0
-        # one store commit for the round, not one per group (S27 G-AO: 64 groups of a
+        # one store commit for the round, not one per group (64 groups of a
         # 30B round took ~170 s of per-group Modal Volume commits)
         hold = getattr(self.buffer, "one_commit", None)
         with hold() if callable(hold) else nullcontext():
@@ -397,7 +397,7 @@ class TakeReport:
     read_s: float = 0.0
     decode_s: float = 0.0
     prefetched: int = 0
-    # S27 P4: task-dispenser positions of the stale groups (their sampler had a dispenser)
+    # task-dispenser positions of the stale groups (their sampler had a dispenser)
     stale_positions: list[int] = field(default_factory=list)
     # the version the max_policy_age gate compared against (not a metric)
     gate_version: int | None = None
@@ -628,7 +628,7 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
     if mode == SAMPLER and reader is not None:
         # the trainer stint is over: its read-ahead would poll the index (a Volume
         # reload every poll) through the rollout and the next stint's start, whose
-        # store writes then fail on the remount (EPERM, GPU run s27-eg-b1)
+        # store writes then fail on the remount (EPERM, seen on GPU)
         reader._stop_prefetching()
     return previous
 
@@ -637,11 +637,11 @@ def register_reader(reader: BatchReader) -> None:
     """Called by the reader rollout function in the rollout executor's process."""
     _ACTIVE[TRAINER] = reader
     pending = _PENDING_RELAY_GATE.pop(TRAINER, None)
-    if pending is not None:  # S27 G-EM: relay mode only (executor_set_relay_gate_version)
+    if pending is not None:  # relay mode only (executor_set_relay_gate_version)
         reader.gate_version = pending
 
 
-# S27 G-EM: a relay trainer's gate version set before its reader exists (the first
+# A relay trainer's gate version set before its reader exists (the first
 # publication precedes the first rollout call, which builds the reader).
 _PENDING_RELAY_GATE: dict[str, int] = {}
 # Relay mode: the round and the gate version of the last take, on the rollout
@@ -678,7 +678,7 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
 
 
 def executor_set_relay_gate_version(_executor: Any, version: int) -> int | None:
-    """:func:`executor_set_gate_version` of a relay trainer (S27 G-EM): a gate set
+    """:func:`executor_set_gate_version` of a relay trainer: a gate set
     before the reader exists is kept and applied when the reader registers, so
     the first take already gates on the merged version."""
     if _ACTIVE.get(TRAINER) is None:

@@ -23,7 +23,7 @@ The rules reproduce compressed-tensors 0.18 (the reference artefact
 
 No calibration data and no smoothing: round to nearest only (RTN). Each output
 row is quantized on its own, so any row slice of a weight gives the same rows
-as the whole weight (the basis for per-rank quantization, D7).
+as the whole weight (the basis for per-rank quantization).
 
 Evidence (CPU, 2026-10-19): the BF16 layer-10 routed experts of
 ``apex-flash-1`` (288 ``down_proj``, 4 ``gate_proj`` / ``up_proj``; native

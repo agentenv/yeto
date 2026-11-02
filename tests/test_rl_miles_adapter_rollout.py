@@ -330,7 +330,7 @@ def test_dynamic_filter_source_is_labelled_on_the_round_event(tmp_path):
 
 
 def test_tool_wait_seconds_are_summed_from_all_generated_samples(tmp_path):
-    """rl-infra-spec 1.7: tool waiting comes from Miles Sample.non_generation_time and is
+    """Tool waiting comes from Miles Sample.non_generation_time and is
     carried separately from generation time (not GPU saturation)."""
     from yeto.rl.engine.driver import IslandDriver, TrainStepMetrics
 

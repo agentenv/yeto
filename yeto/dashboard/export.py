@@ -1,4 +1,4 @@
-"""Static single-file export (design D3).
+"""Static single-file export.
 
 The page is ``static/index.html`` with the full reducer view inlined as
 JSON; it makes no network request when opened (no fonts, no CDN, the Ray

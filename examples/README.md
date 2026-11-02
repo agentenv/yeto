@@ -13,10 +13,9 @@ It is a smoke test, not a benchmark: MATH-500 is a *test* set and the reward
 is exact-match.
 
 ```bash
-yeto launch --training-mode rl --rl-engine legacy \
+yeto launch --training-mode rl \
   --gpu modal:8xh100 --syncer-region nebius/eu-north1 \
   --cluster-prefix math-smoke \
-  --rl-image docker:radixark/miles@sha256:cd40db923225c4146e90fdf4aa04bc000b71c1e980cc42df6f368de7545eaa09 \
   --model Qwen/Qwen3-1.7B --model-revision 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e \
   --data HuggingFaceH4/MATH-500 --data-revision 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be \
   --rl-prompt-column problem --rl-label-column answer \
@@ -27,18 +26,19 @@ yeto launch --training-mode rl --rl-engine legacy \
   --seq-len 2048 --inner-lr 1e-5 --seed 17 --trust-remote-code --on-demand
 ```
 
-- `--rl-engine legacy` reproduces the recorded run below, which pinned the
-  public `radixark/miles:v0.1.0` image and the legacy Miles fork. The default
-  engine is now `ports` (LoRA + GRPO is inside its boundary); drop both
-  `--rl-engine legacy` and `--rl-image` to run the same smoke on `ports` with
-  its pinned default image.
+- Without `--rl-image` the island runs the pinned default ports image
+  (`MILES_NEXT_IMAGE` in `yeto/rl/adapters/miles/pins.py`).
 - `--rl-prompt-column` / `--rl-label-column` name the dataset columns; the RL
   data path otherwise expects `messages` / `prompt` / `input` and `label`,
   and never guesses. A named column that is missing is an error.
 - `--reward-function` takes any `file.py:func` inside the repo; the file is
   synced to the island and its sha256 is attested like any other reward.
-- `--gpu` can be any cloud entry; `modal:8xh100` with an on-demand Nebius
-  syncer is the configuration this was last run in (2026-09-23, run
-  `yeto-rl84f`: 3 rounds, mean raw reward 0.61 on Qwen3-1.7B).
+- `--gpu` can be any cloud entry; the syncer can run in any supported region.
 - Any Qwen3 checkpoint works; `enable_thinking: false` keeps rollouts short
   enough for `--rollout-max-response-len 1024`.
+
+## Other examples
+
+- [`custom_reward/`](custom_reward/README.md): a minimal framework-neutral
+  reward plugin.
+- `rl_algorithms/`: `AlgorithmSpec` JSON files for `--rl-algorithm-spec`.

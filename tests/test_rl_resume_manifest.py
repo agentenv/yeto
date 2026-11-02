@@ -1,4 +1,4 @@
-"""S25 N7.6: resume assertions (A-TRN report #8, a silently reset Adam step). CPU only.
+"""Resume assertions (a silently reset Adam step). CPU only.
 
 * "train 3, save, resume, train 2" equals "train 5" bit for bit (plain torch and
   FSDP2 over gloo with two CPU ranks);
@@ -254,17 +254,20 @@ def _fsdp2_worker(rank: int, world: int, port: int, out_dir: str) -> None:
     """Two CPU ranks, FSDP2 over gloo: continuous 5 steps vs 3 + save/resume + 2."""
     import torch.distributed as dist
     from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+    from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import fully_shard
 
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     dist.init_process_group("gloo", rank=rank, world_size=world)
+    # an explicit CPU mesh: the default one follows the host accelerator (MPS on macOS)
+    mesh = init_device_mesh("cpu", (world,))
     try:
         def build():
             model = _model()
             for layer in model:
                 if isinstance(layer, torch.nn.Linear):
-                    fully_shard(layer)
-            fully_shard(model)
+                    fully_shard(layer, mesh=mesh)
+            fully_shard(model, mesh=mesh)
             return (model, *_optim(model))
 
         def run(model, opt, sched, steps):
@@ -353,7 +356,7 @@ def test_miles_cut_records_and_checks_the_resume_manifest(tmp_path):
 
 
 def test_miles_restore_compares_the_landed_cursor_not_the_cut(tmp_path):
-    """T-REV2: the watermark is compared with the cursor the driver actually restored."""
+    """The watermark is compared with the cursor the driver actually restored."""
     from tests.rl_cut_fakes import make_rank
 
     RankGroup, _context, _expect, _trained_rank, _trainer = _miles()
@@ -414,7 +417,7 @@ def test_miles_first_step_without_advance_is_refused(tmp_path):
 
 
 def test_miles_cut_without_resume_section_is_refused(tmp_path):
-    """A cut written before N7.6 (no resume section, hash still valid) is not resumed."""
+    """A cut written before resume sections existed (no resume section, hash still valid) is not resumed."""
     import hashlib
     import json
 

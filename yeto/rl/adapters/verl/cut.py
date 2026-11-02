@@ -1,5 +1,5 @@
 """verl / FSDP2 cut: save at a safe point, restore into a fresh trainer, prove the
-optimizer continues (S25 N7.6; same cut semantics as the Miles path).
+optimizer continues (same cut semantics as the Miles path).
 
 A verl cut is a neutral :class:`~yeto.rl.engine.cut.CutManifest` (same
 ``progress`` / ``data`` / ``ledger`` / ``outer`` sections, same ``resume``
@@ -13,9 +13,9 @@ Rank file ``rank<NNNNN>.pt`` (``torch.save``):
 * ``model`` -- the parameters the optimizer holds, as the rank's local FSDP2
   shards (``DTensor.to_local``) on CPU. Frozen base weights (LoRA) and any
   parameter outside the optimizer are skipped: verl's state dict also carries a
-  ``requires_grad`` ``lm_head.weight`` that no optimizer steps (S25 T-C4: 156 M
+  ``requires_grad`` ``lm_head.weight`` that no optimizer steps (measured: 156 M
   parameters, 865 MB per rank file next to ~20 M LoRA parameters); it never
-  changes, so the freshly built trainer already has it (S26 E9.2);
+  changes, so the freshly built trainer already has it;
 * ``optim`` -- the optimizer state dict keyed by parameter name, DTensor
   entries stored as local shards; ``dtensor`` lists which entries were DTensors;
 * ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA) RNG.
@@ -24,8 +24,8 @@ Restore needs the same world size (FSDP2 shards are per rank; a DP change is
 refused before any rank writes). Each rank checks its file checksum, loads it
 into the freshly built module/optimizer (DTensors rebuilt with the fresh
 module's mesh and placements), and reports a digest of the state its optimizer
-now steps (N7.6c: read from ``optimizer.param_groups``, not the module copy)
-and of its RNG state (S27 G-ED; both must equal the ones recorded at save)
+now steps (read from ``optimizer.param_groups``, not the module copy)
+and of its RNG state (both must equal the ones recorded at save)
 plus its resume state. The same rank files are the peer snapshot of a
 full-parameter island (:mod:`.peer_recovery`).
 
@@ -154,8 +154,8 @@ def _stepped_state(handles: TrainHandles) -> tuple[dict[str, dict[str, Any]], li
 
     Read from ``optimizer.param_groups`` and ``optimizer.state`` (local shards), not
     from the module's state dict: a digest over the module copy cannot see an
-    optimizer that steps another tensor (S25 N7.6c; on Miles the CPU-offload host
-    master went stale after a restore while the cut digest matched, GPU T-G3). A
+    optimizer that steps another tensor (on Miles the CPU-offload host master once went
+    stale after a restore while the cut digest matched). A
     stepped tensor that is no module parameter is named by its group position."""
     names = {id(p): n for n, p in handles.module.named_parameters()}
     state: dict[str, dict[str, Any]] = {}
@@ -428,7 +428,7 @@ def restored_problems(manifest: CutManifest, expect: RestoreExpectation,
             problems.append(f"{r['path']}: loaded train state differs from the cut")
         if r["scheduler_samples"] != s["scheduler_samples"]:
             problems.append(f"{r['path']}: scheduler at {r['scheduler_samples']}, cut {s['scheduler_samples']}")
-        if "rng_digest" in s and r.get("rng_digest") != s["rng_digest"]:  # cuts since S27 G-ED
+        if "rng_digest" in s and r.get("rng_digest") != s["rng_digest"]:  # older cuts have no rng_digest
             problems.append(f"{r['path']}: restored RNG state differs from the cut")
     now = ResumeManifest(int(expect.local_step), saved.data_watermark, saved.scheduler_increment,
                          _rank_states(results))

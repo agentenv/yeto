@@ -2,7 +2,7 @@
 
 Why: a fixed-partition island runs its round serially (generate -> train ->
 sync boundary -> publish), so the engine GPUs wait while the trainer works and
-the trainer waits while the engines generate. s27-ba-a (2 islands, 8 trainer +
+the trainer waits while the engines generate. A measured run (2 islands, 8 trainer +
 16 engine H200 each) spent 33% of a round generating, 20% training, 41% in the
 sync boundary and 6% publishing, one after another.
 

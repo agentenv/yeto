@@ -1,6 +1,6 @@
-"""d2-wire: D1/D2 wired into the driver safe point with the Flash-Next profile (CPU only).
+"""Elastic recommendation and reconfiguration wired into the driver safe point with the Flash-Next profile (CPU only).
 
-Real IslandController + IslandDriver + elastic fakes (test_rl_reconfig_e1), the
+Real IslandController + IslandDriver + elastic fakes (test_rl_reconfig_controller), the
 Flash-Next ExecutionProfile and elastic declaration, synthetic load windows for
 four load types and a fake 5.7 cost table.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from test_rl_reconfig_e1 import (FP, NAME, ElasticFakePool, ElasticFakePublisher,
+from test_rl_reconfig_controller import (FP, NAME, ElasticFakePool, ElasticFakePublisher,
                                  ForkMembership, _events)
 from yeto.rl.elastic_benchmark.capabilities import Attestation
 from yeto.rl.engine.algorithm import AlgorithmSpec

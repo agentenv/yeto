@@ -1,8 +1,7 @@
 """Offline Miles full-parameter layout of Nemotron-H actors (no GPU, no weights).
 
-The Nano 30B-A3B case is the island layout measured on H200 (S27
-``s27-gr-probe-b``: ``[yeto-layout-probe]`` record and the layout check
-error; the same hash ran in ``s27-gr-j``). The 120B case uses the real
+The Nano 30B-A3B case is the island layout measured on H200 (the
+``[yeto-layout-probe]`` record and the layout check error of a probe run). The 120B case uses the real
 Nemotron-3.5 Super VL config.json; its totals are checked against the
 checkpoint's safetensors headers (revision fb0ee0bc, headers only).
 """
@@ -35,7 +34,7 @@ VL_LANGUAGE_MODEL_NUMEL = 120_668_707_840 - 40 * 512
 def test_nano_tp2_ep2_matches_the_measured_island_layout():
     manifests = L.rank_manifests(L.NemotronHGeometry.from_hf_config(NANO), tp=2, ep=2)
 
-    # s27-gr-probe-b [yeto-layout-probe] "manifests"
+    # probe run [yeto-layout-probe] "manifests"
     assert [m.shard_id for m in manifests] == [
         "tp0-of-2.pp0-of-1.ep0-of-2.cp0-of-1.dp0-of-1",
         "tp1-of-2.pp0-of-1.ep1-of-2.cp0-of-1.dp0-of-1",
@@ -54,7 +53,7 @@ def test_nano_tp2_ep2_matches_the_measured_island_layout():
 
 
 def test_nano_tp1_ep8_dp8_lists_every_parameter_once():
-    """The S27 closing trainer (TP1/EP8/DP8, Miles data-parallel replicas)."""
+    """The closing-run trainer (TP1/EP8/DP8, Miles data-parallel replicas)."""
     geometry = L.NemotronHGeometry.from_hf_config(NANO)
     manifests = L.rank_manifests(geometry, tp=1, ep=8, dp=8)
     (whole,) = L.rank_manifests(geometry, tp=1, ep=1)  # one rank holding every parameter

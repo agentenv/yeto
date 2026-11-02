@@ -170,7 +170,7 @@ def test_entry_preflight_refuses_partial_island_before_any_placement_group(tmp_p
     assert entry.refuse_partial_island_preflight(elastic, SimpleNamespace(nodes=1, gpus_per_node=1), miles_args) is None
 
 
-# ------------------------------------------------- Q4 (C5): parallel layout baseline
+# ------------------------------------------------- parallel layout baseline
 def _layout(**kw):
     base = {"tp": 1, "pp": 1, "cp": 1, "ep": 1, "trainer": 4, "nodes": 2, "gpus_per_node": 4,
             "bundle_map": None, "cross_node_tp": 0, "cross_node_engine_tp": 0}

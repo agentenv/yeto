@@ -1,4 +1,4 @@
-"""Keep ABORTED samples out of group baselines (S25 N10.3b).
+"""Keep ABORTED samples out of group baselines.
 
 An ABORTED trajectory (infrastructure failure, misaligned tokens) is never
 trained: it carries no loss tokens and reward 0.  A group-relative estimator

@@ -90,7 +90,7 @@ def test_wait_ends_when_streams_end_or_at_the_deadline(tmp_path):
 
 
 def test_recover_from_the_island_tape_file_completes_a_closed_tape(tmp_path):
-    """S1 2x1 L40S (s1-mn-20261004a): the stream delivered no run-phase line; the island's
+    """2x1 L40S run: the stream delivered no run-phase line; the island's
     own ~/yeto-output/rl-island-0.jsonl holds the whole tape."""
     c = TapeCollector(tmp_path / "t.jsonl")
     c.feed(f"{PREFIX}{_rec('rl_driver_phase')}\n")
@@ -135,7 +135,7 @@ def test_launcher_recovers_echo_tape_over_rsync(tmp_path):
 
 
 def test_settle_echo_tapes_completes_cut_never_streamed_and_modal_tapes(tmp_path):
-    """S14/A19 (-5r1 r7): a SUCCEEDED job's echo stream went silent after a learner
+    """A SUCCEEDED job's echo stream went silent after a learner
     restart (58/146 records); the island's own file holds the finalized record,
     so the tape is complete and the launcher must not exit 3. Also covers an
     island that never streamed (now recovered too) and a Modal island (tape
@@ -190,7 +190,7 @@ def test_settle_echo_tapes_finalized_stream_needs_no_recovery(tmp_path):
 
 
 def test_tail_skips_sky_control_none_and_ends_when_the_stream_ends(monkeypatch, capsys):
-    """S14/A19 root cause of the missing run-phase lines: skypilot 0.13's client
+    """Root cause of the missing run-phase lines: skypilot 0.13's client
     yields None for every rich-status/heartbeat control payload off the main
     thread (the API server heartbeats after 30 s of log silence); _tail took
     the first None as end-of-stream. None is skipped; exhaustion is the end."""
@@ -217,14 +217,25 @@ def test_tail_skips_sky_control_none_and_ends_when_the_stream_ends(monkeypatch, 
     assert "[isl-l0] YETO_RL_EVENT" in capsys.readouterr().out
 
 
-def test_echo_needs_no_code_object_probe():
+def test_echo_needs_no_code_object_probe(tmp_path, monkeypatch, capsys):
     """rl-code-quality-cleanup 1.9: no runtime __code__ inspection decides the
-    tape writer; the shared writer goes through event_echo.append_record."""
-    import inspect
+    tape writer; enabling the echo leaves the shared writer in place, and that
+    writer (event_echo.append_record) echoes exactly the line it wrote."""
+    from types import SimpleNamespace
 
+    from yeto.rl import event_echo
     from yeto.rl.adapters.miles import island_entry
     from yeto.rl.engine import events
 
-    assert "co_names" not in inspect.getsource(island_entry) and "__code__" not in inspect.getsource(island_entry)
+    monkeypatch.delenv(event_echo.ECHO_ENV, raising=False)
+    writer = events.append_tape_event
     assert not hasattr(island_entry, "_wrap_legacy_tape_writer")
-    assert "append_record" in inspect.getsource(events.append_tape_event)
+    assert island_entry.install_event_echo() is True
+    assert events.append_tape_event is writer  # nothing wrapped or patched
+    tape = tmp_path / "tape.jsonl"
+    events.append_tape_event(SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=3),
+                             {"event": "probe", "n": 1})
+    line = tape.read_text().strip()
+    assert json.loads(line)["event"] == "probe" and json.loads(line)["island_id"] == 3
+    assert event_echo.PREFIX + line in capsys.readouterr().out.splitlines()
+    assert island_entry.install_event_echo() is False  # idempotent

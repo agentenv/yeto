@@ -1,4 +1,4 @@
-"""agentic-rollout-utilization 7: generation-stage utilization on the dashboard
+"""Generation-stage utilization on the dashboard
 (cutoff tally, completion curve, four-phase split, KV/queue, stage-2 carry-over, A/B)."""
 
 import json
@@ -89,10 +89,10 @@ def test_compare_run_is_attached(tmp_path):
     dash_cli.add_parser(p.add_subparsers(dest="cmd"))
     out = tmp_path / "ab.html"
     args = p.parse_args(["dashboard", "export", "--tapes", str(a), "--compare", str(b),
-                         "--label", "A 多发 6", "--compare-label", "B 多发 12", "-o", str(out)])
+                         "--label", "A oversample 6", "--compare-label", "B oversample 12", "-o", str(out)])
     assert dash_cli.main(args) == 0
     html = out.read_text()
-    assert "A 多发 6" in html and "B 多发 12" in html
+    assert "A oversample 6" in html and "B oversample 12" in html
 
 
 def _smoke(tmp_path, reducer):
@@ -110,8 +110,8 @@ def test_page_draws_utilization_and_unknowns(tmp_path):
     r.compare = [util_reducer(label="B")]
     u = _smoke(tmp_path, r)
     assert u["empty_hidden"] is True and u["body_hidden"] is False
-    assert "未知" in u["cut"] and "1000" in u["cut"] and "A" in u["cut"] and "B" in u["cut"]
-    assert "全部轮叠加" in u["ctl"] and "叠加" in u["ctl"]  # round switch + A/B mode
+    assert "unknown" in u["cut"] and "1000" in u["cut"] and "A" in u["cut"] and "B" in u["cut"]
+    assert "all rounds overlaid" in u["ctl"] and "overlay" in u["ctl"]  # round switch + A/B mode
     assert u["done_svg"] == 4 and u["cut_lines"] == 4  # 2 rounds x 2 runs, side by side
     assert u["carry_hidden"] is False and "0 → 1" in u["carry"]
 

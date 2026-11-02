@@ -27,8 +27,6 @@ from test_rl_miles_adapter_config import make_config, sub
 
 CANDIDATES = (
     os.environ.get("YETO_MILES_NEXT_ROOT", ""),
-    os.path.expanduser("~/work/miles-fr1"),
-    os.path.expanduser("~/work/miles-next"),
     "/tmp/miles_up",
 )
 GENERATE_HUB = "miles/rollout/generate_hub/agentic_tool_call.py"

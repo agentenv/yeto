@@ -1,6 +1,6 @@
-"""Which linear modules a quantized rollout may quantize (S26 E6 scope rule).
+"""Which linear modules a quantized rollout may quantize.
 
-The rule is fixed (GOAL §5 E6):
+The rule is fixed:
 
 * a dense model quantizes only its FFN (MLP) linears:
   ``mlp.gate_proj``, ``mlp.up_proj``, ``mlp.down_proj`` (and the fused

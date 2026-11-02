@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check an engine image against its version lock at container start (S25 N0.2).
+"""Check an engine image against its version lock at container start.
 
 Usage: ``assert_image_versions.py LOCK.json`` (the image entrypoint runs it
 before the command). Exit 0 when every check passes, 1 otherwise; the report
@@ -147,6 +147,8 @@ def check_driver(driver: dict | None, report: Report) -> None:
 def run(lock: dict, *, commits_file: Path = COMMITS_FILE, machine: str | None = None) -> Report:
     report = Report()
     machine = machine or platform.machine()
+    # the lock uses the uname -m spelling (yeto.launch.engine_images); macOS and Docker say arm64/amd64
+    machine = {"arm64": "aarch64", "amd64": "x86_64"}.get(machine.lower(), machine)
     report.add("cpu_arch", machine == lock["cpu_arch"], f"{machine} (lock {lock['cpu_arch']})")
     want_py = lock.get("python")
     have_py = platform.python_version()

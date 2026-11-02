@@ -1,4 +1,4 @@
-"""Trainer DP resharding checks (rl-infra-spec 4.6 spike, alignment A4, design D5/D7). Import-light.
+"""Trainer DP resharding checks (spike). Import-light.
 
 A DP change keeps TP/PP/CP/EP, the global batch size, the micro-batch size and
 the algorithm fixed and changes only the data-parallel size of the single
@@ -11,7 +11,7 @@ Everything a DP edge needs to be refused for is refused by
 before ``save_cut``) and again before any rank writes on restore:
 
 * layout: world must be ``tp*pp*cp*dp``; only DP (and so world) may change;
-* batch semantics (D7.4): the production path is the rollout-side schedule
+* batch semantics: the production path is the rollout-side schedule
   (fork ``dp_schedule.build_dp_schedule``: GBS counts rollouts, pack first,
   distribute micro-batch k to rank k % dp), modelled by
   :func:`scheduled_partitions`; GBS/mbs must be a multiple of dp in BOTH
@@ -22,7 +22,7 @@ before ``save_cut``) and again before any rank writes on restore:
   fork scales a micro-batch by ``num_microbatches / num_rollouts * dp``
   (:func:`miles_microbatch_loss_scale`); with Megatron's ``1/num_microbatches``
   and the DP average the weight is ``1/num_rollouts`` at any DP. CPU only
-  recomputes this arithmetic; the evidence that the engine does it is A8 G2.
+  recomputes this arithmetic; the evidence that the engine does it is the GPU acceptance (A8).
   Token-level aggregation
   (``--calculate-per-token-loss``), the Dr.GRPO constant denominator,
   ``--normalize-advantages`` (DP all-reduce whitening), custom reducers/losses,
@@ -201,7 +201,7 @@ def require_reshard(plan: ReshardPlan, **kwargs: Any) -> None:
 
 
 # --------------------------------------------------------------------------
-# Loss normalization and sample mapping (D7.4)
+# Loss normalization and sample mapping 
 # --------------------------------------------------------------------------
 
 
@@ -220,7 +220,7 @@ def sample_weight(*, num_rollouts: int, num_microbatches: int, dp: int, cp: int 
     (forward_backward_func) and the DP(xCP) gradient average ``1/(dp*cp)``.
 
     The Megatron factors are an assumption about Megatron core (not re-read
-    here); CPU only checks the arithmetic -- GPU evidence is A8 G2.
+    here); CPU only checks the arithmetic -- GPU evidence is the A8 acceptance.
     """
     scale = miles_microbatch_loss_scale(num_microbatches=num_microbatches, num_rollouts=num_rollouts, dp=dp, cp=cp)
     return scale / num_microbatches / (dp * cp)
@@ -307,7 +307,7 @@ def step_problems(rollout_indices: list[int], plan: ReshardPlan) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# RNG mapping (4.2a keep_on_dp_change; design D5 "explainable seed mapping")
+# RNG mapping (4.2a keep_on_dp_change; "explainable seed mapping")
 # --------------------------------------------------------------------------
 
 

@@ -1,6 +1,6 @@
-"""S27 G-FH: the initial cut, the final cut and a bf16-downlink catch-up do not wait on one slow downlink (real syncer, CPU, no Ray).
+"""The initial cut, the final cut and a bf16-downlink catch-up do not wait on one slow downlink (real syncer, CPU, no Ray).
 
-G-FD moved the per-round broadcast off the scheduler (``test_slow_downlink``).
+An earlier change moved the per-round broadcast off the scheduler (``test_slow_downlink``).
 Three sends still waited on each learner's link in turn (SLOW-DOWNLINK.md
 section 9.3):
 
@@ -274,7 +274,7 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
 
 
 def test_env_downlink_limit_can_open_at_connect_and_name_two_learners():
-    """S27 G-FH: the GPU check slows island 1's initial cut (FROM_STEP
+    """The GPU check slows island 1's initial cut (FROM_STEP
     "connect") and island 0's final cut (a PULL step near the end) in one
     run: one spec per learner, comma-separated."""
     from tests.test_bulk_resend import make_layout

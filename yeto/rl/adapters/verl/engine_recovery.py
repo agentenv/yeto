@@ -1,4 +1,4 @@
-"""verl :class:`~yeto.rl.engine.engine_outage.EngineRecoveryPort` (S27 G-EW, VERL-PARITY #16).
+"""verl :class:`~yeto.rl.engine.engine_outage.EngineRecoveryPort` (VERL-PARITY #16).
 
 A verl island in the separate mode (``separate``, ``--rl-placement fixed-partition``)
 trains on its trainer cards and generates on standalone vLLM replicas (verl's
@@ -200,7 +200,7 @@ class VerlEngineRecovery:
         """The trainer side keeps its NCCL checkpoint group between updates (verl's
         ``rebuild_group`` default False) and would reuse it with the dead replicas'
         ranks; drop it on every actor worker, so the next update builds a new group
-        with the new replicas (s27-ew-o3: the reused group failed its barrier)."""
+        with the new replicas (a reused group fails its barrier)."""
         workers = self.trainer.actor_rollout_wg.workers
         refs = [worker.__ray_call__.remote(_drop_checkpoint_group) for worker in workers]
         return self.ray.get(refs, timeout=180)
@@ -214,7 +214,7 @@ class VerlEngineRecovery:
         dead_s = self._wait_dead([handle for replica in old for handle in (*replica.servers, *replica.workers)])
         dropped = self._drop_actor_groups()
         # the same actor names as the old replicas: verl's rollout worker finds its server by
-        # ``<prefix>server_<rank>_<node>`` without the replica's name suffix (s27-ew-o4), so the
+        # ``<prefix>server_<rank>_<node>`` without the replica's name suffix, so the
         # new replicas start only after the old actors are dead and their names are free
         new = [manager.rollout_replica_class(
             replica_rank=replica.replica_rank, config=manager.rollout_config, model_config=manager.model_config,
@@ -385,7 +385,7 @@ def arm_verl_engine_outage(driver: Any, trainer: Any, plan: Mapping[str, Any], *
         raise ValueError("verl engine recovery needs the separate mode (--rl-placement fixed-partition): "
                          "a colocated island's engines share the trainer's cards")
     if int(plan.get("rollout_ahead") or 0):
-        # S27 G-FB (s27-next3 joins G-EV's rollout ahead and G-EW's engine recovery): when
+        # Rollout ahead combined with engine recovery: when
         # the engines die in a batch generated ahead, the driver restores them, republishes
         # v(rollout_id - 1) and generates that batch again (driver._finish_ahead_watched);
         # VerlRolloutPool.generate needs the publication of rollout_id itself. Not wired,

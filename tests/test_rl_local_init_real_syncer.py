@@ -1,4 +1,4 @@
-"""S27 local init against the real Rust syncer (CPU, no Ray).
+"""Local init against the real Rust syncer (CPU, no Ray).
 
 Every island loaded the same base weights. Islands report per-fragment
 INIT digests; learner 0 still uploads INIT (the syncer keeps exact f32

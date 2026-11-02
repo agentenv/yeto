@@ -1,4 +1,4 @@
-"""Launch side of the run code pack (rl-identity-tiering L9.4-L9.6).
+"""Launch side of the run code pack.
 
 With ``--rl-code-pack git-patch`` (also the ``auto`` default when the checkpoint
 store is a ``scheme://`` URI) the launcher resolves the run's pack before it
@@ -9,7 +9,7 @@ Modal ``add_local_dir``), so a local tree that changes after the first start doe
 reach replacement or resumed islands. Islands check the tree against
 ``--code-pack-digest`` before they start.
 
-With ``--rl-code-pack release`` (L9.12) the run pack is the ``--rl-image`` itself: a
+With ``--rl-code-pack release`` the run pack is the ``--rl-image`` itself: a
 release image built by ``scripts/build_yeto_release_image.sh`` (yeto in an image
 layer at ``/opt/yeto/src``, with ``~/sky_workdir`` linked to it). Its digest is the
 pack digest; nothing is uploaded and no local tree is shipped (no sky ``workdir``,

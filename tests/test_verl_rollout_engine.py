@@ -1,4 +1,4 @@
-"""S25 N10.9: the records proxy over verl's own rollout client, behind a path secret (CPU).
+"""The records proxy over verl's own rollout client, behind a path secret (CPU).
 
 Real pieces: ``HarborAgentLoop.run``, ``ProxyTokenRecorder`` serving a
 ``RecordsProxy`` over HTTP, the gateway and recording backend, and
@@ -209,7 +209,7 @@ def test_malformed_tool_call_is_a_trained_zero_not_an_abort(verl_loop, qwen, exc
 
 
 def test_context_full_is_a_trained_zero_not_an_abort(verl_loop, qwen):
-    """The conversation outgrows the context: the proxy answers 409, Codex exits; the policy's budget (N10.9)."""
+    """The conversation outgrows the context: the proxy answers 409, Codex exits; the policy's budget."""
     from yeto.rl.adapters.verl.rollout_engine import VerlRolloutEngine
 
     loop_mod, _ = verl_loop

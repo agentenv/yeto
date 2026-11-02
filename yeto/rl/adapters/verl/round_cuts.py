@@ -1,4 +1,4 @@
-"""verl island round cuts: when to cut, the pointer, stop triggers, resume (S25 N7.6b).
+"""verl island round cuts: when to cut, the pointer, stop triggers, resume.
 
 The verl sync island runs the same cut controller as the Miles island
 (:mod:`yeto.rl.engine.round_cut`), wired the same way: with ``--rl-resume-store``
@@ -17,7 +17,7 @@ and no outer syncer (``--rl-single-island-no-sync``),
   ``trainer_remote`` commands, :func:`run_driver`); a preemption signal only
   writes a marker (``install_preempt_handler`` on the main thread; in a Ray
   actor ``watch_preempt_marker`` turns the Modal runner's reclaim marker file
-  into the same notice, S26 E9.1): the next launch resumes from
+  into the same notice): the next launch resumes from
   the newest complete cut.
 
 The resume assertions of :mod:`.cut` run on this path: the restored rank digests
@@ -25,12 +25,12 @@ and Adam steps at restore, the landed data cursor against the cut's data
 watermark (driver ``_restore_data_cursor`` -> ``confirm_resumed_data_cursor``),
 and the Adam/scheduler advance after the first resumed round.
 
-S27 G-ED (VERL-PARITY #20, #21), as on the Miles island:
+VERL-PARITY #20, #21, as on the Miles island:
 
 * a full-parameter island cuts and resumes the same way (the rank files hold
   every FSDP2 parameter shard, the FP32 masters, and their Adam state);
 * a synced island (an outer syncer) with ``--rl-island-cut-store`` (the
-  launcher's island cuts, S27 R-2) writes its own round cuts under
+  launcher's island cuts) writes its own round cuts under
   ``island<learner id>`` and never resumes from them (the syncer is
   authoritative): ``plan["resume"]["write_only"]``;
 * ``--rl-cut-auto-mtbf-s`` / ``--rl-cut-max-interval-s`` give the timed
@@ -86,7 +86,7 @@ def resume_config(args: Any) -> dict[str, Any] | None:
                      max_interval_s=auto.get("max_interval_s"))  # exclusive modes
     # the interval: timed when asked for, else every N rounds (verl default 1)
     interval = auto or {"every": int(every or DEFAULT_CUT_EVERY)}
-    if island_store:  # S27 R-2 on verl (G-ED): a synced island writes its cuts only
+    if island_store:  # a synced island writes its cuts only
         check_island_cut_store(args)
         from yeto.rl.engine import sample_roles
 
@@ -104,7 +104,7 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     from yeto.rl.engine import sample_roles
 
     if sample_roles.sample_role(args) == sample_roles.TRAINER:
-        # a buffer trainer (S25 C2) names its sample buffer's store with
+        # a buffer trainer names its sample buffer's store with
         # --rl-resume-store; round cuts are not wired on that path
         if given:
             raise ValueError(", ".join(given) + ": round cuts are not wired for a verl buffer "
@@ -113,7 +113,7 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (a synced island "
                          "resumes from the syncer)")
-    # --rl-max-policy-age > 0 (the fully_async path) cuts too since S26 E9.2
+    # --rl-max-policy-age > 0 (the fully_async path) cuts too
     # (.fully_async_cut: the rollouter skips the consumed prompts on resume)
     return {
         "store": str(store),
@@ -205,7 +205,7 @@ def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[s
         driver.sync.stop_after = config.get("stop_after")
     # the handler needs the main thread (verl: the task runner actor's); [] when it is not
     signals = install_preempt_handler(controller, emit=driver.emit) if install_signals else []
-    # S26 E9.1: the signal reaches the container's main process, not this actor; the
+    # the signal reaches the container's main process, not this actor; the
     # Modal runner writes the reclaim marker and this thread turns it into the notice
     watcher = watch_preempt_marker(controller) if install_signals else None
     driver.emit("rl_round_cuts_wired", backend="verl", every=checkpoint.every,

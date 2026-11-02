@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L5.3c on sky (CPU, fakes): the trainer island as one sky
+"""Trainer on sky (CPU, fakes): the trainer island as one sky
 cluster per incarnation, the head on an ``s3://`` checkpoint store.
 
 The sky calls go through a fake :class:`SkyIslandOps`; its "cluster" is the fake
@@ -272,7 +272,7 @@ def test_sky_binding_needs_the_held_task(tmp_path, monkeypatch):
 
 
 def test_loop_starts_a_trainer_for_the_samplers_first_policy(tmp_path, monkeypatch):
-    """LoRA samplers wait for a first release: the buffer stays empty, S1 alone would
+    """LoRA samplers wait for a first release: the buffer stays empty, the start rule alone would
     never start. The loop starts one and keeps it until it trained a round."""
     from yeto.rl.engine.trainer_loop import FIRST_POLICY
 
@@ -283,7 +283,7 @@ def test_loop_starts_a_trainer_for_the_samplers_first_policy(tmp_path, monkeypat
     released = {"v": False}
     loop._needs_first_policy = lambda: not released["v"]
 
-    assert _ticks(loop, 1) == [Start] and loop.state is LifecycleState.TRAINING  # S1 alone: Hold
+    assert _ticks(loop, 1) == [Start] and loop.state is LifecycleState.TRAINING  # start rule alone: Hold
     released["v"] = True  # the warm-up publication reached the store
     assert loop.handle.incarnation == 0 and loop.handle.rounds == 0
     clock.now += 10 * T_S

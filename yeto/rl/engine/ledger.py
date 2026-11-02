@@ -1,4 +1,4 @@
-"""Group / batch / update ledger (rl-infra-spec 3.6, design D3, alignment A2/F5).
+"""Group / batch / update ledger.
 
 The ledger records, durably and per rollout, what happened to every group the
 driver saw, so a retry, a partial group, a publish failure or a restart can
@@ -16,7 +16,7 @@ outer progress). Terminal states besides ``outer_recorded``:
   is not in the authoritative restart cut (the learner restarted from an
   earlier outer state, so that update no longer exists); its groups may be
   generated and trained again. A restart below an ``outer_recorded`` batch is
-  refused (commit uncertainty is never replayed automatically, D7-8).
+  refused (commit uncertainty is never replayed automatically).
 * ``engine_discarded`` -- groups the engine drew (data cursor advanced) and
   threw away for a known engine reason, not an algorithm decision: groups
   still in flight when the batch filled are aborted and dropped with
@@ -44,7 +44,7 @@ cut version requires ``carried_over == 0`` (``cut.py``).
 
 Storage is the same fsync'd JSONL writer as the reconfiguration journal (one
 record per transition) so the ledger survives a learner crash; "in memory it
-was once submitted" is never used as the dedup proof (D3).
+was once submitted" is never used as the dedup proof.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class _Batch:
     policy_token: str
     state: str
     filtered: dict[str, Any] = field(default_factory=dict)
-    # rl-infra-spec 4.2 data cursor AFTER this batch drew its prompts (None =
+    # Data cursor AFTER this batch drew its prompts (None =
     # the rollout did not report one). Restart point for the data source.
     data_cursor: dict[str, int] | None = None
 
@@ -245,7 +245,7 @@ class BatchLedger:
                                 "and over-sampling surplus (not returned to the buffer)")
         if any(c is not None for c in filtered_samples):
             detail["samples"] = sum(int(c or 0) for c in filtered_samples)
-            detail["sample_mechanism"] = "spec sample filter (rl-algo-grpo-knobs D7)"
+            detail["sample_mechanism"] = "spec sample filter"
         if detail:
             self._journal.append("filtered", rollout_id=rid, attempt=attempt, detail=detail)
             self._replay(self._journal.records[-1])
@@ -336,7 +336,7 @@ class BatchLedger:
 
 
 def island_cut_ledger(state_dir: str | Path, *, rounds_restart: bool, tag: str) -> BatchLedger:
-    """S27 G-ED: the batch ledger of a synced island that writes island cuts (S27 R-2).
+    """The batch ledger of a synced island that writes island cuts.
 
     The cut store's state (pointer, ledger, journal) is restored into
     ``state_dir`` at start. A full-parameter island numbers its local rounds

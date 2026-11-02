@@ -1,4 +1,4 @@
-"""S25 N10.3b: the ``yeto_grpo`` estimator keeps ABORTED placeholders out of GRPO groups (CPU).
+"""The ``yeto_grpo`` estimator keeps ABORTED placeholders out of GRPO groups (CPU).
 
 verl is not installed on the test machines, so ``verl.trainer.ppo.core_algos``
 is a stub whose ``compute_grpo_outcome_advantage`` is verl's own function,
@@ -23,7 +23,7 @@ np = pytest.importorskip("numpy")
 
 from yeto.rl.agentic.groups import ISOLATED, isolate_rows  # noqa: E402
 
-VERL_CORE_ALGOS = Path(os.path.expanduser("~/work/verl-fork-acad9875/verl/trainer/ppo/core_algos.py"))
+VERL_CORE_ALGOS = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent")) / "verl/trainer/ppo/core_algos.py"
 
 
 def _verl_grpo():

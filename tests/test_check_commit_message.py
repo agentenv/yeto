@@ -23,18 +23,18 @@ def test_plain_english_passes(tmp_path):
 
 
 def test_han_in_subject_fails(tmp_path):
-    assert _run(tmp_path, "Add 钩子\n\nBody.\n") == 1
+    assert _run(tmp_path, "Add \u94a9\u5b50\n\nBody.\n") == 1
 
 
 def test_han_in_body_fails(tmp_path):
-    assert _run(tmp_path, "Add hook\n\n这是正文。\n") == 1
+    assert _run(tmp_path, "Add hook\n\n\u8fd9\u662f\u6b63\u6587\u3002\n") == 1
 
 
 def test_fullwidth_punctuation_in_body_fails(tmp_path):
-    assert _run(tmp_path, "Add hook\n\nNote：see below\n") == 1
+    assert _run(tmp_path, "Add hook\n\nNote\uff1asee below\n") == 1
 
 
-@pytest.mark.parametrize("text", ["kana ひらがな", "hangul 한글", "ideographic　space"])
+@pytest.mark.parametrize("text", ["kana \u3072\u3089\u304c\u306a", "hangul \ud55c\uae00", "ideographic\u3000space"])
 def test_other_cjk_scripts_fail(tmp_path, text):
     assert _run(tmp_path, f"Add hook\n\n{text}\n") == 1
 
@@ -46,15 +46,15 @@ def test_arrow_and_accented_letters_pass(tmp_path):
 def test_comment_lines_and_scissors_section_are_ignored(tmp_path):
     message = (
         "Add hook\n"
-        "# 请输入提交信息\n"
+        "# \u8bf7\u8f93\u5165\u63d0\u4ea4\u4fe1\u606f\n"
         f"{check.SCISSORS}\n"
-        "diff 中文\n"
+        "diff \u4e2d\u6587\n"
     )
     assert _run(tmp_path, message) == 0
 
 
 def test_violation_reports_line_number(capsys, tmp_path):
-    _run(tmp_path, "Add hook\n\n中文\n")
+    _run(tmp_path, "Add hook\n\n\u4e2d\u6587\n")
     assert "line 3" in capsys.readouterr().err
 
 

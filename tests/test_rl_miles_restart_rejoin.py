@@ -1,4 +1,4 @@
-"""S27 E-4c: a restarted full-parameter island joins a running pool through
+"""A restarted full-parameter island joins a running pool through
 the real Miles role stream. Real Rust syncer (asynchronous rounds, island
 lease); the Megatron trainer group and Ray are CPU fakes.
 
@@ -28,7 +28,7 @@ import torch
 
 pytest.importorskip("miles")
 
-from test_e3_overlap_miles_role_stream import SIZES, _Driver, _Trainer, _adapter  # noqa: E402
+from test_sync_overlap_miles_role_stream import SIZES, _Driver, _Trainer, _adapter  # noqa: E402
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: E402,F401
 from test_rl_full_parameter_async import (  # noqa: E402,F401
     P,
@@ -67,7 +67,7 @@ def _initial() -> dict[int, torch.Tensor]:
 
 class _FreshTrainer(_Trainer):
     """Like Megatron: no optimizer-state proof before the first local step
-    (s27-rj-a: "full-parameter last rollout ID is unavailable")."""
+    ("full-parameter last rollout ID is unavailable")."""
 
     async def full_parameter_optimizer_states(self):
         if not self.trained_from:
@@ -208,7 +208,7 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
             def drain_and_leave():
                 # Quorum 1 closes a round with its first push, and island 0
                 # answers a PULL about as fast as the restarted island does
-                # (both ~2 ms on yeto-cpu-test, S27 G-EI). Left as a race, the
+                # (both ~2 ms on a CPU test host). Left as a race, the
                 # restarted island lost every round after its re-JOIN in some
                 # runs. Island 0 leaves one round that the restarted island
                 # was asked for (this PULL's step or a later one) to it, so
@@ -289,7 +289,7 @@ def test_restarted_miles_island_catches_up_trains_and_acknowledges(syncer_binary
 
 
 def test_initial_wait_stops_when_the_pool_finished_first(monkeypatch):
-    """s27-rj-a: a restarted island that dials after the pool's final cut
+    """A restarted island that dials after the pool's final cut
     must not wait for broadcasts until the 900 s timeout."""
     from test_rl_full_parameter_sync import _role_stream_config as config_of
     from types import SimpleNamespace

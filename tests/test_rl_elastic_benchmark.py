@@ -107,7 +107,7 @@ def test_config_rejections_keep_reasons_instead_of_substituting(monkeypatch):
     assert "not divisible" in table["P71"]["reason"]
     assert "rollout" in table["P80"]["reason"]
     dense = dict(manifest["profile"], parameter_mode="full")
-    # The pinned Miles has data-parallel replicas (S27 closing): a dense profile may use DP>1.
+    # The pinned Miles has data-parallel replicas: a dense profile may use DP>1.
     assert caps.config_rejection(configs["P62"], profile=dense, pool_size=8) is None
     # A pin without them (8edea35a7) keeps the dense profile at DP 1.
     monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")

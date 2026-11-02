@@ -2,7 +2,7 @@
 
 :func:`make_trainer_rebuilder` returns the ``trainer_rebuilder`` the
 :class:`~..controller.IslandController` calls at a round-boundary safe point
-(``request_trainer_rebuild``). It composes INFRA-E2's pieces without changing
+(``request_trainer_rebuild``). It composes the existing pieces without changing
 them:
 
 1. ``MilesTrainerGroup.save_cut`` with a :class:`~.trainer.CutContext` built

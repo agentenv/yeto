@@ -1,6 +1,6 @@
-"""verl island-entry spellings the launcher emits (rl-verl-backend; decoupling 5.5 role).
+"""verl island-entry spellings the launcher emits.
 
-A verl island is one node with any number of cards (S26 E9 G3): the
+A verl island is one node with any number of cards: the
 island-local Ray sees every card of the node and verl's colocated hybrid
 engine puts the trainer and the rollout replicas on all of them
 (``island_entry.island_gpus``).  A single-node multi-card island therefore
@@ -22,7 +22,7 @@ from .pins import VERL_COMMIT, VERL_IMAGE
 ISLAND_ENTRY_MODULE = "yeto.rl.adapters.verl.island_entry"
 NEEDS_MILES_SOURCE = False
 DEFAULT_RL_IMAGE = VERL_IMAGE
-# S27 G-DC: ``verl-megatron-build`` is the same image plus the Megatron engine layers
+# ``verl-megatron-build`` is the same image plus the Megatron engine layers
 _IMAGE = re.compile(r"verl(?:-megatron)?-build:(?P<commit>[0-9a-f]{40})")
 
 
@@ -40,23 +40,23 @@ def bundle_map_flag(bundle_map: Mapping[str, Sequence[int]]) -> str:
     for a single-node colocated island, whatever its card count)."""
     roles = ", ".join(f"{role}={list(slots)}" for role, slots in sorted(bundle_map.items()))
     raise ValueError(
-        "verl 岛是单节点同卡共置（colocated）：训练与 rollout 用本节点全部卡，由 verl 自己放置，"
-        f"不接受按角色指定卡号的 bundle map（收到 {roles}）。单节点多卡直接用 --gpu <provider>:<N>x<卡型>，"
-        "不要给 fixed-partition 的 placement")
+        "a verl island is single-node and colocated: training and rollout use all of the node's cards, "
+        f"placed by verl itself, and a per-role card bundle map is not accepted (got {roles}). For several "
+        "cards on one node use --gpu <provider>:<N>x<card type> without a fixed-partition placement")
 
 
 def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool) -> str:
     if allow_cross_node_tp or allow_cross_node_engine_tp:
-        raise ValueError("verl 岛只在一个节点内：不支持跨节点 TP")
+        raise ValueError("a verl island stays on one node: cross-node TP is not supported")
     return ""
 
 
 # ----------------------------------------------------------------------------- full-parameter preset
-# S27 G-DN: the shape of ``--rl-sync-preset full-parameter`` on verl islands
+# The shape of ``--rl-sync-preset full-parameter`` on verl islands
 # (launch.rl_args._prepare_dense_full_sweep asks for it; the Miles backend
 # provides none and keeps its fixed-partition shape).  A verl full-parameter
 # island is colocated by default: verl's hybrid engine trains and rolls out on
-# the same cards.  S27 G-EK: ``--rl-placement fixed-partition`` with
+# the same cards.  ``--rl-placement fixed-partition`` with
 # ``--rl-rollout-gpus N`` runs verl's separate mode instead (``separate``): the
 # trainer keeps its own cards, standalone vLLM servers take the last N cards
 # and the weights go over verl's NCCL checkpoint engine.  The layout hash
@@ -64,13 +64,13 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
 # (the model's HF config on the meta device), not from the Miles layout probe.
 FULL_PARAMETER_PLACEMENT = "colocated"  # the default
 FULL_PARAMETER_PLACEMENTS = ("colocated", "fixed-partition")
-# S27 G-ED: the verl stream recovers from a peer (adapters/verl/peer_recovery.py),
+# The verl stream recovers from a peer (adapters/verl/peer_recovery.py),
 # so the async mode turns it on by default as on Miles (rl_args._peer_recovery_applies).
 FULL_PARAMETER_PEER_RECOVERY = True
 
 
 def full_parameter_peer_recovery(args) -> bool:
-    """S27 G-FG: whether the async mode's default peer recovery applies to this run:
+    """Whether the async mode's default peer recovery applies to this run:
     not on the Megatron engine island, whose donor has no FSDP2 rank files
     (``megatron_engine.sync_problems``); it rejoins by catch-up."""
     from .run_config_rules import megatron_run
@@ -97,13 +97,13 @@ def full_parameter_problems(args) -> list[str]:
                         "on the same cards, or in verl's separate mode on its own trainer and rollout cards)")
     if placement == "fixed-partition" and int(getattr(args, "rl_standby_gpus", 0) or 0):
         problems.append("no --rl-standby-gpus (verl's separate mode has no standby cards)")
-    if is_synced_trainer(args) and placement == "fixed-partition":  # S27 G-EW (VERL-PARITY #14)
+    if is_synced_trainer(args) and placement == "fixed-partition":
         problems.append("no --rl-placement fixed-partition with --rl-sample-role trainer (a verl buffer "
                         "trainer starts no engine; the sampler islands generate)")
-    # S27 G-EW: a synced buffer trainer runs verl's fully_async trainer over the sample buffer
-    # (--rl-max-policy-age >= 1, sample_roles). S27 G-EV: with --rl-rollout-ahead 1 the limit
-    # bounds the one-version lag of the separate mode's synchronous trainer (VERL-PARITY #10);
-    # without it a limit > 0 runs verl's fully_async trainer and rollouter (VERL-PARITY #11),
+    # A synced buffer trainer runs verl's fully_async trainer over the sample buffer
+    # (--rl-max-policy-age >= 1, sample_roles). With --rl-rollout-ahead 1 the limit
+    # bounds the one-version lag of the separate mode's synchronous trainer;
+    # without it a limit > 0 runs verl's fully_async trainer and rollouter,
     # the rollouter on its own cards
     if (int(getattr(args, "rl_max_policy_age", 0) or 0) and not is_synced_trainer(args)
             and placement != "fixed-partition"):
@@ -126,22 +126,22 @@ def full_parameter_problems(args) -> list[str]:
                         "it would ignore it: " + "; ".join(f"{option}: {NOT_MAPPED_REASONS[option]}"
                                                            for option in ignored) + ")")
     schedule = getattr(args, "rl_lr_schedule", None)
-    if schedule not in (None, "auto", "constant"):  # S27 G-EC: verl.train_options
+    if schedule not in (None, "auto", "constant"):  # verl.train_options
         problems.append(f"--rl-lr-schedule constant (got {schedule}; verl's FSDP2 optimizer schedules are "
                         "constant and cosine, not Miles' linear decay)")
     return problems
 
 
-# S27 G-DS: options the launcher forwards to every island that the verl island
+# Options the launcher forwards to every island that the verl island
 # entry does not parse (parse_known_args would drop them without a word):
 # (args dest, value when off, option). Refused instead, before any cloud work.
-# S27 G-EU: the island refuses them too when they reach a full-parameter island the
+# The island refuses them too when they reach a full-parameter island the
 # launcher's preset check does not cover (a no-sync island:
 # train_options.refuse_unmapped_argv); --rl-debug-dump is mapped (train_options.debug_plan).
-# S27 G-EC mapped five of the first fourteen (verl.train_options: --rl-lr-schedule
-# constant, --rl-max-tokens-per-gpu, --rl-activation-recompute,
-# --rl-observe-timeline, --rl-resource-sample-interval) and S27 G-EN one more
-# (--rl-eval-interval: verl's _validate behind the driver's evaluate hook,
+# Mapped elsewhere: verl.train_options (--rl-lr-schedule constant,
+# --rl-max-tokens-per-gpu, --rl-activation-recompute, --rl-observe-timeline,
+# --rl-resource-sample-interval) and verl.eval_port (--rl-eval-interval:
+# verl's _validate behind the driver's evaluate hook,
 # verl.eval_port); the rest stay here.
 IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_verify_every_round", False, "--rl-verify-every-round"),
@@ -155,7 +155,7 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
 # Why each option above has no verl mapping yet (the launcher's refusal says it).
 NOT_MAPPED_REASONS = {
     "--rl-verify-every-round": "the full-parameter publication does not read vLLM's weights back "
-                               "(VERL-PARITY #25; the island refuses it as well, train_options.verify_plan)",
+                               "(the island refuses it as well, train_options.verify_plan)",
     "--rl-deterministic-trainer": "yeto.rl.engine.determinism has no measured verl row",
     "--rl-gradient-accumulation-fusion": "a Megatron kernel option; FSDP2 has none",
     "--rl-async-buffer-rounds": "Miles' fully_async buffer depth; verl's fully_async rollouter has no such "
@@ -165,7 +165,7 @@ NOT_MAPPED_REASONS = {
     "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
                             "there",
 }
-# S27 G-EU (VERL-PARITY #35): the options above that do not apply to a full-parameter
-# FSDP2 island at all (the rest wait for a mapping or for #11 / #25)
+# The options above that do not apply to a full-parameter
+# FSDP2 island at all (the rest wait for a mapping)
 NOT_APPLICABLE_ON_FULL_PARAMETER = ("--rl-gradient-accumulation-fusion", "--rl-lora-dropout",
                                     "--rl-lora-expert-rank")

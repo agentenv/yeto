@@ -1,4 +1,4 @@
-"""S25 N7.7: the Megatron learner takes its card and collective from the device family."""
+"""The Megatron learner takes its card and collective from the device family."""
 
 from __future__ import annotations
 

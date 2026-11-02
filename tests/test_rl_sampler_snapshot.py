@@ -1,4 +1,4 @@
-"""CPU tests for the gated sampler snapshot mode (rl-trainer-cold-start-cost L8.2)."""
+"""CPU tests for the gated sampler snapshot mode."""
 
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ def snapshot_config(*, colocated: bool = False):
     return sub(cfg, "serving", offload_train=False, sampler_snapshot=True)
 
 
-# The G-L8 passes were recorded on SGLang 2fa880182 (S24). The pin moved to 10afe11a7
-# and 754605964 (S26 E6: the FP8 activation-cast fix in Qwen2/Qwen3, the compressed-tensors
-# FP8 in-place reload); until G-L8 is re-run on it
+# The snapshot-mode passes were recorded on SGLang 2fa880182. The pin moved to 10afe11a7
+# and 754605964 (the FP8 activation-cast fix in Qwen2/Qwen3, the compressed-tensors
+# FP8 in-place reload); until those passes are re-run on it
 # the snapshot mode is refused, as for any commit without a record.
 VERIFIED_SGLANG_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
 

@@ -1,4 +1,4 @@
-"""S19 #8: stop tokens with an exact 0.0 placeholder generation logprob get loss_mask 0
+"""Stop tokens with an exact 0.0 placeholder generation logprob get loss_mask 0
 and are counted (payload -> handle -> rl_round_labels)."""
 
 from __future__ import annotations

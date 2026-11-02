@@ -1,4 +1,4 @@
-"""Peer recovery of a full-parameter role stream over a sharded trainer (S27 G-ED).
+"""Peer recovery of a full-parameter role stream over a sharded trainer.
 
 Engine-neutral. :mod:`yeto.rl.peer_recovery` is the exchange with the syncer
 and the snapshot store; :class:`~yeto.rl.engine.full_parameter_stream.
@@ -17,7 +17,7 @@ the part between the two that the Miles and the verl islands share:
   donor's digests (else the restore fails and the island must not train). A
   backend gives three verbs: the rank layout, save every rank's shard, restore
   every rank's shard (Miles: ``cut_plugin``; verl: the FSDP2 rank files of
-  :mod:`yeto.rl.adapters.verl.cut`). S27 G-EL: a backend may also give the
+  :mod:`yeto.rl.adapters.verl.cut`). A backend may also give the
   three capture verbs (copy every rank's state at the safe point, write the
   shards while training goes on; Miles: ``cut_plugin`` ``background="host"``);
 * :class:`StreamRecoveryIsland`: the
@@ -73,7 +73,7 @@ class PeerRecoveryOptions:
     :func:`yeto.rl.peer_recovery.snapshot_store_for`). ``recover``: this
     process lost its trainer state and asks the syncer for a donor.
     ``staging``: local directory for object-store transfers.
-    S27 G-EL: ``manifest_wait_s`` (``--rl-peer-recovery-manifest-wait-s``): how
+    ``manifest_wait_s`` (``--rl-peer-recovery-manifest-wait-s``): how
     long a recovering island re-reads a snapshot whose MANIFEST is not visible
     yet; ``donor_write`` (``--rl-peer-recovery-donor-write``): ``background``
     (a trainer that captures copies at the safe point and writes while it
@@ -119,8 +119,8 @@ def peer_recovery_options(args: Any, environ: Mapping[str, str] | None = None) -
     """Peer recovery of a full-parameter island, or None without
     ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
     is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`), unless
-    the test-only catch-up fault injection picks this re-run (S27 G-DU,
-    ``yeto.rl.engine.driver.catch_up_incarnation``)."""
+    the test-only catch-up fault injection picks this re-run
+    (``yeto.rl.engine.driver.catch_up_incarnation``)."""
     store = getattr(args, "rl_peer_recovery_store", None)
     env = os.environ if environ is None else environ
     recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
@@ -146,7 +146,7 @@ def peer_recovery_options(args: Any, environ: Mapping[str, str] | None = None) -
         # snapshot write, commit, read and the full resend take tens of minutes).
         timeout_s=ttl_s,
         staging=getattr(args, "rl_peer_recovery_staging", None),
-        # S27 G-EL: both default on; the flags bring the behavior before back
+        # both default on; the flags bring back the earlier behavior
         **({} if getattr(args, "rl_peer_recovery_manifest_wait_s", None) is None
            else {"manifest_wait_s": float(args.rl_peer_recovery_manifest_wait_s)}),
         **({} if getattr(args, "rl_peer_recovery_donor_write", None) is None
@@ -176,7 +176,7 @@ class RankShardSnapshot:
     to the snapshot directory), ``sha256``, ``bytes``, ``coord`` and, when the
     backend reports them, the :data:`DIGEST_KEYS`.
 
-    S27 G-EL: a subclass that sets :attr:`captures` also gives
+    A subclass that sets :attr:`captures` also gives
     :meth:`start_ranks`, :meth:`poll_ranks` and :meth:`finish_ranks` (copy at
     the safe point, write while training goes on); :meth:`start`,
     :meth:`written` and :meth:`finish` are then the capture-then-write save."""
@@ -209,7 +209,7 @@ class RankShardSnapshot:
         cannot (the trainer may be partly written: it must not train)."""
         raise NotImplementedError
 
-    # -- optional capture verbs (S27 G-EL; with :attr:`captures`) ---------------
+    # -- optional capture verbs (with :attr:`captures`) -------------------------
     async def start_ranks(self, directory: Path) -> None:
         """Every rank copies its state now and writes its shard into
         ``directory`` on a thread of its own; returns at once. Raise
@@ -368,7 +368,7 @@ class StreamRecoveryIsland:
 class CapturingStreamRecoveryIsland(StreamRecoveryIsland):
     """:class:`StreamRecoveryIsland` over a trainer that captures
     (:attr:`RankShardSnapshot.captures`): the donor copies at the safe point and
-    writes while it trains on (S27 G-EL, ``DonorService`` ``capture``)."""
+    writes while it trains on (``DonorService`` ``capture``)."""
 
     def start_recovery_snapshot(self, directory: Path) -> Path:
         return self._call(self.shards.start(Path(directory)))

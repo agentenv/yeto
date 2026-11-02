@@ -62,10 +62,10 @@ def staleness_threshold_for(limit: int) -> float:
     queued sample can wait for at most ``floor(s) + 1`` versions
     (:func:`queue_version_lag`).
 
-    Mapping s = N (S19 decision 10-10, main agent; was s = N - 1).  With s = N - 1
+    Mapping s = N (was s = N - 1).  With s = N - 1
     = 0 the rollouter generated exactly one round and then idled until the next
     sync, so nothing was in flight at a push and partial rollout never resumed
-    (GPU run s19-verl64b-async8-20261010a: "staleness_samples 32 >=
+    (a GPU run logged "staleness_samples 32 >=
     max_required_samples 32" every round, 0 resumed) -- fully_async degenerated
     to sync alternation.  s = N keeps the rollouter generating while the trainer
     trains; the limit is yeto's: groups whose oldest version is more than N

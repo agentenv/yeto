@@ -1,4 +1,4 @@
-"""P0 4.7: every RL flag is defined once, in the RL flag schema.
+"""Every RL flag is defined once, in the RL flag schema.
 
 Neutral flags live in ``yeto/rl/engine/run_flags.py``; the Miles backend's in
 ``yeto/rl/adapters/miles/run_flags.py``. The CLI RL group and the island
@@ -223,9 +223,16 @@ def test_rl_image_help_shows_the_pinned_image():
     assert MILES_NEXT_IMAGE in _actions_by_option(_launch_parser())["--rl-image"].help
 
 
-def test_island_entry_has_no_hand_written_flags():
-    source = (REPO / "yeto/rl/adapters/miles/island_entry.py").read_text()
-    assert "add_argument(" not in source
+def test_island_entry_has_no_hand_written_flags(monkeypatch):
+    # Without the schema and the two hooks the island parser has no option of its
+    # own: every island flag comes from run_flags (or a hook), none is hand-written.
+    from yeto import wandb_logger
+    from yeto.rl.adapters.miles import elastic_hook
+
+    monkeypatch.setattr(island_entry, "add_rl_flags", lambda parser, layer: None)
+    monkeypatch.setattr(elastic_hook, "add_recommend_arguments", lambda parser: None)
+    monkeypatch.setattr(wandb_logger, "add_arguments", lambda parser: None)
+    assert _options(island_entry.build_parser()._actions) == set()
 
 
 # --------------------------------------------------------------------------- launcher forwarding
@@ -254,7 +261,7 @@ _NON_RL_LITERALS = frozenset({
     "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--inline-resend", "--inline-broadcast", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-at-steps", "--checkpoint-every", "--checkpoint-path", "--config-json",
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
-    # S27 P2 task dispenser (syncer flags)
+    # task dispenser (syncer flags)
     "--dispense", "--dispense-lease-s", "--dispense-log", "--dispense-max-redo", "--dispense-passes",
     "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
     "--grace-arrival-quantile", "--grace-min-ms", "--terminal-grace-ms",
@@ -263,7 +270,7 @@ _NON_RL_LITERALS = frozenset({
     "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
     "--max-base-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
-    # syncer: S27 G-EA spot rollout (subscribers, sample relay)
+    # syncer: spot rollout (subscribers, sample relay)
     "--max-subscribers", "--sample-relay",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
     "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--object-store-memory",

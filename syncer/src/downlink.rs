@@ -1,4 +1,4 @@
-//! bf16 downlink deltas for BCAST_FRAGMENT (S26 E3, session flag
+//! bf16 downlink deltas for BCAST_FRAGMENT (session flag
 //! `DTYPE_FLAG_BCAST_DELTA`).
 //!
 //! Every learner of a session holds, per fragment, an f32 *anchor* that is
@@ -81,7 +81,7 @@ pub fn digest_f32(values: &[f32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// S27 G-FH: the header of a FULL that carries `params` exactly (no anchor
+/// The header of a FULL that carries `params` exactly (no anchor
 /// at this version): what `resend` sends then, without copying the values.
 pub fn exact_full_prefix(fragment: usize, version: u64, params: &[f32]) -> Vec<u8> {
     prefix(fragment, version, KIND_FULL, version, &digest_f32(params))
@@ -173,7 +173,7 @@ impl DownlinkAnchors {
         })
     }
 
-    /// S27 G-FH: the FULL re-send of `version` when the shared anchor is at
+    /// The FULL re-send of `version` when the shared anchor is at
     /// that version (no copy, no hashing); None otherwise, and the exact
     /// params then go out FULL under `exact_full_prefix`.
     pub fn anchored_full(&self, p: usize, version: u64) -> Option<EncodedBcast> {

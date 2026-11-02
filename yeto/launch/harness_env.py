@@ -42,7 +42,7 @@ def is_harbor_agent(args) -> bool:
     Two spellings, one meaning: Miles names the agent callable
     (``--custom-agent-function-path harbor_agent.run``), while verl selects the
     agent loop per data row and asks for the island pieces with the neutral
-    ``--rl-agentic-harbor`` (S27 G-FS).  Both give the island the Harbor image
+    ``--rl-agentic-harbor``.  Both give the island the Harbor image
     layer, the sandbox-provider environment and the tunnelled callback port.
     """
     return (getattr(args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION
@@ -147,7 +147,7 @@ def rl_gae_variant(args) -> str | None:
 
 
 def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, str]:
-    """Rollout-worker env for CompactionRL (design D8; progress "S13 Codex 压缩接线").
+    """Rollout-worker env for CompactionRL.
 
     A ``cross_segment_per_sample`` spec switches ``YETO_CODEX_COMPACTIONRL=1`` on
     (and forwards ``YETO_CODEX_COMPACTIONRL_T_COMP`` from the launching
@@ -186,14 +186,13 @@ def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, 
 def check_compaction_launch(args, environ=None) -> None:
     """Refuse a CompactionRL launch that cannot work, before any cloud resource.
 
-    No agent harness compacts rollouts (the Codex OpenEnv bridge was removed in
-    S26 E0.5).  The Harbor path does not produce compaction segments either
-    (S26 E9.5 decision): on Miles the session server records one stream per
+    No agent harness compacts rollouts (the Codex OpenEnv bridge was removed).
+    The Harbor path does not produce compaction segments either: on Miles the session server records one stream per
     agent session, and an agent-side compaction (Codex auto-compact) rewrites
     the history, which the stream cannot extend; on verl the records proxy is
     refused when it compacts (``gateway.recorder``).  So any custom agent
     (``harbor_agent.run``) leaves ``harness_compacts`` False and a CompactionRL
-    spec is refused here, before any cloud resource.  TEST ONLY (task 6.4 G1): the synthetic two-segment reward stands
+    spec is refused here, before any cloud resource.  TEST ONLY: the synthetic two-segment reward stands
     in for a compacting harness; it is accepted only with
     ``cross_segment_per_sample`` and without a custom agent.
     """

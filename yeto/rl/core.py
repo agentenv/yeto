@@ -180,7 +180,7 @@ def build_rl_fragment_layout(
     """Build the deterministic binpack used by decoupled RL.
 
     ``matrix_merge="avg"`` (the default) merges every fragment by weighted
-    averaging. ``"rda"`` (S27 P1) merges each fragment that holds no
+    averaging. ``"rda"`` merges each fragment that holds no
     embedding-like tensor by radial-directional averaging; a fragment with an
     embedding tensor stays averaged (``yeto.fragments`` rule). The merge modes
     are part of the layout fingerprint, so islands and syncer must agree.

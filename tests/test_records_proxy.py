@@ -1,8 +1,8 @@
-"""S25 N10.5 records proxy and N10.6 template token alignment (CPU).
+"""Records proxy and template token alignment (CPU).
 
 The model is a scripted :class:`FakeEngine`: each reply is the text the chat
 template itself renders for a chosen assistant message, so a correct proxy
-shows no render drift. Tokenizers come from the local HF cache (skip if absent):
+shows no render drift. Tokenizers come from the local HF cache (tests/hf_assets.py; skip if absent):
 Qwen3-0.6B (synced to the remote test box) and GLM-4.7-Flash (stand-in for the
 GLM5.3-Flash tokenizer, which is not available: GLM5.3 itself is not verified).
 """
@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
 from typing import Any
 
 import pytest
+from hf_assets import require_hf_repo
 
 from yeto.rl.adapters.sampler_engines.fake import FakeEngine
 from yeto.rl.compaction import CompactionConfig
@@ -32,20 +32,9 @@ TOOLS = [{"type": "function", "name": "shell", "description": "run a command",
 
 
 def _template(name: str) -> ChatTemplate:
-    try:
-        return ChatTemplate.load(name)
-    except (OSError, ValueError, ImportError) as exc:  # tokenizer not in the local cache
-        pytest.skip(f"{name} tokenizer not available: {exc}")
+    from yeto.rl.harness.chat_templates import TEMPLATES
 
-
-# The Qwen3.8-27B tokenizer files (not on the HF hub cache by default).
-QWEN38_TOKENIZER = os.environ.get("YETO_QWEN38_TOKENIZER", "")
-
-
-def _template_at(name: str, path: str) -> ChatTemplate:
-    if not path:
-        pytest.skip(f"set YETO_QWEN38_TOKENIZER to run the {name} template tests")
-    return ChatTemplate.load(name, tokenizer_path=path)
+    return ChatTemplate.load(name, tokenizer_path=require_hf_repo(TEMPLATES[name].tokenizer))
 
 
 @pytest.fixture(scope="module")
@@ -161,7 +150,7 @@ def run_codex(proxy: Any, trajectory_id: str, *, turns: int = 3) -> list[dict[st
     return outputs
 
 
-# ---------------------------------------------------------------------- N10.5 records
+# ---------------------------------------------------------------------- records
 @pytest.mark.parametrize("name", ["qwen3", "glm5", "qwen3_2507"])
 def test_codex_responses_loop_records_one_aligned_stream(name, request):
     template = request.getfixturevalue(FIXTURES[name])
@@ -193,7 +182,7 @@ def test_codex_responses_loop_records_one_aligned_stream(name, request):
     # The prompts the engine got are prefixes of the final stream (append-only).
     prompts = [p for p, *_ in engine.token_requests]
     assert all(list(p[0]) == ids[:len(p[0])] for p in prompts)
-    # N10.6: the stream equals a fresh tokenization of the rendering on every turn.
+    # The stream equals a fresh tokenization of the rendering on every turn.
     assert records["counters"].get("render_drift_turns", 0) == 0
     assert all(t["render_diff"] is None for t in turns)
     # Source tag and policy version on every turn.
@@ -347,10 +336,10 @@ def test_compaction_on_a_template_that_drops_history_reasoning_fails_closed(qwen
         run_codex(proxy, "t")
 
 
-# ---------------------------------------------------------------------- N10.6 alignment
+# ---------------------------------------------------------------------- alignment
 CONVERSATION = [
     {"role": "system", "content": "You are a coding agent."},
-    {"role": "user", "content": "列出文件 and read them"},
+    {"role": "user", "content": "\u5217\u51fa\u6587\u4ef6 and read them"},
     assistant("plan", calls=[call("c1", "ls -la")]),
     {"role": "tool", "tool_call_id": "c1", "content": "a.txt\nb.txt"},
     assistant("next", calls=[call("c2", "cat a.txt"), call("c3", "cat b.txt")]),
@@ -405,7 +394,7 @@ def test_parsers_fail_closed_on_malformed_tool_calls():
 
 
 def test_qwen38_merges_codex_system_messages_and_template_refusals_fail_closed():
-    template = _template_at("qwen38", QWEN38_TOKENIZER)
+    template = _template("qwen38")
     tools = chat_tools("responses", {"tools": TOOLS})
     # Codex: instructions + a developer message, both "system" in the gateway form.
     messages = [{"role": "system", "content": "a"}, {"role": "system", "content": "b"}, {"role": "user", "content": "u"}]

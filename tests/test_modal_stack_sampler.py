@@ -1,4 +1,4 @@
-"""PeriodicStackSampler and allow_any_ptracer (S27 RAY-SEGV R5): opt-in periodic py-spy ring in the tape dir."""
+"""PeriodicStackSampler and allow_any_ptracer: opt-in periodic py-spy ring in the tape dir."""
 import json
 import os
 import stat

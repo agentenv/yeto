@@ -12,7 +12,7 @@ DOCKER_LOGIN_UNSET = (
 )
 
 
-# fix-verda-provider C block (design D6): clouds whose sky adapter refuses
+# Clouds whose sky adapter refuses
 # `image_id: docker:` (sky/clouds/verda.py: DOCKER_IMAGE unsupported). The
 # island is launched as a bare VM task instead; the host-side setup logs in
 # to the registry and pulls the digest-pinned image, and the host-side run

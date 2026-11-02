@@ -260,9 +260,3 @@ The harness intentionally covers LoRA and flow-matching loss, which are the
 supported asynchronous diffusion path. Full-parameter FSDP synchronization,
 cloud provisioning, FID/FVD/aesthetic metrics, checkpoint-time learning
 curves, and forced learner failures are separate experiments.
-
-## Results
-
-Completed LTX-Video and Wan2.2 benchmark results, including aggregate and
-per-seed quality, execution, and synchronization tables, are archived outside
-the repository.

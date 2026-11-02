@@ -1,5 +1,5 @@
 """yeto-framework-decoupling 4.4 (neutral filter names + legacy normalization)
-and 4.4a (training-side binding check, design D6 / D6a)."""
+and 4.4a (training-side binding check)."""
 
 from __future__ import annotations
 
@@ -113,9 +113,3 @@ def test_launch_preflight_refuses_a_broken_binding(monkeypatch):
     with pytest.raises(binding.BindingError):
         binding.check_spec(spec)
     assert "check_spec(algorithm)" in open(entry.__file__).read()  # wired into preflight()
-
-
-@pytest.mark.skip(reason="verl adapter not implemented yet (rl-verl-backend): its mapping table "
-                  "gets the same three checks (D6a)")
-def test_verl_binding_check_placeholder():
-    raise AssertionError("implement with the verl adapter")

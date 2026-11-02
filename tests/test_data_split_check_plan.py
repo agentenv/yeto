@@ -1,5 +1,5 @@
-"""tools/eval/data_split_check --plan: trainer islands fed by sampler islands (S27 E2,
-s27-cc-e2-a). Their rl_driver_start names no data slot; the plan gives each trainer the
+"""yeto/launch/checks/data_split_check --plan: trainer islands fed by sampler islands.
+Their rl_driver_start names no data slot; the plan gives each trainer the
 --rl-sampler-data-slot of the samplers whose feeds_trainer is that trainer."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from tools.eval.data_split_check import check, main, read_records, trainer_slots_from_plan
+from yeto.launch.checks.data_split_check import check, main, read_records, trainer_slots_from_plan
 
 
 def _request(learner, role, *, feeds=None, slot=None):
@@ -27,7 +27,7 @@ def _plan(*samplers):
                                 *(_request(n, "sampler", feeds=f, slot=s) for n, f, s in samplers)]}
 
 
-E2 = _plan((2, 0, "0/2"), (3, 1, "1/2"))
+PLAN = _plan((2, 0, "0/2"), (3, 1, "1/2"))
 
 
 def _tape(tmp_path, name, island, records):
@@ -50,7 +50,7 @@ def _sampler(tmp_path, name):
 
 
 def test_plan_names_the_sampler_slots_of_each_trainer():
-    assert trainer_slots_from_plan(E2) == ({0: ["0/2"], 1: ["1/2"]}, [])
+    assert trainer_slots_from_plan(PLAN) == ({0: ["0/2"], 1: ["1/2"]}, [])
     lanes = _plan((2, 0, "0/4"), (3, 1, "1/4"), (4, 0, "2/4"), (5, 1, "3/4"))
     assert trainer_slots_from_plan(lanes) == ({0: ["0/4", "2/4"], 1: ["1/4", "3/4"]}, [])
     broken = _plan((2, None, "0/2"), (3, 1, None))
@@ -61,7 +61,7 @@ def test_plan_names_the_sampler_slots_of_each_trainer():
 def test_fed_trainers_pass_with_the_plan_and_fail_without_it(tmp_path):
     tapes = [_trainer(tmp_path, "t0.jsonl", 0, [0, 2, 4]), _trainer(tmp_path, "t1.jsonl", 1, [1, 3]),
              _sampler(tmp_path, "s2.jsonl"), _sampler(tmp_path, "s3.jsonl")]
-    report = check(read_records(tapes), plan=E2)
+    report = check(read_records(tapes), plan=PLAN)
     assert report["ok"], report["problems"]
     assert report["slots"] == {"0": "0/2", "1": "1/2"}
     assert report["sampler_slots_of_trainer"] == {"0": ["0/2"], "1": ["1/2"]}
@@ -75,7 +75,7 @@ def test_fed_trainers_pass_with_the_plan_and_fail_without_it(tmp_path):
 
 def test_a_fed_trainer_with_a_foreign_row_fails_own_slot_and_disjoint(tmp_path):
     tapes = [_trainer(tmp_path, "t0.jsonl", 0, [0, 2, 3]), _trainer(tmp_path, "t1.jsonl", 1, [1, 3])]
-    problems = check(read_records(tapes), plan=E2)["problems"]
+    problems = check(read_records(tapes), plan=PLAN)["problems"]
     assert "own_slot: island 0 trained rows outside slot 0/2: [3]" in problems
     assert any(p.startswith("disjoint: 1 rows") for p in problems)
 
@@ -92,7 +92,7 @@ def test_a_trainer_fed_by_two_samplers_owns_both_slots(tmp_path):
 
 def test_a_slot_named_by_a_fed_trainer_must_be_its_samplers(tmp_path):
     tapes = [_trainer(tmp_path, "t0.jsonl", 0, [0], slot="1/2"), _trainer(tmp_path, "t1.jsonl", 1, [1])]
-    problems = check(read_records(tapes), plan=E2)["problems"]
+    problems = check(read_records(tapes), plan=PLAN)["problems"]
     assert "slots: island 0 names data slot 1/2, but the plan feeds it from sampler slots ['0/2']" in problems
 
 
@@ -105,7 +105,7 @@ def test_islands_that_read_their_own_data_are_unchanged_by_a_plan(tmp_path):
 
 def test_cli_reads_the_plan(tmp_path, capsys):
     plan = tmp_path / "plan.json"
-    plan.write_text(json.dumps(E2))
+    plan.write_text(json.dumps(PLAN))
     tapes = [str(_trainer(tmp_path, "t0.jsonl", 0, [0])), str(_trainer(tmp_path, "t1.jsonl", 1, [1]))]
     assert main(["--plan", str(plan), *tapes]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True

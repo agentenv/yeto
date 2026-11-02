@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Container guard and cost guard of one Modal run (reader of ``modal container list``).
 
-The S27 run scripts (s1-runs/s27-*/run*.sh) each carried a copy of a shell loop
-that stopped the app as soon as more distinct containers than ``NODES`` had been
-seen ("an island container was rescheduled"). On s27-ch-d0a (2026-10-25
-00:56:15Z) two new containers of the island function appeared while the two
-original containers still trained (step 66 at 00:56:11Z); the loop stopped a
-healthy run. This module replaces that loop. Standard library only, so a run
+Run scripts used to carry a copy of a shell loop that stopped the app as soon
+as more distinct containers than ``NODES`` had been seen ("an island container
+was rescheduled"). Modal can list new containers of the island function while
+the original containers still train, so that loop stopped healthy runs. This
+module replaces that loop. Standard library only, so a run
 script can start it with ``/usr/bin/python3 -I`` from its code snapshot.
 
 Rules (one poll every ``--interval-s``):
@@ -19,8 +18,8 @@ Rules (one poll every ``--interval-s``):
 
   * A listed container that no island named, while the islands are not all named, is
     pending. It is no extra container and no rule below counts it. Modal builds a new
-    image inside the app and lists the build container there (s27-ex-1: 12 min of
-    image build, two build containers); the old rule took the first ``--nodes``
+    image inside the app and lists the build container there (a long image build
+    can list several build containers); the old rule took the first ``--nodes``
     containers for the islands' and stopped the app when the real ones came. A
     pending container is billed like any container. It is recorded
     (``unnamed_seen``; ``unnamed_claimed`` when an island names it later;
@@ -49,8 +48,8 @@ Rules (one poll every ``--interval-s``):
   1. an original container is gone (a replacement island: mixed state), unless its
      island finished: the progress log has the island's container line
      (``[modal-island N] rank R container <id>``) and its ``rl_learner_finalized``
-     event (s27-ek-b: island 1 finished and its container left while an idle extra
-     container of island 1's function was listed);
+     event (an island can finish and its container leave while an idle extra
+     container of the same island's function is still listed);
   2. no progress line (``--progress-re`` in ``--progress-log``) for
      ``--extra-stall-s`` seconds, counted from the later of the last progress
      line and the time the present extra containers appeared;
@@ -488,7 +487,7 @@ class RunFiles:
 
 def _log_window(start_time: Any, now: float) -> list[str]:
     """``--since/--until`` around a container's start, in UTC with the offset written out
-    (the CLI reads a time without offset as local time). s27-ek-b: without a window the
+    (the CLI reads a time without offset as local time). Without a window the
     query over the whole app failed with "Logs query hit resource limit"."""
     begin = now - 600.0
     if start_time:

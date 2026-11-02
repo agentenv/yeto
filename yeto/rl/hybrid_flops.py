@@ -1,6 +1,6 @@
 """Model FLOPs of a Nemotron-H hybrid (Mamba-2 + MoE + attention) for MFU.
 
-verl's ``flops_counter`` has no ``nemotron_h`` entry (fork acad9875), so its
+verl's ``flops_counter`` has no ``nemotron_h`` entry in the pinned verl fork, so its
 ``perf/mfu`` is not usable for this model; this module is the formula yeto
 reports. Forward FLOPs per sequence of length ``s`` (multiply-add = 2 FLOPs):
 

@@ -1,4 +1,4 @@
-"""fleet-dashboard 8.1-8.3 + rollout-node sampling: startup status and wide
+"""Fleet-dashboard 8.1-8.3 + rollout-node sampling: startup status and wide
 thresholds, GPU+CPU+memory cost, inferred run name, per-node host samples."""
 
 import json

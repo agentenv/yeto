@@ -6,7 +6,7 @@
 #   1. download the HF 4-layer slice (pinned revision), DAPO-Math-17k and aime-2024;
 #   2. convert HF -> torch_dist (scripts/convert_qwen3_8_next.sh, idempotent);
 #   3. start a local ray head (MILES_SCRIPT_EXTERNAL_RAY=1) and run
-#      Miles' scripts/run_qwen3_8_next.py with the M3 LoRA flags, under a hard
+#      Miles' scripts/run_qwen3_8_next.py with the native LoRA flags, under a hard
 #      `timeout` so a wedged run cannot hold the GPUs (an EXIT trap stops the
 #      ray job / sglang / ray head on timeout, error or signal).
 # Every step is rendered by yeto.rl.profiles.qwen3_8_next; --dry-run prints
@@ -44,7 +44,7 @@ profile() { python3 -m yeto.rl.profiles.qwen3_8_next "$@"; }
 MANIFEST=$(profile manifest)
 NUM_GPUS=$(python3 -c 'import json,sys; m=json.loads(sys.argv[1]); print(m["parallel"]["ep"]*m["parallel"]["pp"])' "$MANIFEST")
 LAUNCH_ENV=$(profile launch-env)
-LAUNCH_CMD=$(profile launch-command -- "${EXTRA[@]}")
+LAUNCH_CMD=$(profile launch-command -- ${EXTRA[@]+"${EXTRA[@]}"})
 MILES_ROOT=$(python3 -c 'import os; print(os.environ.get("YETO_Q38N_MILES_ROOT", "/root/miles"))')
 
 echo "# profile manifest:"; echo "$MANIFEST" | sed 's/^/#   /'
@@ -67,7 +67,7 @@ fi
 if ! ray status >/dev/null 2>&1; then
   ray start --head --num-gpus "${NUM_GPUS}" --disable-usage-stats
 fi
-# T2-S7 F1: `timeout` only kills the launcher (`ray job submit` tails the job);
+# `timeout` only kills the launcher (`ray job submit` tails the job);
 # the ray job itself keeps the GPUs.  Reclaim on every exit path.
 cleanup() {
   ray job list 2>/dev/null | grep -oE 'raysubmit_[A-Za-z0-9]+' | sort -u | xargs -r -n1 ray job stop >/dev/null 2>&1 || true

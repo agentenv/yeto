@@ -280,7 +280,7 @@ def test_check_loaded_fails_on_a_reshaped_parameter(vl_checkpoint):
         check_loaded(loaded, subset, shapes={"lm_head.weight": (8, 4)})
 
 
-# ------------------- the loader's key map and buffers (S27 G-EZ2, check_loaded)
+# ------------------- the loader's key map and buffers (check_loaded)
 def _mapped(vl_checkpoint):
     """The fixture as an HF loader sees it: ``backbone.`` -> ``model.``, the
     embeddings and lm_head kept, and the f32 ``A_log`` loading into a buffer
@@ -344,7 +344,7 @@ def test_check_loaded_finds_an_mtp_block_hidden_in_a_buffer(vl_checkpoint):
         check_loaded(loaded, subset, key_map=key_map, non_trainable={**buffers, "mtp.layers.0.bias": (2,)})
 
 
-# ------------------------- the FSDP2 CPU offload knob (G-EQ2 1b0219ac, reused)
+# ------------------------- the FSDP2 CPU offload knob
 
 
 def _full_run(**kw):

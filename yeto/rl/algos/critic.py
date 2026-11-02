@@ -6,12 +6,12 @@ identity (``CriticSpec``, the advantage-side ``lambd`` / ``lambd_mode`` /
 ``yeto.rl.engine.algorithm``; this module adds what needs the adapter or the
 run configuration:
 
-* flag rows (design D1/D2): ``--lambd``, ``--value-clip``, ``--critic-lr``,
+* flag rows : ``--lambd``, ``--value-clip``, ``--critic-lr``,
   ``--critic-lr-warmup-iters``, ``--num-critic-only-steps`` (extra argv N =
-  the warm-up length, run as its own stage, design D5), ``--critic-load``;
+  the warm-up length, run as its own stage), ``--critic-load``;
   ``--gamma`` stays the ``seq_adv`` row (``advantage.gamma`` is shared with
   REINFORCE++), and under a critic :func:`critic_argv` emits it instead;
-* run-level rejections (design D2), checked before any GPU process by the
+* run-level rejections, checked before any GPU process by the
   launcher (``launch_problems``) and by the learner before it joins outer
   sync (``island_problems``): elastic reconfiguration / ``--indep-dp``,
   ``--deploy-component trainer``, critic GPU counts different from the
@@ -47,7 +47,7 @@ FORK_FLAGS = frozenset({
     "--positive-example-lm-loss-coef", "--positive-example-reward-threshold",
     "--positive-example-source",
     # CompactionRL 2 / SAO 2 critic updates per policy update: fork e07e51c07
-    # (yeto-critic-family), one dest; the mechanism stays undeclared until GPU G1.
+    # (yeto-critic-family), one dest; the mechanism stays undeclared until a GPU run verifies it.
     "--critic-updates-per-step", "--num-critic-epochs",
 })
 
@@ -67,7 +67,7 @@ def _positive_coef(path: str, value: Any) -> float | None:
 register_field("loss", "positive_lm_coef", default=None, parse=_positive_coef)
 register_field("loss", "positive_lm_reward_threshold", default=None,
                parse=lambda path, v: _alg._number(path, v))
-# How a sample is judged positive (user decision C, design D7): "success" = the
+# How a sample is judged positive (user decision C): "success" = the
 # reward function's explicit boolean success field; "reward" = reward > threshold,
 # allowed only as a declaration that the reward is a binary success signal.
 POSITIVE_LM_SOURCES = ("success", "reward")
@@ -105,8 +105,8 @@ def positive_lm_success_problems(spec: AlgorithmSpec, values: Mapping[str, Any])
     (``yeto.rl.reward_declarations``) to write ``sample.metadata['success']``.
 
     Without it the Miles fork raises at the first critic step on the island
-    (S19 #6 s19-vapo-g3-20261010a: out-of-tree ``gsm8k_reward:score`` wrote no
-    flag; S13 G1 passed with ``yeto.rl.gsm8k_reward:score``). Skipped when the
+    (an out-of-tree ``gsm8k_reward:score`` wrote no flag, while
+    ``yeto.rl.gsm8k_reward:score`` does). Skipped when the
     caller passes no ``reward_function`` or it cannot be imported here.
     """
 
@@ -131,7 +131,7 @@ def positive_lm_success_problems(spec: AlgorithmSpec, values: Mapping[str, Any])
 register_launch_check("positive_lm_success", positive_lm_success_problems)
 
 # --------------------------------------------------------------------------
-# Stage-W value-quality gate (user decision B, design D5/D7). Absent (None) =
+# Stage-W value-quality gate (user decision B). Absent (None) =
 # record only, never block; absent from the canonical JSON while None, so no
 # existing spec hash changes. Checked by critic_warmup.finish_warmup/load_product.
 # --------------------------------------------------------------------------
@@ -158,12 +158,12 @@ def _reject_warmup_gate(spec: AlgorithmSpec) -> str | None:
 register_rejection("critic_warmup_gate", _reject_warmup_gate)
 register_mechanism("features", "positive_example_lm_loss",
                    lambda s: s.loss.positive_lm_coef is not None)
-# Fork-only GAE variants: undeclared by the Miles adapter until GPU G1 (task 7.3).
+# Fork-only GAE variants: undeclared by the Miles adapter until a GPU run verifies them.
 register_mechanism("features", "gae_decoupled",
                    lambda s: s.advantage.gae_variant == "decoupled")
 register_mechanism("features", "gae_length_adaptive",
                    lambda s: s.advantage.lambd_mode == "length_adaptive")
-# CompactionRL (change 9.3): undeclared until GPU G1 (task 9.4).
+# CompactionRL: undeclared until a GPU run verifies it.
 register_mechanism("features", "gae_cross_segment",
                    lambda s: s.advantage.gae_variant == "cross_segment_per_sample")
 register_mechanism("features", "gae_cross_segment_whole_rollout",
@@ -184,7 +184,7 @@ def _gamma_rule(spec: AlgorithmSpec) -> str | None:
 _alg._REJECTIONS["seq_adv_gamma"] = _gamma_rule
 
 # --------------------------------------------------------------------------
-# run-level rejections (design D2)
+# run-level rejections
 # --------------------------------------------------------------------------
 
 _SHARED = "Miles shared actor/critic PPO"
@@ -241,7 +241,7 @@ def critic_run_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -> list[
                 )
     if values.get("sync_preset") == "decoupled":
         problems.append(
-            "decoupled outer sync with a critic is not supported (design D4: actor and critic "
+            "decoupled outer sync with a critic is not supported (actor and critic "
             "are averaged together by strict-avg only; decoupled is a later exploration)"
         )
     return problems
@@ -258,8 +258,7 @@ def critic_lr_warmup_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) ->
     ``train_iters = num_rollout * rollout_batch_size * n_samples * num_critic_epochs
     // global_batch_size``, ``lr_decay_iters`` defaulting to ``train_iters`` (an
     explicit ``--lr-decay-iters`` is shared with the actor); Megatron then asserts
-    ``lr_warmup_steps < lr_decay_steps`` at critic init (S13 G1 SAO: warmup 10,
-    decay 3). Checked only when every input is known and not overridden by
+    ``lr_warmup_steps < lr_decay_steps`` at critic init (e.g. warmup 10, decay 3 fails). Checked only when every input is known and not overridden by
     extra argv.
     """
 
@@ -299,7 +298,7 @@ def critic_lr_horizon_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -
     actor steps, and Miles shares it with the critic (fork model.py only fills
     ``lr_decay_iters`` when it is None).  With ``critic_updates_per_step`` = N > 1
     the critic takes N x actor steps, so it trains at LR 0 for the last
-    (N-1)/N of the run (S14 SAO G1 s14-forkg1-sao-20261007a: decay 12, warmup
+    (N-1)/N of the run (observed with SAO: decay 12, warmup
     10, 24 critic steps -> critic LR 0 from step 12; values stuck near 0.05,
     EV <= 0 every round).  A constant schedule never decays."""
 

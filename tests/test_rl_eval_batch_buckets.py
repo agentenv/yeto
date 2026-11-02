@@ -1,4 +1,4 @@
-"""rl-eval-difficulty-buckets 4.1 (D5): training batch summary by difficulty."""
+"""rl-eval-difficulty-buckets 4.1: training batch summary by difficulty."""
 
 from types import SimpleNamespace
 import pytest

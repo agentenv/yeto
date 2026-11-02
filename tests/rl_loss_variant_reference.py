@@ -1,4 +1,4 @@
-"""Independent reference formulas for rl-algo-loss-variants (design D3, task 2.1).
+"""Independent reference formulas for rl-algo-loss-variants.
 
 Written from the papers with plain torch on small tensors; imports neither
 yeto nor miles, so it can check the Miles fork (``michaellchung/miles``
@@ -38,10 +38,10 @@ arxiv.org HTML; GMPO also against the official code):
   constant A, |A| * sgn(A) = A, so loss = -ratio * A. Default delta = 0.4.
   Official code (github.com/callsys/GMPO train_zero_math_gmpo.py:675-688,
   checked line by line by the main agent 2026-09-30) matches this form.
-  Clip fraction (yeto D5 semantics): per round, sum over sequences of clipped
+  Clip fraction (yeto semantics): per round, sum over sequences of clipped
   valid A != 0 tokens / sum of valid A != 0 tokens (``gmpo_global_clip``;
   the fork reports the two sums as gmpo_clip_num / gmpo_clip_den).
-* Combination order (design D3): variant token loss first, then multiplied by
+* Combination order: variant token loss first, then multiplied by
   the (truncated) TIS / IcePop weight, then aggregated.
 """
 

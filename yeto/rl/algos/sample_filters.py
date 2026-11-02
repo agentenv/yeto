@@ -1,9 +1,9 @@
 """overlong filtering for the shared ``record_trained_groups`` hook
-(change ``rl-algo-grpo-knobs`` design D7; rl-infra-spec alignment A2/F5).
+(change ``rl-algo-grpo-knobs``).
 
 ``yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups`` is the
 single ``--rollout-sample-filter-path`` of the ports path, shared with the
-rl-infra-spec 3.6 ledger. The hook calls :func:`apply_sample_filters` *before*
+reconfiguration ledger. The hook calls :func:`apply_sample_filters` *before*
 recording the kept groups (patch ``infra-drafts/1b-hook.patch``); nothing else
 may open another ``--rollout-sample-filter-path``.
 

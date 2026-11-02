@@ -1,4 +1,4 @@
-"""Critic warm-up as its own stage (change ``rl-algo-critic-family``, design D5).
+"""Critic warm-up as its own stage.
 
 Stage W is one plain Miles launch (``train.py``, the mode of Miles' own PPO
 example), not the ports driver loop: the critic is built from the initial
@@ -63,7 +63,7 @@ class CriticWarmupError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# Value quality at the end of stage W (user decision B, design D5/D7): the
+# Value quality at the end of stage W: the
 # 50 warm-up steps are only a starting point; the product records how well the
 # critic fits the returns and may be gated on it (spec critic.warmup_* fields,
 # registered by yeto.rl.algos.critic; None = record only).
@@ -378,7 +378,7 @@ def stage_w_command(main_argv: Sequence[str], spec: AlgorithmSpec, *, actor_chec
     """``python3 -m yeto.rl.stage_w_entry <miles>/train.py <stage-W argv>``: plain
     Miles (no ports driver), but connected to the island's Ray with the ports
     driver's job ``runtime_env`` (PYTHONPATH incl. /root/Megatron-LM) so its
-    actors import what the ports path's do (s13-g1-modal-20261007b)."""
+    actors import what the ports path's do."""
 
     argv = warmup_stage_argv(main_argv, spec, actor_checkpoint=actor_checkpoint,
                              critic_save=critic_save)

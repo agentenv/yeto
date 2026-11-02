@@ -1,4 +1,4 @@
-"""S27 R-5: param layout record and the offline TP/PP/EP merge (pure torch)."""
+"""Param layout record and the offline TP/PP/EP merge (pure torch)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Rollout groups through the sample relay (S27 G-EA).
+"""Rollout groups through the sample relay.
 
 Sampler side: :class:`RelaySampleBuffer` has the buffer surface of
 :class:`~yeto.rl.engine.sample_buffer.FileSampleBuffer` that the unchanged
@@ -10,7 +10,7 @@ writers use (``GroupWriter``, the Miles buffer writer) and that
 ``header``: ``sample_id``, ``behavior_version`` (oldest engine version of any
 token: the policy version the trainer gates on), ``tokens``, ``provenance``,
 ``sampler_round``, ``sampler_id``, ``fragment_versions`` (the version vector
-of the cut that generated the oldest tokens), ``cuts`` (S27 G-EM: for every
+of the cut that generated the oldest tokens), ``cuts`` (for every
 engine version in the group, the merged cut the sampler loaded for it:
 ``merged_version``, ``digest``, ``fragment_versions``), ``written_at``.
 ``payload``: the buffer payload of the group (``encode_group``:
@@ -27,7 +27,7 @@ unread groups, so the relay depth a sampler sees is the trainer's real
 backlog. A sample id already in the local buffer is acknowledged and
 skipped (an item delivered again after a pump restart).
 
-S27 G-EM: the pump writes each sample's external merged cut into its metadata
+The pump writes each sample's external merged cut into its metadata
 (``yeto.rl.engine.external_policy.CUT_METADATA_KEY``: the cut of the sample's
 oldest engine version, from the item's ``cuts``), so the trainer's evidence
 names the weights that generated every trajectory. An item without the cut of
@@ -213,7 +213,7 @@ class RelaySampleBuffer:
 
     def pending_groups(self) -> int:
         """The sampler loop's backlog on the relay: groups in the channel that no
-        trainer took yet (S29 spot run, defect D5). The release-based backlog
+        trainer took yet. The release-based backlog
         (``len - last_seen.buffer_selected``) counts from 0 until the first merged
         cut is loaded; a full-parameter run merges one fragment per outer step, so
         the first cut needs ``fragments`` trainer rounds, which need groups, while
@@ -238,7 +238,7 @@ class RelayPump:
         """``buffer``: the writer instance of the local buffer; ``reader``: the
         reader's instance (its ``read_cursor`` bounds the prefetch; None: the
         writer's own cursor); ``watchdog``: a ``boat_labels.OrphanWatchdog``
-        (S29 D15) that sees every item's sampler incarnation and deletes the
+        that sees every item's sampler incarnation and deletes the
         boat sandboxes of a spot island that left."""
         if int(prefetch_groups) < 1:
             raise ValueError("prefetch_groups must be >= 1")
@@ -321,7 +321,7 @@ class RelayPump:
     def run(self) -> None:
         while not self._stop.is_set():
             if self.watchdog is not None:
-                self.watchdog.poll()  # never raises (S29 D15)
+                self.watchdog.poll()  # never raises
             try:
                 if self.step() == 0:
                     self._stop.wait(min(1.0, self.wait_s))
@@ -377,8 +377,8 @@ SPOT_SYNCER_ENV = "YETO_SPOT_SYNCER"  # sampler island: subscribe to this syncer
 
 def trainer_relay_env(syncer: tuple[str, int], learner_id: int, *, groups_per_round: int,
                       prefetch: int | None = None) -> dict[str, str]:
-    """The relay variables of a training island (``--rl-sample-relay``; both backends,
-    S27 G-EA / G-EV): the syncer that serves the relay, the island's channel (its
+    """The relay variables of a training island (``--rl-sample-relay``; both backends):
+    the syncer that serves the relay, the island's channel (its
     learner id) and the groups the pump keeps unread (default two rounds)."""
     host, port = syncer
     if prefetch is None:
@@ -408,7 +408,7 @@ def relay_sampler_buffer(environ: Mapping[str, str] | None = None) -> "RelaySamp
 
 
 def pump_event_printer(channel: int) -> Callable[..., None]:
-    """S29 D16: the emitter of the relay pump and its boat orphan watchdog: one
+    """The emitter of the relay pump and its boat orphan watchdog: one
     ``YETO_RL_EVENT <json>`` stdout record per event (``island_id`` = the relay
     channel, which is the trainer island's id), the format the trainer log and
     the launcher's tape collector read."""
@@ -437,7 +437,7 @@ def maybe_start_relay_pump(reader_buffer: Any, environ: Mapping[str, str] | None
     from yeto.rl.harness.harbor.boat_labels import OrphanWatchdog
 
     emit = pump_event_printer(channel)
-    # S29 D15: None without YETO_BOAT_RUN_ID. S29 D16: the watchdog and the pump
+    # None without YETO_BOAT_RUN_ID. The watchdog and the pump
     # print their events (rl_boat_orphans_deleted, rl_relay_item_rejected), which
     # were dropped without an emitter.
     watchdog = OrphanWatchdog.from_env(env, emit=emit)

@@ -1,4 +1,4 @@
-"""The spot sampler island (S27 G-EA) on the engine sampler island's code.
+"""The spot sampler island on the engine sampler island's code.
 
 A spot sampler is the engine sampler island (:mod:`yeto.rl.engine.engine_sampler`,
 :mod:`yeto.rl.engine.engine_sampler_entry`): ``SamplerLoop`` admits rounds
@@ -15,7 +15,7 @@ handle replacement. Only its two channels differ:
 It stops when the syncer says the run finished, when the syncer link stays
 down for ``syncer_lost_s``, when the relay did not answer for ``relay_gone_s``,
 or on the reclaim marker (PREEMPTED). Every relay item names the cut that
-generated each of its versions (S27 G-EM); the base weights served before the
+generated each of its versions; the base weights served before the
 first cut are named by the digest of ``base_dir``.
 
 ``python -m yeto.rl.spot_rollout.sampler --spec SPEC.json``: the engine
@@ -99,9 +99,9 @@ class SpotChannels:
             base_version=int(spec.get("base_version", 0)), base_dir=spec.get("base_dir") or base_model)
         from .version_board import VERSION_BOARD, VersionReader
 
-        # S29 D9/D4: the run's merged version, read at every round admission
+        # The run's merged version, read at every round admission
         self.version = VersionReader(lambda: RelayBoard(self.addr, VERSION_BOARD, self.subscriber_id, key=key))
-        if spec.get("version_board", True):  # False: drills that need stale groups (S29 D10)
+        if spec.get("version_board", True):  # False: drills that need stale groups
             self.releases.version_reader = self.version
         self.buffer = RelaySampleBuffer(self.producer, fragment_versions=self.releases.fragment_versions,
                                         should_stop=self.stopping, cut_of=self.releases.cut_identity)
@@ -121,7 +121,7 @@ class SpotChannels:
     def stopping(self) -> bool:
         # fenced: a newer process of this sampler took its id on the head
         # version.regressed: the board went back below a version this sampler read,
-        # i.e. a fresh syncer replaced the run it joined (S29 D4)
+        # i.e. a fresh syncer replaced the run it joined
         return (self.client.run_finished() or self.client.fenced() or self.syncer_lost()
                 or self.buffer.gone or self.version.regressed)
 
@@ -152,7 +152,7 @@ class SpotChannels:
 
 def label_boat_sandboxes(spec: Mapping[str, Any], incarnation: str,
                          environ: Mapping[str, str] | None = None) -> list[str]:
-    """S29 D15: with ``YETO_BOAT_RUN_ID`` set, label this process's boat sandboxes
+    """With ``YETO_BOAT_RUN_ID`` set, label this process's boat sandboxes
     with the island (``sampler_id``) and this incarnation, and delete the
     sandboxes an earlier incarnation of this island left (a preempted VM runs
     no exit cleanup). Returns the deleted sandbox ids. The labels go to

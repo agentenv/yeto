@@ -159,7 +159,7 @@ SKY_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS
 
 
 def _sky_python() -> str | None:
-    cand = os.environ.get("YETO_SKY_PYTHON") or os.path.expanduser("~/work/gpu-head/venv/bin/python")
+    cand = os.environ.get("YETO_SKY_PYTHON")
     if cand and os.path.exists(cand):
         r = subprocess.run([cand, "-c", "import sky"], capture_output=True, text=True,
                            env=dict(os.environ, **SKY_ENV))

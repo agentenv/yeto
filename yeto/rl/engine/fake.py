@@ -98,8 +98,8 @@ def fake_capabilities(profile: str = "miles-like", **overrides) -> EngineCapabil
         traits=BackendTraits(weight_transport_names=FAKE_WEIGHT_TRANSPORTS, publish_while_offloaded=True),
     )
     values.update(overrides)
-    # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for
-    # 1b (grpo_knobs.G1_DECLARED == the 1b part of MILES_DECLARED).
+    # The fake declares what the Miles adapter declares for the GRPO knobs
+    # (grpo_knobs.GRPO_KNOBS_DECLARED == the GRPO-knob part of MILES_DECLARED).
     from yeto.rl.algos.grpo_knobs import merge_declared
 
     return merge_declared(EngineCapabilities(**values))
@@ -131,7 +131,7 @@ class FakeEngine:
     unacked_member_rounds: dict[int, str] = field(default_factory=dict)
     stale_token_rounds: set[int] = field(default_factory=set)
     constant_reward_rounds: set[int] = field(default_factory=set)
-    # Rounds whose trainer reports a masked-token fraction (design D6);
+    # Rounds whose trainer reports a masked-token fraction;
     # others report none (TrainStepMetrics.masked_fraction stays unset).
     masked_fraction_rounds: dict[int, float] = field(default_factory=dict)
     grad_norm_reported: bool = True

@@ -38,9 +38,9 @@ def verl_needs_nccl_shm_off(args, spec: ClusterSpec) -> bool:
     """A verl island with several cards in one Modal container runs NCCL with
     its shared-memory transport off.
 
-    S26 E9 e9-g2-a: on a 2-card Modal container verl's NCCL checkpoint engine
-    failed attaching ``/dev/shm/nccl-*`` ("No such file or directory", NCCL
-    system error); the same run with ``NCCL_SHM_DISABLE=1`` passed (e9-g2-d/e).
+    On a 2-card Modal container verl's NCCL checkpoint engine failed attaching
+    ``/dev/shm/nccl-*`` ("No such file or directory", NCCL system error); with
+    ``NCCL_SHM_DISABLE=1`` it passed.
     NCCL then uses P2P/sockets between the two local ranks. Miles islands are
     not changed (no failure seen there)."""
     backend = getattr(args, "rl_backend", None) or "miles"
@@ -63,8 +63,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     # Modal ships cfg.envs as a modal.Secret, so the task's secret envs
     # (split_secret_envs) join them here; registry logins stay out.
     # sky.Task wraps secret values in pydantic SecretStr (str() is "**********"):
-    # unwrap, or the island gets the mask (s19-compaction-g1-20261010a: TBENCH
-    # reward HMAC key "outside its size bound").
+    # unwrap, or the island gets the mask (the TBENCH reward HMAC key was
+    # then rejected as "outside its size bound").
     envs.update({k: _secret_value(v) for k, v in (getattr(task, "secrets", None) or {}).items()
                  if k in SECRET_ENV_NAMES})
     envs["SYNCER_ADDR"] = syncer_addr
@@ -180,7 +180,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
 # A full-parameter island holds whole-model f32 cuts as Ray objects: its
 # anchors, the current cut, the overlap round base, staged broadcasts and a
 # reconnect catch-up. What does not fit in the object store spills to the
-# container disk; s27-gh-a (27B, Modal's default disk) spilled 318 GB and
+# container disk; a 27B run on Modal's default disk spilled 318 GB and
 # failed with ENOSPC. Size the disk for this many f32 copies.
 FULL_PARAMETER_SPILL_COPIES = 5
 MODAL_EPHEMERAL_DISK_MARGIN_GIB = 64
@@ -280,7 +280,7 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None
 # cancellation and up to 30 s more to shut its runner down (Modal system log: "failed to
 # respond to cancellation for too long: 30 seconds", "shutting down for too long (grace
 # period: 30 seconds)"); `modal app list` showed the last task up to ~6 s after it ended.
-# S27 runs took 17-60 s from the stop to "stopped" (EXTRA-CONTAINER.md); 5 checks (~25 s)
+# Runs took 17-60 s from the stop to "stopped"; 5 checks (~25 s)
 # reported 8 of them as not stopped (exit 5). 25 checks wait about 2 min.
 MODAL_STOP_VERIFY_ATTEMPTS = 25
 MODAL_STOP_VERIFY_DELAY_S = 5.0
@@ -422,7 +422,7 @@ def effective_recover_timeout(args) -> float:
 
 
 def wan_probe_relaunches(args) -> int:
-    """New containers per island after a rejected link probe (S26 E3b);
+    """New containers per island after a rejected link probe;
     0 when no island runs the probe."""
     if not (float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0) > 0
             or float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0) > 0):

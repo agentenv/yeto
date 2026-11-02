@@ -1,11 +1,12 @@
-"""S25 N7.3: trainer island on SSH nodes, W4A8 re-quantized releases, and the
-head's view of unmerged shard records (N3.6)."""
+"""Trainer island on SSH nodes, W4A8 re-quantized releases, and the
+head's view of unmerged shard records."""
 
 from __future__ import annotations
 
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -196,6 +197,10 @@ def test_ssh_binding_reads_a_sharded_store_by_key(tmp_path, checked_cards):
 
 
 # ---------------------------------------------------------------- a real process group, locally
+# The node scripts target Linux nodes and start the island under setsid (util-linux; absent on macOS).
+needs_setsid = pytest.mark.skipif(shutil.which("setsid") is None, reason="setsid not installed (the node scripts need it)")
+
+
 class LocalOps(SshOps):
     """Runs the node scripts with local bash instead of SSH (one node only)."""
 
@@ -206,6 +211,7 @@ class LocalOps(SshOps):
         return ["env", f"HOME={self.home}", "bash", "-c", script]
 
 
+@needs_setsid
 def test_start_and_kill_scripts_on_a_local_process_group(tmp_path):
     fake = tmp_path / "torchrun"
     event = {"island_id": "t", "time_unix": 1.0, "event": "x"}
@@ -232,7 +238,7 @@ def test_start_and_kill_scripts_on_a_local_process_group(tmp_path):
     subprocess.run(["bash", "-n"], input=kill_script(remote_paths("r", "t", 1)), text=True, check=True)
 
 
-# ---------------------------------------------------------------- N3.6 unmerged shard records
+# ---------------------------------------------------------------- unmerged shard records
 def test_head_counts_shard_records_the_trainer_has_not_merged():
     objects = _objects()
     npu = FileSampleBuffer(objects, batch_size=1, index=shard_index("npu"))
@@ -242,7 +248,7 @@ def test_head_counts_shard_records_the_trainer_has_not_merged():
     view = CommittedBacklog(head, lambda: 0, unmerged=UnmergedShards(objects))
     npu.append(_entry("n0", version=1, appended_at=1.0))
     ppu.append(_entry("p0", version=2, appended_at=2.0))
-    assert plain.backlog(3).samples == 0  # the gap N3.6 closes: a stopped trainer merges nothing
+    assert plain.backlog(3).samples == 0  # the gap this closes: a stopped trainer merges nothing
     stats = view.backlog(3)
     assert (stats.samples, stats.batches, stats.oldest_version) == (2, 1.0, 1)
     trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True)  # merges n0, p0
@@ -339,6 +345,7 @@ def test_release_cli_one_pass_with_the_real_converter(world):
         assert (out / name).read_bytes() == (original / name).read_bytes()
 
 
+@needs_setsid
 def test_island_end_closes_the_stream_and_runs_a_last_requant_pass(tmp_path):
     fake = tmp_path / "torchrun"
     fake.write_text("#!/bin/bash\nsleep 0.5\nexit 3\n")

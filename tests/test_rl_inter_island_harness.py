@@ -24,7 +24,7 @@ def test_quorum_lease_catch_up(tmp_path):
     assert res["final"]["outer_version"] == 6 and len(steps) == 6
     # quorum timeout stepping: some rounds advanced without the slow island
     assert any(e["timed_out"] and "slow" in e["absent"] for e in steps)
-    # P4: the slow island's late deltas are carried over with gamma**lag, not dropped
+    # The slow island's late deltas are carried over with gamma**lag, not dropped
     assert any(e["kind"] == "delta_carried_over" and e["island_id"] == "slow" for e in ev)
     assert any(k.startswith("slow@") for e in steps for k in e["carried_in"])
     assert not any(e["kind"] == "delta_rejected" and e.get("reason") == "stale_base" for e in ev)

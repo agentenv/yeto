@@ -1,6 +1,6 @@
 """Qwen3.8-Flash-Next (``qwen4_exp``) provider view without Megatron-Bridge.
 
-try22 (s11-h200-20261005v-fnboot) died in ``run_miles`` at
+A GPU run died in ``run_miles`` at
 ``megatron.bridge.AutoBridge.from_hf_pretrained``: transformers 5.12.1 (the
 pin of both our ports image and radixark/miles:qwen38next) has no
 ``qwen4_exp`` model type.  Miles registers it at runtime

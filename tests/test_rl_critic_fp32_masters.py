@@ -1,4 +1,4 @@
-"""rl-algo-critic-family (user decision 2026-10-07): critic two-island sync is over
+"""Critic two-island sync is over
 the FP32 optimizer masters (CPU only; fake DistributedOptimizer, no Megatron, no Ray).
 
 A fake DistributedOptimizer leaf holds bf16 model parameters and FP32 main shards
@@ -254,7 +254,7 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
     for preset in ("decoupled", None, "full-parameter"):
         with pytest.raises(AlgorithmSpecError, match="single-island"):
             check_unverified_allowance(names, islands=2, outer_sync=True, sync_preset=preset)
-    # a non-critic unverified mechanism keeps D11, even with the critic under strict-avg
+    # a non-critic unverified mechanism stays single-island, even with the critic under strict-avg
     with pytest.raises(AlgorithmSpecError, match="single-island"):
         check_unverified_allowance(["execution:critic", "losses:cispo"], islands=2, outer_sync=True,
                                    sync_preset="strict-avg")
@@ -273,8 +273,8 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
 
 def test_allowance_sao_streaming_full_has_a_critic_channel():
     """sao-streaming-full requires the SAO critic, which has its own role
-    syncer (P0-D8); without the allowance no multi-island SAO run could start
-    (P0-1.11 GPU check, 2026-10-14)."""
+    syncer; without the allowance no multi-island SAO run could start
+    (found on a GPU check)."""
 
     names = [
         "advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
@@ -316,7 +316,7 @@ def test_launcher_two_island_critic_strict_avg_passes_decoupled_refused(tmp_path
 
 
 def test_critic_state_summary_wakes_an_asleep_colocated_critic():
-    """s13-g1-modal-20261007a: the summary read paused critic memory (CUDA invalid argument)."""
+    """On a Modal run the summary read paused critic memory (CUDA invalid argument)."""
     import types
 
     import torch
@@ -345,7 +345,7 @@ def test_critic_state_summary_wakes_an_asleep_colocated_critic():
 
 
 def test_single_rank_dp_gathers_on_cpu_in_one_buffer(monkeypatch):
-    """s19-compaction-g3-20261010a: the critic export ran out of GPU memory on a
+    """On a GPU run the critic export ran out of GPU memory on a
     second (torch.cat) copy of the FP32 masters while the actor was still
     resident. One flat buffer per leaf now; a single-rank DP group (dist up)
     gathers on the CPU with no collective, and export/import still round-trip."""

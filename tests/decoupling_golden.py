@@ -1,4 +1,4 @@
-"""Golden samples for the yeto-framework-decoupling change (phase 0, task 1.1).
+"""Golden samples for the yeto framework decoupling (launch -> Miles argv path).
 
 Every sample is produced on CPU only: no Ray, no GPU, no cloud.  The path is the
 real one the island takes -- ``yeto launch`` CLI -> launcher island task (sky
@@ -17,8 +17,8 @@ Recorded per configuration:
   * ``runtime_attrs`` / ``placement`` of the translated launch;
   * ``backend_identity`` without the engine commit.
 
-No code hash is recorded (rl-identity-tiering D5, L9.10): no plugin source
-hash, no ``ports_runtime_fingerprint``, no engine commit; since L9.11 the
+No code hash is recorded: no plugin source hash, no
+``ports_runtime_fingerprint``, no engine commit; the
 translated ``runtime_attrs`` carry no plugin source hash either. The run code
 pack pins code; a plugin-only change needs no re-record. Specs built here carry
 plugin references without a source hash, so their hashes do not depend on code.
@@ -28,7 +28,7 @@ the live LoRA tensors (``yeto.protocol.layout_fingerprint``), only known once th
 model is loaded on the island.
 
 Regenerate (only when a change is intended and documented in hash-migration.md):
-    PYTHONPATH=/tmp/s15-noray python tests/decoupling_golden.py --write
+    python tests/decoupling_golden.py --write
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ def _execution_profile(args, launch, algorithm, *, yeto_policy_sync: bool) -> di
         num_steps_per_rollout=int(_argv_value(argv, "--num-steps-per-rollout", "1")),
         yeto_rl_sync_preset=getattr(args, "sync_preset", "strict-avg"),
         yeto_rl_overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
-        # S17 N17: the LR schedule enters the contract hash
+        # the LR schedule enters the contract hash
         lr=(None if _argv_value(argv, "--lr", None) is None else float(_argv_value(argv, "--lr"))),
         lr_decay_style=_argv_value(argv, "--lr-decay-style", None),
         lr_decay_iters=(None if _argv_value(argv, "--lr-decay-iters", None) is None
@@ -213,8 +213,8 @@ def _maxrl_spec():
 
 
 def _without_plugin_hashes(spec):
-    """The spec with plugin references by path only (rl-identity-tiering L9.2), so
-    the recorded hashes do not change with plugin source code (L9.10)."""
+    """The spec with plugin references by path only, so the recorded
+    hashes do not change with plugin source code."""
     from yeto.rl.engine.algorithm import AlgorithmSpec, _strip_plugin_hashes
 
     return AlgorithmSpec.from_dict(_strip_plugin_hashes(json.loads(spec.canonical_json())))
@@ -234,18 +234,18 @@ def _fn_cli(_tmp: Path) -> tuple[str, ...]:
 
 
 CONFIGS: tuple[Config, ...] = (
-    Config("grpo_default", "GRPO 默认（ports，固定分区，strict-avg）", lambda t: BASE),
-    Config("grpo_tis", "GRPO + TIS 失配修正（tis_clip 2.0）",
+    Config("grpo_default", "GRPO default (ports, fixed partition, strict-avg)", lambda t: BASE),
+    Config("grpo_tis", "GRPO + TIS mismatch correction (tis_clip 2.0)",
            lambda t: BASE + ("--rl-algorithm-spec", _spec_file(t, "tis", _tis_spec))),
-    Config("decoupled", "decoupled 外层同步（--rl-sync-preset decoupled）",
+    Config("decoupled", "decoupled outer sync (--rl-sync-preset decoupled)",
            lambda t: BASE + ("--rl-sync-preset", "decoupled", "--local-rl-rounds-per-sync", "2")),
-    Config("drgrpo", "Dr.GRPO 常数分母归约（G1 drgrpo 证据里的 spec 原文件）",
+    Config("drgrpo", "Dr.GRPO constant-denominator reduction (the spec file from the drgrpo evidence)",
            lambda t: BASE + ("--rl-algorithm-spec", str(REPO / DRGRPO_EVIDENCE))),
-    Config("seq_adv_maxrl", "seq_adv：MaxRL 优势变换（含奖励流水线插件）",
+    Config("seq_adv_maxrl", "seq_adv: MaxRL advantage transform (with a reward pipeline plugin)",
            lambda t: BASE + ("--rl-algorithm-spec", _spec_file(t, "maxrl", _maxrl_spec))),
-    Config("elastic", "岛内弹性模式（--rl-elastic，单配置资源表）",
+    Config("elastic", "in-island elastic mode (--rl-elastic, single-config resource table)",
            lambda t: BASE + _elastic(t)),
-    Config("fn_2x8", "Flash-Next 2×8 正式训练形状（fntrain.sh print 2x8）", _fn_cli, fn=True),
+    Config("fn_2x8", "Flash-Next 2x8 production training shape (fntrain.sh print 2x8)", _fn_cli, fn=True),
 )
 
 
@@ -314,19 +314,20 @@ def record_config(config: Config) -> dict[str, Any]:
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
         "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
-        # Phase 5 (design D7); without the engine commit (L9.10, design D5).
+        # Backend identity without the engine commit (no code hash in the golden).
         "backend_identity": _backend_identity(),
         "session_contract_hash": None,
-        "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），"
-                                      "再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定"
-                                      "（yeto.rl.engine.backend_identity），离线不可得",
+        "session_contract_hash_note": ("computed at run time from the LoRA tensor layout "
+                                       "(yeto.protocol.layout_fingerprint), then bound to the island "
+                                       "contract v3 (backend identity, LR schedule, semantic hash, code "
+                                       "pack digest; yeto.rl.engine.backend_identity); not available offline"),
     }
 
 
 def _backend_identity() -> dict:
     from yeto.rl.adapters.miles.identity import backend_identity
 
-    identity = backend_identity(compat_group="nvidia-h100")  # 7.7b: fixed sample card type
+    identity = backend_identity(compat_group="nvidia-h100")  # fixed sample card type
     return {k: v for k, v in identity.to_dict().items() if k != "engine_commit"}
 
 

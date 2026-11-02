@@ -1,4 +1,4 @@
-"""S26 E9.5 in the pinned Miles image: Miles itself drives the Harbor suspend/resume hooks (CPU).
+"""In the pinned Miles image: Miles itself drives the Harbor suspend/resume hooks (CPU).
 
 Skipped without the ``miles`` package (local venvs, yeto-cpu-test); run in the
 Miles image (``yeto-miles-ports``).  Real pieces: Miles' agent-hook loader

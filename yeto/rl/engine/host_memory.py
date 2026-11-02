@@ -1,6 +1,6 @@
-"""Give the memory of a released host copy back to the OS (S27 G-EY).
+"""Give the memory of a released host copy back to the OS.
 
-Run s27-elastic-c (Nemotron Nano, peer recovery): the donor's training
+A Nemotron Nano run with peer recovery: the donor's training
 container went from 282 GiB to 736 GiB when every rank copied its state to
 host memory for the snapshot, and stayed at about 692 GiB after the shards
 were written and committed. On CPU (``cut_plugin`` host background write, the
@@ -80,9 +80,9 @@ def release_host_memory() -> dict[str, Any]:
     }
 
 
-# ---- where the host memory is (S27 G-EZ3) ----
+# ---- where the host memory is ----
 #
-# The 120B verl island on npu1 (G-EZ2) used about 150-175 GiB per node more
+# The 120B verl island on Ascend NPUs used about 150-175 GiB per node more
 # than its parameters, gradients and Adam state; the node's MemAvailable alone
 # cannot say which process or which kind of page holds it. These two readers
 # give the split a caller logs next to each training step.

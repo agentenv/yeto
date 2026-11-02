@@ -1,4 +1,4 @@
-"""S27 R-2: round cuts of synced islands and the timed cut interval (no Ray, no GPU)."""
+"""Round cuts of synced islands and the timed cut interval (no Ray, no GPU)."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def test_auto_interval_cuts_first_then_waits_young_daly_seconds():
 
 def test_auto_interval_is_capped_and_floored():
     interval = AutoCutInterval(mtbf_s=604800.0, max_interval_s=600.0, clock=_Clock())
-    interval.record_cut(1, cost_s=270.0)  # 4B full parameter, inline (E6)
+    interval.record_cut(1, cost_s=270.0)  # 4B full parameter, inline
     assert interval.interval_s() == 600.0
     floored = AutoCutInterval(mtbf_s=10.0, min_interval_s=30.0, clock=_Clock())
     floored.record_cut(1, cost_s=0.01)
@@ -62,7 +62,7 @@ def test_auto_interval_is_capped_and_floored():
 
 
 def test_the_default_interval_keeps_cuts_under_five_percent_of_the_wall_time():
-    """S27 G-AT: no cut flag -> a timed interval; a 30B cut (about 400 s, s27-ao-a)
+    """No cut flag -> a timed interval; a 30B cut (about 400 s)
     is taken about every 8000 s, above the one-hour cap, instead of every round."""
     from yeto.rl.engine.cut_interval import DEFAULT_MAX_COST_SHARE, DEFAULT_MTBF_S
 
@@ -71,7 +71,7 @@ def test_the_default_interval_keeps_cuts_under_five_percent_of_the_wall_time():
     assert isinstance(default, AutoCutInterval)
     assert (default.mtbf_s, default.max_cost_share) == (DEFAULT_MTBF_S, DEFAULT_MAX_COST_SHARE) == (21600.0, 0.05)
     default.clock = clock
-    assert default.due(1) is False  # S27 G-CD: the first cut waits DEFAULT_FIRST_CUT_S
+    assert default.due(1) is False  # the first cut waits DEFAULT_FIRST_CUT_S
     clock.now += 1800
     assert default.due(2) is True  # and measures the cost
     default.record_cut(2, cost_s=400.0)
@@ -283,7 +283,7 @@ def test_island_cut_store_refusals(extra, no_sync):
 
 
 def test_verl_takes_the_timed_interval():
-    """S27 G-ED: the verl island wires the timed interval as Miles does."""
+    """The verl island wires the timed interval as Miles does."""
     from yeto.rl.adapters.verl.round_cuts import resume_config
 
     with pytest.raises(ValueError, match="need --rl-resume-store"):
@@ -308,9 +308,9 @@ def test_write_only_cuts_commit_inline_for_a_buffer_reader():
     _commit_cuts_inline_for_buffer_reader(None, miles_args=SimpleNamespace())
 
 
-# ---------------------------------------------------------------- S27 G-CD: cut cost and commit time
+# ---------------------------------------------------------------- cut cost and commit time
 def test_the_default_first_cut_waits_and_the_background_counts_in_the_cost():
-    """s27-bb-b1 (Nano DP8, 473 GB cuts): the default interval cut at round 1 and
+    """A GPU run (Nano DP8, 473 GB cuts): the default interval cut at round 1 and
     then every ~52 rounds on the 144 s critical path alone, while each cut also
     took 529 s of store sync and a commit that timed out at 600 s."""
     from yeto.rl.engine.cut_interval import DEFAULT_FIRST_CUT_S

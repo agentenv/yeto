@@ -1,4 +1,4 @@
-"""rl-multinode-island Q4 (C5): the island state dir (journal, cuts, ledger) is copied to an
+"""The island state dir (journal, cuts, ledger) is copied to an
 off-island checkpoint store after every commit point and restored on an empty state dir
 (machine replaced); --rl-checkpoint-store plumbing (cli -> launcher -> learner -> controller)."""
 

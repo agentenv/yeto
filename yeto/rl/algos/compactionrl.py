@@ -1,15 +1,14 @@
-"""CompactionRL declaration (change ``rl-algo-critic-family`` task 9.3, design D8).
+"""CompactionRL declaration.
 
 CompactionRL (arXiv 2607.05378v1, sec. 4-5) = PPO with a critic, trained on
 compacted agent rollouts (rollout side: :mod:`yeto.rl.compaction`):
 cross-segment GAE (eq. 13-15; ``cross_segment_per_sample``), length-adaptive lambda with alpha 1.5,
 token-level loss normalisation (eq. 12), critic lr 3e-6, 2 value updates per
 policy update, 50 steps of value pretraining from the policy checkpoint (run
-as warm-up stage W, design D5), one rollout per prompt (a run-level setting).
+as warm-up stage W), one rollout per prompt (a run-level setting).
 
-gamma 1.0 and KL 0 come from design D8 / tasks 9.3; the paper does not state
-them (see :data:`NOT_IN_PAPER`). Execution is not declared before GPU G1
-(task 9.4): ``features:gae_cross_segment`` and ``features:critic_multi_update``
+gamma 1.0 and KL 0 are yeto choices; the paper does not state them (see
+:data:`NOT_IN_PAPER`). Execution is not declared before a GPU smoke: ``features:gae_cross_segment`` and ``features:critic_multi_update``
 are undeclared, and ``--critic-updates-per-step`` is a requested fork flag.
 """
 
@@ -30,9 +29,9 @@ PAPER_PARAMETERS: tuple[tuple[str, Any, str], ...] = (
     ("critic.critic_updates_per_step", 2, "sec. 5.1: 2 value updates per policy update"),
     ("critic.warmup_steps", 50, "sec. 5.1: critic from policy ckpt, 50 value-pretraining steps"),
 )
-# Values from design D8 / tasks 9.3 that the paper does not state.
+# yeto values that the paper does not state.
 DESIGN_PARAMETERS: tuple[tuple[str, Any, str], ...] = (
-    ("advantage.gamma", 1.0, "design D8 / task 9.3 (paper: not given)"),
+    ("advantage.gamma", 1.0, "yeto choice (paper: not given)"),
 )
 
 # Run-level settings (not part of the algorithm hash).
@@ -48,22 +47,22 @@ PAPER_RUN_SETTINGS: dict[str, Any] = {
 }
 
 NOT_IN_PAPER: dict[str, str] = {
-    "advantage.gamma": "not given; 1.0 from design D8",
-    "kl": "not given; design D8 kl=0 (no KL placement; Miles shared PPO requires kl_coef 0)",
+    "advantage.gamma": "not given; yeto uses 1.0",
+    "kl": "not given; yeto uses kl=0 (no KL placement; Miles shared PPO requires kl_coef 0)",
     "loss.eps_clip": "not given numerically; Miles default",
     "critic.value_clip": "not given; Miles default 0.2",
     "advantage.lambd": "unused under length_adaptive; filled with 1.0",
     "length_adaptive l": "paper: 'response length'; per-segment vs whole rollout not stated; "
-                         "confirmed (design D8): whole rollout's optimized-token count",
-    "segment-end bootstrap": "not stated; confirmed (design D8): V=0 at every segment end",
-    "critic target": "not stated; confirmed (design D8): local (uncorrected) return = local "
+                         "confirmed: whole rollout's optimized-token count",
+    "segment-end bootstrap": "not stated; confirmed: V=0 at every segment end",
+    "critic target": "not stated; confirmed: local (uncorrected) return = local "
                      "advantage + V",
     "summary template": "q_sum section names / <analysis> text / u_resume text not given",
 }
 
 
 def compactionrl_whole_rollout_control_spec(**overrides: Any) -> AlgorithmSpec:
-    """Ablation arm (task 9.5): the explicit control mode ``cross_segment_whole_rollout``
+    """Ablation arm: the explicit control mode ``cross_segment_whole_rollout``
     (one sample per rollout + per-token segment ids; earlier segments get no terminal
     reward, unlike eq. 15). Everything else equals :func:`compactionrl_spec`."""
 
@@ -89,11 +88,11 @@ def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:
     return AlgorithmSpec(**groups)
 
 
-# --- Rollout-side switch (progress.md "S13 Codex 压缩接线") ------------------------
+# --- Rollout-side switch ---------------------------------------------------------
 # The trainer-side gae variant decides whether rollouts must be compacted:
 # ``cross_segment_per_sample`` (this spec) needs one sample per compaction
 # segment.  The Codex bridge that produced them (switched on by
-# ``YETO_CODEX_COMPACTIONRL``) was removed in S26 E0.5; only the TEST synthetic
+# ``YETO_CODEX_COMPACTIONRL``) was removed; only the TEST synthetic
 # reward (``yeto.rl.synthetic_segments``) labels segments now.  The control arm
 # ``cross_segment_whole_rollout`` needs the whole rollout as ONE sample with
 # per-token segment ids; the bridge runs every segment in its own session-server

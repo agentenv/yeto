@@ -1,5 +1,5 @@
 """Neutral name -> Miles implementation, and the training-side binding check
-(yeto-framework-decoupling 4.4 / 4.4a, design D6 / D6a).
+(yeto-framework-decoupling 4.4 / 4.4a).
 
 4.4: the core names dynamic-sampling filters neutrally
 (``nonzero_reward_std_bounded``, ``nonzero_reward_std``); this table spells

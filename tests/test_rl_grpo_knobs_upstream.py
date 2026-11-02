@@ -1,7 +1,7 @@
 """rl-algo-grpo-knobs checks against upstream Miles source (2.3/2.4/3.3/4.2-4.4/6.4).
 
-Run in ``~/work/miles-next-venv`` with
-``PYTHONPATH=<yeto>:~/work/miles-next``; skipped where Miles
+Run in a Miles venv with
+``PYTHONPATH=<yeto>:<miles-checkout>``; skipped where Miles
 is not importable. ``megatron.training`` is not installed in that venv, so
 argv is parsed with Miles' own argument provider
 (``get_miles_extra_args_provider``) on a bare argparse parser -- the Miles

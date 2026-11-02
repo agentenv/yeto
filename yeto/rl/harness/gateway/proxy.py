@@ -1,5 +1,5 @@
 """Records proxy: the gateway plus :class:`.records.RecordingBackend`, with an
-HTTP shell (S25 N10.5).
+HTTP shell.
 
 Sits in front of a sampler engine. An agent that only speaks OpenAI (Harbor's
 built-in codex agent uses Responses) gets a per-trajectory base URL::

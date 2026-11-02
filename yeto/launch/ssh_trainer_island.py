@@ -1,4 +1,4 @@
-"""Trainer island on SSH nodes for the trainer scheduler (S25 N7.3, design D4).
+"""Trainer island on SSH nodes for the trainer scheduler.
 
 The trainer scheduler (``trainer_loop``) starts and stops the trainer island
 through the ``TrainerIslands`` port (``launch`` / ``events`` / ``alive`` /
@@ -45,7 +45,7 @@ node without an ``address`` is accepted only when its SSH target is an IP.
 
 The head reads the cuts, the commands and the sample buffer through the store's
 object API (``s3://`` or ``oss://``); with a sharded buffer it also counts the
-records the trainer has not merged yet (``UnmergedShards``, N3.6).
+records the trainer has not merged yet (``UnmergedShards``).
 
 The launcher holds back an ``ssh:`` island of ``--gpu`` as the trainer island
 and builds its spec from ``--rl-node-inventory`` (:func:`island_spec_from_inventory`).
@@ -140,7 +140,7 @@ class SshTrainerSpec:
             if not self.docker_args_of(node):
                 raise SshIslandError(
                     f"node {node.name}: runtime docker needs docker_args, the device flags of `docker run` "
-                    f"for device family {node.device_family} (inventory docker_args; PPU: task N0.2b)")
+                    f"for device family {node.device_family} (inventory docker_args)")
         if len(self.nodes) > 1:
             for node in self.nodes:
                 rendezvous_address(node)  # raises on a node the others cannot dial

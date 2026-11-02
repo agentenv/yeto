@@ -1,4 +1,4 @@
-"""Protocol gateway core (design D1/D5, tasks 4.1/4.2): three entry points -> chat -> TITO session.
+"""Protocol gateway core: three entry points -> chat -> TITO session.
 
 In-process library; the HTTP shell (task 10.x) wraps ``core.Gateway`` later.
 """

@@ -1,4 +1,4 @@
-"""Harbor's codex agent with yeto's model provider (S26 R3); see :mod:`.codex_provider`."""
+"""Harbor's codex agent with yeto's model provider; see :mod:`.codex_provider`."""
 
 from __future__ import annotations
 

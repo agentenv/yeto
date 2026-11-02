@@ -1,4 +1,4 @@
-"""S26 E0.4: the Harbor layer of the Miles / verl images and the start check."""
+"""The Harbor layer of the Miles / verl images and the start check."""
 
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ layer = _load(LAYER / "harbor_layer.py", "harbor_layer")
 SPEC = json.loads((LAYER / "versions.json").read_text())
 HARBOR_LINE = f"harbor @ git+https://github.com/harbor-framework/harbor@{HARBOR_COMMIT}"
 
-# Base versions the S25 N10.9 check read from the two images (install_diff in
-# SESSION25/logs/T-N109/check-miles2.log and check-verl.log).
+# Base versions an install_diff check read from the two images.
 MILES_BEFORE = """\
 filelock==4.0.0
 importlib-metadata==9.0.1
@@ -240,7 +239,7 @@ def test_modal_harbor_layer_ships_the_layer_files_and_the_checker():
 
 def test_lock_records_a_package_installed_twice_without_a_version():
     # The Miles base image has peft-0.18.1.dist-info and peft-0.20.0.dist-info; the build saw one
-    # first and the running container the other (S26 agentic check).
+    # first and the running container the other (agentic check).
     text = MILES_BEFORE + "peft==0.18.1\npeft==0.20.0\n"
     assert layer.duplicate_names(text) == {"peft"}
     assert layer.duplicate_names(MILES_BEFORE) == set()

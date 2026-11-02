@@ -1,6 +1,6 @@
-"""Full-parameter outer sync of the verl Megatron engine island (S27 G-FG).
+"""Full-parameter outer sync of the verl Megatron engine island.
 
-The verl Megatron island (:mod:`.megatron_ports`, S27 G-DC) trains with
+The verl Megatron island (:mod:`.megatron_ports`) trains with
 verl's Megatron engine (TP/PP/EP, DistributedOptimizer).  This module lets it
 join a full-parameter syncer session the way an FSDP2 island does: the
 engine-neutral role stream, the verl chunked adapter, the cuts, the lazy
@@ -70,7 +70,7 @@ _EXPORTS = 0
 def _trace(step: str) -> None:
     """One line per step of the first manifest, with Python fault frames armed.
 
-    S27 G-FL: under PP > 1 the first manifest is also the first cross-stage collective
+    Under PP > 1 the first manifest is also the first cross-stage collective
     (Megatron-Bridge gathers the global parameter names over the pipeline group), and a
     crash there reaches the log as Ray's C++ fiber stack with no Python frame. The lines
     below say how far the rank got; ``faulthandler`` adds the Python stack of every
@@ -90,7 +90,7 @@ def _trace(step: str) -> None:
 
 
 def _pp_probe() -> None:
-    """S27 G-FL diagnostic, off unless ``YETO_MEGATRON_PP_PROBE=1``.
+    """Pipeline-parallel diagnostic, off unless ``YETO_MEGATRON_PP_PROBE=1``.
 
     Runs the collective Megatron-Bridge runs first under PP > 1 -- an object all-gather
     over the pipeline group (``_megatron_global_param_names_all_pp_ranks``) -- on its
@@ -116,7 +116,7 @@ def _pp_probe() -> None:
 
 
 def router_bias_dump(chunks: Sequence[Any], tag: str) -> None:
-    """S27 G-FT diagnostic, off unless ``YETO_MEGATRON_ROUTER_BIAS_DUMP`` names a path.
+    """Router-bias diagnostic, off unless ``YETO_MEGATRON_ROUTER_BIAS_DUMP`` names a path.
 
     The MoE router bias (``mlp.router.expert_bias``) is a persistent buffer, so no
     optimizer master backs it and the full-parameter layout does not hold it
@@ -179,7 +179,7 @@ def remote_megatron_export_flat(worker_dict, indices: Sequence[int], units: Sequ
     finite and hashes them (:class:`.full_parameter.FlatFragment`).
 
     ``layout`` translates Bridge's HF names into the layout's names and offsets
-    (S27 G-FT, blocker B15): a per-expert tensor lands at its row's offset
+    a per-expert tensor lands at its row's offset
     inside the stacked layout tensor, so the fragment buffer does the stacking
     (:class:`yeto.rl.megatron_hf_boundary.LayoutSink`)."""
 
@@ -197,7 +197,7 @@ def remote_megatron_export_flat(worker_dict, indices: Sequence[int], units: Sequ
     gather_s = time.perf_counter() - started - fragment.copy_s
     _EXPORTS += 1
     if _EXPORTS == 1 or _EXPORTS % 50 == 0:
-        # S27 G-FT: "export_hf was called" is a criterion of its own, and a
+        # "export_hf was called" is a criterion of its own, and a
         # publication that only records the base weights' identity reaches the
         # tape looking the same as one that read them (run ft-1 took 3.6 ms over
         # a 126.3 GB payload).  One line per worker says which happened.
@@ -212,7 +212,7 @@ def bridge_inputs(layout: boundary.LayoutMap | None, whole: Mapping[str, Any]) -
     """``whole`` (whole layout tensors) under Bridge's own HF names.
 
     One row of a stacked layout tensor is a view of it, so this costs no copy
-    (S27 G-FT).  Without a map the two namespaces are the same."""
+   .  Without a map the two namespaces are the same."""
 
     if layout is None or not layout.slots:
         return dict(whole)
@@ -251,7 +251,7 @@ def remote_megatron_apply(worker_dict, arrays: Mapping[str, Any], write_indices:
 # ----------------------------------------------------------------------------- island side
 def layout_map(model_path: str | None, bridge_names: Iterable[str],
                shapes: Mapping[str, Sequence[int]]) -> boundary.LayoutMap:
-    """Where Megatron-Bridge's HF names go in the island's layout (S27 G-FT, B15).
+    """Where Megatron-Bridge's HF names go in the island's layout.
 
     Megatron-Bridge names the tensors of the *base checkpoint*; the layout names
     the HF model's own trainable parameters.  For Qwen3 the two are the same set
@@ -359,7 +359,7 @@ class MegatronFullParameterGroup(VerlFullParameterGroup):
                                                index.layout_for([*write, *read]))
 
     async def light_digest(self) -> dict:
-        """S28 G-LHASH: the light policy digest (:mod:`.local_digest`): every rank hashes
+        """The light policy digest (:mod:`.local_digest`): every rank hashes
         its own FP32 master shards on the host, no collective; the rows are combined
         here into one global digest."""
 

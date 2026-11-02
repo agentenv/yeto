@@ -3,10 +3,10 @@
 5.2, 5.3).
 
 Needs Miles (``MILES_NEXT_COMMIT`` checkout on ``sys.path``) and torch; skipped
-otherwise. Run in miles-next-venv:
+otherwise. Run in the pinned Miles venv:
 
-    PYTHONPATH=~/work/miles-next:$PWD \
-      ~/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_mismatch_observe.py
+    PYTHONPATH=<miles-checkout>:$PWD \
+      <miles-venv>/bin/python -m pytest -q tests/test_rl_mismatch_observe.py
 """
 
 from __future__ import annotations

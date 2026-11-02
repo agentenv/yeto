@@ -1,4 +1,4 @@
-"""SSH-harness export carries the ports run's algorithm (P0 D9 interface)."""
+"""SSH-harness export carries the ports run's algorithm."""
 
 import json
 

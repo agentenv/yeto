@@ -136,7 +136,7 @@ def test_megatron_plan_official_and_scaled():
 
 
 @pytest.mark.parametrize("kw,match", [
-    (dict(architecture="NemotronH_Omni_Reasoning_V3"), "视觉"),
+    (dict(architecture="NemotronH_Omni_Reasoning_V3"), "vision"),
     (dict(n_gpus=2, tp=4, ep=2, rollout_tp=2), "TP"),
     (dict(num_experts=128, ep=3, tp=1, n_gpus=3, rollout_tp=1), "EP"),
     (dict(n_gpus=2, tp=2, ep=2, rollout_tp=4), "rollout"),

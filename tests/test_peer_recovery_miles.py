@@ -65,7 +65,7 @@ class FakeGroup:
         self.generation = 0
         self.applied = []
         self.calls = []
-        # Background writes (S27 G-EL): polls until every rank reports done.
+        # Background writes: polls until every rank reports done.
         self.write_polls = 1
         self.pending_shards = None
         self.polls_until_written = 0
@@ -84,7 +84,7 @@ class FakeGroup:
                 out.append({"path": path, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
                             "coord": coord})
             if kwargs.get("background") == cut_plugin.HOST_BACKGROUND:
-                # S27 G-EL: the ranks write in the background; FINISH returns the summaries
+                # The ranks write in the background; FINISH returns the summaries
                 self.pending_shards, self.polls_until_written = out, self.write_polls
                 return [{"pending": kwargs["cut_id"], "coord": r["coord"]} for r in out]
             return out
@@ -115,7 +115,7 @@ class FakeGroup:
 
 class FreshGroup(FakeGroup):
     """Like Megatron in a fresh process: no optimizer-state proof before the
-    island's first local step, even after a snapshot restore (s27-gd-rec-a)."""
+    island's first local step, even after a snapshot restore."""
 
     async def full_parameter_optimizer_states(self):
         raise RuntimeError("full-parameter last rollout ID is unavailable")
@@ -262,7 +262,7 @@ def stubs(monkeypatch):
 
 
 def serve(stream, *, max_polls=10) -> int:
-    """Donor safe points until the snapshot is served: the copy (S27 G-EL capture),
+    """Donor safe points until the snapshot is served: the copy (capture),
     the safe points that find the shards written, and, once the background hash +
     commit finished, the one that reports it; returns the snapshots served."""
     async def run() -> int:
@@ -297,7 +297,7 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
     assert serve(donor) == 1
     (_, versions, sha256, locator), = donor_client.sent
     assert versions == (3, 4)
-    # S27 G-EL: the ranks copy at the safe point and write in the background; a later
+    # The ranks copy at the safe point and write in the background; a later
     # safe point finds them written and collects them.
     assert donor_group.calls == [cut_plugin.SAVE_CUT_SHARD, cut_plugin.RANK_COORDS,
                                  cut_plugin.POLL_CUT_SHARD, cut_plugin.FINISH_CUT_SHARD]
@@ -440,7 +440,7 @@ def test_streams_without_peer_recovery_serve_nothing(tmp_path, stubs):
 
 
 def test_restore_without_scheduler_rebase_fails_the_first_apply(tmp_path, stubs, monkeypatch):
-    """G-D2 rec-c: restore OK and digests equal, but Miles refused the first apply."""
+    """Restore OK and digests equal, but Miles refused the first apply."""
     store_root = tmp_path / "store"
     donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
     serve(donor_stream(store_root, FakeGroup(adam_step=17), donor_client))
@@ -455,7 +455,7 @@ def test_restore_without_scheduler_rebase_fails_the_first_apply(tmp_path, stubs,
         asyncio.run(MilesFullParameterRoleStream(config(store_root, recover=True)).initialize(FakeGroup()))
 
 
-# -- S27 G-EL: the donor copies at the safe point and writes while it trains ----
+# -- the donor copies at the safe point and writes while it trains ----
 
 
 @pytest.mark.parametrize("donor_write", ["background", "inline"])
@@ -521,7 +521,7 @@ def test_a_rank_refusing_the_background_copy_refuses_the_snapshot(tmp_path, stub
 
 
 def test_the_neutral_island_captures_only_over_a_capturing_trainer():
-    # s27-next2 merge: s27-elastic-fix's capture-then-write moved into engine.stream_recovery;
+    # The capture-then-write moved into engine.stream_recovery;
     # the Miles rank shards capture (cut_plugin background="host"), the verl rank files do not
     from yeto.rl.adapters.miles.full_parameter.peer_recovery import MilesRankShards
     from yeto.rl.adapters.verl.peer_recovery import VerlRankShards

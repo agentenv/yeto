@@ -595,7 +595,7 @@ def _fake_py(path, has_sky: bool):
 
 
 @pytest.mark.parametrize("venv_sky,conda_sky,want", [
-    (True, False, "yeto-head-py"),   # Nebius: miniconda 3.10 without sky (S19 bug)
+    (True, False, "yeto-head-py"),   # Nebius: miniconda 3.10 without sky (a past bug)
     (False, True, "miniconda3"),     # image whose own Python >= 3.11 got sky
 ])
 def test_head_down_script_picks_the_python_that_has_sky(tmp_path, venv_sky, conda_sky, want):
@@ -913,7 +913,7 @@ def test_head_public_image_sends_no_registry_login(fake_sky, monkeypatch, tmp_pa
 
 
 def test_head_syncer_skips_a_synced_groups_sampler_islands(monkeypatch):
-    """S26 e9b-sync-a: the head syncer waited for 3 learners (2 trainers + the
+    """The head syncer waited for 3 learners (2 trainers + the
     sampler island), so the two synced trainers never got their first round."""
     seen = {}
 

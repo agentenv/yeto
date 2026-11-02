@@ -1,4 +1,4 @@
-"""Materialize a full-parameter Miles round cut as a Hugging Face model directory (S27 R-5).
+"""Materialize a full-parameter Miles round cut as a Hugging Face model directory.
 
 The offline evaluator (:mod:`yeto.rl.eval.offline_cuts`) serves each cut with
 SGLang, which loads a Hugging Face directory. A Miles cut shard

@@ -1,5 +1,5 @@
 """Records backend: the gateway ``SessionBackend`` that samples a ``SamplerEngine``
-directly and records every token (S25 N10.5).
+directly and records every token.
 
 The gateway (:class:`.core.Gateway`) keeps doing what it does for the Miles
 session server: Responses/Chat/Messages -> canonical chat, chain location,
@@ -11,7 +11,7 @@ signed sampling. This backend replaces the session server behind it:
   recorded ids are the ids the engine saw and sampled;
 * per token: id, loss mask (1 = sampled by the policy), log-probability, and
   per turn the policy version and the source (:class:`Provenance`);
-* N10.6 drift check: each turn compares the stream with a fresh tokenization of
+* Drift check: each turn compares the stream with a fresh tokenization of
   the full rendering and records the first differing position. The stream is
   what trains; a drift means the template does not reproduce the generated
   text (counted, not fatal);
@@ -138,7 +138,7 @@ class Segment:
 class _Prompt:
     """Ids to append before the next sample. ``stop``: a stop token the engine
     ended on but did not return (mask 0); ``tail``: the new messages (mask 0);
-    ``render_diff``: N10.6 drift position (None: aligned or not checked)."""
+    ``render_diff``: drift position (None: aligned or not checked)."""
 
     stop: tuple[int, ...]
     tail: tuple[int, ...]
@@ -209,7 +209,7 @@ class RecordingBackend:
             prompt_tokens = len(segment.token_ids) - len(completion.token_ids)
         try:
             message = self._parse(completion)
-        except TemplateError as exc:  # malformed model output: the policy's failure (N10.9)
+        except TemplateError as exc:  # malformed model output: the policy's failure
             segment.turns[-1].parse_error = str(exc)[:500]
             self.counters[session.trajectory_id]["policy_output_errors"] += 1
             raise

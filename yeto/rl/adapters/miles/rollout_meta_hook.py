@@ -1,4 +1,4 @@
-"""Metadata extraction that runs *inside* the Miles rollout process (design D3).
+"""Metadata extraction that runs *inside* the Miles rollout process.
 
 Upstream rollout functions call, at the end of every training rollout::
 
@@ -43,7 +43,7 @@ from typing import Any
 
 META_SINK_ENV = "YETO_ROLLOUT_META_SINK"
 DEFAULT_SINK_ACTOR = "yeto_rollout_meta"
-# E1: per-step seconds of the last metadata hook run (printed by record_trained_groups)
+# Per-step seconds of the last metadata hook run (printed by record_trained_groups)
 _HOOK_TIMES: dict[str, float] = {}
 
 
@@ -58,7 +58,7 @@ def _timed(name: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
 DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
-# S19 #8: kept-sample stop tokens masked for a 0.0 placeholder logprob this rollout.
+# Kept-sample stop tokens masked for a 0.0 placeholder logprob this rollout.
 _PLACEHOLDER_ATTR = "_yeto_placeholder_logprob_tokens"
 _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # Per-round algorithm counters reported by rollout-side algorithm code AFTER
@@ -68,13 +68,13 @@ _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # rollout's metadata by the driver-side reader, so they are never attributed
 # to the next round.
 ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
-# E1: the cross-version IS estimate of a fully_async round, sent after the round's
+# The cross-version IS estimate of a fully_async round, sent after the round's
 # metadata (the prefill scoring runs in the background, off the rollout's critical path)
 LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # buffer_stale_groups: groups the sample-buffer reader passed over this round
 # because they were older than max_policy_age (consumed, not trained)
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
-# buffer_stale_positions (S27 P4): the task-dispenser positions of those groups,
+# buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
 ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
 
@@ -158,8 +158,8 @@ def _load_miles_tokenizer(args: Any) -> Any:
 def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     """``--rollout-sample-filter-path`` hook: remember the kept groups.
 
-    Shared by rl-algo-grpo-knobs (sample filters, D7) and the rl-infra-spec
-    3.6 ledger (alignment A2/F5). Spec-selected sample filters run first
+    Shared by rl-algo-grpo-knobs (sample filters) and the
+    reconfiguration ledger. Spec-selected sample filters run first
     (``yeto.rl.algos.sample_filters``: overlong filter sets
     ``remove_sample=True`` on truncated samples; default config: untouched).
     Filtered samples are the ledger's terminal ``filtered``. Over-sampling
@@ -180,12 +180,12 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     marks = [("start", time.monotonic())]
     apply_sample_filters(args, data)
     marks.append(("sample_filters", time.monotonic()))
-    # Side effect beyond filtering (S17 WP6): with --codex-exclude-reasoning-from-loss
+    # Side effect beyond filtering: with --codex-exclude-reasoning-from-loss
     # this sets loss_mask 1 -> 0 on generated reasoning tokens of the kept samples
     # (before Miles converts them to train data). Default: returns at once, no sample touched.
     apply_reasoning_loss_policy(args, data, tokenizer_loader=_load_miles_tokenizer)
     marks.append(("reasoning_mask", time.monotonic()))
-    # S19 #8: a stop token forced by the engine's grammar mask (SGLang returns
+    # A stop token forced by the engine's grammar mask (SGLang returns
     # logprob exactly 0.0 under the masked distribution) is not a model choice:
     # loss_mask 1 -> 0 before Miles converts the samples to train data.
     from yeto.rl.harness.placeholder_logprob_mask import apply_to_groups as mask_placeholder_logprobs
@@ -200,12 +200,12 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
-    # S27 P2: the dispenser learns which of its rows entered this training batch
+    # The dispenser learns which of its rows entered this training batch
     from .task_dispense import on_trained as dispense_on_trained
 
     dispense_on_trained(data)
     marks.append(("dispense", time.monotonic()))
-    # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
+    # Full-parameter islands: bind the exact accepted batch, after the
     # final loss masks, for the role streams to read at the round boundary.
     from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
 
@@ -215,7 +215,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
             rollout_id=current_rollout_round(),
         )
     if getattr(args, "fully_async", False):
-        # P0-S: Miles' fully_async drains finished groups and runs no
+        # Miles' fully_async drains finished groups and runs no
         # all-samples hook; the trained groups are the round report, with the
         # prompt ledger's counts (groups drawn, stale groups dropped).
         from .fully_async_prompts import current as current_prompt_ledger
@@ -228,7 +228,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
         marks.append(("ledger", time.monotonic()))
         extract_rollout_metadata(args, data, round_counts=counts)
         marks.append(("round_metadata", time.monotonic()))
-    # E1: where the hook's time goes (it runs on the rollout's critical path)
+    # Where the hook's time goes (it runs on the rollout's critical path)
     detail = " ".join(f"{k}={v:.3f}" for k, v in sorted(_HOOK_TIMES.items()))
     _HOOK_TIMES.clear()
     print(f"[rl] sample filter hook: total={marks[-1][1] - marks[0][1]:.3f}s "
@@ -380,7 +380,7 @@ def _bucket_of(sample: Any) -> str:
 
 
 def batch_summary_by_bucket(args: Any, samples: Sequence[Any]) -> dict[str, dict[str, float | int | None]]:
-    """rl-eval-difficulty-buckets 4.1 (D5): trained samples grouped by their row's
+    """rl-eval-difficulty-buckets 4.1: trained samples grouped by their row's
     ``metadata.difficulty`` (missing = ``unknown``): count, reward mean, success
     rate (reward > 0), truncated fraction, mean response length. Scalars only."""
     groups: dict[str, list[Any]] = {}
@@ -468,7 +468,7 @@ def build_metadata(
         **extra,
     }
     placeholder = int(getattr(args, _PLACEHOLDER_ATTR, 0) or 0)
-    if placeholder:  # S19 #8: absent when 0 (old key set kept)
+    if placeholder:  # absent when 0 (old key set kept)
         from yeto.rl.harness.placeholder_logprob_mask import COUNT_KEY as _PLACEHOLDER_KEY
 
         payload[_PLACEHOLDER_KEY] = placeholder
@@ -499,13 +499,13 @@ def build_metadata(
         payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
             args, all_samples, trained, limit=trajectory_records_limit(args))
         rows = round_data_rows(trained_samples)
-        if rows is not None:  # S27: only on an island that reads a row slot
+        if rows is not None:  # only on an island that reads a row slot
             payload[ROUND_DATA_ROWS_KEY] = rows
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
     if harness.get(TITO_SESSION_MISMATCH_KEY) and batch_summary_enabled(args):
-        # S14-M1 (observe only): the per-record mismatches, truncated and capped,
+        # Observe only: the per-record mismatches, truncated and capped,
         # so the driver can tape them as ``rl_harness_mismatch``. Absent on the
         # default path and when there is nothing to report (old key set kept).
         records = harness_mismatch_records(
@@ -522,7 +522,7 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
     in / discarded this round, the trained cross-version tokens and the estimated
     cross-version IS truncated fraction (:mod:`.carry_over`).
 
-    ``defer_estimate_for`` (E1, a rollout id): the estimate (one prefill of every
+    ``defer_estimate_for`` (a rollout id): the estimate (one prefill of every
     cross-version sample, about 1 s on A10G) runs in a background thread and goes
     to the sink as a :data:`LATE_META_SCHEMA` record; the fields here then say
     ``cross_version_estimate: "deferred"``. Its only reader, the policy-age
@@ -636,7 +636,7 @@ def _int_or(value: Any, default: int) -> int:
 def harness_mismatch_records(
     all_samples: Iterable[Sequence[Any]], *, limit: int, text_limit: int,
 ) -> list[dict[str, Any]]:
-    """S14-M1: the per-record ``tito_session_mismatch`` dicts of every sample
+    """The per-record ``tito_session_mismatch`` dicts of every sample
     (upstream ``Mismatch.to_dict``: type/segment_index/expected_text/actual_text/
     detail), flattened in sample order, texts cut to ``text_limit`` chars and at
     most ``limit`` records. Int / bool / dict values of the key (harness bridge
@@ -731,7 +731,7 @@ ROUND_DATA_ROWS_KEY = "round_data_rows"
 
 
 def round_data_rows(trained_samples: Iterable[Any]) -> dict[str, Any] | None:
-    """S27 task assignment: ``{"samples": n, "rows": data_split.row_runs(...)}``
+    """Task assignment: ``{"samples": n, "rows": data_split.row_runs(...)}``
     of every trained sample that carries its --data row
     (``metadata[DATA_ROW_KEY]``), however many there are (the reward records
     stop at a limit); None when none does (no row slot)."""
@@ -753,7 +753,7 @@ _DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failur
 
 
 def _data_row(meta: dict[str, Any]) -> dict[str, int]:
-    """S27 task assignment: ``{"data_row": n}`` when the island reads a row slot
+    """Task assignment: ``{"data_row": n}`` when the island reads a row slot
     (the row's number in the unsplit data); {} otherwise."""
     from yeto.rl.engine.data_split import DATA_ROW_KEY
 
@@ -762,7 +762,7 @@ def _data_row(meta: dict[str, Any]) -> dict[str, int]:
 
 
 def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
-    """S15 stage-2 follow-up: Codex exit status, agent counters and the signed
+    """Codex exit status, agent counters and the signed
     ``testsh_rc`` from the harness metadata; only the keys that are present."""
     out: dict[str, Any] = {}
     status = meta.get("exit_status")
@@ -777,10 +777,10 @@ def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
         reason = metrics.get("end_reason")
         if isinstance(reason, str) and reason:
             out["end_reason"] = reason[:160]
-        etime = metrics.get("evaluate_time")  # S17 N13: seconds spent grading
+        etime = metrics.get("evaluate_time")  # seconds spent grading
         if isinstance(etime, (int, float)) and not isinstance(etime, bool) and etime >= 0:
             out["evaluate_time"] = round(float(etime), 3)
-        kind = metrics.get("end_kind")  # S17 C9
+        kind = metrics.get("end_kind")
         if isinstance(kind, str) and kind:
             out["end_kind"] = kind[:32]
         for key in ("turn_completion_tokens", "turn_context_tokens", "turn_tool_output_bytes"):
@@ -882,7 +882,7 @@ def _sink_target(sink: str | None) -> tuple[str, str]:
     return kind, target
 
 
-# E1: inside one hook run (:func:`one_sink_view`) each sink value is read once and
+# Inside one hook run (:func:`one_sink_view`) each sink value is read once and
 # the sink actor is looked up once (ray.get_actor is a GCS round trip per call)
 _SINK_VIEW = threading.local()
 
@@ -903,7 +903,7 @@ def _sink_call(target: str, actor_method: str, *call_args: Any) -> Any:
 @contextmanager
 def one_sink_view():
     """Within this block every sink value (policy token, published map, policy-age
-    limit) is read at most once per (sink, value) and reused (E1: the metadata
+    limit) is read at most once per (sink, value) and reused (the metadata
     hook read the limit from the sink actor once per sample, ~70 actor calls a
     round). A value another process writes while a block runs is seen from the
     next block on (before, two reads inside one hook run could see two values;
@@ -984,7 +984,7 @@ PUBLISHED_POLICIES_FILE = "published-policies.json"
 
 
 def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
-    """Driver side (P0-S): the published versions in the policy-age window
+    """Driver side: the published versions in the policy-age window
     (version -> weight hash); the rollout side names trajectory policies from it."""
     payload = json.dumps(dict(policies), sort_keys=True)
     _sink_write(sink, PUBLISHED_POLICIES_FILE, payload, "set_policies", payload)
@@ -1107,7 +1107,7 @@ _CURSOR_FIELDS = ("sample_offset", "epoch_id", "sample_group_index", "sample_ind
 
 
 def data_cursor(data_source: Any) -> tuple[dict[str, int] | None, int | None]:
-    """rl-infra-spec 4.2: data source position and reuse-buffer length (cut-audit §3).
+    """Data source position and reuse-buffer length (cut-audit §3).
 
     Read in the rollout process after the rollout drew its prompts (Miles
     ``RolloutDataSource`` attributes; ``get_buffer_length`` on the buffered
@@ -1134,7 +1134,7 @@ ELASTIC_METADATA_ENV = "YETO_RL_ELASTIC_METADATA"
 
 
 def elastic_metadata_enabled(args: Any) -> bool:
-    """Report data cursor/buffer length only when E1/E2 (ledger, cut) is on.
+    """Report data cursor/buffer length only when the ledger or round cuts are on.
 
     Off by default so the default metadata (and ``carried_over=None``) is
     unchanged. Set ``args.yeto_rl_elastic_metadata`` or the environment
@@ -1164,7 +1164,7 @@ def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
                               round_counts: Mapping[str, Any] | None) -> None:
     try:
         # fully_async (round_counts): the trainer is waiting for this batch; the
-        # cross-version estimate is read only after its train step (E1)
+        # cross-version estimate is read only after its train step
         payload = _timed("build", build_metadata, args, all_samples,
                          defer_estimate=round_counts is not None)
         if elastic_metadata_enabled(args):
@@ -1177,7 +1177,7 @@ def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
         if round_counts is not None:
             from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
 
-            # P0-S overlap: groups drawn this round finish in later rounds, so
+            # Overlap: groups drawn this round finish in later rounds, so
             # the draws and Miles' stale drops are reported as they are
             # (stale_dropped_groups None = unknown), not balanced per round.
             payload.update(round_counts, execution_mode=ROLLOUT_OVERLAP_MODE)
@@ -1199,8 +1199,8 @@ def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
             # flight (partial_rollout off -> their prompts are consumed, never
             # trained: terminal, A2/F5 'filtered' with reason aborted_in_flight)
             payload["aborted_in_flight_groups"] = max(0, submitted - generated)
-        # agentic-rollout-utilization 1.2: the fork's abort() tally (agentenv/miles
-        # s18-abort-discard-stats) is exact, first rollout included; absent on
+        # agentic-rollout-utilization 1.2: the fork's abort() tally (Miles fork)
+        # is exact, first rollout included; absent on
         # older images -> the offset-derived count above (tokens unknown).
         from yeto.rl.engine.rollout_cutoff import discard_stats_fields
 

@@ -1,4 +1,4 @@
-"""rl-multinode-island Q6 (ruling 2026-10-04): runtime GPU uuid reconciliation.
+"""Runtime GPU uuid reconciliation.
 
 Pure rule (``multinode.reconcile_gpu_pool``), the controller's ``gpu_pool`` journal
 record, the entry preflight with a fake per-node nvidia-smi probe, and the
@@ -222,16 +222,16 @@ def test_entry_preflight_probe_failure_is_fail_closed_and_single_node_is_a_no_op
     ctl.close()
 
 
-def test_main_calls_the_gpu_pool_preflight_right_after_the_partial_island_check():
-    import inspect
+def test_main_calls_the_gpu_pool_preflight_right_after_the_partial_island_check(monkeypatch):
+    from test_rl_infra_switches import drive_run_ports_island
 
-    from yeto.rl.adapters.miles import entry
-
-    src = inspect.getsource(entry)
-    i = src.index("        refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)\n")
-    j = src.index("        reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)\n")
-    k = src.index("        pin_placement_group_to_head(topology.gpus_per_node)\n")
-    assert i < j < k
+    preflights = ["refuse_partial_island_preflight", "reconcile_gpu_pool_preflight",
+                  "pin_placement_group_to_head"]
+    calls, _ = drive_run_ports_island(monkeypatch, topology=SimpleNamespace(nodes=2, gpus_per_node=4))
+    assert [c for c in calls if c in preflights or c == "connect_island_ray"] == ["connect_island_ray", *preflights]
+    # a single-node island runs none of the multi-node preflights
+    calls, _ = drive_run_ports_island(monkeypatch, topology=SimpleNamespace(nodes=1, gpus_per_node=4))
+    assert not set(preflights) & set(calls)
 
 
 # ------------------------------------------------------------- CLI -> learner switch

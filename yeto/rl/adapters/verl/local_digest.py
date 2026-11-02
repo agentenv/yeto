@@ -1,12 +1,11 @@
-"""Light policy digest of a verl Megatron full-parameter island (S28 G-LHASH).
+"""Light policy digest of a verl Megatron full-parameter island.
 
 The full check of a no-sync full-parameter island
 (:meth:`.full_parameter_stream.VerlChunkedFullParameterAdapter.fragment_digests`)
 rebuilds every HF tensor: per fragment it copies the FP32 masters to the
 card, gathers the TP/EP/PP/DP shards with HCCL, converts them to HF and
 hashes the fragment on rank 0, one fragment after another.  For the 120B
-model that is about 250 fragments, about 27.7 min per check
-(infra-drafts/SESSION28/G-120C.md section 30).
+model that is about 250 fragments, about 27.7 min per check.
 
 The light digest reads the same FP32 masters but moves nothing between
 ranks: every rank hashes the master shards it owns, on the host, in a thread
@@ -24,7 +23,7 @@ Definition (``LIGHT_DIGEST_VERSION``):
   flat range of the parameter that the shard holds;
 * global digest = ``SHA-256(prefix, algorithm, topology, sorted rows)`` (64 hex).
 
-Invariants (tested in ``tests/test_s28_light_digest.py``):
+Invariants (tested by the light-digest tests):
 
 1. Same weights, same topology: same digest (rows are sorted, so the order
    of ranks and of threads does not matter).

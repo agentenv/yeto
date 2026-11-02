@@ -131,7 +131,7 @@ pub struct Config {
     /// are unchanged, so this is deliberately not part of the semantic
     /// profile hash.
     pub async_checkpoint: bool,
-    /// S26 E3: full-f32 refresh period of bf16 downlink deltas (sessions
+    /// Full-f32 refresh period of bf16 downlink deltas (sessions
     /// with `DTYPE_FLAG_BCAST_DELTA`). Wire encoding only: merges, versions
     /// and checkpoints are unchanged, so it is not in the profile hash.
     pub bcast_delta_full_every: Option<u64>,
@@ -173,29 +173,29 @@ pub struct Config {
     /// the recover flag). Bound, donor tries and donor timeout only: it never
     /// changes a merge, so it is not in the semantic profile hash.
     pub recovery: crate::recovery::RecoveryConfig,
-    /// S27 G-EL: send a rejoin catch-up and a recovery replay from the
+    /// Send a rejoin catch-up and a recovery replay from the
     /// scheduler itself (the behavior before `resend.rs`): each fragment send
     /// waits for the learner's link, so a slow link stalls every round and
     /// lease. Off (default): a forwarder task per learner sends them while
-    /// the scheduler serves rounds (S27 G-FH: bf16-downlink sessions too).
+    /// the scheduler serves rounds (bf16-downlink sessions too).
     /// Wire timing only, not in the profile hash.
     pub inline_resend: bool,
-    /// S27 G-FD: send each published fragment to every learner from the
+    /// Send each published fragment to every learner from the
     /// scheduler, waiting on each learner's link (the behavior before the
     /// slow-downlink spill): one slow downlink then stalls every round and
     /// PULL. Off (default): a broadcast that does not fit in a learner's send
     /// queues now goes to that learner's forwarder (`BulkResends::spill`).
-    /// S27 G-FH: the same holds for the initial cut (`broadcast_initial_cut`)
+    /// The same holds for the initial cut (`broadcast_initial_cut`)
     /// and the final cut (one send task per learner,
     /// `finalize_learners_after`); this flag restores the old in-turn sends
     /// of both. Wire timing only, not in the profile hash.
     pub inline_broadcast: bool,
-    /// S27 P4b: how rounds that the exact fold cannot reproduce (partial
+    /// How rounds that the exact fold cannot reproduce (partial
     /// quorum, token weights) reduce pushes.  Numerics only (the result is
     /// within f32 rounding of the buffered merge), so not in the profile
     /// hash; Buffered keeps the historical bits.
     pub weighted_fold: crate::fold::WeightedFoldMode,
-    /// S27 P4b: this process's slice of a fragment-sharded head.  Default is
+    /// This process's slice of a fragment-sharded head.  Default is
     /// unsharded and changes nothing.
     pub shard: crate::shard::ShardPlan,
     /// MoE: weight each expert tensor of a push by the tokens the island
@@ -209,17 +209,17 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
-    /// S27 P2 task dispenser (`dispense.rs`): islands claim the rows they
+    /// Task dispenser (`dispense.rs`): islands claim the rows they
     /// train over TASK_* connections. Hands out data only, never changes a
     /// merge, so it is not in the semantic profile hash. None: off.
     pub dispense: Option<crate::dispense::DispenseConfig>,
     /// JSONL log of every dispenser event (`task-dispense.jsonl`).
     pub dispense_log: Option<std::path::PathBuf>,
-    /// S27 G-EA: most receive-only subscribers connected at once; 0 = off
+    /// Most receive-only subscribers connected at once; 0 = off
     /// (SUBSCRIBE is refused). Subscribers never change a merge, so this is
     /// not in the semantic profile hash.
     pub max_subscribers: u32,
-    /// S27 G-EA: limits of the sample relay (`sample_relay.rs`); None = off
+    /// Limits of the sample relay (`sample_relay.rs`); None = off
     /// (RELAY_HELLO is refused). Not in the semantic profile hash.
     pub sample_relay: Option<crate::sample_relay::RelayConfig>,
     /// Lease of the shared member table (`members.rs`) when the task
@@ -513,7 +513,7 @@ impl Group {
         Ok(())
     }
 
-    /// S27 G-FD: queue one tensor frame like `send_tensor_large`, but only
+    /// Queue one tensor frame like `send_tensor_large`, but only
     /// when every chunk fits in the writer queues now: the permits of all
     /// chunks are reserved first, so this never waits on the learner's link.
     /// `Ok(false)`: it does not fit and nothing was queued. A closed stream
@@ -564,7 +564,7 @@ impl Group {
         Ok(true)
     }
 
-    /// S27 G-FH: whether a tensor frame of `chunks` CHUNK envelopes fits in
+    /// Whether a tensor frame of `chunks` CHUNK envelopes fits in
     /// this learner's writer queues now, only after they drain, or never (a
     /// stream would get more chunks than its queue holds, so
     /// `try_send_tensor_now` can never take it).
@@ -583,7 +583,7 @@ impl Group {
         room
     }
 
-    /// S27 G-FH: the writer queues could take a frame of `chunks` CHUNK
+    /// The writer queues could take a frame of `chunks` CHUNK
     /// envelopes now, or are empty when such a frame never fits.
     fn queue_settled(&self, chunks: usize) -> bool {
         let streams = self.chunk_streams();
@@ -593,13 +593,13 @@ impl Group {
             .all(|stream| stream.capacity() >= per_stream.min(stream.max_capacity()))
     }
 
-    /// S27 G-FH: the number of data streams the chunks are spread over.
+    /// The number of data streams the chunks are spread over.
     fn chunk_stream_count(&self) -> usize {
         self.chunk_streams().len()
     }
 }
 
-/// S27 G-FH: room in a learner's writer queues for one tensor frame
+/// Room in a learner's writer queues for one tensor frame
 /// (`Group::queue_room`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueueRoom {
@@ -608,12 +608,12 @@ enum QueueRoom {
     Never,
 }
 
-/// S27 G-FH: CHUNK envelopes of one BCAST/FINAL tensor frame (`TensorFrame`).
+/// CHUNK envelopes of one BCAST/FINAL tensor frame (`TensorFrame`).
 fn tensor_frame_chunks(prefix_len: usize, dtype: u8, values: usize) -> usize {
     (13 + prefix_len + tensor_nbytes(dtype, values).unwrap_or(0)).div_ceil(CHUNK_SIZE)
 }
 
-/// S27 G-FH: CHUNK envelopes of the largest broadcast frame of the owned
+/// CHUNK envelopes of the largest broadcast frame of the owned
 /// fragments (a FULL on a bf16-downlink session).
 fn largest_bcast_chunks(st: &GlobalState) -> usize {
     let (prefix_len, dtype) = if st.downlink.is_some() {
@@ -748,7 +748,7 @@ fn append_tensor_bytes(
     Ok(())
 }
 
-/// S27 G-EA: one receive-only subscriber connection (`subscriber.rs`).
+/// One receive-only subscriber connection (`subscriber.rs`).
 struct SubscriberConn {
     group: Arc<Group>,
     subscriber_id: u32,
@@ -774,7 +774,7 @@ impl SubscriberConn {
     }
 }
 
-/// S27 G-EA: every subscriber connection of this syncer, by subscriber id.
+/// Every subscriber connection of this syncer, by subscriber id.
 struct SubscriberHub {
     max: u32,
     /// The syncer's shared member table (subscribers are members).
@@ -871,9 +871,9 @@ impl SubscriberHub {
     }
 
     /// End of the run: tell every subscriber, let the notices reach the
-    /// sockets, then close the connections. S27 G-EM: closing right after the
+    /// sockets, then close the connections. Closing right after the
     /// send let a subscriber see its data streams end before the notice and
-    /// redial a finished head (run s27-ea-a1).
+    /// redial a finished head.
     async fn finish(&self) {
         let conns = self.live();
         for conn in &conns {
@@ -1087,7 +1087,7 @@ struct Push {
     transfer: PushTransfer,
 }
 
-/// When and how fast one PUSH_FRAGMENT reached the syncer (D4 full-parameter
+/// When and how fast one PUSH_FRAGMENT reached the syncer (full-parameter
 /// timing): `recv_seconds` runs from the first byte of the push (its first
 /// chunk, or the frame header) to its last byte; `arrived_unix` is the wall
 /// clock at the last byte. Written per responder on the event tape so a round
@@ -1145,13 +1145,13 @@ struct RegistryState {
     /// Where the membership record (syncer epoch, retired generations) is
     /// persisted next to the checkpoint; None: not persisted.
     membership_record: Option<std::path::PathBuf>,
-    /// The task dispenser (S27 P2); its record is a checkpoint sidecar.
+    /// The task dispenser; its record is a checkpoint sidecar.
     dispense: Option<Arc<crate::dispense_service::DispenseService>>,
-    /// S27 G-EA: receive-only subscribers (None: --max-subscribers 0). Kept
+    /// Receive-only subscribers (None: --max-subscribers 0). Kept
     /// apart from `current`/`groups`/`membership`, so no round, lease, final
     /// cut or status record ever sees them.
     subscribers: Option<Arc<SubscriberHub>>,
-    /// S27 G-EL: learners whose catch-up or recovery replay a forwarder
+    /// Learners whose catch-up or recovery replay a forwarder
     /// task sends; publications offer them each version instead of sending.
     resends: HashMap<Member, Arc<ResendConn>>,
     /// Generations whose control connection closed but whose
@@ -1305,7 +1305,7 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The task dispenser of `cfg` (S27 P2): restored from the record next to
+/// The task dispenser of `cfg`: restored from the record next to
 /// the checkpoint on `--resume`, which retires every island process of the
 /// record and puts their unreported positions back first.
 fn initial_dispense(
@@ -1992,7 +1992,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
     let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
-    // S27: one member table for the dispenser, the subscribers and the relay
+    // One member table for the dispenser, the subscribers and the relay
     // producers, so one sampler process is one member on all three channels.
     let members = crate::members::shared(cfg.dispense.as_ref().map_or(cfg.member_lease, |d| d.lease));
     let dispense = initial_dispense(&cfg, &members)?;
@@ -2127,7 +2127,7 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8, expert_tags: bool) -> R
 }
 
 fn group_label(g: &str) -> &str {
-    if g.is_empty() { "未声明" } else { g }
+    if g.is_empty() { "undeclared" } else { g }
 }
 
 fn hex32(h: &[u8; 32]) -> String {
@@ -2201,10 +2201,7 @@ fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
         Some(expected) if expected == &offered => None,
         Some(expected) if expected.compat_group != offered.compat_group => Some(format!(
             "session mismatch (HELLO refused, session keeps running): \
-             兼容组不同：{} 对 {}，容差未标定 (compat_group differs: expected {}, got {}; \
-             tolerance not calibrated)",
-            group_label(&expected.compat_group),
-            group_label(&offered.compat_group),
+             compat_group differs: {} vs {}, tolerance not calibrated",
             group_label(&expected.compat_group),
             group_label(&offered.compat_group),
         )),
@@ -2674,7 +2671,7 @@ const DATA_READER_DRAIN: Duration = Duration::from_secs(10);
 /// How long a SUBSCRIBE waits for the first learner to establish the session.
 const SUBSCRIBE_SESSION_WAIT: Duration = Duration::from_secs(1800);
 
-/// S27 G-EA: admit one receive-only subscriber (`subscriber.rs`). Checks:
+/// Admit one receive-only subscriber (`subscriber.rs`). Checks:
 /// the MAC (subscribe domain), the HELLO body with a subscriber id below
 /// `--max-subscribers`, dtype bf16, and the established session's layout
 /// and fingerprint (and profile hash when offered). The session contract and
@@ -3862,8 +3859,8 @@ async fn scheduler(
     // Local init: islands whose digests agree with the applied INIT already
     // hold version 0 and only get INIT_CONFIRM. A resumed cut is not the
     // base checkpoint, so it is always broadcast.
-    // S27 G-EL (`resend.rs`): catch-ups and recovery replays go out on a
-    // forwarder task per learner; S27 G-FD/G-FH: so do the broadcasts (the
+    // Catch-ups and recovery replays go out on a
+    // forwarder task per learner; so do the broadcasts (the
     // initial cut included) a learner's send queues cannot take now.
     let mut resends = BulkResends::new();
     if st.global_step < last_step {
@@ -3919,7 +3916,7 @@ async fn scheduler(
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
     let mut catch_ups: CatchUps<Arc<Group>> = CatchUps::new();
-    // S27 G-FH: bf16-downlink sessions too (G-EL kept them inline): the
+    // Bf16-downlink sessions too (background resends used to keep them inline): the
     // forwarder sends each fragment as a FULL with the shared anchor
     // (`ResendConn::owe`), as the inline catch-up did. Only
     // `--inline-resend` keeps the scheduler sending them itself.
@@ -4299,9 +4296,9 @@ async fn scheduler(
                 }
             }
         }
-        // S27 G-EL: background resends (catch-ups and recovery replays sent by
+        // Background resends (catch-ups and recovery replays sent by
         // a forwarder task per learner). The scheduler only checks which ones
-        // have handed over the versions they owed (S27 G-EY) and runs their
+        // have handed over the versions they owed and runs their
         // tails here.
         for member in resends.drop_superseded(&registry) {
             warn!(
@@ -4680,7 +4677,7 @@ async fn scheduler(
                     // newer HELLO may supersede this one meanwhile.
                     let fragments = if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
                     if background_resend {
-                        // S27 G-EL: offer the current values only once the
+                        // Offer the current values only once the
                         // pending round is durable (as the inline catch-up
                         // checks before each send); later versions come with
                         // their publication.
@@ -4750,9 +4747,9 @@ async fn scheduler(
                         }
                     };
                     if background_resend {
-                        // S27 G-EL: a forwarder task sends the replay while merges go
+                        // A forwarder task sends the replay while merges go
                         // on. Once the replayed versions are handed over, the tail
-                        // promotes the island (`take_due`, S27 G-EY); the versions
+                        // promotes the island (`take_due`); the versions
                         // published meanwhile follow on the same forwarder.
                         resends.start(&registry, &st, member, group, replay.iter().copied(),
                                       ResendTail::Recovery { replayed: replay.len() });
@@ -4888,7 +4885,7 @@ async fn scheduler(
             },
         }
     }
-    // S27 G-FH: the forwarders stop after the fragment each is sending; the
+    // The forwarders stop after the fragment each is sending; the
     // final cut of each learner waits for its forwarder on its own task, so
     // the scheduler does not wait here on a slow link.
     // `--inline-broadcast`: the old bounded wait (then abort).
@@ -6132,7 +6129,7 @@ async fn publish_round(
 }
 
 /// BCAST the newly committed version of fragment `p` to every current
-/// learner (`publish_round`). S27 G-FD: without `--inline-broadcast`, a
+/// learner (`publish_round`). Without `--inline-broadcast`, a
 /// learner gets it inline only if its writer queues take it now; otherwise
 /// (and while its forwarder has anything pending) the learner's forwarder
 /// sends it, so this never waits on a learner's link.
@@ -6165,22 +6162,22 @@ async fn broadcast_round(
         }
         None => None,
     };
-    // S27 G-EA: offer this version to the subscribers first (no await);
+    // Offer this version to the subscribers first (no await);
     // their forwarders send it while the learners are served below.
     let subscribers = registry.lock().unwrap().subscribers.clone();
     if let Some(hub) = subscribers {
         hub.publish(st, p);
     }
-    // S27 G-FD: on a bf16-downlink session a forwarder sends the FULL with
+    // On a bf16-downlink session a forwarder sends the FULL with
     // the shared anchor at this version (its learner may have skipped
     // deltas). Cheap: the anchor was just set to this version.
     let forwarded_full = st
         .downlink
         .as_ref()
         .map(|anchors| anchors.lock().unwrap().resend(p, st.versions[p], &st.params[p]));
-    // S27 G-EL: learners being resent in the background get this version
+    // Learners being resent in the background get this version
     // offered to their forwarder (no await) instead of sent inline.
-    // S27 G-FD: so do learners whose downlink was too slow (`spill`).
+    // So do learners whose downlink was too slow (`spill`).
     let resends: Vec<Arc<ResendConn>> = registry.lock().unwrap().resends.values().cloned().collect();
     for conn in &resends {
         conn.offer_published(p, st.versions[p], &st.params[p], forwarded_full.as_ref());
@@ -6190,7 +6187,7 @@ async fn broadcast_round(
             continue;
         }
         if !cfg.inline_broadcast {
-            // S27 G-FD: send inline only what the learner's writer queues
+            // Send inline only what the learner's writer queues
             // take now; otherwise its forwarder sends it, so one slow
             // downlink cannot hold the merges and PULLs of the others.
             if budget_cutoff.enabled && budget_cutoff.deadline().is_some() {
@@ -6649,8 +6646,8 @@ async fn broadcast_all_fragments(
     }
 }
 
-/// S27 G-FH: send the initial (or resumed) cut to every learner in `groups`
-/// without waiting on any learner's link (G-EL §8.3, G-FD §9.3). A learner
+/// Send the initial (or resumed) cut to every learner in `groups`
+/// without waiting on any learner's link. A learner
 /// whose writer queues take a fragment now gets it inline; from the first
 /// fragment that does not fit, its forwarder sends the rest of the cut in
 /// order and exactly (version 0 stays version 0, never coalesced: a learner
@@ -6728,7 +6725,7 @@ async fn send_final_cut(st: &GlobalState, group: &Arc<Group>, manifest_only: boo
     FinalCut::new(st, manifest_only).send(group).await
 }
 
-/// S27 G-FH: the frozen final cut (the exact f32 masters of every owned
+/// The frozen final cut (the exact f32 masters of every owned
 /// fragment and the manifest), shared by every learner's send task. All
 /// learners get the same bytes, so every one that acknowledges holds the
 /// same cut.
@@ -6762,7 +6759,7 @@ impl FinalCut {
 
 type FinalSends = tokio::task::JoinSet<(Member, bool, Result<()>)>;
 
-/// S27 G-FH: send the final cut to `group` on its own task, after its
+/// Send the final cut to `group` on its own task, after its
 /// learner's stopped forwarder (`previous`) handed over its last fragment.
 /// `first`: part of the live set at the final cut (the ACK wait starts once
 /// all of those are in the writer queues).
@@ -6785,7 +6782,7 @@ fn spawn_final_send(
     send_members.insert(handle.id(), (member, first));
 }
 
-/// S27 G-FH: what woke the finalization loop.
+/// What woke the finalization loop.
 enum FinalWake {
     Sent(std::result::Result<(tokio::task::Id, (Member, bool, Result<()>)), tokio::task::JoinError>),
     Event(Option<Event>),
@@ -6847,7 +6844,7 @@ async fn finalize_learners(
 }
 
 /// `finalize_learners` once the round loop stopped the forwarders
-/// (`forwarders`: their tasks, S27 G-FH). Each learner's final cut goes out
+/// (`forwarders`: their tasks). Each learner's final cut goes out
 /// on its own task, after that learner's forwarder handed over its last
 /// fragment, so one slow downlink delays only its own learner: the others
 /// get the cut at their link's pace and their ACKs, heartbeats and HELLOs
@@ -7255,8 +7252,8 @@ enum CatchUpStep<G> {
 /// A catch-up is the whole model (about 110 GB of f32 for a 27B model). The
 /// scheduler sends one fragment per pass and then serves events and round
 /// deadlines again, so a catch-up delays a grace or quorum deadline by at
-/// most one fragment transfer instead of by the whole model (s27-gh-a: a
-/// 300 s grace window committed after 14 min). A learner does not join new
+/// most one fragment transfer instead of by the whole model (otherwise a
+/// 300 s grace window could commit after 14 min). A learner does not join new
 /// rounds before its catch-up is done: its pushes would be against stale
 /// bases.
 struct CatchUps<G> {
@@ -7333,16 +7330,16 @@ const RESEND_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// over the fragment it is sending before it is aborted.
 const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
 
-/// S27 G-EL: one learner connection whose catch-up or recovery replay a
+/// One learner connection whose catch-up or recovery replay a
 /// forwarder task sends (`resend.rs`). Publications offer it every newer
-/// version (no await) instead of sending to it inline. S27 G-EY: the
+/// version (no await) instead of sending to it inline. The
 /// versions owed at the start are targets; the tail runs once they are
 /// handed over, and the forwarder then keeps sending newer versions until
 /// nothing is pending.
 struct ResendConn {
     group: Arc<Group>,
     dtype: u8,
-    /// S27 G-FD: a bf16-downlink session. The learner may have skipped
+    /// A bf16-downlink session. The learner may have skipped
     /// deltas, so every version goes out as a FULL with the shared anchor
     /// (`ResendState::full_headers`), never as a delta.
     downlink: bool,
@@ -7351,7 +7348,7 @@ struct ResendConn {
     stop: tokio::sync::watch::Sender<bool>,
 }
 
-/// S27 G-FH: the FULL header of a version a forwarder sends on a
+/// The FULL header of a version a forwarder sends on a
 /// bf16-downlink session.
 #[derive(Clone, Debug)]
 enum FullHeader {
@@ -7364,7 +7361,7 @@ enum FullHeader {
     Exact,
 }
 
-/// S27 G-FH: one frame a forwarder sends before its pending map, exactly as
+/// One frame a forwarder sends before its pending map, exactly as
 /// queued: the initial cut must reach a learner at version 0 (a learner
 /// outside a pool refuses any other version and any second copy).
 struct ExactFrame {
@@ -7377,7 +7374,7 @@ struct ExactFrame {
 #[derive(Default)]
 struct ResendState {
     pending: crate::resend::Pending,
-    /// S27 G-FH: frames sent first, in order, never coalesced.
+    /// Frames sent first, in order, never coalesced.
     prelude: std::collections::VecDeque<ExactFrame>,
     /// A fragment was popped and is not yet in the writer queues.
     in_flight: bool,
@@ -7420,8 +7417,8 @@ impl ResendConn {
         }
     }
 
-    /// Offer `values` of `version` under a downlink FULL header (S27 G-FH:
-    /// also `FullHeader::Exact`). Returns true when queued.
+    /// Offer `values` of `version` under a downlink FULL header (also
+    /// `FullHeader::Exact`). Returns true when queued.
     fn offer_full_locked(state: &mut ResendState, p: usize, version: u64, values: Arc<Vec<f32>>, header: FullHeader) -> bool {
         let queued = !state.ended && state.pending.offer(p, version, values);
         if queued {
@@ -7431,8 +7428,7 @@ impl ResendConn {
     }
 
     /// Offer a newly published version: the f32 masters, or on a
-    /// bf16-downlink session the FULL that carries the shared anchor (S27
-    /// G-FD; `full`, from `DownlinkAnchors::resend` at this version).
+    /// bf16-downlink session the FULL that carries the shared anchor (`full`, from `DownlinkAnchors::resend` at this version).
     fn offer_published(&self, p: usize, version: u64, params: &Arc<Vec<f32>>, full: Option<&crate::downlink::EncodedBcast>) {
         let Some(full) = full.filter(|_| self.downlink) else {
             return self.offer(p, version, params.clone());
@@ -7446,7 +7442,7 @@ impl ResendConn {
         }
     }
 
-    /// S27 G-FH: send this frame before anything pending, exactly as given
+    /// Send this frame before anything pending, exactly as given
     /// (the initial cut; `header`: its downlink FULL header).
     fn queue_exact(&self, frame: ExactFrame) {
         {
@@ -7461,7 +7457,7 @@ impl ResendConn {
 
     /// Offer the current value of each fragment in `fragments` and make every
     /// pending entry a target. Returns (offered fragments, their bytes).
-    /// S27 G-FH: on a bf16-downlink session each one is a FULL with the
+    /// On a bf16-downlink session each one is a FULL with the
     /// shared anchor (or the exact params, hashed by the forwarder), so a
     /// catch-up of such a session goes out on the forwarder too.
     fn owe(&self, st: &GlobalState, fragments: impl IntoIterator<Item = usize>) -> (usize, usize) {
@@ -7545,7 +7541,7 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
         let next = {
             let mut state = conn.state.lock().unwrap();
             if let Some(frame) = state.prelude.pop_front() {
-                // S27 G-FH: an exact frame (the initial cut) goes first.
+                // An exact frame (the initial cut) goes first.
                 state.pending.mark_sent(frame.p, frame.version);
                 state.in_flight = true;
                 state.target_in_flight = false;
@@ -7556,7 +7552,7 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
                 let next = state.pending.pop();
                 state.in_flight = next.is_some();
                 state.target_in_flight = state.pending.unmet() < unmet;
-                // S27 G-FD: the FULL header offered with this version.
+                // The FULL header offered with this version.
                 let header = match &next {
                     Some((p, version, _)) if conn.downlink => {
                         Some(state.full_headers.remove(p).filter(|(offered, _)| offered == version).map(|(_, h)| h))
@@ -7577,7 +7573,7 @@ async fn resend_forwarder(conn: Arc<ResendConn>, mut stop: tokio::sync::watch::R
             None => (crate::resend::bcast_prefix(p, version).to_vec(), conn.dtype),
             Some(Some(FullHeader::Encoded(header))) => (header, DTYPE_F32),
             Some(Some(FullHeader::Exact)) => {
-                // S27 G-FH: hash the exact values here, not on the scheduler.
+                // Hash the exact values here, not on the scheduler.
                 let hashed = values.clone();
                 match tokio::task::spawn_blocking(move || crate::downlink::exact_full_prefix(p, version, &hashed)).await {
                     Ok(header) => (header, DTYPE_F32),
@@ -7641,7 +7637,7 @@ struct BulkResend {
     tail: Option<ResendTail>,
     started: Instant,
     fragments: usize,
-    /// S27 G-FD: started by `spill` (a slow downlink), not by a resend.
+    /// Started by `spill` (a slow downlink), not by a resend.
     spilled: bool,
 }
 
@@ -7657,7 +7653,7 @@ enum DueTail {
 /// learner being resent joins no new round until its tail ran.
 struct BulkResends {
     entries: Vec<BulkResend>,
-    /// S27 G-FH: (learner, fragment) pairs already warned about a fragment
+    /// (learner, fragment) pairs already warned about a fragment
     /// that never fits the learner's writer queues.
     never_fits_warned: HashSet<(u32, usize)>,
 }
@@ -7667,7 +7663,7 @@ impl BulkResends {
         Self { entries: Vec::new(), never_fits_warned: HashSet::new() }
     }
 
-    /// S27 G-FH (G-FE §5.1): a frame of `chunks` CHUNK envelopes that did not
+    /// A frame of `chunks` CHUNK envelopes that did not
     /// fit `group`'s writer queues. When it never can (a stream would get
     /// more chunks than its queue holds: fragment > streams x 512 MiB), say
     /// so once per learner and fragment; every broadcast of that fragment then
@@ -7751,7 +7747,7 @@ impl BulkResends {
         });
     }
 
-    /// S27 G-FD: the writer queues of `group`'s learner cannot take the
+    /// The writer queues of `group`'s learner cannot take the
     /// broadcast of fragment `p` now (a slow downlink). Hand the learner to a
     /// forwarder that sends this version, and the versions published after
     /// it, at the pace of its link (newest version per fragment wins), while
@@ -7800,7 +7796,7 @@ impl BulkResends {
         });
     }
 
-    /// S27 G-FH: the writer queues of `group`'s learner cannot take its
+    /// The writer queues of `group`'s learner cannot take its
     /// initial cut now. Hand the learner to a forwarder that sends this frame
     /// and the rest of the initial cut (`queue_initial`) in order and
     /// exactly, then the versions published after them (newest wins), at
@@ -7837,7 +7833,7 @@ impl BulkResends {
         });
     }
 
-    /// S27 G-FH: queue an initial-cut frame on the learner's forwarder (one
+    /// Queue an initial-cut frame on the learner's forwarder (one
     /// sender per learner). `Err(frame)`: the learner has no forwarder.
     fn queue_initial(&mut self, member: Member, frame: ExactFrame) -> Result<(), ExactFrame> {
         match self.entries.iter_mut().find(|entry| entry.member == member) {
@@ -7924,7 +7920,7 @@ impl BulkResends {
                 }
                 drop(state);
             }
-            // S27 G-FH (G-FE §5.2): a forwarder that handed everything over
+            // A forwarder that handed everything over
             // may still leave its learner's writer queues full; going inline
             // then would only spill the next broadcast again. It stays until
             // the queues could take the largest broadcast (or are empty, when
@@ -7970,7 +7966,7 @@ impl BulkResends {
         due
     }
 
-    /// S27 G-FH: end of the round loop: tell every forwarder to stop after
+    /// End of the round loop: tell every forwarder to stop after
     /// the fragment it is sending, without waiting. The final cut of each
     /// learner waits for its forwarder's task first (one sender per learner,
     /// no half-sent message), on that learner's own send task.
@@ -8018,7 +8014,7 @@ async fn wait_forwarders(forwarders: HashMap<Member, tokio::task::JoinHandle<()>
 /// re-JOINed learner's push on an older base is fenced. The inline path
 /// passes the current versions (every one is in the writer queues); a
 /// background resend passes the versions its forwarder has handed over,
-/// which are older for fragments republished since (S27 G-EY). False when
+/// which are older for fragments republished since. False when
 /// the budget cutoff was established.
 #[allow(clippy::too_many_arguments)]
 async fn finish_catch_up(
@@ -8152,7 +8148,7 @@ async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: us
     Ok(())
 }
 
-// S27 G-FH: the final cut now sends through `FinalCut`; only the (dead
+// The final cut now sends through `FinalCut`; only the (dead
 // outside tests) `broadcast_updated_fragment` still uses this.
 #[cfg_attr(not(test), allow(dead_code))]
 async fn send_fragment(
@@ -8740,7 +8736,7 @@ mod tests {
             other.compat_group = group.to_string();
             let message = admit_session(&session, other).expect("must refuse");
             assert!(message.starts_with("session mismatch"), "{message}");
-            assert!(message.contains(&format!("兼容组不同：nvidia-h100 对 {group}，容差未标定")), "{message}");
+            assert!(message.contains(&format!("compat_group differs: nvidia-h100 vs {group}, tolerance not calibrated")), "{message}");
         }
         assert_eq!(session.lock().unwrap().as_ref(), Some(&h100));
         let session: Session = Arc::new(Mutex::new(None));
@@ -9105,7 +9101,7 @@ mod tests {
         config.checkpoint_path = Some(std::path::PathBuf::from("/another/critic.ckpt"));
         config.final_state = Some(std::path::PathBuf::from("/ignored/final.bin"));
         config.event_tape = Some(std::path::PathBuf::from("/ignored/events.jsonl"));
-        config.resume = false; // P0-1.7b.1-Q7: how the syncer starts, not semantics
+        config.resume = false; // how the syncer starts, not semantics
         assert_eq!(config.semantic_profile_hash(), original);
         config.pipeline = 3;
         assert_ne!(config.semantic_profile_hash(), original);
@@ -9117,7 +9113,7 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(digest, "f51de8a095c0fa428c5483c7921da805bb8b3cd2736fe19fdd03f47e4f733913");
         // A manifest-only final cut appends its own domain; Python vector in
-        // tests/test_s27_final_cut_ack.py.
+        // tests/test_sync_fragment_boundary.py.
         config.expert_token_weights = false;
         config.final_cut_manifest_only = true;
         let digest: String =
@@ -9125,7 +9121,7 @@ mod tests {
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
         // A grace floor appends its own block; off keeps the hash. Python
-        // vector in tests/test_s27_grace_floor.py.
+        // vector in tests/test_sync_grace_floor.py.
         config.final_cut_manifest_only = false;
         config.grace_arrival_quantile = 0.0;
         config.grace_min_ms = 0;
@@ -9783,9 +9779,9 @@ mod tests {
         }
     }
 
-    /// S27 G-EL: the scheduler only offers; a forwarder sends at the link's
+    /// The scheduler only offers; a forwarder sends at the link's
     /// pace, and a version published while the link is full replaces the
-    /// pending one. S27 G-EY: the tail runs once the versions owed at the
+    /// pending one. The tail runs once the versions owed at the
     /// start are handed over, although a later publication is still pending;
     /// the learner stays on its forwarder (publications are offered to it)
     /// until nothing is pending.
@@ -9844,7 +9840,7 @@ mod tests {
         assert!(frames.try_recv().is_err());
     }
 
-    /// S27 G-EY: a catch-up tail records, as the learner's catch-up floor,
+    /// A catch-up tail records, as the learner's catch-up floor,
     /// the versions handed over (older than the current ones where a newer
     /// version is still pending). A second catch-up after the tail ran owes
     /// its tail again; after its tail a resend belongs to the current
@@ -9952,7 +9948,7 @@ mod tests {
             .unwrap();
     }
 
-    /// S27 G-FD (run s27-fa-r1): a broadcast that does not fit in a
+    /// A broadcast that does not fit in a
     /// learner's send queue goes to its forwarder instead of holding the
     /// scheduler. The learner keeps joining rounds; versions published while
     /// its link is full coalesce (the newest wins, none goes out of order);
@@ -10019,7 +10015,7 @@ mod tests {
         assert!(waited.is_err(), "--inline-broadcast waits on the slow link");
     }
 
-    /// S27 G-FD: `try_send_tensor_now` reserves every chunk's slot on the
+    /// `try_send_tensor_now` reserves every chunk's slot on the
     /// stream the round-robin puts it on, queues the same frames as
     /// `send_tensor_large`, and queues nothing when one stream is full.
     #[tokio::test]
@@ -10116,7 +10112,7 @@ mod tests {
         (version, kind)
     }
 
-    /// S27 G-FD: on a bf16-downlink session a slow learner may skip deltas,
+    /// On a bf16-downlink session a slow learner may skip deltas,
     /// so its forwarder sends each version as a FULL with the shared anchor
     /// (digest checked as the island does). After it is served inline again,
     /// the next delta applies on what it holds; both learners end with the
@@ -10165,7 +10161,7 @@ mod tests {
         assert_eq!(slow_anchor, fast_anchor);
     }
 
-    /// S27 G-FH: the initial cut never waits on a learner's link. A learner
+    /// The initial cut never waits on a learner's link. A learner
     /// whose queue is full gets the rest of the cut from its forwarder, in
     /// order and exactly (version 0, never replaced: a learner outside a pool
     /// refuses anything else); versions merged meanwhile follow it (the
@@ -10221,7 +10217,7 @@ mod tests {
         assert!(waited.is_err(), "--inline-broadcast waits on the slow link");
     }
 
-    /// S27 G-FH: on a bf16-downlink session a catch-up goes out on the
+    /// On a bf16-downlink session a catch-up goes out on the
     /// forwarder too: each fragment as a FULL that carries the shared anchor
     /// (or the exact params, hashed by the forwarder, for a fragment never
     /// published); the island-side check passes and the anchors match.
@@ -10256,7 +10252,7 @@ mod tests {
         assert!(matches!(&due[..], [DueTail::CatchUp { floor, .. }] if floor == &vec![5, 0]));
     }
 
-    /// S27 G-FH (G-FE §5.2): a forwarder that handed everything over while
+    /// A forwarder that handed everything over while
     /// its learner's queue is still full is not removed; going inline then
     /// would only spill the next broadcast again. It goes once the queue has
     /// room.
@@ -10286,7 +10282,7 @@ mod tests {
         assert!(bulk.is_empty() && registry.lock().unwrap().resends.is_empty());
     }
 
-    /// S27 G-FH (G-FE §5.1): a frame with more chunks per stream than a
+    /// A frame with more chunks per stream than a
     /// queue holds never fits; `queue_room` says so (one warning per learner
     /// and fragment), and `queue_settled` then asks for empty queues.
     #[tokio::test]
@@ -10309,7 +10305,7 @@ mod tests {
         assert!(group.queue_settled(3) && group.queue_settled(2));
     }
 
-    /// S27 G-FH: the final cut goes out on one task per learner. A slow
+    /// The final cut goes out on one task per learner. A slow
     /// learner (sorted first) whose forwarder is still sending holds only
     /// itself: the fast learner gets the whole cut and its ACK is taken at
     /// once. The ACK wait starts when the cut is in every learner's queue,
@@ -11028,7 +11024,7 @@ mod tests {
 
     #[test]
     fn eval_checkpoint_steps_append_to_the_profile_hash_like_python() {
-        // Python: tests/test_s27_eval_checkpoints.py.
+        // Python: tests/test_sync_eval_checkpoints.py.
         let mut config = round_test_config(8);
         config.learners = 2;
         config.quorum = 2;
@@ -11748,7 +11744,7 @@ mod tests {
         assert_eq!(grace_floor(0, 0.5, &gaps), Duration::from_secs(25));
         assert_eq!(grace_floor(40_000, 0.5, &gaps), Duration::from_secs(40));
         // The arming site caps the larger of the adaptive window and the floor.
-        // E1-like inputs: τ·ξ_step − ξ_quorum − ξ_sync = 54 − 33.7 − 8.2 s,
+        // Inputs from a measured elastic run: τ·ξ_step − ξ_quorum − ξ_sync = 54 − 33.7 − 8.2 s,
         // so the adaptive window alone is under 10 s.
         let mut config = round_test_config(8);
         config.grace_ms = 300_000;
@@ -12758,7 +12754,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // ----- dynamic membership (S27 E-1/E-2) -----
+    // ----- dynamic membership -----
 
     fn capacity_round(expected: Vec<Member>, theta: f64, caps: &[(u32, f64)]) -> Round {
         let cfg = crate::membership::MembershipConfig {

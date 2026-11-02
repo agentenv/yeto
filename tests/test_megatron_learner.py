@@ -26,7 +26,7 @@ def test_parse_args_maps_backend_and_parallelism():
 
 
 def test_the_gradient_nan_check_default_is_shared_with_the_verl_island():
-    """S27 G-FL: this learner has no hardware verification, so the flag is here only to
+    """This learner has no hardware verification, so the flag is here only to
     keep our two Megatron paths from disagreeing; the value comes from the neutral
     module, not from a second hand-written default."""
     from yeto.rl import megatron_grad_checks

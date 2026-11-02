@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Write WP3 (rl-eval-difficulty-buckets D6b) hold-out lists for the built-in benchmarks.
+"""Write the hold-out lists for the built-in benchmarks.
 
     python tools/reward_env/holdout.py --swev-data swev-78f471bf.parquet --out-dir data/eval
 
 The TB2 lists (data/eval/tb2-holdout.json, tb2-train.json) are written by
-tools/reward_env/tb2_lists.py from the Harbor task directories (S26 E9.5).
+tools/reward_env/tb2_lists.py from the Harbor task directories.
 """
 
 from __future__ import annotations

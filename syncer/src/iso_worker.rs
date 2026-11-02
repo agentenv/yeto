@@ -1853,7 +1853,14 @@ mod tests {
         control.release(2);
         assert_eq!(second_reply.await.unwrap().unwrap(), vec![1002.0]);
         pool.drain().await.unwrap();
-        assert_eq!(pool.inner.queue.slots.available_permits(), 1);
+        // The worker returns its permit after it sends the reply.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pool.inner.queue.slots.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

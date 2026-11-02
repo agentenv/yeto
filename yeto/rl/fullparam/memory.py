@@ -1,4 +1,4 @@
-"""Memory estimate of one full-parameter training step (S25 N7.1 FSDP2, N7.1b Megatron).
+"""Memory estimate of one full-parameter training step (FSDP2 and Megatron).
 
 Every number here is derived from formulas, not measured. The launcher uses
 the estimate to refuse a plan before it reaches any node: a plan whose
@@ -32,9 +32,9 @@ group, ``T`` tokens per sequence, ``U`` Ulysses degree):
   ``[T, T]`` int32 + bool mask and the FP32 indexer scores
   ``[T, index_heads, T / kpool]`` (modeling_glm5_next.py L825, L1236-1246;
   source read, not run at this size). A sparse DSA kernel removes them; none
-  exists for training on PPU or NPU yet (N7.0).
+  exists for training on PPU or NPU yet.
 
-Megatron (``framework="megatron"``, N7.1b; the PPU stage-1 backend, A-TRN §4).
+Megatron (``framework="megatron"``; the PPU stage-1 backend, A-TRN §4).
 ``W`` cards, tensor parallel ``TP`` (sequence parallel assumed on), pipeline
 ``PP``, expert parallel ``EP`` (expert tensor parallel 1), context parallel
 ``CP``. Figures are for the worst pipeline stage (``ceil(layers / PP)``
@@ -49,7 +49,7 @@ skew is not modelled):
   ``state_bytes`` Adam state; with the distributed optimizer this is divided
   by the data-parallel size of its group (dense ``W / (TP x PP)``, CP
   included; experts ``W / (EP x PP)``), without it it is per local parameter;
-* optimizer host offload (N7.1c; Megatron ``--optimizer-cpu-offload
+* optimizer host offload (Megatron ``--optimizer-cpu-offload
   --optimizer-offload-fraction F``): the fraction ``F`` of the Adam state
   moves to the host, and with ``offload_master`` also that fraction of the
   FP32 master. Host memory per node is the offloaded bytes of one card times
@@ -63,13 +63,13 @@ skew is not modelled):
 * Miles' DSA layer does not support CP (``dsa.py`` NotImplementedError), so a
   DSA model with ``CP > 1`` is refused.
 
-Every output carries ``basis: "推算"`` (derived, not measured).
+Every output carries a ``basis`` field: a fixed word meaning "derived, not measured".
 
 Not modelled: allocator fragmentation, collective buffers, the runtime's own
 reserve (covered by ``device_usable_fraction``), CPU optimizer step time.
 
 Status: formulas checked by CPU unit tests; every output needs on-card
-measurement (N7.4 / N9.1).
+measurement.
 
 CLI::
 
@@ -97,7 +97,7 @@ PLAN_STATUS = {
     "full": "FSDP2 CPUOffloadPolicy (optimizer step on the host CPU)",
 }
 LABEL = "derived from formulas, not measured"
-BASIS = "推算"  # the dashboard / report word for LABEL
+BASIS = "estimated"  # the dashboard / report word for LABEL
 
 
 class MemoryPlanError(ValueError):
@@ -367,7 +367,7 @@ def estimate(shape: ModelShape, plan: TrainPlan) -> Estimate:
 
 
 def _estimate_megatron(shape: ModelShape, plan: TrainPlan) -> Estimate:
-    """Megatron variant of :func:`estimate` (module doc, N7.1b)."""
+    """Megatron variant of :func:`estimate` (module doc)."""
     est = Estimate(shape, plan)
 
     def add(name: str, value: float, formula: str, where: str = "device") -> None:

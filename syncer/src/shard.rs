@@ -1,4 +1,4 @@
-//! Head sharding: one logical syncer split across N processes (S27 P4b).
+//! Head sharding: one logical syncer split across N processes.
 //!
 //! The syncer already works per fragment: every round merges
 //! exactly one fragment, and the only cross-fragment state is the global step

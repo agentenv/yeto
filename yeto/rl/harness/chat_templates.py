@@ -1,4 +1,4 @@
-"""Chat template registry and the token alignment check (S25 N10.5/N10.6).
+"""Chat template registry and the token alignment check.
 
 The records proxy (:mod:`yeto.rl.harness.gateway.records`) renders canonical
 chat messages (the gateway form, :mod:`.gateway.translate`) with the served
@@ -26,7 +26,7 @@ Registered templates:
   replacing ``template_kwargs`` (xhigh / medium / low; the template's default
   is xhigh).
 
-:func:`check_alignment` is the N10.6 check: the template rendering, tokenized
+:func:`check_alignment` is the drift check: the template rendering, tokenized
 the way the proxy sends it, must equal the tokenizer's own
 ``apply_chat_template`` ids token by token, and it reports how many tokens an
 engine would add if it got the text and tokenized it with special tokens.
@@ -189,17 +189,17 @@ register_template(TemplateSpec(
 register_template(TemplateSpec(
     name="qwen3_2507", tokenizer="Qwen/Qwen3-4B-Instruct-2507", parser=parse_qwen3,
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
-    verified="Qwen3-4B-Instruct-2507@cdbee75f tokenizer (S25 T-N109)", merge_leading_system=True))
+    verified="Qwen3-4B-Instruct-2507@cdbee75f tokenizer", merge_leading_system=True))
 register_template(TemplateSpec(
     name="qwen38", tokenizer="Qwen/Qwen3.8-27B", parser=parse_qwen38,
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
     template_kwargs={"enable_thinking": True, "preserve_thinking": True},
-    verified="Qwen3.8-27B@1d4bf0f2 tokenizer (S25 T-G2)", merge_leading_system=True))
+    verified="Qwen3.8-27B@1d4bf0f2 tokenizer", merge_leading_system=True))
 register_template(TemplateSpec(
     name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
     stop_tokens=("<|im_end|>",),
     template_kwargs={"enable_thinking": True, "truncate_history_thinking": False},
-    verified="Nemotron-3.5-Super-VL-120B tokenizer + chat template (S28 G-120, CPU alignment test)",
+    verified="Nemotron-3.5-Super-VL-120B tokenizer + chat template (CPU alignment test)",
     merge_leading_system=True))
 
 
@@ -291,7 +291,7 @@ class ChatTemplate:
         return self.spec.parser(text)
 
 
-# ---------------------------------------------------------------------- N10.6 check
+# -------------------------------------------------------------------- drift check
 @dataclass(frozen=True)
 class AlignmentReport:
     """``aligned``: the proxy's ids equal ``apply_chat_template`` ids.

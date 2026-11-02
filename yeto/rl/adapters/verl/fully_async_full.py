@@ -1,4 +1,4 @@
-"""Full-parameter verl trainers on the fully_async ports (S27 G-EW; VERL-PARITY #14, #11).
+"""Full-parameter verl trainers on the fully_async ports (VERL-PARITY #14, #11).
 
 The fully_async trainer actor (:mod:`.fully_async_runner`) and the buffer trainer
 (:mod:`.buffer_trainer_runner`) hold the same verl FSDP2 actor workers as the
@@ -65,7 +65,7 @@ def refuse_unwired(plan: Mapping[str, Any]) -> None:
 def trainer_group(island: Any, plan: Mapping[str, Any]):
     """The trainer group these ports read and write, None for the default FSDP2 one.
 
-    S27 G-FN (blocker B5): a Megatron engine island (``plan["engine"] == "megatron"``)
+    A Megatron engine island (``plan["engine"] == "megatron"``)
     reads and writes its weights through the Megatron HF boundary, not through FSDP2
     rank files, so it needs its own group (:class:`~.megatron_full_parameter.MegatronFullParameterGroup`).
     That group only uses ``island.call_workers`` / ``island.call_workers_shared``,

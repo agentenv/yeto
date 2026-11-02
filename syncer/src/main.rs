@@ -235,17 +235,19 @@ struct Args {
     /// Fragment rounds: wait for one donor snapshot before asking the next.
     #[arg(long, default_value_t = 600)]
     recovery_donor_timeout_s: u64,
+    /// DEPRECATED (kept for comparison runs; prints a warning when set).
     /// Send a rejoin catch-up and a recovery replay from the scheduler
-    /// itself, waiting for each fragment on the learner's link (the behavior
-    /// before S27 G-EL; before S27 G-FH bf16-downlink sessions always did).
+    /// itself, waiting for each fragment on the learner's link (the old
+    /// behavior; bf16-downlink sessions used to always do this).
     /// Default: a forwarder task per learner sends them while rounds,
     /// heartbeats and leases are served.
     #[arg(long, default_value_t = false)]
     inline_resend: bool,
+    /// DEPRECATED (kept for comparison runs; prints a warning when set).
     /// Send every broadcast (the initial cut, each merged fragment, the
     /// final cut) to each learner from the scheduler itself, in turn,
-    /// waiting on a slow learner's link (the behavior before S27 G-FD and
-    /// G-FH). Default: a learner whose send queues cannot take a broadcast
+    /// waiting on a slow learner's link (the old behavior).
+    /// Default: a learner whose send queues cannot take a broadcast
     /// now gets it, and later versions, from a forwarder task, and each
     /// learner's final cut goes out on its own task, while the other
     /// learners' rounds, PULLs and acknowledgements go on.
@@ -259,7 +261,7 @@ struct Args {
     final_grace_s: Option<u64>,
     /// Rounds the exact fold cannot reproduce (quorum below the roster or
     /// token weights): buffered keeps every push until the round closes
-    /// (historical bits); streaming folds each push on arrival (S27 P4b).
+    /// (historical bits); streaming folds each push on arrival.
     #[arg(long, default_value = "buffered")]
     weighted_fold: String,
     /// MoE: weight each expert tensor of a push by the tokens the island
@@ -274,7 +276,7 @@ struct Args {
     /// parameters, which stay in --checkpoint-path / --final-state).
     #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
     final_cut_payload: String,
-    /// S27 P2 task dispenser: islands claim the rows of --data they train
+    /// Task dispenser: islands claim the rows of --data they train
     /// from this syncer (TASK_* connections, docs/PROTOCOL.md "Task
     /// dispenser"). Off by default.
     #[arg(long)]
@@ -297,21 +299,21 @@ struct Args {
     /// JSONL log of every dispenser event.
     #[arg(long)]
     dispense_log: Option<std::path::PathBuf>,
-    /// Fragment-sharded head (S27 P4b): this process owns the fragment
+    /// Fragment-sharded head: this process owns the fragment
     /// range of shard --shard-index out of --shard-count and runs only the
     /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
     #[arg(long, default_value_t = 0)]
     shard_index: u32,
     #[arg(long, default_value_t = 1)]
     shard_count: u32,
-    /// S27 G-EA: admit up to N receive-only subscribers at once (sampler
+    /// Admit up to N receive-only subscribers at once (sampler
     /// islands on any cloud that follow the global weights as bf16
     /// broadcasts; never in quorum, roster or final cut; their ids are
     /// 2^31 + 31 bits of their sampler id's SHA-256, as the task dispenser's
     /// sampler holders). 0 = off: SUBSCRIBE is refused.
     #[arg(long, default_value_t = 0)]
     max_subscribers: u32,
-    /// S27 G-EA: serve the sample relay (sampler islands PUT rollout
+    /// Serve the sample relay (sampler islands PUT rollout
     /// samples, a training island TAKEs them) on this port. Off by default.
     #[arg(long)]
     sample_relay: bool,
@@ -379,6 +381,9 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    for warning in deprecation_warnings(&args) {
+        tracing::warn!("{warning}");
+    }
     let dispense = dispense_config(&args)?;
     let member_lease = member_lease(&args)?;
     let shard = args.shard_plan()?;
@@ -508,6 +513,28 @@ fn main() -> anyhow::Result<()> {
         .block_on(server::run(cfg))
 }
 
+/// One warning per deprecated flag that is set. Each flag keeps the old
+/// scheduler-inline send path; the forwarder-task default replaced it.
+fn deprecation_warnings(args: &Args) -> Vec<String> {
+    let mut out = Vec::new();
+    if args.inline_resend {
+        out.push(
+            "--inline-resend is deprecated: catch-ups and recovery replays are sent by a \
+             per-learner forwarder task by default; the flag will be removed in a future release"
+                .to_string(),
+        );
+    }
+    if args.inline_broadcast {
+        out.push(
+            "--inline-broadcast is deprecated: broadcasts that do not fit a learner's send \
+             queues go to its forwarder task by default; the flag will be removed in a future \
+             release"
+                .to_string(),
+        );
+    }
+    out
+}
+
 /// The island member table's lease (`--dispense-lease-s`), checked when a
 /// service that uses the table is on.
 fn member_lease(args: &Args) -> anyhow::Result<std::time::Duration> {
@@ -556,6 +583,34 @@ fn parse_hex32(text: &str) -> anyhow::Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_flags_still_parse_and_warn_once_each() {
+        let base = ["yeto-syncer", "--learners", "1", "--total-steps", "1"];
+        let plain = Args::try_parse_from(base).unwrap();
+        assert!(deprecation_warnings(&plain).is_empty());
+        let both = Args::try_parse_from(
+            base.iter().copied().chain(["--inline-resend", "--inline-broadcast"]),
+        )
+        .unwrap();
+        assert!(both.inline_resend && both.inline_broadcast);
+        let warnings = deprecation_warnings(&both);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].starts_with("--inline-resend is deprecated"));
+        assert!(warnings[1].starts_with("--inline-broadcast is deprecated"));
+    }
+
+    #[test]
+    fn help_marks_inline_flags_deprecated() {
+        use clap::CommandFactory;
+        let help = Args::command().render_long_help().to_string();
+        for flag in ["--inline-resend", "--inline-broadcast"] {
+            let at = help.find(flag).unwrap();
+            let rest = &help[at + flag.len()..];
+            let next = rest.find("\n      --").map_or(help.len(), |n| at + flag.len() + n);
+            assert!(help[at..next].contains("DEPRECATED"), "{flag} help: {}", &help[at..next]);
+        }
+    }
 
     #[test]
     fn final_ack_timeout_is_compatible_when_omitted_and_distinct_when_set() {

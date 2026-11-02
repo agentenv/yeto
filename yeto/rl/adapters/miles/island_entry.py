@@ -40,8 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     from yeto.wandb_logger import add_arguments as add_wandb_arguments
 
     parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
-    add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py (P0 4.7)
-    add_recommend_arguments(parser)  # D2 elastic hook
+    add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py
+    add_recommend_arguments(parser)  # elastic hook
     add_wandb_arguments(parser)
     return parser
 
@@ -49,9 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
 def verify_island_code_pack(digest: str | None, tree: str | Path | None = None, *,
                             mode: str | None = None, release_manifest: str | Path | None = None,
                             log=print) -> dict | None:
-    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack.
+    """Refuse to start when the workdir is not the run pack.
 
-    Release mode (L9.12): the tree must be the image's source root with the source
+    Release mode: the tree must be the image's source root with the source
     hash its build recorded; returns the release manifest. The image digest
     (``digest``) is checked by the registry pull, not here."""
 
@@ -137,7 +137,7 @@ def parse_args(argv=None):
 
 
 def build_ports_launch(args, run_config, extra_argv=()):
-    """The ports learner's spec -> Miles argv step (design D8).
+    """The ports learner's spec -> Miles argv step.
 
     ``--rl-algorithm-spec`` (else the legacy CLI, as in R0), then the mapped
     extra-argv flags are absorbed by the translation; the run config's
@@ -183,7 +183,7 @@ _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
                   "rl_elastic_recovery_timeout_s")
 # --rl-elastic-cells is optional: without it the island lists the fork's
-# declared cells (InferenceController.describe_cells, fork F-R1) at compose time.
+# declared cells (InferenceController.describe_cells) at compose time.
 _ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",
                      "rl_elastic_initial_config")
 
@@ -200,7 +200,7 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-accept-rebind")
     from yeto.rl.adapters.miles.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
-    # S27 G-DI design v2: a two-cluster island with an engine outage budget declares its
+    # A two-cluster island with an engine outage budget declares its
     # rollout cells without --rl-elastic (the launcher sets the env with the flags)
     from yeto.rl.engine.engine_outage import outage_budget_s
 
@@ -235,7 +235,7 @@ def _check_ports_infra_switches(args) -> None:
 
 
 def _check_sample_store(args) -> None:
-    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` (engine-neutral rule)."""
+    """``--rl-sample-store`` / ``--rl-sample-lanes`` (engine-neutral rule)."""
     from yeto.rl.engine.sample_roles import check_sample_store
 
     check_sample_store(args)
@@ -249,7 +249,7 @@ _CUT_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep
 
 def _check_resume_switches(args) -> None:
     """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync;
-    ``--rl-island-cut-store`` (S27 R-2) is a synced island's; the cut cadence flags
+    ``--rl-island-cut-store`` is a synced island's; the cut cadence flags
     need a store (elastic, resume or island cuts)."""
     from yeto.rl.engine.cut_interval import cut_interval_for
 
@@ -287,8 +287,8 @@ def _check_resume_switches(args) -> None:
 
 
 def _check_island_cut_store(args) -> None:
-    """S27 R-2: island round cuts belong to a synced island (engine-neutral check,
-    shared with the verl island since S27 G-ED)."""
+    """Island round cuts belong to a synced island (engine-neutral check,
+    shared with the verl island)."""
     from yeto.rl.engine.cut_interval import check_island_cut_store
 
     check_island_cut_store(args)
@@ -326,7 +326,7 @@ def _elastic_cells(value: str | None) -> tuple[str, ...]:
 
 
 def apply_sample_role(args, miles_args, environ=None) -> None:
-    """L4.6 (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
+    """Buffer island (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
     and the environment of the buffer rollout functions (forwarded to the Ray
     workers by ``connect_island_ray``). Role ``both`` sets nothing."""
     from yeto.rl.engine import sample_roles
@@ -335,7 +335,7 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
 
     env = os.environ if environ is None else environ
     if int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0:
-        # S27 G-EA: island 0 publishes its fragment layout for the spot subscribers
+        # Island 0 publishes its fragment layout for the spot subscribers
         from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
 
         env[PUBLISH_ENV] = "1"
@@ -343,15 +343,15 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
         return
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     miles_args.yeto_rl_sample_buffer = config
-    node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
-    # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
+    node = getattr(args, "rl_convertible_node", None)  # A convertible node's own shard
+    # a pair island runs as learner 0: its sampler id is its node name
     sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
     env.update(island_env(
         config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
         shard=node, shards=getattr(args, "rl_buffer_shards", None),
         lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None)))
-    miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
+    miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # None off a synced trainer
     if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
         env.update(sample_relay_env(args))
     if getattr(args, "rl_spot_syncer", None) and config.role == sample_roles.SAMPLER:
@@ -359,7 +359,7 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
 
 
 def spot_sampler_env(args) -> dict[str, str]:
-    """S27 G-EA (--rl-spot-syncer, sampler island): weights from that syncer as a
+    """(--rl-spot-syncer, sampler island): weights from that syncer as a
     receive-only subscriber, groups to its relay channel --rl-spot-channel."""
     from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV, RELAY_CHANNEL_ENV, SPOT_SYNCER_ENV
 
@@ -369,7 +369,7 @@ def spot_sampler_env(args) -> dict[str, str]:
 
 
 def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
-    """S27 G-EA (--rl-sample-relay, trainer island): the spot samplers' groups come
+    """(--rl-sample-relay, trainer island): the spot samplers' groups come
     through the head's sample relay. The trainer reads them from a buffer on local
     disk (the relay pump fills it: ``yeto.rl.spot_rollout.relay_buffer``) and makes
     no policy releases (the samplers follow the syncer as subscribers)."""
@@ -388,7 +388,7 @@ def sample_relay_env(args, *, tmp_root: str | None = None) -> dict[str, str]:
 
 
 def _cut_auto(args) -> dict[str, float]:
-    """The timed cut interval flags (empty: every N rounds; engine-neutral since S27 G-ED)."""
+    """The timed cut interval flags (empty: every N rounds; engine-neutral)."""
     from yeto.rl.engine.cut_interval import cut_auto_options
 
     return cut_auto_options(args)
@@ -400,14 +400,14 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
-    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+    if getattr(args, "rl_verify_every_round", False):  # read by entry (driver.verify_every_round)
         miles_args.yeto_rl_verify_every_round = True
-    if getattr(args, "rl_verify_every", None) is not None:  # S27 C5: read by entry (driver.verify_every)
+    if getattr(args, "rl_verify_every", None) is not None:  # read by entry (driver.verify_every)
         from yeto.rl.engine.run_flags import check_verify_every
 
         check_verify_every(args)
         miles_args.yeto_rl_verify_every = int(args.rl_verify_every)
-    if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
+    if getattr(args, "rl_profile_trainer", False):  # read by state_plugin.train_one_step
         miles_args.yeto_rl_profile_trainer = True
         from yeto.rl.engine import phase_profile
 
@@ -429,7 +429,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         if getattr(miles_args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
             from .harbor_agent import check_suspend_config
 
-            check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
+            check_suspend_config(environ)  # stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     if getattr(args, "rl_rollout_ahead", 0):  # read by entry (driver) and carry_over
         miles_args.yeto_rl_rollout_ahead = int(args.rl_rollout_ahead)
@@ -466,7 +466,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_tp = True
     auto = _cut_auto(args)
     if auto:
-        miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
+        miles_args.yeto_rl_cut_auto = auto  # a timed interval (any cut store)
     island_store = getattr(args, "rl_island_cut_store", None)
     if getattr(args, "rl_resume_store", None) or island_store:
         from yeto.rl.engine.cut_interval import island_cut_store_for
@@ -483,7 +483,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
                            else int(args.rl_stop_after_rounds)),
-            # S27 R-2: a synced island writes its cuts only (no resume from them)
+            # A synced island writes its cuts only (no resume from them)
             **({"write_only": True} if island_store else {}),
         }
         from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
@@ -553,11 +553,11 @@ def _check_single_island_no_sync(args) -> None:
 
 
 def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
-    """Startup refusal of the ports algorithm options (D8/D11), before any work."""
+    """Startup refusal of the ports algorithm options, before any work."""
 
     from yeto.rl.engine.algorithm import check_unverified_allowance
 
-    # D11 as written: any outer sync refuses the allowance. The learner CLI
+    # Any outer sync refuses the allowance. The learner CLI
     # always joins a syncer (--syncer is required), so the island count it
     # receives (--num-learners is not sent to Miles islands) is not relied on.
     check_unverified_allowance(
@@ -606,10 +606,9 @@ class AlgorithmMismatchError(RuntimeError):
 
 
 def verify_ports_algorithm(args, miles_args, launch) -> None:
-    """D9/D11: before the island joins outer sync (no bridge exists yet).
+    """Before the island joins outer sync (no bridge exists yet).
 
-    Plugins are re-hashed and imported (a stale source hash: warning event,
-    rl-identity-tiering L9.2); the island's algorithm hash is
+    Plugins are re-hashed and imported (a stale source hash: warning event); the island's algorithm hash is
     compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
     refusal; missing: warning event, for manually started islands);
     absorbed flags and unverified allowances are recorded.
@@ -675,9 +674,9 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
 
 
 def _append_correction_record(args, miles_args, algorithm) -> None:
-    """rl-offpolicy-correction-passthrough D8: the island tape records the full
+    """The island tape records the full
     correction group, the Miles values and ``prox_anchor``. A field Miles
-    cannot map refuses the start (phase 2, L6b.2), after the record and its
+    cannot map refuses the start (phase 2), after the record and its
     ``correction_config_warning`` events are on the tape."""
     from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
                                                      refuse_correction_warnings)
@@ -717,8 +716,8 @@ _canonical_sha256 = identity_sha256  # yeto/rl/engine/full_parameter_identity.py
 
 
 # Miles flags whose values may differ between islands of one full-parameter run:
-# routing ports, the rollout seed, the training data (P3: each island may train
-# on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
+# routing ports, the rollout seed, the training data (each island may train
+# on its own task list) and evaluation (eval runs on the eval island, so
 # training islands may carry none, or their own). Value counts: one, except
 # where listed in the two maps below.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
@@ -757,7 +756,7 @@ _DENSE_ISLAND_LOCAL_MILES_SWITCHES = frozenset(
 )
 
 # Placement flags left out of the contract only when the launch gives islands
-# their own placement (P4 --rl-per-island-placement): the GPU split, trainer
+# their own placement (--rl-per-island-placement): the GPU split, trainer
 # shape and weight transfer path then differ by design. A uniform launch keeps
 # them in, so islands with different GPU splits are still refused. The rollout
 # engine size (--rollout-num-gpus-per-engine) always stays in: it sets the
@@ -858,8 +857,8 @@ _full_parameter_identity = full_parameter_identity  # the same rule for every en
 
 
 def _no_sync_island(args) -> bool:
-    """A no-sync island (a sampler / trainer island, L4.6, or a single island
-    with both roles, S26 E11): it has no outer sync, so full parameter mode runs
+    """A no-sync island (a sampler / trainer island, or a single island
+    with both roles): it has no outer sync, so full parameter mode runs
     without the full-parameter sync preset."""
     return bool(getattr(args, "rl_single_island_no_sync", False))
 
@@ -869,7 +868,7 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
     Full parameter mode needs a full-parameter preset, and a full-parameter
     preset needs full parameter mode, except that the full-parameter sweep also
-    carries the DeepSeek V4 expert-full LoRA hybrid (P0 1.7b.2).
+    carries the DeepSeek V4 expert-full LoRA hybrid.
     """
 
     from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESETS
@@ -887,7 +886,7 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
 
 def _check_full_parameter_sync(args, *, yeto_policy_sync: bool) -> None:
-    """Every full-parameter island runs the ports full-parameter sync (P0-D8)."""
+    """Every full-parameter island runs the ports full-parameter sync."""
 
     if not yeto_policy_sync:
         raise ValueError("full-parameter training requires Yeto policy sync")
@@ -897,16 +896,16 @@ def _check_full_parameter_sync(args, *, yeto_policy_sync: bool) -> None:
 
 def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
     """Dense full-parameter GRPO is the strict-sweep profile of the ports
-    full-parameter sync (P0-D8): one role, H=1, whole-round fragment sweeps.
+    full-parameter sync: one role, H=1, whole-round fragment sweeps.
 
     The Milestone-1 limits (version-0 start, generation-0 roster, pinned Miles
-    source tree) are gone (P0-D7); the syncer's authoritative fragments decide
+    source tree) are gone; the syncer's authoritative fragments decide
     the start version and the launcher owns the roster.
     """
 
     _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
     if _full_parameter_async(args):
-        # S27 P2 asynchronous rounds: H local rounds per fragment push, at
+        # Asynchronous rounds: H local rounds per fragment push, at
         # most FULL_PARAMETER_ASYNC_MAX_PIPELINE fragment rounds in flight;
         # no sweep-only options.
         if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) < 1:
@@ -942,7 +941,7 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         from yeto.rl.engine.run_flags import local_training_steps_line
 
         print(local_training_steps_line(args.global_rounds, args.fragments,
-                                        who=f"yeto-miles island {getattr(args, 'learner_id', '?')}"), flush=True)  # S29 D7
+                                        who=f"yeto-miles island {getattr(args, 'learner_id', '?')}"), flush=True)
     if not _is_sha256(getattr(args, "syncer_profile_sha256", None)):
         raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")
 
@@ -973,12 +972,12 @@ def _roster_generations(args) -> tuple[int, ...]:
 
 
 def _full_parameter_async(args) -> bool:
-    """S27 P2: ``--full-parameter-rounds async`` (asynchronous sharded rounds)."""
+    """``--full-parameter-rounds async`` (asynchronous sharded rounds)."""
     return getattr(args, "full_parameter_rounds", "sweep") == "async"
 
 
 def _local_init(args, async_rounds: bool) -> bool:
-    """Local init (S27): every island launched by one run loads the same base
+    """Local init: every island launched by one run loads the same base
     checkpoint, so async rounds keep it as version 0 by default; the syncer
     refuses the run if the islands' fragment digests disagree."""
     return local_init_rule(getattr(args, "init_mode", "auto"), async_rounds)
@@ -988,7 +987,7 @@ def _dense_full_sync_config(
     args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
     """The dense full-parameter sync as a one-role :class:`FullParameterSyncConfig`:
-    the strict sweep, or (S27 P2) the streaming profile with a partial quorum."""
+    the strict sweep, or the streaming profile with a partial quorum."""
 
     from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
     from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
@@ -1050,7 +1049,7 @@ def _dense_full_sync_config(
 
 def _max_local_rounds_ahead(args, async_rounds: bool) -> int | None:
     """``--sweep-max-local-rounds-ahead`` (launcher ``--rl-sync-max-local-rounds-ahead``):
-    the S27 G-AG lead cap of the asynchronous rounds; None (off) by default."""
+    the lead cap of the asynchronous rounds; None (off) by default."""
     value = getattr(args, "sweep_max_local_rounds_ahead", None)
     if value is None:
         return None
@@ -1073,14 +1072,14 @@ PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"  # "1": the launcher relaunched this i
 
 
 def _island_syncer_epoch(args) -> int | None:
-    """S27 E-3: the HELLO carries the syncer epoch only when the launcher sent one."""
+    """The HELLO carries the syncer epoch only when the launcher sent one."""
     value = getattr(args, "rl_syncer_epoch", None)
     return None if value is None or getattr(args, "rl_peer_recovery_store", None) is None else int(value)
 
 
 def peer_recovery_options(args, environ=None):
-    """S27 E-3: peer recovery of a full-parameter island, or None without
-    ``--rl-peer-recovery-store`` (engine-neutral since S27 G-ED, shared with
+    """Peer recovery of a full-parameter island, or None without
+    ``--rl-peer-recovery-store`` (engine-neutral, shared with
     the verl island: :func:`yeto.rl.engine.stream_recovery.peer_recovery_options`)."""
     from yeto.rl.engine.stream_recovery import peer_recovery_options as options
 
@@ -1281,10 +1280,10 @@ def _dense_full_training_contract_sha256(
     """Hash shared training semantics while excluding island-local routing,
     data, eval and (with per-island placement) placement.
 
-    Each island may train on its own task list (P3), so the training data
+    Each island may train on its own task list, so the training data
     (``--data``, its revision and the prompt file) stays out of the contract.
     Evaluation does not change the trained weights and runs on the eval island
-    (P3-Q3), so its settings stay out too. With per-island placement (P4) the
+    so its settings stay out too. With per-island placement the
     placement flags stay out as well; ``per_island_placement`` records that (v6).
     """
 
@@ -1314,7 +1313,7 @@ def _dense_full_training_contract_sha256(
             "yeto_source_sha256": args.source_sha256,
             "miles_backend_identity_sha256": _backend_identity_sha256(args),
             "reward_sha256": args.reward_sha256,
-            # The Codex harness contract left with the harness (S26 E0.5); the
+            # The Codex harness contract left with the harness; the
             # key stays so the v6 contract hash of existing runs is unchanged.
             "codex_harness_contract": None,
         }
@@ -1391,10 +1390,10 @@ def prepare_prompt_data(
 ) -> Path:
     """Write ``source`` (local file or Hub dataset) as Miles prompt rows.
 
-    ``slot`` (``data_split.DataSlot``, S27 task assignment): keep only the
+    ``slot`` (``data_split.DataSlot``, task assignment): keep only the
     slot's rows, in data order; each kept row records its row number in the
     unsplit data as ``metadata["yeto_data_row"]``. ``number_rows`` (the task
-    dispenser, S27 P2): keep every row and record every row number."""
+    dispenser): keep every row and record every row number."""
     from yeto.data import load_rows
     from yeto.rl.engine.data_split import DATA_ROW_KEY
 
@@ -1466,7 +1465,7 @@ def _verify_island_task_data(args) -> dict[str, Any] | None:
 
 
 def _island_dispense(args) -> bool:
-    """S27 P2: the island claims its rows from the actor syncer's dispenser
+    """The island claims its rows from the actor syncer's dispenser
     (``--rl-data-dispense``). Refused where it does not apply (as the slot)."""
 
     if not getattr(args, "rl_data_dispense", False):
@@ -1480,7 +1479,7 @@ def _island_dispense(args) -> bool:
     role = sample_roles.sample_role(args)
     if getattr(args, "rl_sampler_data_slot", None):
         raise ValueError("--rl-data-dispense and --rl-sampler-data-slot exclude each other")
-    if role == sample_roles.SAMPLER:  # S27 P4: a sampler island claims its rows too
+    if role == sample_roles.SAMPLER:  # a sampler island claims its rows too
         if not getattr(args, "rl_dispense_addr", None):
             raise ValueError("--rl-data-dispense on a sampler island needs --rl-dispense-addr")
     elif role != sample_roles.BOTH:
@@ -1506,7 +1505,7 @@ def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
 
     rows, digest = file_fingerprint(prompt_path)
     if sample_roles.sample_role(args) == sample_roles.SAMPLER:
-        # S27 P4: the sampler's dispenser (a synced group's actor syncer); its island
+        # The sampler's dispenser (a synced group's actor syncer); its island
         # id comes from its sampler id, apart from the training islands' learner ids
         host, port = _syncer_addresses(args.rl_dispense_addr)[0]
         sampler = getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
@@ -1525,8 +1524,8 @@ def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
 
 
 def _dispense_streams(args, prompt_path, rows: int, digest: bytes) -> dict[str, Any]:
-    """S27 P3: the streams of ``--rl-dispense-mix`` / ``--rl-dispense-by-label``
-    and this island's ``--rl-dispense-labels``; {} for the plain P2 data. An
+    """The streams of ``--rl-dispense-mix`` / ``--rl-dispense-by-label``
+    and this island's ``--rl-dispense-labels``; {} for the plain dispensed data. An
     island whose labels are on no row fails here, before any training."""
 
     mix = getattr(args, "rl_dispense_mix", None)
@@ -1547,7 +1546,7 @@ def _dispense_streams(args, prompt_path, rows: int, digest: bytes) -> dict[str, 
 
 
 def _island_data_slot(args) -> Any:
-    """S27 task assignment: the island's ``--rl-data-slot`` (``data_split.DataSlot``),
+    """Task assignment: the island's ``--rl-data-slot`` (``data_split.DataSlot``),
     None when the island reads every row. A slot belongs to a training island
     that reads ``--data`` itself: refused with per-island task data, on a
     sampler (``--rl-sampler-data-slot``) and on an eval-only island."""
@@ -1605,9 +1604,9 @@ from yeto.hw.catalog import HARDWARE_EVENT  # noqa: E402
 
 
 def _island_code_pack_digest(args) -> str | None:
-    """rl-identity-tiering: the run code pack digest (L9.4, checked at startup),
-    else (L9.1 transition) the attested source tree hash. Both are lowercase
-    sha256 hex; the value is the fourth slot of the island contract (L9.7)."""
+    """The run code pack digest (checked at startup),
+    else (transition) the attested source tree hash. Both are lowercase
+    sha256 hex; the value is the fourth slot of the island contract."""
     return getattr(args, "code_pack_digest", None) or getattr(args, "source_sha256", None)
 
 
@@ -1652,8 +1651,8 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
                   timeout: float = 5.0, sleep=time.sleep) -> list[tuple[str, int]]:
     """Island-side TCP probe of every syncer this learner will dial (actor
     --syncer, critic --critic-syncer), printed with the addresses, before any
-    model/Miles work. s13-g3-modal-20261007b: both Modal islands sat 15 min in
-    the client's silent redial; this fails in ~30 s and names the address."""
+    model/Miles work. Without it an unreachable syncer leaves the island
+    silently redialing for minutes; this fails in ~30 s and names the address."""
     import socket
 
     connect = connect or socket.create_connection
@@ -1677,7 +1676,7 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
 
 
 def probe_wan_link(args, *, probe=None) -> None:
-    """S26 E3b: measure this container's link to the actor syncer before any
+    """Measure this container's link to the actor syncer before any
     model work; exit EXIT_SLOW_LINK below the configured rates so the launcher
     can request another container. Off unless a minimum rate is set."""
     min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
@@ -1762,7 +1761,7 @@ def probe_ref_load(args, model_path) -> dict:
 
 def write_boot_only_marker(args, ports_launch, run_config, ref_probe, *,
                            path=None, out=None) -> dict:
-    """``--rl-boot-only`` (S11 fnboot): every torch_dist-free check passed (provider
+    """``--rl-boot-only``: every torch_dist-free check passed (provider
     view, Miles argv built + parsed, algorithm verified); record it and return so the
     learner exits 0 without training."""
     from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
@@ -1832,8 +1831,8 @@ def run_miles(
     parameter_mode = getattr(args, "parameter_mode", "lora")
     sync_preset = getattr(args, "sync_preset", "strict-avg")
     full_parameter = _full_parameter_mode(args, sync_preset)
-    # P0-D8: every full-parameter preset runs the one full-parameter sync; the
-    # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
+    # Every full-parameter preset runs the one full-parameter sync; the
+    # full-parameter strict sweep also carries DeepSeek V4 expert-full.
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
     if _trains_base_parameters(args) and not full_parameter_sync and not _no_sync_island(args):
@@ -1877,11 +1876,11 @@ def run_miles(
 
     native_lora_export = None
     if flash_next.is_flash_next(args, model_path):
-        # try24: no predicted LoRA layout (specs == ()); the ports state plugin
+        # No predicted LoRA layout (specs == ()); the ports state plugin
         # exports through Miles' native qwen3_8_next exporter and the layout
         # hash is learned from the first export (_run_ports).
         native_lora_export = "qwen3_8_next"
-        # try22: megatron.bridge AutoBridge cannot parse qwen4_exp (transformers
+        # megatron.bridge AutoBridge cannot parse qwen4_exp (transformers
         # 5.12.1 has no such model type).  Miles registers the HF alias and
         # trains through its own plugin, so build a read-only provider view
         # from the aliased AutoConfig instead (FN-IMAGE-PLAN option (c)).
@@ -1991,7 +1990,7 @@ def run_miles(
 
     # The full-parameter sync contracts bind the spec hash (4.8). The island
     # contract v3 (strict, decoupled, elastic) binds the semantic hash and the
-    # run code pack instead (rl-identity-tiering L9.7); placement capabilities
+    # run code pack instead; placement capabilities
     # stay out of both.
     algorithm_spec_sha256 = ports_algorithm.sha256()
     algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
@@ -2188,7 +2187,7 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
-    # S27 task assignment: the island's row slot (rl_driver_start, data passes) and
+    # Task assignment: the island's row slot (rl_driver_start, data passes) and
     # where a full-parameter island keeps its data position across processes
     slot = _island_data_slot(args)
     miles_args.yeto_rl_data_slot = None if slot is None or slot.whole else slot.env()
@@ -2197,7 +2196,7 @@ def run_miles(
     if miles_args.yeto_rl_data_dispense is not None:
         miles_args.yeto_rl_data_position_store = None  # the dispenser keeps the position
     if full_parameter and not yeto_policy_sync:
-        # A no-sync buffer island (L4.6) trains every parameter without the sync
+        # A no-sync buffer island trains every parameter without the sync
         # block above: bind the same full-parameter identity for _run_ports.
         from yeto.provenance import file_sha256
 
@@ -2229,7 +2228,7 @@ def run_miles(
 
 
 def _configure_grad_audit(args, miles_args) -> bool:
-    """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing, design D12): export pre-clip LoRA grads.
+    """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing): export pre-clip LoRA grads.
 
     The grads are written next to the round audit (``args.audit_dir``); the
     ports state plugin arms the capture from its ``train_one_step`` recorder.
@@ -2256,7 +2255,7 @@ def _ports_spec(args, extra_argv: Sequence[str] = ()):
 
 
 def _run_critic_warmup_stage(args, run_config, extra_argv: Sequence[str] = ()):
-    """rl-algo-critic-family 5.3 (design D5): stage W before the ports main stage.
+    """rl-algo-critic-family 5.3: stage W before the ports main stage.
 
     Only for a critic copied from the actor with ``warmup_steps > 0`` and no
     ``--rl-critic-load``; every other run config is returned unchanged. The
@@ -2358,9 +2357,9 @@ def _run_ports(
     yeto_policy_sync: bool,
     native_lora_export: str | None = None,
 ) -> None:
-    """Ports path: yeto's IslandDriver over upstream Miles (design D2).
+    """Ports path: yeto's IslandDriver over upstream Miles.
 
-    ``native_lora_export`` (Flash-Next, S11 try24): the LoRA layout is not
+    ``native_lora_export`` (Flash-Next): the LoRA layout is not
     predictable on the CPU side, so no hash is pinned here; the policy state
     learns it from the first export (before any receipt) and pins it after.
     """
@@ -2409,7 +2408,7 @@ def _run_ports(
         return
     from yeto.rl.engine.sample_roles import SAMPLER, sample_role
 
-    if sample_role(args) == SAMPLER:  # L4.6: generate into the sample buffer, never train
+    if sample_role(args) == SAMPLER:  # Generate into the sample buffer, never train
         from yeto.rl.adapters.miles.sampler_island import run_sampler_island
 
         run_sampler_island(miles_args)
@@ -2429,7 +2428,7 @@ def _run_ports(
 def main(argv=None) -> None:
     from yeto.modal_runner import allow_any_ptracer
 
-    allow_any_ptracer()  # S27 RAY-SEGV R5: only with YETO_STACK_SAMPLE_S (py-spy sampling on gVisor)
+    allow_any_ptracer()  # only with YETO_STACK_SAMPLE_S (py-spy sampling on gVisor)
     learner_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     from yeto.provenance import (
@@ -2439,7 +2438,7 @@ def main(argv=None) -> None:
         verify_source_tree_sha256,
     )
 
-    # rl-identity-tiering D6: with a run code pack the pack digest check replaces
+    # With a run code pack the pack digest check replaces
     # the source tree check (the launcher attests --source-sha256 on the pack tree).
     if getattr(args, "code_pack_digest", None):
         release = verify_island_code_pack(args.code_pack_digest,
@@ -2553,7 +2552,7 @@ if __name__ == "__main__":
     try:
         from yeto.island_credential_guard import check_island_credentials
 
-        check_island_credentials()  # secret-handling-hardening D4
+        check_island_credentials()  # secret-handling-hardening
         main()
     except BaseException as error:  # noqa: BLE001
         if _rejoin_exhausted(error):

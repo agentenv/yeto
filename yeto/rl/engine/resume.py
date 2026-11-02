@@ -54,10 +54,10 @@ SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
 # rounds between cuts where a fixed interval has no --rl-cut-every (verl; a direct
 # RoundCutCheckpoint). The Miles flags default to a timed interval instead
-# (cut_interval.cut_interval_for, S27 G-AT); the publication checks follow the
+# (cut_interval.cut_interval_for); the publication checks follow the
 # interval in use (driver.verify_publication).
 DEFAULT_CUT_EVERY = 1
-# E1: next to a store's first round cut while it is written and committed in the
+# next to a store's first round cut while it is written and committed in the
 # background (``round-cuts/<cut_id>`` + this suffix, a file); see discard_unfinished_first_cut
 FIRST_CUT_MARK = ".first-cut-in-progress"
 
@@ -319,7 +319,7 @@ def store_for(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None
     double); otherwise a bucket mount or a plain shared directory."""
     env = os.environ if environ is None else environ
     if "://" in str(path):
-        # S27 G-EL: a store URI here is a launch bug (s27-elastic-a: a peer snapshot
+        # a store URI here is a launch bug (a peer snapshot
         # store URI reached the Modal island and its Volume store took it for a
         # relative directory on the container's local disk). Every store
         # implementation takes the island's path of the store (the mount or the
@@ -505,7 +505,7 @@ def prune(store_root: Path, *, keep: int, cut_ids_of: Callable[[Path], str | Non
             shutil.rmtree(p, ignore_errors=True)
             deleted.append(f"{STATE_DIR}/{p.name}")
     wanted = {cid for cid in (cut_ids_of(p) for p in kept) if cid}
-    # E1: a cut newer than every kept one may be being written right now (a periodic
+    # a cut newer than every kept one may be being written right now (a periodic
     # cut is captured while the previous cut commits in the background): not pruned
     newest = max((r for r in map(_cut_rollout, wanted) if r is not None), default=None)
     cuts = root / ROUND_CUTS
@@ -534,7 +534,7 @@ def first_cut_mark(store_root: Path, cut_id: str) -> Path:
 
 
 def mark_first_cut(store_root: Path, cut_id: str) -> Path:
-    """E1: written (fsynced) before the store's first round cut starts its shards, so a
+    """Written (fsynced) before the store's first round cut starts its shards, so a
     run that dies before that cut's LATEST is committed can tell its files from the
     cuts of an unfinished store (:func:`discard_unfinished_first_cut`)."""
     mark = first_cut_mark(store_root, cut_id)
@@ -710,7 +710,7 @@ class ResumeController:
             guard.release()
         store.reload()
         self.restored: dict[str, Any] | None = None
-        # E1: the files of a first round cut that never committed, deleted at start
+        # the files of a first round cut that never committed, deleted at start
         self.discarded_first_cut: list[str] | None = None
         latest = read_latest(store.root)
         started = time.monotonic()
@@ -861,7 +861,7 @@ PREEMPT_WATCH_THREAD = "preempt-marker-watcher"
 
 def watch_preempt_marker(controller: "ResumeController", *, environ: Mapping[str, str] | None = None,
                          poll_s: float = 0.5, out: Any = None) -> Any:
-    """S26 E9.1: the preemption marker for a driver that never gets the signal.
+    """The preemption marker for a driver that never gets the signal.
 
     Modal sends SIGINT/SIGTERM to the container's main process only. A driver in
     a Ray actor (verl: the task runner) is neither that process nor its main

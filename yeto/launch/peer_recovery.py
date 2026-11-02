@@ -1,4 +1,4 @@
-"""Launcher side of peer recovery (S27 E-3, ``--rl-peer-recovery``).
+"""Launcher side of peer recovery (``--rl-peer-recovery``).
 
 Full-parameter asynchronous rounds only, with a fixed roster or an island
 pool. The pool decides which island fills a slot; this option decides the

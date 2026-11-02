@@ -47,7 +47,7 @@ def _add(buf, sample_id, version):
     buf.append(SampleIndexEntry(sample_id, version, ref, tokens=3))
 
 
-# ---------------------------------------------------------------- L4.1 index
+# ---------------------------------------------------------------- index
 def test_append_select_commit_and_backlog(tmp_path):
     buf = _buffer(tmp_path)
     assert isinstance(buf, DurableSampleBuffer)
@@ -98,7 +98,7 @@ def test_reopen_after_process_exit(tmp_path):
         _add(again, "late", 3)
 
 
-# ---------------------------------------------------------------- L4.3 arrival
+# ---------------------------------------------------------------- arrival
 def test_arrival_callback_fires_within_one_interval(tmp_path):
     reader = _buffer(tmp_path)
     writer = _buffer(tmp_path)  # another process in production
@@ -118,7 +118,7 @@ def test_arrival_callback_fires_within_one_interval(tmp_path):
     assert reader.poll() == 0  # the polled sample is not reported twice
 
 
-# ---------------------------------------------------------------- L4.2 / L4.4 lifecycle
+# ---------------------------------------------------------------- lifecycle
 class _Island:
     def __init__(self, tmp_path, *, fail_rounds=None):
         self.tmp_path = tmp_path
@@ -184,7 +184,7 @@ def test_crash_after_consuming_trains_the_samples_again(tmp_path):
 
 
 def test_samplers_follow_the_trainer_and_keep_the_last_version(tmp_path):
-    """D5: while training, each published version reaches the sampler; samples
+    """While training, each published version reaches the sampler; samples
     record the version the sampler loaded; after a stop the sampler keeps it."""
     island = _Island(tmp_path)
     sampler = FakeSampler(island.buffer, island.published)

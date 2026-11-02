@@ -1,7 +1,7 @@
 """yeto.rl.nemotron_h_recompute: the recompute hook this island installs on
 transformers' ``NemotronHBlock`` (CPU, a stand-in block class).
 
-The checks that matter for the island (S27 G-EQ4):
+The checks that matter for the island:
 1. the wrapped forward gives the same values and the same gradients;
 2. it really recomputes -- the block's forward runs a second time during the
    backward -- and the graph it leaves behind holds fewer nodes;

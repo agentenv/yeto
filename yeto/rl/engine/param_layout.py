@@ -1,4 +1,4 @@
-"""How a trainer rank's parameters sit in the whole model, and the offline merge (S27 R-5).
+"""How a trainer rank's parameters sit in the whole model, and the offline merge.
 
 A full-parameter cut shard holds the rank's local model copy keyed by local
 Megatron names (``cut_plugin``). With TP/PP/EP > 1 those tensors are slices

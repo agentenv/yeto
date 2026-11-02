@@ -285,7 +285,7 @@ def test_family_quota_code_fallback_covers_sky_gaps():
     from yeto.shape.providers import _family_quota_code
 
     # sky 0.12 has no p5 rows; the family fallback must map all P variants
-    # to the shared "All P Spot" bucket (there is no separate P5 spot quota).
+    # to the shared "All P Spot" bucket (there is no separate spot quota per P-series type).
     assert _family_quota_code("p5.48xlarge", True) == "L-7212CCBC"
     assert _family_quota_code("p5en.48xlarge", True) == "L-7212CCBC"
     assert _family_quota_code("p4d.24xlarge", True) == "L-7212CCBC"

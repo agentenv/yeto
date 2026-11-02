@@ -156,14 +156,14 @@ pub struct GlobalState {
     pub delta_correction: Option<merge::Heloco>,
     /// Spectrum flattener. Torch mode owns one persistent child process.
     iso_backend: IsoBackend,
-    /// bf16 downlink anchors (S26 E3); in memory only, never checkpointed.
+    /// bf16 downlink anchors; in memory only, never checkpointed.
     pub downlink: Option<std::sync::Mutex<crate::downlink::DownlinkAnchors>>,
-    /// Head shard of this process and the fragments it owns (S27 P4b).
+    /// Head shard of this process and the fragments it owns.
     /// Unowned fragments are never allocated, initialized or checkpointed.
     shard: ShardPlan,
     schedule: ShardSchedule,
     /// Small records written next to every checkpoint at the same cut
-    /// (the task dispenser, S27 P2). Empty: none.
+    /// (the task dispenser). Empty: none.
     pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
 }
 
@@ -1039,7 +1039,7 @@ impl CheckpointSnapshot {
 
     /// Atomically persist the snapshot at `path` through the sibling
     /// temporary `<path without extension>.tmp`; see `persist`.  Every
-    /// checkpoint sidecar (the task dispenser, S27 P2) is written first as
+    /// checkpoint sidecar (the task dispenser) is written first as
     /// `<path><suffix>` (temporary file, rename), so a crash between the two
     /// leaves the newer record with the older checkpoint.  Evaluation
     /// checkpoints (`persist` only) carry no sidecars.

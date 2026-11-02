@@ -296,7 +296,7 @@ def test_fork_rng_without_a_device_forks_no_cards_on_cpu(
     assert recorded_fork == [{"devices": []}]
 
 
-# --- device family (S25 N7.7) --------------------------------------------
+# --- device family --------------------------------------------------------
 
 
 @pytest.fixture

@@ -371,7 +371,7 @@ class AwsProviders:
 
         SkyPilot ships an instance-type -> quota-code table which we try
         first, but it has gaps (no p5 rows as of sky 0.12 — that gap once
-        made a planner treat P5 spot as unlimited). The fallback derives the
+        made a planner treat p5 spot as unlimited). The fallback derives the
         code from the instance family letter(s), matching AWS's actual quota
         buckets ("All P Spot Instance Requests" covers p2..p5en alike).
         None means genuinely unmappable; callers must treat that as

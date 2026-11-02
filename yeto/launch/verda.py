@@ -16,7 +16,7 @@ VERDA_ISLANDS: dict = {}
 
 def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
     """Per-run Verda setup on this machine: the full local sky catalog, the
-    patch status (unpatched -> no auto-recovery for these islands, D4) and
+    patch status (unpatched -> no auto-recovery for these islands) and
     the instance-id guard used by recovery and teardown."""
     from ..shape.providers import write_verda_sky_catalog
     from ..sky_patches import verda as verda_patch
@@ -109,7 +109,7 @@ def _verda_copy_override(sky, cand: dict) -> dict:
 
 
 def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
-    """Launch one Verda island over live-stock candidates (D5)."""
+    """Launch one Verda island over live-stock candidates."""
     from ..shape.providers import VerdaSignals, launch_with_verda_candidates
 
     sig = VerdaSignals(cache=None, use_spot=bool(getattr(args, "spot", False)))

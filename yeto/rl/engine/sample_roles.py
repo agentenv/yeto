@@ -1,4 +1,4 @@
-"""Island sample roles (rl-trainer-start-stop L4.6).
+"""Island sample roles.
 
 An island has one sample role:
 
@@ -9,7 +9,7 @@ An island has one sample role:
   generating with the last one while the trainer is stopped, up to a backlog cap;
 * ``trainer``: the island trains on groups read from the buffer and releases
   every published policy for the samplers;
-* ``convertible`` (L7.5): a colocated LoRA island that generates into its own
+* ``convertible``: a colocated LoRA island that generates into its own
   shard of the buffer, and converts to trainer in place when the head's
   scheduler selects it (``yeto.rl.engine.convertible_remote``). An island is
   convertible when it is declared so (``--rl-node-class islandM=convertible``);
@@ -18,18 +18,18 @@ An island has one sample role:
 The sampler and the trainer mount the same checkpoint store (the buffer and the
 releases live there). They are either separate single-island launches
 (``--rl-sample-role``), or one launch of two islands, a *store-coupled pair*
-(``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``, L5.4),
-or one launch of one trainer and several sampler islands (S25 C1: each sampler
+(``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``),
+or one launch of one trainer and several sampler islands (each sampler
 writes its own shard of the buffer, :func:`buffer_shards`): there is no syncer, and each island runs as its own one-learner, no-sync island
 (learner id 0 of 1) whose role comes from its island args (:func:`island_args`).
-Synced trainers (S25 C3, :mod:`.merged_release`): a launch of N >= 2 islands
+Synced trainers (:mod:`.merged_release`): a launch of N >= 2 islands
 with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
 ``--rl-single-island-no-sync``): every island is a trainer, learner m of N, and
 reads lane m of the buffer; the island with learner id 0 releases the merged
 policy. The store reaches the island as ``--rl-sample-store`` (buffer and
 releases only: multi-island round cuts do not exist), the trainer count as
 ``--rl-sample-lanes``. The samplers are separate no-sync launches over the
-same store, or (S26 E9.4) islands of the same launch, a *synced group*
+same store, or islands of the same launch, a *synced group*
 (``--rl-sample-role trainer --rl-island-sample-role M:sampler``, a syncer): the
 listed islands are no-sync samplers (learner 0 of 1, like a pair's samplers)
 and every other island is a synced trainer, learner k of K in island order
@@ -67,7 +67,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
-from .data_split import DataSlot  # noqa: F401 - re-exported (S26 E9.3 callers)
+from .data_split import DataSlot  # noqa: F401 - re-exported (callers import it from here)
 from .selection import FULL_PARAMETER_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
@@ -91,7 +91,7 @@ class SampleBufferConfig:
     ``min_round_s``: sampler, min seconds from one round start to the next (a
     throttle, so a test can make the sampler slower than the trainer);
     ``fused_stage``: LoRA sampler, check the release digest while copying the
-    adapter to local disk (``--rl-sampler-fused-stage``, S26 E5);
+    adapter to local disk (``--rl-sampler-fused-stage``);
     ``release_legacy``: trainer or convertible node, reload the store before every
     policy release and commit LATEST separately (``--rl-release-reload-latest``;
     ``PolicyReleaseStore.cached_latest``);
@@ -270,7 +270,7 @@ def is_pair(args: Any) -> bool:
 
 
 def is_synced_group(args: Any) -> bool:
-    """S26 E9.4: one launch of synced trainers and their sampler islands
+    """One launch of synced trainers and their sampler islands
     (``--rl-sample-role trainer`` with a syncer and ``--rl-island-sample-role
     M:sampler``; module doc)."""
     return bool(getattr(args, "rl_island_sample_role", None)) and is_synced_trainer(args)
@@ -298,7 +298,7 @@ def sampler_islands(args: Any, num_islands: int) -> list[int]:
 
 
 def buffer_shards(args: Any, num_islands: int) -> list[str] | None:
-    """The buffer shards of a pair with several sampler islands (S25 C1): one per
+    """The buffer shards of a pair with several sampler islands: one per
     sampler island, named by its node name; None with one sampler (it writes the
     index itself, as before)."""
     return _shards_of(sampler_islands(args, num_islands))
@@ -395,12 +395,12 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
         out.rl_buffer_shards = buffer_shards(args, num_islands)
         samplers = len(sampler_islands(args, num_islands))
-        # each sampler island draws its own slot of the data (S26 E9.3)
+        # each sampler island draws its own slot of the data
         out.rl_sampler_data_slot = (DataSlot(sampler_islands(args, num_islands).index(island), samplers).env()
                                     if out.rl_sample_role == SAMPLER and samplers > 1 else None)
         if out.rl_sample_role == SAMPLER and getattr(args, "rl_sampler_spot", False):
             # spot billing without the legacy --spot volume: the buffer is the sampler's
-            # durable state (S25 C1)
+            # durable state
             out.spot = True
             out.spot_without_volume = True
         if out.rl_sample_role == SAMPLER and samplers > 1:
@@ -412,7 +412,7 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
         out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
-        # each node draws its own slot of the data, as sampler islands do (S26 E9.3);
+        # each node draws its own slot of the data, as sampler islands do;
         # without it every node generates the same prompts in the same order
         nodes = convertible_islands(args)
         out.rl_sampler_data_slot = (DataSlot(nodes.index(island), len(nodes)).env()
@@ -469,7 +469,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     out.rl_syncer_epoch = None
     out.rl_sampler_node = node_name(island)
     if getattr(args, "rl_data_split", None) == "dispense":
-        # S27 P4: the sampler claims its rows from the group's actor syncer (no slot)
+        # The sampler claims its rows from the group's actor syncer (no slot)
         out.rl_sampler_dispense_island = island
         out.rl_sampler_data_slot = None
     else:
@@ -516,7 +516,7 @@ def buffer_full_parameter(args: Any) -> bool:
     """``--tuning full`` on a no-sync island: the island trains every parameter
     without the full-parameter sync, since it has no syncer. A sampler/trainer
     island (single or pair) passes the policy to the sampler as a store release;
-    a single island with both roles (S26 E11) updates its own engines in place."""
+    a single island with both roles updates its own engines in place."""
     return (getattr(args, "tuning", "lora") == "full"
             and bool(getattr(args, "rl_single_island_no_sync", False)))
 
@@ -649,7 +649,7 @@ def _check_release_delta(args: Any, role: str) -> None:
     """``--rl-release-delta-full-every N``: 0 (off) or N >= 2, on a trainer whose
     full-weight releases are staged (``policy_release`` module doc).
 
-    Backends: Miles (S27 G-BG), and since S27 G-EQ3 a verl full-parameter buffer
+    Backends: Miles, and a verl full-parameter buffer
     trainer, whose export writes the base checkpoint's own files
     (``adapters/verl/hf_export``) so the delta against the base stays small."""
     every = int(getattr(args, "rl_release_delta_full_every", 0) or 0)
@@ -685,7 +685,7 @@ def _full_weights(args: Any) -> bool:
 
 
 def convertible_min_backlog_rounds(args: Any) -> int:
-    """The smallest backlog cap of a convertible node, in rounds: S1 starts a trainer
+    """The smallest backlog cap of a convertible node, in rounds: the trainer scheduler starts a trainer
     at a backlog of at most ``a_hard + 1`` batches (``a_hard`` = the max policy
     age), so a lower cap would hold every node back before any trainer starts."""
     return int(getattr(args, "rl_max_policy_age", 0) or 0) + 1
@@ -733,7 +733,7 @@ def island_env(args: Any) -> dict[str, str]:
     """The environment a pair's sampler island gets from the launcher ({} for
     every other island; ``args`` are the island args): the reclaim marker path,
     so the Modal runner turns the reclaim signal into that file and the sampler
-    leaves without being signalled (S25 C1)."""
+    leaves without being signalled."""
     if sample_role(args) != SAMPLER or not getattr(args, "rl_sampler_node", None):
         return {}
     from .sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV

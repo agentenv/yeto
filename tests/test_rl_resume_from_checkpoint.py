@@ -1,6 +1,6 @@
-"""rl-resume-from-checkpoint (S17 C4), CPU only: store + LATEST + hashes, resume checks,
+"""rl-resume-from-checkpoint, CPU only: store + LATEST + hashes, resume checks,
 round cuts without --rl-elastic (save -> machine gone -> resume, real MilesTrainerGroup
-cut/restore on E2's CPU rank fakes), launcher/Modal wiring, tape continuity, dashboard."""
+cut/restore on CPU rank fakes), launcher/Modal wiring, tape continuity, dashboard."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 import torch
 from test_rl_multinode_round_cut import _Driver, _hash, _Pool, _trainer
 from test_rl_reconfig_recovery import _ctl
-from test_rl_trainer_rebuild_e1 import ARGS
+from test_rl_trainer_rebuild import ARGS
 
 from tests.rl_cut_fakes import make_rank, params, train_step
 from yeto.cloud import modal_ckpt_store as mcs
@@ -78,7 +78,7 @@ def _cp(ctl, driver, trainer, ledger, *, backend_fingerprint="miles@0af62f4d", *
 
 
 def _cut(cp, driver, **kw):
-    """Save a cut and complete it: a periodic cut (also the store's first, E1) commits in
+    """Save a cut and complete it: a periodic cut (also the store's first) commits in
     the background; the outcome of that commit is folded into the returned pointer."""
     info = cp.save(driver, **kw)
     if info is None or info["store_commit"] != "deferred":
@@ -209,7 +209,7 @@ def test_cuts_without_latest_are_refused(tmp_path):
 
 @pytest.mark.parametrize("layout", ["unmarked", "one_marked_one_not", "stray_file", "mark_of_another_cut"])
 def test_cuts_without_latest_are_refused_unless_all_are_a_marked_first_cut(tmp_path, layout):
-    """E1: only a store whose every cut carries the first-cut mark (never committed)
+    """Only a store whose every cut carries the first-cut mark (never committed)
     is started over; any other store with cuts and no LATEST is refused, untouched."""
     store = _store(tmp_path / "store")
     cuts = store.root / rs.ROUND_CUTS
@@ -240,7 +240,7 @@ def _first_cut_in_flight(tmp_path, store, every=4):
 
 
 def test_first_periodic_cut_with_interval_n_commits_in_the_background(tmp_path):
-    """E1: with --rl-cut-every 4 the store's first cut (rollout 4) is in the steady
+    """With --rl-cut-every 4 the store's first cut (rollout 4) is in the steady
     rounds: it is deferred like the others, marked until its LATEST is committed."""
     store = _store(tmp_path / "store", _Vol())
     rank, ctl, driver, cp = _trained_island(tmp_path, store, 4)
@@ -310,7 +310,7 @@ def test_save_kill_resume_without_elastic_continues_bitwise(tmp_path):
     store = _store(tmp_path / "store", vol)
     rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
     info = _cut(cp_a, driver_a, rollout_id=2)
-    # E1: the store's first cut commits in the background too (marked until LATEST is committed)
+    # The store's first cut commits in the background too (marked until LATEST is committed)
     assert info["store_synced"] is True and info["store_commit"] == "deferred"
     assert not list((store.root / rs.ROUND_CUTS).glob(f"*{rs.FIRST_CUT_MARK}"))
     assert info["cut_bytes"] > 0 and info["lr_at_next_round"] == [5e-6]
@@ -586,8 +586,8 @@ def test_dashboard_sees_resumes_segments_and_discarded_rounds():
     assert [s["resumed_at"] for s in segs] == [None, 2] and segs[1]["startup_s"] == 22.0
 
 
-def test_next_lr_matches_the_g1_tape_bitwise():
-    """S17 G1 base tape (s1-runs/s17-g1-base, 10 rounds, linear to 0 over 10): applied
+def test_next_lr_matches_the_recorded_tape_bitwise():
+    """A recorded base tape (10 rounds, linear to 0 over 10): applied
     lrs per round; the cut's lr_at_next_round prediction must reproduce them exactly."""
     from yeto.rl.adapters.miles.entry import next_lr_for
 
@@ -623,7 +623,7 @@ def test_preempt_signal_writes_only_a_marker_and_hands_the_signal_on(tmp_path):
 
 
 def test_modal_commit_goes_through_the_runner_interpreter(tmp_path, monkeypatch):
-    """G2 A: the learner's Python has no Modal client deps; the commit runs in the
+    """The learner's Python has no Modal client deps; the commit runs in the
     runner's interpreter with the runner's import path (a fake modal module here)."""
     import sys
 
@@ -650,7 +650,7 @@ def test_modal_commit_goes_through_the_runner_interpreter(tmp_path, monkeypatch)
 
 
 def test_resume_wiring_carries_the_runtime_fingerprint(tmp_path):
-    """G2 A: the cut refused 'runtime: backend_fingerprint missing' -- the wiring must
+    """The cut refused 'runtime: backend_fingerprint missing' -- the wiring must
     hand the island's runtime fingerprint to the round-cut controller."""
     from yeto.rl.adapters.miles.entry import resume_wiring_for
 
@@ -663,7 +663,7 @@ def test_resume_wiring_carries_the_runtime_fingerprint(tmp_path):
     assert w.controller.runtime_fingerprint == "miles@abc" and w.every == 2 and w.ledger is not None
 
 
-# ---------------------------------------------------------------- E1: cut before offload, background cut
+# ---------------------------------------------------------------- cut before offload, background cut
 class _CountingTrainer:
     """The real MilesTrainerGroup cut path, counting the cut and onload/offload calls."""
 
@@ -749,7 +749,7 @@ def test_prepared_cut_is_written_in_the_background_without_waking_the_trainer(tm
     done = cp.join_commit(driver)
     assert done["ok"] is True and done["cut_id"] == info["cut_id"] and trainer.calls[-1] == "collect_cut"
     assert driver.events[-1][0] == "rl_cut_committed" and driver.events[-1][1]["ok"] is True
-    # E1: the event says where the shard was written (the rank's writer process)
+    # The event says where the shard was written (the rank's writer process)
     assert driver.events[-1][1]["writer"] == [{"mode": "process"}]
     assert cp.pointer()["cut_id"] == info["cut_id"]
     assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
@@ -810,7 +810,7 @@ def test_background_cut_can_be_turned_off(tmp_path, monkeypatch):
 
 
 def test_cut_context_takes_the_cursor_read_with_the_in_flight_entries():
-    """E1: a rollout that keeps drawing during the cut (Miles fully_async) returns the
+    """A rollout that keeps drawing during the cut (Miles fully_async) returns the
     cursor read together with its entries; the context uses that one."""
     rank = make_rank(0)
     driver = _Driver(rank, published=2, local_step=2)
@@ -881,7 +881,7 @@ def test_a_periodic_cut_never_waits_for_the_commit_it_starts(tmp_path):
 
 
 def test_prune_keeps_a_cut_newer_than_every_kept_one(tmp_path):
-    """E1: a periodic cut is captured while the previous one commits in the background;
+    """A periodic cut is captured while the previous one commits in the background;
     the commit's prune must not delete the newer cut being written."""
     root = tmp_path / "store"
     for seq, cut_id in ((1, "r000002-aa"), (2, "r000004-aa")):
@@ -897,7 +897,7 @@ def test_prune_keeps_a_cut_newer_than_every_kept_one(tmp_path):
 
 
 def test_a_prepared_cut_skipped_while_committing_is_collected_at_the_next_cut(tmp_path):
-    """E1: the safe point does not wait for the trainer writer of a prepared cut it
+    """The safe point does not wait for the trainer writer of a prepared cut it
     skips (busy commit); the next cut collects that writer and drops its files."""
     import threading
 
@@ -926,7 +926,7 @@ def test_a_prepared_cut_skipped_while_committing_is_collected_at_the_next_cut(tm
 
 
 def test_a_cut_declined_at_prepare_does_not_wake_the_offloaded_trainer(tmp_path):
-    """E1: prepare met a running commit; when the commit is done by the safe point the
+    """Prepare met a running commit; when the commit is done by the safe point the
     periodic cut is skipped instead of waking the offloaded trainer for it."""
     import threading
 
@@ -953,7 +953,7 @@ def test_a_cut_declined_at_prepare_does_not_wake_the_offloaded_trainer(tmp_path)
 
 
 def test_a_deferred_cut_snapshots_the_state_dir_as_it_was_at_the_cut(tmp_path):
-    """E1 (Modal A10G resume e1c): a periodic cut is synced into the store after later
+    """(Modal A10G resume run) A periodic cut is synced into the store after later
     rounds changed the state dir (the ledger); the snapshot must hold the state dir as
     it was at the cut, else a resume refuses the ledger (consumed groups differ)."""
     store = _store(tmp_path / "store", _Vol())

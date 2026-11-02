@@ -1,4 +1,4 @@
-"""Receive-only subscriber of the global weights (S27 G-EA; syncer ``subscriber.rs``).
+"""Receive-only subscriber of the global weights (syncer ``subscriber.rs``).
 
 A sampler island on any cloud follows the merged weights without being a
 learner. It opens the usual connection group (control socket + striped data
@@ -19,7 +19,7 @@ streams) with SUBSCRIBE instead of HELLO:
   current version once (at the first merge after it connected), then each
   merged version; a slow link skips versions (newest wins per fragment);
 * at the end of the run the syncer sends ERROR ``subscriber: run finished``
-  (S27 G-EM: the client keeps that notice even when it arrives on a link the
+  (the client keeps that notice even when it arrives on a link the
   client is already tearing down, and then stops redialing).
 
 A reconnect (new generation) gets every fragment again. The session is
@@ -107,10 +107,10 @@ class SubscriberClient(SyncerClient):
         self._run_finished = threading.Event()
 
     def _dispatch(self, gen: int, msg_type: int, payload) -> None:
-        # S27 G-EM: the end-of-run notice counts on any connection generation. The
+        # The end-of-run notice counts on any connection generation. The
         # syncer closes the data streams right after it; when their end reaches
         # the client first, the client starts a new generation and the base class
-        # would drop the notice as a late message (A run s27-ea-a1: the sampler
+        # would drop the notice as a late message (In one run the sampler
         # kept redialing a finished head).
         if msg_type == MSG_ERROR and RUN_FINISHED in bytes(payload).decode("utf-8", errors="replace"):
             self._run_finished.set()
@@ -165,7 +165,7 @@ class WeightCut:
 
     versions: tuple[int, ...]
     fragments: tuple[bytes, ...]
-    # S27 G-EM: SHA-256 of each fragment's bytes (empty: not computed)
+    # SHA-256 of each fragment's bytes (empty: not computed)
     digests: tuple[bytes, ...] = ()
 
     @property

@@ -1,4 +1,4 @@
-"""Full-parameter boundary of a Megatron model in HF parameter names (S27 G-FG).
+"""Full-parameter boundary of a Megatron model in HF parameter names.
 
 A full-parameter island synchronizes whole FP32 parameters with the unified
 syncer.  The verl FSDP2 island names them by the HF parameter names of the
@@ -28,13 +28,13 @@ The island decides the indices once from every rank's manifest
 (:class:`HfTaskIndex`), so ranks whose tasks name different experts still run
 the same tasks.
 
-Pipeline parallelism (S27 G-FL): Bridge's task list covers the global parameter
+Pipeline parallelism: Bridge's task list covers the global parameter
 names of every stage, so a stage holds ``param_weight = None`` for another
 stage's tasks and receives the whole tensor over the PP group.  The one
 parameter outside that list is the tied embedding's second copy on the last
 stage (:func:`tied_output_copies`), which an apply writes explicitly.
 
-Two namespaces (S27 G-FT, blocker B15): Bridge names the tensors of the *base
+Two namespaces: Bridge names the tensors of the *base
 checkpoint*, the island's layout names the HF *model*'s own parameters, and for
 some families (NemotronH) the two differ -- ``backbone.`` against ``model.``,
 and 128 per-expert checkpoint tensors against one model tensor stacked along
@@ -124,7 +124,7 @@ def embedding_task_index(tasks: Sequence[Any]) -> int | None:
 
 def tied_output_copies(modules: Sequence[Any], tasks: Sequence[Any]) -> list[Any]:
     """The tied embedding's second copy on this rank, which no conversion task writes
-    (S27 G-FL; empty for PP == 1 and for an untied model).
+    (empty for PP == 1 and for an untied model).
 
     With ``share_embeddings_and_output_weights`` and PP > 1 the last pipeline stage
     owns its own ``output_layer.weight``: Megatron fills it with the first stage's
@@ -335,7 +335,7 @@ class LayoutSlot:
 
 @dataclass(frozen=True)
 class LayoutMap:
-    """Bridge's HF names -> the island's layout names (S27 G-FT, module doc).
+    """Bridge's HF names -> the island's layout names (see the module doc).
 
     ``slots``: a Bridge name's slot, or None when the layout does not hold that
     tensor at all.  A persistent buffer is the case that matters: the layout is

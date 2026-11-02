@@ -1,4 +1,4 @@
-"""Checkpoint tensor names <-> the HF model's own state names (S27 G-EZ2, G-EQ3).
+"""Checkpoint tensor names <-> the HF model's own state names .
 
 ``transformers`` does not load a checkpoint by matching tensor names to the
 model's ``named_parameters()``.  Between the two sits a registered conversion
@@ -6,7 +6,7 @@ table (``transformers.conversion_mapping.get_model_conversion_mapping``): for
 ``nemotron_h`` it renames ``backbone.`` to ``model.`` and stacks the 512
 per-expert tensors ``mixer.experts.<e>.{up,down}_proj.weight`` of a MoE layer
 into one ``mixer.experts.{up,down}_proj`` tensor.  A name-for-name comparison
-therefore reports a correct checkpoint as unloadable (S27 G-EZ, EZ-7.5..7.9),
+therefore reports a correct checkpoint as unloadable,
 and an export that writes the model's own names does not reproduce the base
 checkpoint's layout.
 
@@ -29,7 +29,7 @@ persistent buffers.  A checkpoint tensor can load into a buffer
 loader fills and no optimizer updates), so a check that counts only
 parameters is short by exactly those tensors.
 
-The reverse (S27 G-EQ3) is the same map read backwards: a checkpoint tensor
+The reverse is the same map read backwards: a checkpoint tensor
 is its model tensor (renamed) or row ``index`` of a stacked one
 (:func:`checkpoint_tensor`).  :func:`base_export` plans an export that writes
 the *base checkpoint's own* files -- the same tensor names, the same per-file
@@ -201,7 +201,7 @@ def model_state_conversion(model_path: str | Path) -> tuple[list[Any], str | Non
     The state names are the model's own ``state_dict`` keys: parameters *and*
     persistent buffers (module doc), which is what :func:`checkpoint_key_map`
     must be given -- a checkpoint tensor that loads into a buffer has a target
-    there and none in a trainable-parameter list (S27 G-FT)."""
+    there and none in a trainable-parameter list."""
     import torch
     import transformers
     from transformers import AutoConfig, AutoModelForCausalLM

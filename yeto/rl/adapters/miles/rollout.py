@@ -8,7 +8,7 @@ dereferenced here). The yeto-visible metadata comes from
 a small sink. ``require_policy_tokens`` implements the pre-training identity
 check (spec: mismatching groups are rejected before training).
 
-E1 membership verbs (rl-infra-spec 3.4, :class:`~..ports.ElasticRolloutPool`)
+Membership verbs (:class:`~..ports.ElasticRolloutPool`)
 map yeto member ids (``engine:<cell>``) onto the fork's explicit membership
 API (fork M2/M3, michaellchung/miles ``yeto/ports`` 0af62f4d):
 ``InferenceController.start_cells/stop_cells(expected_epoch)``,
@@ -68,7 +68,7 @@ class PolicyTokenMismatch(RuntimeError):
 
 
 def policy_token(rollout_id: int, policy_hash: str) -> str:
-    """yeto's policy token (design D3), carried as SGLang weight version.
+    """yeto's policy token, carried as SGLang weight version.
 
     Single definition: :attr:`yeto.rl.core.PolicySnapshot.token`.
     """
@@ -86,26 +86,26 @@ def cells_of(members: Any) -> list[str]:
     return sorted(cell_of(m) for m in members)
 
 
-# Test-only fault injection (rl-infra-spec 3.8 X6 quorum case, gpu-plan-v2 A5):
+# Test-only fault injection (cross-quorum case):
 # sleep this many seconds before the FIRST fork ``start_cells`` of the process.
 # Unset (default) = no effect. Set by the launcher's
 # ``--rl-test-inject-start-delay-s`` (exported in the island run command).
 INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
-# Test-only (plan.md E1-D ③④, 3.7): the next N fork ``stop_cells`` calls fail
+# Test-only: the next N fork ``stop_cells`` calls fail
 # inside the fork AFTER deregistration (its engine provider's stop raises), so
 # the fork records ``incomplete``. Unset (default) = no effect.
 INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
-# Test-only (A4b): during the FIRST drain of the process an artificial tool-wait
+# Test-only: during the FIRST drain of the process an artificial tool-wait
 # entry is put on the ToolWaitBoard and removed again after this many seconds. Longer
 # than the drain budget it makes the drain time out -> CANCELLED -> undrain, with no
 # request touched (the entry is not a request). Unset (default) = no effect.
 INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
-# Test-only (A4b / E1-C variant): the next N ``undrain`` calls fail inside the
+# Test-only (variant of the above): the next N ``undrain`` calls fail inside the
 # adapter (as a fork uncordon failure would), so a drain timeout cannot restore
 # the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
 INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
 INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
-# Test-only (A4bc / 3.3 X5 "no replay"): when set (any non-empty value; "1"
+# Test-only (3.3 X5 "no replay"): when set (any non-empty value; "1"
 # from the launcher), every execution of the injected tool is journaled in
 # ``<elastic state dir>/side_effects.jsonl`` (tool_wait.ToolSideEffectLog):
 # one ``tool_side_effect`` record *before* the tool wait starts, keyed by
@@ -179,8 +179,8 @@ def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, 
 
 
 def arm_stop_failure_in_controller(controller: Any) -> str:
-    """Runs INSIDE the fork InferenceController actor (``__ray_call__``), test only
-    (E1-D ③④): the engine provider's next ``stop_cells`` raises once, so the fork
+    """Runs INSIDE the fork InferenceController actor (``__ray_call__``), test only:
+    the engine provider's next ``stop_cells`` raises once, so the fork
     takes its real half-failure path (membership ``incomplete``, reason
     ``stop_failed``). Returns the provider class name as the arming receipt."""
     provider = getattr(controller, "_engine_provider", None)
@@ -247,7 +247,7 @@ async def running_members(controller: Any) -> frozenset[str]:
 def require_policy_tokens(batch: RolloutBatchHandle, expected_token: str) -> None:
     external = getattr(batch, "external_cut", None)
     if external is not None:
-        # S27 G-EM relay mode: the groups name the merged versions of external cuts
+        # Relay mode: the groups name the merged versions of external cuts
         # (yeto.rl.engine.external_policy); the same age rule the driver applied.
         from yeto.rl.engine.external_policy import ExternalMergedCuts
 
@@ -363,7 +363,7 @@ def _sink_actor_class():
         def get_limit(self) -> int | None:
             return getattr(self, "_limit", None)
 
-        # P0-S: published version -> weight hash (JSON), for trajectory evidence.
+        # Published version -> weight hash (JSON), for trajectory evidence.
         def set_policies(self, payload: str) -> None:
             self._policies = payload
 
@@ -414,7 +414,7 @@ class RayMetadataSink:
         self._ray.get(self._actor.set_policies.remote(json.dumps(dict(policies), sort_keys=True)))
 
     def _take_items(self) -> list[dict[str, Any]]:
-        """Every pushed record not yet taken; late round records (E1) are kept aside
+        """Every pushed record not yet taken; late round records are kept aside
         by rollout id, the others are returned (and forgotten) in push order."""
         from .rollout_meta_hook import LATE_META_SCHEMA
 
@@ -570,7 +570,7 @@ def handle_from_metadata(
 
 
 _CARRY_OVER_KEYS = (
-    # P0-S overlap: Miles fully_async stale drops (None = unknown)
+    # Overlap: Miles fully_async stale drops (None = unknown)
     "stale_dropped_groups", "execution_mode",
     "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
     "cross_version_scored_tokens", "cross_version_unscored_samples",
@@ -585,7 +585,7 @@ _CARRY_OVER_KEYS = (
     "resumed_groups", "resumed_done_groups", "suspend_expired_trajectories",
     "policy_age_exceeded_trajectories", "suspended_trajectories", "suspended_env_seconds",
     "suspend_retried_turns",
-    # rl-offpolicy-correction-passthrough D5/D6: the driver pops these into ``offpolicy_gate``
+    # The driver pops these into ``offpolicy_gate``
     GATE_DROPPED_LENGTHS, GATE_GRANULARITY, TRUNCATED_BY_TURN,
 )
 
@@ -713,7 +713,7 @@ class MilesRolloutPool:
 
             side_effect_log = ToolSideEffectLog(side_effect_log)
         self._side_effects = side_effect_log
-        # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
+        # ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
         # IR-2: harness board (tool_wait.HarnessBoard, local or actor handle),
@@ -728,19 +728,19 @@ class MilesRolloutPool:
         self._args = args
         self._fully_async = bool(getattr(args, "fully_async", False))
         self._prompt_ledger_installed = False
-        # S27 task assignment: an island with a data slot reshuffles every later pass
+        # Task assignment: an island with a data slot reshuffles every later pass
         # over its rows (data_passes); installed in the executor before the first draw
         self._data_passes_pending = bool(getattr(args, "yeto_rl_data_slot", None))
-        # S27 P2: an island that claims its rows from the dispenser (task_dispense)
+        # An island that claims its rows from the dispenser (task_dispense)
         self._dispense_pending = bool(getattr(args, "yeto_rl_data_dispense", None))
         self._dispense_installed = False
-        # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
+        # Cells the fork declared at startup (startup bundles); None = membership verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
         self._controller = inference_controller
         self._executor = rollout_executor
         self._metadata = metadata
-        self._deferred_estimates: set[int] = set()  # E1: late cross-version estimates
+        self._deferred_estimates: set[int] = set()  # late cross-version estimates
         self._expected_policy = expected_policy
         self._runner = runner or LoopRunner()
         self._run = self._runner.run
@@ -764,7 +764,7 @@ class MilesRolloutPool:
             raise ValueError(f"{INJECT_TOOL_WAIT_ENV} must be a positive number of seconds")
         self.injected_tool_waits: list[float] = []
         self.event_sink: Callable[..., None] | None = None  # test_injection record sink
-        # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
+        # Role transfer (4.7): fork RayWorkerManager handle (None = the named
         # actor, looked up on first use), the startup bundle map
         # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
         # GPUs per engine.
@@ -783,7 +783,7 @@ class MilesRolloutPool:
         setter(int(limit))
 
     def set_published_policies(self, published: PublishedPolicies) -> None:
-        """P0-S (driver optional verb): the published versions in the policy-age
+        """(Driver optional verb): the published versions in the policy-age
         window, from which the rollout side names each trajectory's policy."""
         setter = getattr(self._metadata, "set_published_policies", None)
         if callable(setter):
@@ -793,7 +793,7 @@ class MilesRolloutPool:
         """The data source position NOW (and its reuse-buffer length), read inside
         the rollout executor's process -- not the last batch's cached value.
         Catches a cursor moved outside generation (``rollout_executor.load``
-        during a trainer rebuild; E2 G-4.5 row 5).
+        during a trainer rebuild).
 
         Miles (fork e3a11ab3) hands the driver a ``RayWorkerHandle`` whose
         ``__getattr__`` turns every name into a remote method call; the Ray
@@ -869,7 +869,7 @@ class MilesRolloutPool:
         self._dispense_installed = True
 
     def commit_dispensed(self, rollout_id: int) -> dict[str, Any] | None:
-        """S27 P2 (driver, after the round's sync boundary): the rollout executor
+        """(Driver, after the round's sync boundary): the rollout executor
         reports the round's kept rows trained (``task_dispense.commit_round``).
         None when this island takes no rows from the dispenser."""
         if not getattr(self, "_dispense_installed", False):
@@ -879,7 +879,7 @@ class MilesRolloutPool:
         return self._in_executor(commit_round, int(rollout_id))
 
     def close_dispensed(self) -> dict[str, Any] | None:
-        """S27 P2 (driver, finished run): release every row not trained yet."""
+        """(Driver, finished run): release every row not trained yet."""
         if not getattr(self, "_dispense_installed", False):
             return None
         from .task_dispense import close_source
@@ -928,7 +928,7 @@ class MilesRolloutPool:
         return None, remote
 
     def late_cross_version_fraction(self, rollout_id: int) -> float | None:
-        """E1: the deferred cross-version IS estimate of ``rollout_id`` (fully_async),
+        """The deferred cross-version IS estimate of ``rollout_id`` (fully_async),
         None when the round deferred none or it did not arrive in time."""
         take_late = getattr(self._metadata, "take_late", None)
         if not callable(take_late) or rollout_id not in self._deferred_estimates:
@@ -1015,7 +1015,7 @@ class MilesRolloutPool:
         self._install_data_passes()
         self._install_dispense()
         if self._fully_async and not self._prompt_ledger_installed:
-            # P0-S: account for the prompts the background worker draws
+            # Account for the prompts the background worker draws
             from .fully_async_prompts import install as install_prompt_ledger
 
             self._in_executor(install_prompt_ledger)
@@ -1049,8 +1049,8 @@ class MilesRolloutPool:
     LOAD_DIAG_INTERVAL_S = 60.0
 
     def _load_diag(self, reason: str) -> None:
-        """Rate-limited, reasoned log when the load probe yields nothing (fnA try27:
-        0 ``rl_load_sample`` with no trace of why)."""
+        """Rate-limited, reasoned log when the load probe yields nothing
+        (otherwise 0 ``rl_load_sample`` with no trace of why)."""
         now = time.monotonic()
         last = getattr(self, "_load_diag_last", None)
         if last is not None and last[0] == reason and now - last[1] < self.LOAD_DIAG_INTERVAL_S:
@@ -1117,10 +1117,10 @@ class MilesRolloutPool:
             return None
 
     def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, Any] | None:
-        """rl-infra-spec 1.7: one load sample for ``timeline.classify_load``.
+        """One load sample for ``timeline.classify_load``.
 
         * ``active_requests``/``workers``/``cordoned``: fork-M3 router
-          ``GET /worker_inflight`` (E1's drain reads ``active_requests``);
+          ``GET /worker_inflight`` (the drain reads ``active_requests``);
         * ``running_requests``/``queued_requests``: sum over engines of SGLang
           ``GET /get_load`` (``num_reqs - num_waiting_reqs`` / ``num_waiting_reqs``);
         * ``engine_capacity``: sum over engines of SGLang ``/server_info``
@@ -1236,11 +1236,11 @@ class MilesRolloutPool:
         _resolve(_call(source, method, sorted(members)))
 
     def set_admission(self, open_: bool) -> None:
-        """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
+        """Convertible node: close (False) or open (True)
         harness admission to this pool's running members (no-op without a board)."""
         self._harness_admission("open_admission" if open_ else "close_admission", self.members())
 
-    # E1: set by a driver that runs the --offload-rollout step in its own phase
+    # Set by a driver that runs the --offload-rollout step in its own phase
     # (offload_after_generate); other callers keep the offload inside generate
     defer_offload = False
 
@@ -1289,10 +1289,10 @@ class MilesRolloutPool:
             return frozenset()
         return self._run(running_members(self._controller))
 
-    # -- E1 membership verbs (3.4) ---------------------------------------------
+    # -- membership verbs (3.4) ------------------------------------------------
     def _require_declared(self) -> tuple[str, ...]:
         if not self._declared:
-            raise MembershipPlanError("no declared rollout cells: E1 membership verbs are off")
+            raise MembershipPlanError("no declared rollout cells: membership verbs are off")
         return self._declared
 
     def plan_add(self, count: int) -> frozenset[str]:
@@ -1342,7 +1342,7 @@ class MilesRolloutPool:
         return self._worker_manager
 
     def member_gpus(self, members: Any = None) -> dict[str, tuple[str, ...]]:
-        """Pool GPU ids each member (declared cell) is bound to now (E3 H2: choose
+        """Pool GPU ids each member (declared cell) is bound to now (role transfer: choose
         the members to remove by the GPUs a transfer moves). Read from the fork's
         ``RayWorkerManager.get_cell_bundles`` and mapped back through the startup
         bundle map; ``members`` None = the serving members."""
@@ -1355,7 +1355,7 @@ class MilesRolloutPool:
             raise MembershipPlanError(f"cells {unknown} were not declared at startup")
         describe = getattr(self._controller, "describe_cells", None)
         if callable(describe):
-            # fork F-R1: the controller reports each declared cell's bundles
+            # The controller reports each declared cell's bundles
             # (reordered bundle indices of the startup placement group)
             described = dict(self._run(describe()) or {})
             missing = sorted(set(cells) - set(described))
@@ -1378,14 +1378,14 @@ class MilesRolloutPool:
                          if owned and set(owned) <= wanted)
 
     def bind_members(self, members: frozenset[str], gpus: tuple[str, ...]) -> str:
-        """Bind stopped declared cells to the GPUs a trainer released (E3 role transfer, 4.7).
+        """Bind stopped declared cells to the GPUs a trainer released (role transfer, 4.7).
 
         Points a fresh placement-group view (fork-M6 ``set_pg_view``) at the
         startup bundles of ``gpus`` and rebinds each cell (``rebind_cell``) to
         consecutive slots of it, in sorted member order, so the next
         ``add_engines`` starts them there. Returns the view name.
 
-        Depends on fork gap F-R1: the fork (M1) cannot declare at startup a
+        Depends on the fork cell declaration: the fork (M1) cannot declare at startup a
         stopped rollout cell whose default binding lies outside the rollout
         view, so on the real fork there may be no such cell to bind yet.
         """
@@ -1408,7 +1408,7 @@ class MilesRolloutPool:
         if running:
             raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
         cross = bool(getattr(self._args, "yeto_rl_allow_cross_node_engine_tp", False))
-        for i, cell in enumerate(cells):  # rl-multinode-island D7: a cell never spans nodes by default
+        for i, cell in enumerate(cells):  # A cell never spans nodes by default
             run = gpus[i * per:(i + 1) * per]
             if not self._bundles.same_node(run):
                 # ruling 2026-10-04 v2: with the explicit opt-in a cross-node engine is one
@@ -1438,7 +1438,7 @@ class MilesRolloutPool:
         return view
 
     def unbind_members(self, members: frozenset[str]) -> None:
-        """Return stopped deferred cells to unbound (fork F-R1 ``unbind_cell``), so
+        """Return stopped deferred cells to unbound (fork ``unbind_cell``), so
         their bundles are free for a growing trainer (4.7 rollout->trainer, after
         ``remove_engines``). Only cells declared stopped (``start: false``) can be
         unbound; a startup-started cell keeps its bundles (the fork asserts)."""
@@ -1626,7 +1626,7 @@ class MilesRolloutPool:
         }
 
     def member_states(self) -> dict[str, dict[str, Any]] | None:
-        """Per declared member (fork F-R1 ``describe_cells``): ``state`` (unbound /
+        """Per declared member (fork ``describe_cells``): ``state`` (unbound /
         stopped / running), ``tracked``, ``serving``, ``awaiting_admission``. Used by
         the restart recovery (3.7) to refuse unbound targets and to verify router
         admission before release. None on a fork without ``describe_cells``."""

@@ -1,11 +1,11 @@
-"""Per-bucket evaluation metrics (rl-eval-difficulty-buckets D4, tasks 3.2).
+"""Per-bucket evaluation metrics.
 
 Input: the deduplicated per-unit result records of one policy version (and
 optionally of version 0 for the paired difference). A record carries at least
 ``task_id``, ``trial``, ``eval_bucket``, ``success`` (bool), ``reward`` and
 ``end_reason`` (completed / max_turns / max_seq_len / timed_out / infra_error).
 
-``infra_error`` records never count in the pass rate (D6.d); they are reported
+``infra_error`` records never count in the pass rate; they are reported
 as a fraction of their own. Standard errors come from a task-level bootstrap
 (resample tasks, keep each task's trials together) with a fixed seed, so the
 same records always give the same numbers.

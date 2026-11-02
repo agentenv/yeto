@@ -1,4 +1,4 @@
-"""fleet-dashboard 1.2/1.3/2.1/2.2: a tape written by the (fake-engine) ports
+"""A tape written by the (fake-engine) ports
 driver with the new events, read back by the dashboard reducer."""
 
 from __future__ import annotations

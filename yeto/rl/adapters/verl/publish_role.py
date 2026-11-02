@@ -1,4 +1,4 @@
-"""verl publication role (``publish`` in the backend registry; S27 G-DC, V10).
+"""verl publication role (``publish`` in the backend registry).
 
 (``publish.py`` of this adapter is the LoRA publication checksum module.)
 
@@ -29,5 +29,5 @@ def publisher_class(engine: str):
 
 def __getattr__(name: str):
     if name == "INJECT_UPDATE_BLOCK_ENV":
-        raise ValueError("verl 后端没有接 --rl-test-inject-update-weights-block-s（只在 Miles 岛上）")
+        raise ValueError("the verl backend does not wire --rl-test-inject-update-weights-block-s (Miles islands only)")
     raise AttributeError(name)

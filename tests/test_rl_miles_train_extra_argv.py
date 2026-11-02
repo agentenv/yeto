@@ -1,4 +1,4 @@
-"""S27 G-Y: YETO_MILES_TRAIN_EXTRA_ARGV allow-list (MFU measurement flags, Nemotron-H only)."""
+"""YETO_MILES_TRAIN_EXTRA_ARGV allow-list (MFU measurement flags, Nemotron-H only)."""
 import pytest
 
 from yeto.rl.adapters.miles.config import MilesConfigError, train_extra_argv
@@ -33,5 +33,5 @@ def test_commas_split_like_spaces():
 
 
 def test_log_prob_chunking_is_allowed():
-    # S27 G-EF: the colocated agentic run ran out of memory in the full fp32 log-prob block
+    # the colocated agentic run ran out of memory in the full fp32 log-prob block
     assert train_extra_argv("nemotron_h", "--log-probs-chunk-size,4096") == ("--log-probs-chunk-size", "4096")

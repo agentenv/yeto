@@ -1,4 +1,4 @@
-"""Ports Miles argv of the expanded DeepSeek V4 Flash recipe (P0 1.7b.2).
+"""Ports Miles argv of the expanded DeepSeek V4 Flash recipe.
 
 The removed legacy translation carried the same recipe for the agentenv Miles
 fork.  Two of its flags existed only there:

@@ -1,4 +1,4 @@
-"""Fragment-sharded syncer head (S27 P4b) with real syncer processes.
+"""Fragment-sharded syncer head with real syncer processes.
 
 N syncer shards run on localhost; fake islands (threads with a
 ``ShardedSyncerClient``) answer every PULL with a deterministic learner

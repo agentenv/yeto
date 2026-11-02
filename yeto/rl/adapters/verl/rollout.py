@@ -1,4 +1,4 @@
-"""verl rollout role (``rollout``; S27 G-DC, V10).
+"""verl rollout role (``rollout``).
 
 The rollout ports of the verl islands: :class:`~.ports_impl.VerlRolloutPool`
 for both engines (the FSDP2 colocated island and the Megatron island with its
@@ -20,5 +20,5 @@ def rollout_pool_class():
 
 def __getattr__(name: str):
     if name == "INJECT_START_DELAY_ENV":
-        raise ValueError("verl 后端没有接 --rl-test-inject-start-delay-s（rollout 启动延迟注入只在 Miles 岛上）")
+        raise ValueError("the verl backend does not wire --rl-test-inject-start-delay-s (rollout start-delay injection is Miles-only)")
     raise AttributeError(name)

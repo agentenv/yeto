@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Judge a Qwen3.8-Flash-Next-4layer native LoRA GRPO trainer log (M4 G3/G4, T2-S7 §4).
+"""Judge a Qwen3.8-Flash-Next-4layer native LoRA GRPO trainer log.
 
     judge_qwen3_8_next_lora_log.py LOG --num-gpus 4 --rank 32 --expert-rank 8 [--rollouts 5]
         [--eval-min 0] [--adapter-restart] [--json OUT]
@@ -7,10 +7,10 @@
 Checks (each reported PASS/FAIL, exit 0 only if all pass):
   trainable      `native LoRA applied: ... trainable=N` shows exactly the two
                  per-rank values of expected_rank_trainable_4layer, each
-                 num_gpus/2 times (M3 acceptance #1, F2 wording)
+                 num_gpus/2 times
   lora_check     no `[LORA-CHECK]` / `end_weight_update failed` line, i.e. the
                  --check-lora-weight-equal name-set + sha256 read-back passed
-                 (M3 #3/#4: 54 serving modules incl. zero-padded experts)
+                 (54 serving modules incl. zero-padded experts)
   rollouts       `step <i>: {'train/...}` rounds == --rollouts
   rewards        (info) rollout/rewards and truncated ratio per round, grad_norm
                  == 0 everywhere is flagged: LoRA B stays 0 and the logprob
@@ -18,7 +18,7 @@ Checks (each reported PASS/FAIL, exit 0 only if all pass):
   finite         train/loss, ppo_kl, grad_norm, train_rollout_logprob_abs_diff
                  present and finite in every round
   logprob_diff   rounds >= 2 of train_rollout_logprob_abs_diff within 10x of
-                 round 1 (QSA de-interleave end-to-end, M3 #2)
+                 round 1 (QSA de-interleave end-to-end)
   load_keys      no `missing key` / `unexpected key` from checkpoint loading
   eval           (--eval-min N) at least N `eval <i>:` lines carrying eval/aime
   adapter        (--adapter-restart) `Successfully loaded LoRA adapter from`

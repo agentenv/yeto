@@ -1,4 +1,4 @@
-//! Streaming reduction of one fragment's learner pushes (S27 P4, P4b).
+//! Streaming reduction of one fragment's learner pushes.
 //!
 //! The buffered merge (`GlobalState::prepare_merge`) keeps every learner's
 //! decoded f32 outer gradient for a fragment until the round completes, so
@@ -27,8 +27,8 @@
 //!   buffered path (not needed by the strict full-parameter preset).
 //!
 //! Rounds outside those conditions (quorum below the roster, adaptive grace,
-//! token weights) can use `StreamingFold` instead (S27 P4b,
-//! `--weighted-fold streaming`): pushes fold in arrival order into
+//! token weights) can use `StreamingFold` instead
+//! (`--weighted-fold streaming`): pushes fold in arrival order into
 //! unnormalised sums that are divided by the weight sum at close.  It trades
 //! bit identity for bounded memory; see its documentation for the bound.
 
@@ -246,7 +246,7 @@ impl std::str::FromStr for WeightedFoldMode {
 
 /// Arrival-order streaming reduction for rounds whose responder set or
 /// weights are only known when the round closes (quorum K below the roster,
-/// adaptive grace, tokens²/steps weights).  S27 P4b.
+/// adaptive grace, tokens²/steps weights).
 ///
 /// Each push is folded on arrival into unnormalised accumulators and its
 /// buffer is dropped.  `finish` normalises by the final weight sum.  To keep

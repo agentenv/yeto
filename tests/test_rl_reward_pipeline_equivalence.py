@@ -1,7 +1,7 @@
 """Dispatcher == Miles built-in ``_post_process_rewards`` (rl-algo-grpo-knobs 5.2).
 
-Runs where upstream Miles imports (``~/work/miles-next-venv`` with
-``PYTHONPATH=<yeto>:~/work/miles-next``); skipped otherwise.
+Runs where upstream Miles imports (a Miles venv with
+``PYTHONPATH=<yeto>:<miles-checkout>``); skipped otherwise.
 Element-wise comparison with ``torch.equal`` (not approximate).
 """
 
@@ -21,7 +21,7 @@ from yeto.rl.algos import grpo_knobs, reward_pipeline as rp  # noqa: E402
 from yeto.rl.engine.algorithm import AlgorithmSpec  # noqa: E402
 
 # sha256 of miles/ray/rollout/train_data_conversion.py at MILES_NEXT_COMMIT
-# 7402a53d5. Re-reviewed for it (S27 G-CR): `git diff 03947150 7402a53d5 --
+# 7402a53d5. Re-reviewed for it: `git diff 03947150 7402a53d5 --
 # miles/ray/rollout/train_data_conversion.py` is 58 added lines, 0 removed --
 # the segment_ids / tokens_after / gae_length / positive_example_success
 # train-data fields and their value specs; _post_process_rewards,

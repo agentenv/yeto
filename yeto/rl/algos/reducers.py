@@ -1,4 +1,4 @@
-"""Dr.GRPO constant-denominator pg_loss reducer (change ``rl-algo-grpo-knobs``, design D2).
+"""Dr.GRPO constant-denominator pg_loss reducer (change ``rl-algo-grpo-knobs``).
 
 Vendored from radixark/miles ``9e4260d``
 ``examples/experimental/DrGRPO/custom_reducer.py``
@@ -9,7 +9,7 @@ Vendored from radixark/miles ``9e4260d``
 
 The only change: the divisor is not the module constant ``DIVISOR = 1000.0``
 but ``loss.constant_denominator`` of the AlgorithmSpec, read from
-``args.yeto_algo_plugins`` (hash-checked, design D5). ``args`` is the Miles
+``args.yeto_algo_plugins`` (hash-checked). ``args`` is the Miles
 namespace Megatron keeps as its global args (Miles ``initialize.py``
 ``set_args(args)``); a missing denominator raises. yeto rejects
 ``loss.aggregation='constant'`` with ``--calculate-per-token-loss`` and with
@@ -70,7 +70,7 @@ def constant_denominator_reducer(
 
     assert _cp_world_size() == 1, "This custom reducer only supports cp_size == 1"
     if calculate_per_token_loss:
-        # yeto refuses this combination before launch (design D2); the
+        # yeto refuses this combination before launch; the
         # original example degrades to a plain token sum here.
         raise RuntimeError(
             "loss.aggregation='constant' cannot be combined with --calculate-per-token-loss"

@@ -2,8 +2,8 @@
 
 Skips unless upstream Miles imports. Run in the pinned upstream venv:
 
-    PYTHONPATH=~/work/miles-next:$PWD \\
-      ~/work/miles-next-venv/bin/python -m pytest -q \\
+    PYTHONPATH=<miles-checkout>:$PWD \\
+      <miles-venv>/bin/python -m pytest -q \\
       tests/test_rl_algorithm_flags_upstream.py
 
 2.6 runs upstream ``miles.utils.arguments.parse_args`` (which also runs

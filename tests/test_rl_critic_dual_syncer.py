@@ -1,4 +1,4 @@
-"""rl-algo-critic-family 4.2/4.3 (design D4 plan a): dual syncer, critic tensor
+"""rl-algo-critic-family 4.2/4.3 (one syncer per channel): dual syncer, critic tensor
 plugin, cross-channel atomic commit, round-cut critic checkpoint (CPU only)."""
 
 from __future__ import annotations
@@ -348,7 +348,7 @@ def test_two_islands_actor_and_critic_hashes_agree(tmp_path):
         applies = [c for c in e.calls if c[0] in ("apply", "critic_apply")]
         # initial + 2 committed rounds, critic applied before the actor each time
         assert [c[0] for c in applies] == ["critic_apply", "apply"] * 3
-    # G3 evidence: per committed version, both islands record the same applied critic
+    # GPU-run evidence: per committed version, both islands record the same applied critic
     import json
 
     tapes = [[json.loads(line) for line in (tmp_path / f"i{i}.jsonl").read_text().splitlines()]
@@ -408,7 +408,7 @@ def test_build_sync_selects_the_dual_channel_for_a_critic():
     from yeto.rl.adapters.miles.entry import build_sync
 
     base = dict(yeto_rl_bridge_config=SimpleNamespace(), yeto_rl_sync_preset="strict-avg",
-                yeto_rl_completed_groups_path="/tmp/s13/none.pt")
+                yeto_rl_completed_groups_path="/tmp/critic/none.pt")
     sync, _ = build_sync(SimpleNamespace(**base, use_critic=True,
                                          yeto_rl_critic_syncer_addr=("h", 29401)), yeto_policy_sync=True)
     assert isinstance(sync, DualStrictAvgSync) and sync.OUTER_SYNC_KIND == "strict"
@@ -417,7 +417,7 @@ def test_build_sync_selects_the_dual_channel_for_a_critic():
 
 
 def test_write_back_ships_only_each_tensors_own_bytes():
-    """s19-ppo-g3-20261009a: the channel hands import_critic_state views into one
+    """A PPO GPU run: the channel hands import_critic_state views into one
     flat buffer; pickling a view writes the whole buffer, so the run_plugin payload
     grew to (number of tensors) x (buffer size). The write-back must pickle to about
     the size of the weights."""
@@ -484,7 +484,7 @@ def _catchup_sync(monkeypatch, *, critic_version, actor_version, awaited):
 
 
 def test_restarted_island_catches_the_critic_channel_up(monkeypatch):
-    """s19-ppo-g3-20261009b: island 1 was killed after the actor channel committed
+    """A PPO GPU run: island 1 was killed after the actor channel committed
     v1 and before its critic push reached the critic syncer; the relaunched island
     found actor v1 / critic v0 and refused to start, and island 0 waited forever.
     The relaunched island now pushes its committed critic unchanged for v1."""

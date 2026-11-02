@@ -1,6 +1,6 @@
 """Pre-optimizer LoRA gradient audit for the teacher-forcing check.
 
-rl-engine-ports tier 2 (design D12) gates the teacher-forcing step on the LoRA
+The teacher-forcing tier 2 gates the teacher-forcing step on the LoRA
 *gradient*, not on the Adam update: Adam's first step is ~``lr * sign(g)``, so
 bf16 noise flips the sign of near-zero gradient elements and inflates the update
 distance even when the gradients agree. The island therefore exports, per

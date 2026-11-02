@@ -1,4 +1,4 @@
-"""Updates of the sampler weights during a generation (S27 R-3 follow-up).
+"""Updates of the sampler weights during a generation.
 
 The ``sglang-server`` adapter against a fake SGLang HTTP server
 (:mod:`fake_sglang_server`) that models the update lock and pause/continue,
@@ -104,7 +104,7 @@ def test_live_update_pauses_loads_and_continues_the_running_round(tmp_path):
 
 
 def test_without_live_update_the_update_waits_for_the_round(tmp_path):
-    """The E5 behavior: the release waits behind the whole generation."""
+    """The previous behavior: the release waits behind the whole generation."""
     with FakeSGLang() as fake:
         engine = _engine(tmp_path, fake, live=False)
         assert not updates_during_generation(engine)

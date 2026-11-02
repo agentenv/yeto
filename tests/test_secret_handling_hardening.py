@@ -31,7 +31,7 @@ GOOD = "3b9e60e5a2c554a2826f6cef83fdeecabfc1723d6663c4d5fd23b01e08a555e2"
 BAD = "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
 
 
-# --------------------------------------------------------------------------- D1 HELLO HMAC
+# --------------------------------------------------------------------------- HELLO HMAC---
 
 def test_seal_hello_appends_domain_separated_hmac():
     body = b"hello-body"
@@ -113,7 +113,7 @@ def test_legacy_hello_with_right_key_is_admitted_wrong_key_refused(syncer_binary
         _stop(process)
 
 
-# --------------------------------------------------------------------------- D2 head-pinned contract
+# --------------------------------------------------------------------------- head-pinned contract---
 
 def test_pinned_contract_refuses_a_negative_island_that_connects_first(syncer_binary, tmp_path):
     port = _port()
@@ -179,7 +179,7 @@ def test_cli_validates_the_pinned_contract():
         sha256_hex_arg("ABC")
 
 
-# --------------------------------------------------------------------------- D3 token boundary
+# --------------------------------------------------------------------------- token boundary---
 
 def test_secret_envs_are_split_out_of_plain_envs():
     from yeto import launcher
@@ -191,7 +191,7 @@ def test_secret_envs_are_split_out_of_plain_envs():
     assert secrets == {"HF_TOKEN": "h", "WANDB_API_KEY": "w", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "s"}
 
 
-# --------------------------------------------------------------------------- D4 island start-up check
+# --------------------------------------------------------------------------- island start-up check---
 
 def test_guard_names_match_the_launcher_list():
     from yeto import launcher

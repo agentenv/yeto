@@ -1,7 +1,7 @@
 """Structural check of a SecRLEnv grader verdict in trajectory metadata.
 
-Kept from the SecRLEnv reward of the removed self-written Codex harness (S26
-E0.5, tag s26-pre-harness-removal) so trajectory evidence of the ``secrlenv``
+Kept from the SecRLEnv reward of the removed self-written Codex harness so
+trajectory evidence of the ``secrlenv``
 kind still verifies; the same role ``tbench_outcome`` has for Terminal-Bench.
 Rewards are not signed (``rl-drop-reward-tamper-hash``): this checks
 shape, status and range only.

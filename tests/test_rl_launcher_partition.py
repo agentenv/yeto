@@ -1,4 +1,4 @@
-"""rl-infra-spec 2.1: launcher shapes a LoRA fixed partition (trainer = node - rollout - standby)."""
+"""Launcher shapes a LoRA fixed partition (trainer = node - rollout - standby)."""
 
 from __future__ import annotations
 

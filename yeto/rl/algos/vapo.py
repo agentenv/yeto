@@ -1,7 +1,7 @@
-"""VAPO declaration (change ``rl-algo-critic-family`` task 7.2, design D7).
+"""VAPO declaration (change ``rl-algo-critic-family`` ).
 
 VAPO (arXiv 2504.05118v3) = PPO with a critic plus, from its sec. 5.1 list:
-value pretraining (50 steps; run as the warm-up stage W, design D5),
+value pretraining (50 steps; run as the warm-up stage W),
 decoupled GAE (value target lambda 1.0), length-adaptive policy lambda
 ``1 - 1/(alpha*l)`` with alpha 0.05, clip-higher (eps_low 0.2, eps_high 0.28),
 token-level policy loss, positive-example LM loss (weight 0.1) and group
@@ -13,8 +13,8 @@ Translation: PPO (shared actor/critic, ``critic_argv``) + the fork's
 (fork 70e3d7761: positives from the reward function's explicit boolean success
 field; NLL normalized by the global positive-token count, eq. 9). Values not in
 the paper are not invented: every configuration that differs from the paper or
-that the paper does not give is listed in :data:`DEVIATIONS` (design D7). Not a registration module (no fields/flags here);
-execution is not declared available before GPU G1 (task 7.3).
+that the paper does not give is listed in :data:`DEVIATIONS`. Not a registration module (no fields/flags here);
+execution is not declared available before a GPU run verifies it.
 """
 
 from __future__ import annotations
@@ -49,11 +49,11 @@ PAPER_RUN_SETTINGS: dict[str, Any] = {
 }
 
 # Every configuration that differs from the paper or that the paper does not
-# give (user decision E, 2026-10-07; mirrored in design D7):
+# give (user decision E):
 # (item, yeto value, source of the value, relation to the paper).
 DEVIATIONS: tuple[tuple[str, str, str, str], ...] = (
     ("critic.init", "copy_actor_backbone + 50-step warm-up (stage W) with value-quality "
-     "metrics (critic_warmup.value_quality)", "design D5; user decision B",
+     "metrics (critic_warmup.value_quality)", "user decision B",
      "differs: paper initializes the value model from a reward model; no RM in this stack"),
     ("loss.positive_lm_source", "success (explicit boolean sample.metadata success/is_correct "
      "from the reward function; missing -> error)", "user decision C",

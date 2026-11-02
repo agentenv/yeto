@@ -447,18 +447,11 @@ AF3-style structure diffusion, use the Protenix adapter.
 - Raw-video LoRA has been exercised on LTX-Video and Wan2.1; Wan2.1 14B and
   dual-denoiser Wan2.2 have completed 8-GPU FSDP2 validation.
 - The NAVA external adapter has completed GPU train/save/reload validation.
-- Ascend 910B4 validation includes SD 1.5 raw-image LoRA under DDP and two-card
-  FSDP2/HCCL, plus CogVideoX-5b-nf4 raw-MP4 LoRA training, adapter reload, and
-  MP4 generation. The quantized load contained 341 real BnB 4-bit layers; the
-  saved 336-tensor adapter contained 4,128,768 finite values.
-- PixArt Alpha XL-2 at ModelScope commit
-  `9330fbbca134bd66ba7d25f8267213db0451acdd` completed two single-card Ascend
-  optimizer steps over real Pokemon BLIP image/caption rows at 256×256. Its
-  448-tensor attention LoRA contained 2,064,384 finite values, and all 224
-  LoRA-B tensors changed. A separate base-plus-adapter reload completed
-  two-step sampling and wrote a valid 256×256 RGB PNG.
-- External diffusion adapters have not yet completed equivalent Ascend
-  train/save/reload validation.
+- On Ascend 910B: SD 1.5 raw-image LoRA under DDP and two-card FSDP2/HCCL;
+  CogVideoX-5b NF4 raw-MP4 LoRA training, adapter reload and MP4 generation;
+  PixArt Alpha XL-2 attention-LoRA training, reload and sampling. See
+  [ASCEND.md](ASCEND.md#validation-status).
+- External diffusion adapters have not been trained and reloaded on Ascend.
 - Held-out quality and equal-hardware synchronization are separate concerns;
   use [DIFFUSION_BENCHMARK.md](DIFFUSION_BENCHMARK.md) for that experiment.
 

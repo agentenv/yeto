@@ -1,7 +1,7 @@
 """dashboard 5.1/5.2: controller rl_cell_snapshot / rl_reconfig_phase events."""
 from __future__ import annotations
 
-from test_rl_reconfig_e1 import _attestation, _profile, _setup, _up_then_down, FP  # noqa: F401
+from test_rl_reconfig_controller import _attestation, _profile, _setup, _up_then_down, FP  # noqa: F401
 
 from yeto.rl.engine.controller import COMMITTED, SUCCEEDED, IslandController
 from yeto.rl.engine.journal import read_journal

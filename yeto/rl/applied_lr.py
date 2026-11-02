@@ -1,4 +1,4 @@
-"""The learning rate each optimizer step actually applies (fix-decoupled-lr-schedule D4).
+"""The learning rate each optimizer step actually applies.
 
 Miles steps the LR scheduler *after* ``optimizer.step()`` and logs
 ``train/lr-pg_0`` after that, so the logged value is always the LR of the

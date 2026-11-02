@@ -1,4 +1,4 @@
-"""S25 N10.9: the Miles Harbor path with the records proxy as recorder (CPU).
+"""The Miles Harbor path with the records proxy as recorder (CPU).
 
 Real pieces: ``records_generate.run_sample`` (outer layer, outcome rules,
 ``join_turns``, sample filling), ``ProxyTokenRecorder`` over HTTP, the gateway

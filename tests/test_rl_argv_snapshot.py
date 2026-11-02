@@ -37,7 +37,7 @@ def _captured_args():
 
 
 def test_standby_gpus_need_a_lora_fixed_partition():
-    """rl-infra-spec 2.1 / review F7: standby is never silently dropped."""
+    """Standby is never silently dropped."""
 
     import argparse
 

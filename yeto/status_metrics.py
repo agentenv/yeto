@@ -189,9 +189,9 @@ def summarize_tape(records: list[dict]) -> dict:
     }
 
 
-NO_DATA = "无数据"
+NO_DATA = "n/a"
 # (label, field paths) shown per island for learner tapes (fleet-dashboard 1.5);
-# a path "a.b" reads record["a"]["b"]. Missing/None renders as 无数据, never 0.
+# a path "a.b" reads record["a"]["b"]. Missing/None renders as n/a, never 0.
 TRAIN_FIELDS = (
     ("train_step", ("train_step",)),
     ("reward", ("reward_mean",)),

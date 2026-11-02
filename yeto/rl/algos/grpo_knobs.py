@@ -1,20 +1,20 @@
 """GRPO-family knobs on the ports path (change ``rl-algo-grpo-knobs``).
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. It adds
-(through the P0 registry, never by editing the shared files):
+(through the core extension registry, never by editing the shared files):
 
 * spec fields
   - ``advantage.reward_shapers``: ordered list of ``{"name": <REWARD_SHAPERS key>, **params}``
-    (``overlong_penalty`` with ``max_length``/``cache_length``, design D6);
+    (``overlong_penalty`` with ``max_length``/``cache_length``);
   - ``advantage.transform`` / ``advantage.transform_params``: the
     ``ADV_TRANSFORMS`` key (default ``grpo_default``) and its parameters
-    (P2 ``rl-algo-seq-and-adv`` registers more keys);
-  - ``loss.constant_denominator``: Dr.GRPO constant denominator (design D2);
-  - ``kl.ref_model``: ``{"source", "revision"}`` reference model identity (design D3);
+    (:mod:`yeto.rl.algos.seq_adv` registers more keys);
+  - ``loss.constant_denominator``: Dr.GRPO constant denominator;
+  - ``kl.ref_model``: ``{"source", "revision"}`` reference model identity;
 * rejection rules (pre-GPU, field-named): dispatcher selection, stage
   parameters, constant aggregation, KL reference identity, over-sampling;
 * :func:`plugins_config` -- the JSON configuration the dispatcher / reducer /
-  overlong filter read from ``args.yeto_algo_plugins`` (design D5);
+  overlong filter read from ``args.yeto_algo_plugins``;
 * :func:`launch_problems` -- the checks that need the run configuration
   (rollout batch size, generation limit, CP, multi-LoRA).
 
@@ -136,7 +136,7 @@ register_field("kl", "ref_model", default=None, parse=_parse_ref_model, to_json=
 
 
 # --------------------------------------------------------------------------
-# mechanisms (features dimension; declared only after G1, design D1)
+# mechanisms (features dimension; declared only after a single-GPU smoke)
 # --------------------------------------------------------------------------
 
 
@@ -153,7 +153,7 @@ register_mechanism("features", "kl_loss_ref_model", lambda s: s.kl.ref_model is 
 
 
 # --------------------------------------------------------------------------
-# rejection matrix additions (design D1-D7)
+# rejection matrix additions
 # --------------------------------------------------------------------------
 
 
@@ -258,7 +258,7 @@ def _reject_plugins(s) -> str | None:
     required = required_plugins(s)
     listed = {p.path: p.sha256 for p in s.plugins}
     missing = [r.path for r in required if r.path not in listed]
-    # rl-identity-tiering L9.2: a stale source hash is a startup warning
+    # a stale source hash is a startup warning
     # (AlgorithmSpec.verify_plugins), not a rejection.
     if missing:
         return (
@@ -277,7 +277,7 @@ register_rejection("grpo_knobs_over_sampling", _reject_over_sampling)
 
 
 # --------------------------------------------------------------------------
-# runtime attrs (design D5) and run-configuration checks
+# runtime attrs and run-configuration checks
 # --------------------------------------------------------------------------
 
 
@@ -428,7 +428,7 @@ def _launch_check(spec, values):
     )
 
 
-# P0 extension hooks (algo-cap ebd436b, merged from infra-drafts/1b-shared.patch).
+# Core extension hooks.
 from yeto.rl.engine.algorithm import (  # noqa: E402
     register_gradient_rule,
     register_island_check,
@@ -448,37 +448,33 @@ register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
 
 
 # --------------------------------------------------------------------------
-# task 8.3: mechanisms whose single-GPU smoke (G1) passed
-# (openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/g1_report.json).
-# overlong_filter is NOT declared (its hook wiring, 1b-hook.patch, is not merged
-# and it has no G1). Declaring means only "G1 passed", never "improves training".
+# Mechanisms whose single-GPU smoke passed. Declaring means only "the smoke
+# passed", never "improves training".
 # --------------------------------------------------------------------------
 
-G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
-# integ-decl: the only allowed reducer is claimed by the constant-denominator
-# aggregation (P0 register_named_reducer), so declaring loss_aggregations:
+# The only allowed reducer is claimed by the constant-denominator
+# aggregation (register_named_reducer), so declaring loss_aggregations:
 # constant admits it without the generic features:custom_pg_loss_reducer.
 from yeto.rl.engine.algorithm import register_named_reducer  # noqa: E402
 
-# Pinned to the reducer source the drgrpo G1 ran (evidence
-# 2026-09-29-algo1b-g1/out/drgrpo/algorithm_spec.json).
+# Pinned to the reducer source the Dr.GRPO smoke ran.
 REDUCER_SOURCE_SHA256 = "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
 register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",),
                        sha256=REDUCER_SOURCE_SHA256)
 
-G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
-    # G1 run -> mechanisms declared from it (dimension -> names); mirrors the 1b
-    # part of integ-decl MILES_DECLARED (5f56ff9). Only mechanisms shown to take
-    # effect on the GPU. dual_clip is NOT declared (no dual-branch metric).
-    # custom_pg_loss_reducer: P0 register_named_reducer (only the Dr.GRPO reducer).
-    "drgrpo": {"loss_aggregations": frozenset({"constant"})},  # g1 attempt2
+GRPO_KNOBS_DECLARED: dict[str, dict[str, frozenset[str]]] = {
+    # smoke run -> mechanisms declared from it (dimension -> names); mirrors the
+    # GRPO-knob part of MILES_DECLARED. Only mechanisms shown to take effect on
+    # the GPU. dual_clip is NOT declared (no dual-branch metric).
+    # custom_pg_loss_reducer: register_named_reducer (only the Dr.GRPO reducer).
+    "drgrpo": {"loss_aggregations": frozenset({"constant"})},
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
                          "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
     "g1b_a_r1": {"features": frozenset({"eps_clip"})},  # clipfrac > 0 (window only)
     "g1c_no_std": {"features": frozenset({"no_grpo_std_normalization"})},
-    # The next four are pinned to Miles 0af62f4d (integ-decl images):
+    # The next four are pinned to Miles 0af62f4d:
     "g1f_token": {"loss_aggregations": frozenset({"token"})},  # needs the LoRA-bridge fix
     "g1h_over_sampling": {"features": frozenset({"over_sampling"})},
     "g1i_overlong_filter": {"features": frozenset({"overlong_filter"})},
@@ -488,17 +484,17 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
 
 
 def declared_mechanisms() -> dict[str, frozenset[str]]:
-    """Union of G1_DECLARED per dimension (to merge into the engine declaration)."""
+    """Union of GRPO_KNOBS_DECLARED per dimension (to merge into the engine declaration)."""
 
     out: dict[str, set[str]] = {}
-    for dims in G1_DECLARED.values():
+    for dims in GRPO_KNOBS_DECLARED.values():
         for dim, names in dims.items():
             out.setdefault(dim, set()).update(names)
     return {d: frozenset(n) for d, n in out.items()}
 
 
 def merge_declared(capabilities):
-    """``capabilities`` with the G1-declared mechanisms added (union per dimension)."""
+    """``capabilities`` with the smoke-declared mechanisms added (union per dimension)."""
 
     import dataclasses
 

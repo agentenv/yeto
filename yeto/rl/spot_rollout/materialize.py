@@ -1,4 +1,4 @@
-"""Turn a subscriber's weight cut into a Hugging Face directory (S27 G-EA).
+"""Turn a subscriber's weight cut into a Hugging Face directory.
 
 The syncer sends each fragment as bf16 values in layout order. This module
 splits them by the trainer's layout (``layout_manifest``), joins the row
@@ -13,7 +13,7 @@ trainer with TP = PP = EP = 1 (the whole model in one rank's copy). A
 sharded trainer needs the per-shard ``param_layout`` record (global names,
 TP split) to merge slices, which the layout record does not carry yet.
 
-S27 G-EV: a verl full-parameter trainer's layout names its parameters by their
+A verl full-parameter trainer's layout names its parameters by their
 HF names under the shard id ``global`` (``adapters/verl/full_parameter.py``: the
 FSDP2 layout carries no shard identity). Those names are written as they are,
 without the Megatron conversion (:func:`hf_named_layout`).
@@ -72,7 +72,7 @@ def megatron_model(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
 
 
 def hf_model(layout: FragmentLayout, cut: WeightCut) -> dict[str, Any]:
-    """``{HF name: bf16 tensor}`` of a :func:`hf_named_layout` cut (S27 G-EV)."""
+    """``{HF name: bf16 tensor}`` of a :func:`hf_named_layout` cut."""
     if not hf_named_layout(layout):
         raise MaterializeError(f"the layout does not name HF parameters (shard {HF_NAMED_SHARD!r})")
     return _whole_tensors(layout, cut)
@@ -125,7 +125,7 @@ def materialize(layout: FragmentLayout, cut: WeightCut, *, base_model: str | os.
 
     base = Path(base_model)
     config = json.loads((base / "config.json").read_text())
-    hf_names = convert is None and hf_named_layout(layout)  # S27 G-EV: verl names the HF parameters
+    hf_names = convert is None and hf_named_layout(layout)  # verl names the HF parameters
     if convert is None and not hf_names:
         convert = miles_converter(model_name or str(config["model_type"]))
     tag = hashlib.sha256(json.dumps(list(cut.versions)).encode()).hexdigest()[:12]

@@ -39,7 +39,7 @@ def test_protocol_shapes():
     assert isinstance(Pool(), ports.RolloutPool)
     assert isinstance(Trainer(), ports.TrainerGroup)
     assert not isinstance(Pool(), ports.TrainerGroup)
-    # E1-E3 verbs are reserved, not required in R0.
+    # membership verbs are reserved, not required in R0.
     assert not hasattr(ports.RolloutPool, "add_engines")
     assert not hasattr(ports.TrainerGroup, "save_cut")
     assert not hasattr(ports.Placement, "reconfigure")

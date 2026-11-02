@@ -1,4 +1,4 @@
-"""``--rl-engine ports`` composition root (tasks 5.1, design D2).
+"""``--rl-engine ports`` composition root.
 
 ``run_ports_island`` is what ``yeto.rl.adapters.miles.island_entry.run_miles`` calls on the ports
 path, after the legacy-shared validation has produced the parsed upstream Miles
@@ -64,109 +64,76 @@ def ports_runtime_fingerprint(launch: Any) -> str:
     return runtime_fingerprint(launch, MILES_NEXT_COMMIT)
 
 
-# Declared beyond R0: "dimension:name" -> evidence that the mechanism takes
-# effect on GPU (declaration policy, rl-infra-spec alignment §7b; may be
-# overridden by the user). One entry per mechanism, added in its own commit.
-_E1A = "openspec/changes/rl-algo-mismatch-correction/evidence"
-_E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
-_E1B_B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1b"
-_E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
-_E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
-_E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
-_E1B_G1I = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1i"
-_E1B_G1J = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1j"
-_ESUP = "openspec/changes/rl-algo-supplement/evidence/phase1-gpu"
-_E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
+# Declared beyond R0: "dimension:name" -> why the mechanism is declared, i.e. the
+# GPU observation showing it takes effect (declaration policy; may be overridden
+# by the user). One entry per mechanism.
 MILES_DECLARED: dict[str, str] = {
-    "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
+    "corrections:tis": "GPU run: tis_clipfrac > 0",
     "corrections:opsm": (
-        f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0, optimizer_steps 2); the OPSM "
-        "dimension that every source-specific OPSM mechanism also requires"
+        "GPU run: opsm_clipfrac > 0 with 2 optimizer steps; the OPSM dimension that every "
+        "source-specific OPSM mechanism also requires"
     ),
-    "corrections:opsm_trainer": f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0)",
-    "features:maxrl": f"{_E2A}/attempt4 (maxrl)",
-    "features:mapo": f"{_E2A}/attempt4 (mapo)",
-    "loss_aggregations:constant": f"{_E1B}/g1_report_v2.json drgrpo (constant-denominator aggregation)",
-    "kl_placements:loss": f"{_E1B}/g1_report_v2.json kl_k3 (kl_loss 0 / 0.00079 / 0.00082)",
-    "features:kl_loss_ref_model": f"{_E1B}/g1_report_v2.json kl_k3 (ref model loaded, kl_loss > 0)",
-    "features:entropy_bonus": f"{_E1B}/g1_report_v2.json entropy (entropy_loss 0.30/0.38/0.45)",
-    "reward_postprocessors:custom_reward_postprocess": f"{_E1B}/g1_report_v2.json overlong_penalty (dispatcher shaped 4/7/21 of 32 samples)",
-    "features:overlong_penalty": f"{_E1B}/g1_report_v2.json overlong_penalty (shaped_samples 4/7/21)",
-    "advantage_estimators:gspo": f"{_E2A}/attempt6 gspo_s2 (optimizer_steps 2: second-step clipfrac 0.1875/0.5/0.5; steps 1: 0)",
+    "corrections:opsm_trainer": "GPU run: opsm_clipfrac > 0",
+    "features:maxrl": "GPU run: maxrl advantages applied",
+    "features:mapo": "GPU run: mapo advantages applied",
+    "loss_aggregations:constant": "GPU run: constant-denominator aggregation (Dr. GRPO)",
+    "kl_placements:loss": "GPU run: kl_loss 0 / 0.00079 / 0.00082 with k3",
+    "features:kl_loss_ref_model": "GPU run: reference model loaded, kl_loss > 0",
+    "features:entropy_bonus": "GPU run: entropy_loss 0.30 / 0.38 / 0.45",
+    "reward_postprocessors:custom_reward_postprocess": "GPU run: dispatcher shaped 4/7/21 of 32 samples",
+    "features:overlong_penalty": "GPU run: shaped_samples 4/7/21",
+    "advantage_estimators:gspo": "GPU run: second-step clipfrac 0.1875/0.5/0.5 with 2 optimizer steps",
     "advantage_estimators:reinforce_plus_plus": (
-        f"{_E2A}/attempt6 rpp; plan.md 'Attempt 6 addenda': rollout/advantages mean "
-        "0.0155/0.0742/-0.0217 (non-zero where GRPO's group-normalized mean is ~0), "
-        "ref_log_probs scored every round, diverging from round 1 (reward KL active)"
+        "GPU run: rollout/advantages mean non-zero where GRPO's group-normalized mean is ~0; "
+        "ref_log_probs scored every round and diverging from round 1 (reward KL active)"
     ),
     "advantage_estimators:reinforce_plus_plus_baseline": (
-        f"{_E2A}/attempt6 rpp_baseline; plan.md 'Attempt 6 addenda': rollout/advantages "
-        "mean 0.0374/0.1242/0.1093 (vs ~0 for GRPO), ref_log_probs scored, diverging from "
-        "round 1"
+        "GPU run: rollout/advantages mean non-zero (vs ~0 for GRPO); ref_log_probs scored "
+        "and diverging from round 1"
     ),
-    "features:gdpo": f"{_E2A}/attempt6 gdpo (per-round nonzero_advantages 32/24/32 match the dispatcher)",
-    "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
-    "corrections:icepop": f"{_E1A}/2026-09-29-trigger icepop [0.99,1.01] (masked tis_clipfrac 0.192/0.225/0.267)",
-    "corrections:mis_mask": f"{_E1A}/2026-09-29-trigger mis-mask token [0.99,1.01] (mask fraction 0.192/0.225/0.267)",
+    "features:gdpo": "GPU run: per-round nonzero_advantages match the dispatcher",
+    "corrections:mismatch_observe": "GPU run: observation only, weights constant 1",
+    "corrections:icepop": "GPU run: icepop [0.99, 1.01] masks tokens (masked tis_clipfrac > 0)",
+    "corrections:mis_mask": "GPU run: token mask [0.99, 1.01], mask fraction > 0",
     "corrections:mis": (
-        f"{_E1A}/2026-10-08-mis-trigger mis truncate token, upper bound 1.01 (test value to trigger the "
-        "bound, not a recommendation), Miles 8bc52237a: mis_tis_truncate_fraction 0.0917/0.1093/0.1262, "
-        "weight after bound <= before in every step, mis_is_ratio_max_final 1.0100; G1 run with bound 2.0 "
-        "in 2026-09-29-g1b/runs/mis (fraction 0). MIS path unchanged 0394715..8bc52237a (loss_hub diff "
-        "touches only the policy_loss_variant dispatch)"
+        "GPU run: token truncation with upper bound 1.01 (a trigger value, not a "
+        "recommendation): truncate fraction > 0, weight after the bound <= before in every "
+        "step, final max ratio 1.0100"
     ),
-    "features:eps_clip": f"{_E1B_B}/plan.md run A-r1 (eps_clip 0.001 / eps_clip_high 0.002, test values to trigger the clip, not recommendations): step-2 pg_clipfrac 0.1046/0.1107/0.1046",
-    "features:no_grpo_std_normalization": f"{_E1B_C}/g1c_report.json no_std (isolated paired step 1: grad_norm 0.2428 vs baseline 0.6349; effective, paired_valid; analyze.py 12b592f)",
+    "features:eps_clip": "GPU run: eps_clip 0.001 / eps_clip_high 0.002 (trigger values): step-2 pg_clipfrac > 0.1",
+    "features:no_grpo_std_normalization": "GPU run: paired step-1 grad_norm 0.2428 vs baseline 0.6349",
     "loss_aggregations:token": (
-        f"{_E1B_G1F} (branch algo-1b-token 604078e..9f6f8a6, YETO_SHA 8d30ad2): paired "
-        "step 1 (raw_reward 0.90625 both) grad_norm 0.4310 vs baseline 0.4867; ONLY on "
-        "Miles 0af62f4d+ (LoRA bridge sets calculate_per_token_loss); image "
-        "sha256:c6f5455c... inferred from the pin and verified from source by the main "
-        "agent (launch.log printed no digest)"
+        "GPU run: paired step-1 grad_norm 0.4310 vs baseline 0.4867; only on Miles "
+        "0af62f4d+ (the LoRA bridge sets calculate_per_token_loss)"
     ),
     "features:over_sampling": (
-        f"{_E1B_G1H} (branch algo-1b-os d53397d, conclusion rewritten 3fec259): the "
-        "pre-registered criteria (a)(b) are literally met but discriminate weakly; the "
-        "decisive evidence is the over_sampling arm's rollout 1 (submitted 8, aborted 4, "
-        "filtered 0 -- inferred afterwards from the rollout_meta_hook formula, one round "
-        "only) and the two arms' parameter tables differing only in "
-        "over_sampling_batch_size; strong evidence awaits a rerun once Miles records the "
-        "batch size of every submission. Miles 0af62f4d only"
+        "GPU run: aborted submissions in the over_sampling arm while the two arms differ "
+        "only in over_sampling_batch_size (weak evidence until Miles records the batch "
+        "size of every submission). Miles 0af62f4d only"
     ),
     "features:overlong_filter": (
-        f"{_E1B_G1I} (branch algo-1b-os bf9f914): paired (step-1 raw_reward 0.65625 both "
-        "arms, truncation rate 0.5); (a) of_on filtered_samples 16/16/31, (b) of_off None, "
-        "(c) step-1 grad_norm 0.5647 vs 0.6329; round 3 (31/32 filtered) raised no "
-        "zero-gradient false alarm. Requires the 1b hook (integ-decl 21912fe or later: "
-        "rollout_meta_hook applies the sample filter before recording trained groups). "
-        "Miles 0af62f4d only"
+        "GPU run: filtered_samples 16/16/31 with the filter on, none with it off; step-1 "
+        "grad_norm 0.5647 vs 0.6329; a round with 31/32 filtered raised no zero-gradient "
+        "false alarm. Miles 0af62f4d only"
     ),
     "features:clip_higher": (
-        f"{_E1B_G1J} (branch algo-1b 53cb477): 6 groups x 3 steps, seed 17; step-1 "
-        "grad_norm bit-identical in both arms (1.1293506622314453), round-1 step-3 "
-        "grad_norm A 0.5642 vs B 0.6572 -- pre-registered criterion met. Nature of the "
-        "evidence: a deterministic same-seed reproduction of the post-hoc g1e observation "
-        "(step-2 grad_norm differs; g1j's first two steps are bit-identical to g1e), not "
-        "an independent confirmation; the attribution holds (the arms differ only in "
-        "eps_clip_high, step 1 bit-identical). RAN ON Miles "
-        "0394715, not the pinned 0af62f4d: transferred because `git diff 0394715..0af62f4d "
-        "-- miles` (13 files, checked by the main agent and ALGO-CAP) touches no "
-        "loss/policy file and leaves the clip path unchanged -- a code-diff argument, not "
-        "a run on 0af62f4d. Open: suspected pg_clipfrac vs loss inconsistency "
-        "(2026-09-29-clipfrac-offline/report.md). Miles 0af62f4d only"
+        "GPU run: step-1 grad_norm bit-identical in both arms, later steps differ "
+        "(0.5642 vs 0.6572) with the arms differing only in eps_clip_high. Ran on Miles "
+        "0394715; the diff to 0af62f4d leaves the loss and clip path unchanged. Miles "
+        "0af62f4d only"
     ),
-    # rl-algo-supplement phase 1 (S19 #13, Modal 1xA10G, Qwen3-0.6B LoRA, 3 rounds x 2 steps),
-    # Miles 64b591a4b only (see MILES_DECLARED_PINS).
-    "losses:cispo": f"{_ESUP}/results.md 4.2 cispo + 4.3 cispo-tis ((a)-(d),(f); round-1 step-2 pg_loss -0.0324 vs GRPO 0.000166)",
-    "losses:sapo": f"{_ESUP}/results.md 4.2 sapo + 4.3 sapo-tis ((a)-(d); round-1 step-2 pg_loss -0.0148 vs 0.000166)",
-    "losses:gmpo": f"{_ESUP}/results.md 4.2 gmpo + 4.3 gmpo-tis ((a)-(e); clip_fraction == gmpo num/den)",
-    "features:dual_clip": f"{_ESUP}/results.md 4.4 (eps_clip_c 1.01: dual_clipfrac 0.0030/0.0341/0.0371)",
-    "features:kl_unbiased": f"{_ESUP}/results.md 4.5 kl-unbiased (kl_loss 0.000245/0.000718/0.000954, differs from k3)",
-    "corrections:opsm_rollout": f"{_ESUP}/results.md 4.6 (opsm_clipfrac 0.0625/0.219/0.25, opsm_old_logprob_source=rollout)",
-    "features:rollout_logprobs_as_old": f"{_ESUP}/results.md 4.6 (use_rollout_logprobs=true in the event spec)",
+    # Small LoRA GPU run (3 rounds x 2 steps); Miles 64b591a4b only (see MILES_DECLARED_PINS).
+    "losses:cispo": "GPU run: round-1 step-2 pg_loss -0.0324 vs GRPO 0.000166",
+    "losses:sapo": "GPU run: round-1 step-2 pg_loss -0.0148 vs GRPO 0.000166",
+    "losses:gmpo": "GPU run: clip_fraction equals the gmpo num/den ratio",
+    "features:dual_clip": "GPU run: eps_clip_c 1.01, dual_clipfrac > 0",
+    "features:kl_unbiased": "GPU run: kl_loss differs from k3",
+    "corrections:opsm_rollout": "GPU run: opsm_clipfrac > 0 with opsm_old_logprob_source=rollout",
+    "features:rollout_logprobs_as_old": "GPU run: use_rollout_logprobs=true in the event spec",
 }
 
 
-# User-code mechanisms that are never declared (rl-algo-supplement design D6):
+# User-code mechanisms that are never declared:
 # GPU evidence covers one piece of code, not arbitrary user code.  The vendored
 # Dr.GRPO reducer is claimed by ``loss_aggregations:constant`` through
 # ``register_named_reducer`` and so never requires
@@ -193,38 +160,36 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
 # --policy-loss-variant policy_loss the loss path calls the same
 # compute_policy_loss with the same arguments, need_full_log_probs is
 # unchanged, and the new flags only add parser entries/validation.
-# 2f23a0fc = 5c1b49eb + F-R1, same basis: `git diff --stat 5c1b49eb..2f23a0fc
+# 2f23a0fc = 5c1b49eb + fork cell declaration, same basis: `git diff --stat 5c1b49eb..2f23a0fc
 # -- miles` touches only miles/ray/{placement_group,rollout/inference_controller,
 # specs/inference}.py, miles/utils/workers/* and the --yeto-placement-map help
 # text in arguments.py -- no loss_hub/backends file; without rollout_cells /
-# deferred cells the startup path starts the same cells (evidence
-# openspec/changes/rl-infra-spec/evidence/2026-09-30-img-2f23a0f).
-# fb04d6ff / e3a11ab3 = 2f23a0fc + M5, same basis: `git diff --stat
+# deferred cells the startup path starts the same cells.
+# fb04d6ff / e3a11ab3 = 2f23a0fc + LoRA DP-invariant restore fix, same basis: `git diff --stat
 # 2f23a0fc..e3a11ab3
 # -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
 # only with --lora-dp-invariant-state (default off); default training/loss
-# path unchanged (evidence .../2026-09-30-img-e3a11ab).
-# 1023269 = e3a11ab3 + M3 + A27 (image-m3a27), same basis: `git diff
+# path unchanged.
+# 1023269 = e3a11ab3 + Qwen3.8-Next LoRA layout + worker loss, same basis: `git diff
 # --name-only e3a11ab38..1023269 -- miles miles_plugins` touches
 # megatron_utils/model.py (a new is_qwen3_8_next_model LoRA-injection branch
 # only), update_weight/hf_weight_iterator_direct.py, utils/lora/*,
 # miles_plugins/models/qwen3_8_next/lora.py, sglang_utils/sglang_api_client.py,
 # weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
-# parser entries in arguments.py -- no loss_hub/training-loss file (evidence
-# .../evidence/ports-image/2026-10-02-m3a27).
-# Derived from the single lineage in pins.py (0.7): 0af62f4d and every later commit.
+# parser entries in arguments.py -- no loss_hub/training-loss file.
+# Derived from the single lineage in pins.py: 0af62f4d and every later commit.
 _PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
 # 64b591a4b and later: 56068bd56 .. 386ae3b07 add only full-parameter state/transport,
-# LoRA-hybrid publish and SAO streaming files (no loss_hub or training-loss file), so the G1 evidence carries over by code diff.
+# LoRA-hybrid publish and SAO streaming files (no loss_hub or training-loss file), so the GPU evidence carries over by code diff.
 _PINS_SUPP = miles_fork_lineage_from("64b591a4bec1ffa37fb089d3e3b99c84773b1ffc")
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
-    # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
-    # grad_norm bit-identical to the baseline)
+    # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss
+    # (grad_norm bit-identical to the baseline)
     "loss_aggregations:token": _PINS_0AF62F4D_PLUS,
     "features:over_sampling": _PINS_0AF62F4D_PLUS,
     "features:overlong_filter": _PINS_0AF62F4D_PLUS,
     "features:clip_higher": _PINS_0AF62F4D_PLUS,
-    # rl-algo-supplement phase 1 G1 ran on 64b591a4b (S19 #13); 5.2 re-ran clip_higher there too.
+    # the loss-supplement GPU smoke ran on 64b591a4b; clip_higher was re-run there too.
     **{m: _PINS_SUPP for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
                                "features:kl_unbiased", "corrections:opsm_rollout",
                                "features:rollout_logprobs_as_old")},
@@ -262,13 +227,12 @@ def miles_capabilities(
     Mechanism dimensions are the R0 set (``EngineCapabilities`` defaults:
     grpo, policy_loss, default aggregation, KL none/reward, no correction,
     the nonzero-std filters); a follow-up algorithm change adds a mechanism
-    here only after its single-GPU smoke (G1) passed. Exception: the SecRLEnv
-    group check moved over from the removed legacy engine (P0-1.7b.4-Q1,
-    decided 2026-10-13); its ports run is scheduled for the next GPU stage. ``execution``
-    (rl-algorithm-capabilities D4, alignment A1): no critic, serial
+    here only after its single-GPU smoke passed. Exception: the SecRLEnv
+    group check moved over from the removed legacy engine; its ports run is
+    still to be scheduled. ``execution``: no critic, serial
     colocated produces policy age 0, and upstream SGLang rollouts return
     logprobs (``sglang_rollout.py`` ``return_logprob=True``).
-    ``unverified_mechanisms`` is the single-island D11 allowance.
+    ``unverified_mechanisms`` is the single-island allowance.
     """
 
     capabilities = EngineCapabilities(
@@ -297,8 +261,7 @@ def receipt_role_family(algorithm: AlgorithmSpec) -> str:
     critic-free estimator (grpo, gspo, reinforce_plus_plus[_baseline]) trains
     the single actor role -> ``"grpo"``; the estimator itself is identified by
     ``algorithm_spec_sha256``. A critic algorithm (estimator ppo with
-    ``execution.needs_critic``) trains actor + critic -> ``"ppo"``
-    (rl-algo-critic-family D4).
+    ``execution.needs_critic``) trains actor + critic -> ``"ppo"``.
     """
     from yeto.rl.engine.algorithm import CRITIC_ESTIMATORS
 
@@ -313,7 +276,7 @@ def receipt_role_family(algorithm: AlgorithmSpec) -> str:
 
 
 def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilities:
-    """Infra declaration (rl-infra-spec 2.1/2.2): the fixed-partition placement and
+    """Infra declaration: the fixed-partition placement and
     the partitioned-serial driver mode are implemented on the ports path.
 
     Kept apart from :func:`miles_capabilities` (the algorithm/R0 declaration).
@@ -351,7 +314,7 @@ def expected_algorithm_sha256(miles_args: Any, environ: Any = None) -> str | Non
     Sources: ``miles_args.yeto_rl_expected_algorithm_sha256`` (learner flag
     ``--rl-expected-algorithm-sha256``) or the ``YETO_RL_EXPECTED_ALGORITHM_SHA256``
     environment variable. Comparing it with the runtime spec is what makes the
-    A1 check non-circular (review F2).
+    contract check non-circular.
     """
     environ = os.environ if environ is None else environ
     value = getattr(miles_args, "yeto_rl_expected_algorithm_sha256", None) or environ.get(
@@ -372,7 +335,7 @@ def execution_profile_for(
 
     colocated placement -> ``colocated-serial``; fixed partition ->
     ``partitioned-serial``, or ``partitioned-overlap`` (eval||train/outer_sync
-    only, task 2.3) when ``yeto_rl_overlap_eval`` is set. The profile is
+    only) when ``yeto_rl_overlap_eval`` is set. The profile is
     bound to ``expected_sha256`` (launcher-provided); :func:`preflight` then
     compares it with the runtime ``AlgorithmSpec``. Without an external hash a
     partitioned run is refused; a colocated (R0) run binds to the runtime spec
@@ -463,7 +426,7 @@ def side_effect_log_kwargs(elastic: Any) -> dict[str, Any]:
 
 
 def harness_source(miles_args: Any, elastic: Any = None) -> Any:
-    """IR-2: where the drain probe / load sample read harness counts from.
+    """Where the drain probe / load sample read harness counts from.
 
     ``elastic.harness_board`` when wired; the island's named ``HarnessBoard``
     actor when a custom agent function (agentic generate) is configured;
@@ -484,7 +447,7 @@ def harness_source(miles_args: Any, elastic: Any = None) -> Any:
     return HARNESS_NOT_AGENTIC
 
 
-# IR-1: harness preflight hook. Called by ``run_ports_island`` after the A1
+# Harness preflight hook. Called by ``run_ports_island`` after the
 # contract preflight and BEFORE connect_island_ray / any placement or model
 # allocation; an exception aborts the island with zero allocate calls.
 HarnessPreflight = Callable[[Any, Any], None]  # (miles_args, launch) -> None
@@ -512,7 +475,7 @@ def resolve_harness_preflight(miles_args: Any, environ: Any = None) -> HarnessPr
     return hook
 
 
-# A16 / D5 (rl-fn-codex-rollout 0.6): the island publishes its own INFRA member cell
+# The island publishes its own INFRA member cell
 # so the Codex harness admits sessions under ``rollout.member_id(cell_id)`` instead
 # of the global key.  Single-island (--rl-single-island-no-sync) islands publish 0.
 MEMBER_CELL_ENV = "YETO_RL_CELL_ID"
@@ -549,10 +512,10 @@ def preflight_stage(
     """Everything ``run_ports_island`` checks before Ray / placement / allocation.
 
     Returns ``(fingerprint, capabilities, profile, elastic)``. The harness
-    preflight (IR-1) runs last, after the contract preflight and the elastic
+    preflight runs last, after the contract preflight and the elastic
     wiring checks; a failure here means no allocate call ever happens.
     """
-    publish_member_cell(miles_args)  # A16: member cell before the harness preflight resolves it
+    publish_member_cell(miles_args)  # member cell before the harness preflight resolves it
     fingerprint = ports_runtime_fingerprint(launch)
     capabilities = with_partitioned_serial(
         miles_capabilities(
@@ -567,24 +530,24 @@ def preflight_stage(
         yeto_policy_sync=yeto_policy_sync,
         expected_sha256=expected_algorithm_sha256(miles_args),
     )
-    preflight(profile, algorithm, capabilities)  # A1: before any GPU process
-    # E1 (3.x), opt-in: a bad manifest/attestation fails here, before Ray.
+    preflight(profile, algorithm, capabilities)  # before any GPU process
+    # Elastic wiring, opt-in: a bad manifest/attestation fails here, before Ray.
     elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
     hook = harness_preflight if harness_preflight is not None else resolve_harness_preflight(miles_args)
     if hook is not None:
         # 7.1 in Miles' error type; the neutral hook repeats it with the core error.
         check_harness_reward_scope(getattr(miles_args, "yeto_harness_reward_scope", None))
-        hook(miles_args, launch)  # IR-1: harness preflight before placement/allocation
+        hook(miles_args, launch)  # harness preflight before placement/allocation
     return fingerprint, capabilities, profile, elastic
 
 
 def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
-    """A1: the launcher-bound profile agrees with the runtime AlgorithmSpec and the
+    """The launcher-bound profile agrees with the runtime AlgorithmSpec and the
     declared capabilities, before any GPU process exists (before connect_island_ray)."""
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
     check_algorithm_contract(profile, algorithm)
-    # 4.4a (design D6a): neutral names bind to the pre-rename implementation, or no launch.
+    # neutral names bind to the pre-rename implementation, or no launch.
     from .binding import check_spec
 
     print("[yeto] backend binding " + json.dumps(check_spec(algorithm), sort_keys=True), flush=True)
@@ -607,7 +570,7 @@ def build_sync(
 ) -> tuple[Any, Any]:
     """(sync session, progress store) for the preset the learner selected.
 
-    A full-parameter island (P0-D8) gets the one :class:`FullParameterSync`
+    A full-parameter island gets the one :class:`FullParameterSync`
     over its trainable-role ``groups``; its progress lives in the syncer.
     """
 
@@ -646,7 +609,7 @@ def build_sync(
                               ), progress
     critic_syncer = getattr(miles_args, "yeto_rl_critic_syncer_addr", None)
     if critic_syncer is not None:
-        # rl-algo-critic-family 4.2.3 (design D4 plan a): second syncer channel for the
+        # second syncer channel for the
         # critic, one atomic commit for both roles.
         from yeto.rl.engine.bridges import DualStrictAvgSync
 
@@ -659,7 +622,7 @@ def build_sync(
 
 
 def data_position_log_for(miles_args: Any, sync: Any, *, learner_id: int) -> Any:
-    """S27 task assignment: the data position log of a full-parameter island in
+    """The data position log of a full-parameter island in
     the run store (``--rl-data-position-store``), None otherwise. Only a
     full-parameter session restarts its round counter at 0 in every process; the
     other sessions resume their data cursor by global rollout id."""
@@ -706,7 +669,7 @@ def _is_full_parameter_sync(sync: Any) -> bool:
 
 def _policy_state_for(sync: Any, *, full_parameter: bool = False, **lora: Any) -> Any:
     """The full-parameter actor cut for a FullParameterSync island; a trainer-side
-    full-parameter digest for a no-sync full-parameter island (L4.6); else LoRA state."""
+    full-parameter digest for a no-sync full-parameter island; else LoRA state."""
 
     from .full_parameter.session import MilesFullParameterPolicyState
     from .state import MilesFullParameterLocalPolicyState, MilesPolicyState
@@ -754,12 +717,12 @@ def compose_island(
 ):
     """Wire the adapter ports into an ``IslandDriver`` (no upstream imports).
 
-    ``critic_model`` (rl-algo-critic-family 3.1): the upstream critic
+    ``critic_model``: the upstream critic
     ``TrainGroup`` of a critic algorithm (shared actor/critic PPO), trained
     before the actor in every round; None for every critic-free algorithm.
 
-    ``elastic`` (:class:`.elastic_wiring.ElasticWiring`, rl-infra-spec 3.x):
-    declared rollout cells for the E1 membership verbs, the reconfiguration
+    ``elastic`` (:class:`.elastic_wiring.ElasticWiring`):
+    declared rollout cells for the elastic membership verbs, the reconfiguration
     controller and the batch ledger. The controller reconciles the fork's
     membership epoch with its journal before the driver runs. None keeps the
     island unchanged.
@@ -860,16 +823,16 @@ def compose_island(
         ),
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
-    # E1: publication checks on every round (default: cut, first and every-K rounds)
+    # publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
-    # S27 C5: --rl-verify-every N (no-sync island): hash the policy only every N-th version
+    # --rl-verify-every N (no-sync island): hash the policy only every N-th version
     verify_every = getattr(miles_args, "yeto_rl_verify_every", None)
     if verify_every is not None:
         driver.verify_every = int(verify_every)
         allow = getattr(driver.policy_state, "allow_unverified_rounds", None)
         if callable(allow):
             allow()
-    # S27: the engines generate the next round's batch while the trainer trains
+    # the engines generate the next round's batch while the trainer trains
     driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
@@ -897,7 +860,7 @@ def compose_island(
                                                    epoch=epochs.config_epoch)
         topology = getattr(launch.placement, "topology", None)
         if topology is not None and callable(getattr(elastic.controller, "set_topology", None)):
-            # rl-multinode-island D9/Q6: node loss is observed through Ray, fail closed
+            # node loss is observed through Ray, fail closed
             elastic.controller.set_topology((topology.nodes, topology.gpus_per_node), _ray_alive_nodes,
                                             layout=island_layout_of(miles_args, topology, launch.placement))
         elastic.controller.open(driver.rollout)
@@ -911,7 +874,7 @@ def compose_island(
                                 algorithm=algorithm, actor_model=actor_model,
                                 rollout_executor=rollout_executor, runner=runner,
                                 base_model_revision=base_model_revision)
-        # D2 (6.5): --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
+        # --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
         from .elastic_hook import elastic_hook_for
 
         driver.elastic_hook = elastic_hook_for(miles_args, controller=elastic.controller,
@@ -926,16 +889,16 @@ def compose_island(
         from yeto.rl.engine.resume import install_preempt_handler, watch_preempt_marker
 
         install_preempt_handler(resume.controller, emit=driver.emit)
-        # S26 E9.1: on Modal the signal reaches the runner, which writes the reclaim marker
+        # on Modal the signal reaches the runner, which writes the reclaim marker
         watch_preempt_marker(resume.controller)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)
     from .sampler_island import wire_policy_releases
 
-    # L4.6: a trainer island (--rl-sample-role trainer) releases every publish to the samplers
+    # a trainer island (--rl-sample-role trainer) releases every publish to the samplers
     wire_policy_releases(driver, miles_args=miles_args, actor_model=actor_model, runner=runner)
-    # rl-spot-cost-saving 4.1 (opt-in, YETO_SPOT_INFLIGHT_SAVE_DIR): timed in-flight save
+    # opt-in (YETO_SPOT_INFLIGHT_SAVE_DIR): timed in-flight save
     from .inflight_save import install as _install_inflight_save
 
     _install_inflight_save(driver, rollout_executor, island=str(learner_id))
@@ -944,7 +907,7 @@ def compose_island(
 
 
 def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
-    """rl-spot-cost-saving 5.x: a droppable island (``YETO_ISLAND_ROLE``) LEAVEs the
+    """A droppable island (``YETO_ISLAND_ROLE``) LEAVEs the
     elastic pool on a reclaim notice and writes ``spot_reclaim`` with role
     droppable. Nothing is saved: it loses only its own round increment and comes
     back from the syncer base. No-op on every other island."""
@@ -997,7 +960,7 @@ def next_lr_for(miles_args: Any):
     run's schedule with Megatron's ``OptimizerParamScheduler.get_lr`` arithmetic
     (constant / linear / cosine, warmup 0 -- what yeto's lr_schedule emits). The round
     after ``local_step`` optimizer steps trains at scheduler step ``local_step``
-    (G1 tape: rounds 0..9 at 1e-5 * (1 - k/10)). None when the schedule is not one of
+    (e.g. rounds 0..9 at 1e-5 * (1 - k/10)). None when the schedule is not one of
     these (the cut still restores the scheduler step, checked in restore_cut_shard)."""
     import math
 
@@ -1050,13 +1013,13 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
     from yeto.rl.engine.cut_interval import cut_interval_for
 
     if config.get("write_only"):
-        # S27 R-2: a synced island writes round cuts; its syncer stays authoritative
+        # a synced island writes round cuts; its syncer stays authoritative
         if isinstance(sync, LocalOnlySync) or not isinstance(sync, RoundCutHooks):
             raise ValueError(f"--rl-island-cut-store: {type(sync).__name__} takes no island round cuts "
                              "(strict, decoupled or full-parameter outer sync only)")
     elif not isinstance(sync, LocalOnlySync):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
-                         "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")
+                         "goes through the syncer checkpoint)")
     from yeto.rl.engine.ledger import BatchLedger, island_cut_ledger
     from yeto.rl.engine.resume import ResumeController, store_for
 
@@ -1078,7 +1041,7 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
 
 
 def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
-    """rl-multinode-island M4: with a checkpoint store and no outer syncer, keep a round
+    """With a checkpoint store and no outer syncer, keep a round
     cut in the store at every safe point and resume from it (round_cut module doc)."""
     from .rebuild_wiring import CutSource
     from .round_cut import wire_round_cuts
@@ -1104,7 +1067,7 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
                                  or config.get("allow_config_change", False)),
         next_lr=next_lr_for(miles_args), interval=_cut_interval_of(elastic, miles_args))
     if config.get("write_only"):
-        # S27 R-2: a synced trainer's buffer lane keeps its own position (S25 C3)
+        # a synced trainer's buffer lane keeps its own position
         _commit_cuts_inline_for_buffer_reader(checkpoint, miles_args=miles_args)
         return
     _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
@@ -1114,8 +1077,8 @@ def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -
     """A write-only cut store on a trainer that reads the sample buffer: commit
     each cut inline. A deferred cut holds the store writer guard until the next
     cut, so the buffer reader skips every Volume reload in between, never sees
-    the sampler's new groups and fails the round (S27 L11 s27-gle9-b: "0/32
-    groups after 900 s")."""
+    the sampler's new groups and fails the round ("0/32 groups after
+    900 s")."""
     from .buffer_rollout import READER_FUNCTION_PATHS
 
     if checkpoint is not None and getattr(miles_args, "rollout_function_path", None) in READER_FUNCTION_PATHS:
@@ -1136,9 +1099,9 @@ def _cut_interval_of(wiring: Any, miles_args: Any) -> Any:
 
 
 def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:
-    """L4.5: a trainer whose rollout reads the durable sample buffer writes the
+    """A trainer whose rollout reads the durable sample buffer writes the
     consumed watermark into each round cut and continues there after a restore
-    (also a convertible node, L7.5, whose rollout function reads in trainer mode)."""
+    (also a convertible node, whose rollout function reads in trainer mode)."""
     from .buffer_rollout import READER_FUNCTION_PATHS, wire_sample_buffer
 
     if getattr(miles_args, "rollout_function_path", None) not in READER_FUNCTION_PATHS:
@@ -1210,7 +1173,7 @@ def _role_map(request: Any) -> dict[str, Any] | None:
 
 
 def lora_perturber(driver: Any) -> Callable[[float | None], Awaitable[None]]:
-    """TEST ONLY (``YETO_RL_TEST_INJECT_LORA_PERTURB``, 3.5 E1-B): ``await perturb(eps)``
+    """TEST ONLY (``YETO_RL_TEST_INJECT_LORA_PERTURB``): ``await perturb(eps)``
     applies the published LoRA adapter + eps to the trainer (optimizer state and
     local step preserved); ``await perturb(None)`` applies the saved original back
     exactly. Used around one member-scoped update_weights. It is a coroutine
@@ -1265,11 +1228,11 @@ async def _await_ref(ref: Any) -> Any:
 
 def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor_model,
                         rollout_executor, runner, base_model_revision, manager=None) -> bool:
-    """E3 (4.7): the startup bundle map on the rollout pool (bind_members /
+    """The startup bundle map on the rollout pool (bind_members /
     member_gpus) and ``MilesTrainerOps`` behind ``IslandController.trainer_edges``.
 
     Skipped (trainer edges stay refused) without the SwappableActor proxy,
-    without pool GPU ids (``ElasticWiring.pool_gpus``), when E3's modules are
+    without pool GPU ids (``ElasticWiring.pool_gpus``), when the trainer-resize modules are
     not in the tree, or when the startup views cannot be read. Returns whether
     the edges were wired. Attested trainer edges are still required per edge.
     """
@@ -1277,14 +1240,14 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
 
     controller = elastic.controller
     if rebuild_preconditions(miles_args):
-        # review L2: a trainer edge rebuilds the trainer; not possible on this run
+        # a trainer edge rebuilds the trainer; not possible on this run
         return False
     if (not isinstance(actor_model, SwappableActor) or elastic.pool_gpus is None
             or not callable(getattr(controller, "set_trainer_edges", None))):
         return False
     try:
         from .trainer_resize import MilesTrainerOps
-    except ImportError:  # E3 not integrated in this tree
+    except ImportError:  # trainer resize not integrated in this tree
         return False
     from .bundles import StartupBundles
     from .rebuild_wiring import CutSource
@@ -1303,7 +1266,7 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
                                  head_node=_ray_head_node()[0] if gpus_per_node is not None else None)
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
         if gpus_per_node is not None:
-            raise  # rl-multinode-island D3/Q6: a multi-node island fails closed, never silently
+            raise  # a multi-node island fails closed, never silently
         return False
     pool = driver.rollout
     pool._bundles = bundles
@@ -1346,10 +1309,10 @@ def selection_event(
     unverified_mechanisms: Any = (),
     outer_sync: bool | None = None,
 ) -> dict[str, Any]:
-    """Run event carrying the algorithm identity (D9) and its provenance.
+    """Run event carrying the algorithm identity and its provenance.
 
-    ``rl/algorithm_absorbed_flags`` lists flags absorbed from extra argv
-    (D3); ``rl/unverified_mechanisms`` the D11 allowances (an artifact of
+    ``rl/algorithm_absorbed_flags`` lists flags absorbed from extra argv;
+    ``rl/unverified_mechanisms`` the unverified-mechanism allowances (an artifact of
     such a run contains unverified mechanisms).
     """
 
@@ -1390,7 +1353,7 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     """
 
     environ = os.environ if environ is None else environ
-    quant_env = rollout_quant_env(miles_args, environ)  # S26 E6 tier 1: checked before any engine starts
+    quant_env = rollout_quant_env(miles_args, environ)  # FP8 tier 1: checked before any engine starts
     address = environ.get("RAY_ADDRESS")
     if not address:
         environ.update(quant_env)  # a Ray the driver starts inherits the driver's environment
@@ -1404,7 +1367,7 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         )
     from yeto.rl.engine.backends import BACKEND_ENV
 
-    # Decoupling 4.11 (design D11 方案 A): the rollout actors and codex
+    # The rollout actors and codex
     # subprocesses look up the backend's rollout-metadata port by this name.
     env_vars = {"RAY_ADDRESS": address, BACKEND_ENV: "miles"}
     from yeto.rl.event_echo import ECHO_ENV
@@ -1422,7 +1385,7 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
             env_vars[key] = value
     from .cut_injection import ALL_ENVS as CUT_INJECTION_ENVS
 
-    for key in CUT_INJECTION_ENVS:  # TEST ONLY (E2 G-4.5): rank-side switches, off unless set
+    for key in CUT_INJECTION_ENVS:  # TEST ONLY: rank-side switches, off unless set
         if environ.get(key):
             env_vars[key] = environ[key]
 
@@ -1437,7 +1400,7 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
     from .buffer_rollout import ISLAND_ENVS as SAMPLE_BUFFER_ENVS
 
-    for key in (*SAMPLE_BUFFER_ENVS, STORE_IMPL_ENV):  # L4.6: the buffer rollout functions
+    for key in (*SAMPLE_BUFFER_ENVS, STORE_IMPL_ENV):  # the buffer rollout functions
         if environ.get(key):  # open the store inside the rollout executor actor
             env_vars[key] = environ[key]
     for key in environ:  # the store's own settings (yeto.cloud.*: Volume name, s3 URI/credentials)
@@ -1453,7 +1416,7 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
 
 def rollout_quant_env(miles_args: Any, environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """S26 E6 tier 1: the SGLang ignore list for ``miles_args.hf_checkpoint``, after the
+    """FP8 tier 1: the SGLang ignore list for ``miles_args.hf_checkpoint``, after the
     scope check (:func:`yeto.rl.quant.tiers.online_plan` raises before any engine starts).
     Empty for every other tier and for a trainer-only island (no rollout engine).
 
@@ -1475,7 +1438,7 @@ def rollout_quant_env(miles_args: Any, environ: Mapping[str, str] | None = None)
 
 
 def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: Any = subprocess.run) -> Path:
-    """S26 E6 tier 1, trainer source: convert the BF16 base with Miles' own converter
+    """FP8 tier 1, trainer source: convert the BF16 base with Miles' own converter
     (``tools/convert_hf_to_fp8.py``, 128x128 blocks) keeping the plan's ignore list in BF16,
     check the result against the scope rule, and point the engines at it
     (``--rollout-hf-checkpoint``). The trainer keeps ``hf_checkpoint`` (BF16) and Miles
@@ -1483,7 +1446,7 @@ def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: 
     from yeto.rl.quant import tiers
 
     if not hasattr(miles_args, "rollout_hf_checkpoint"):
-        raise RuntimeError("this Miles has no --rollout-hf-checkpoint (needs the S26 E6 fork commit)")
+        raise RuntimeError("this Miles has no --rollout-hf-checkpoint (needs a newer fork commit)")
     work_dir.mkdir(parents=True, exist_ok=True)
     ignore_file, out = work_dir / "fp8-native-ignore.json", work_dir / "fp8-native-base"
     ignore_file.write_text(json.dumps(tiers.native_ignore_list(plan)))
@@ -1498,9 +1461,9 @@ def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: 
     return out
 
 
-# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode);
-# the table row lives in the core (decoupling 4.9, yeto.rl.engine.determinism).
-# It reaches every rank through connect_island_ray (A2 follow-up, L-2.3).
+# Determinism environment (with Megatron --deterministic-mode); the table row
+# lives in the core (yeto.rl.engine.determinism). It reaches every rank through
+# connect_island_ray.
 from yeto.rl.engine.determinism import determinism_env as _determinism_env  # noqa: E402
 
 DETERMINISM_ENV = _determinism_env("miles", "nvidia")
@@ -1508,9 +1471,9 @@ DETERMINISM_ENV = _determinism_env("miles", "nvidia")
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,
                            explicit: Any = ()) -> tuple[str, ...]:
-    """The fork cell ids the E1 verbs manage.
+    """The fork cell ids the elastic verbs manage.
 
-    With a fork that lists its declared cells (``describe_cells``, F-R1), each
+    With a fork that lists its declared cells (``describe_cells``), each
     explicit ``--rl-elastic-cells`` name is resolved to the fork cell id: by the
     ``alias`` the fork reports (the yeto name declared in placement map
     ``rollout_cells``), else by the cell id itself; an unknown name is refused.
@@ -1522,7 +1485,7 @@ def resolve_declared_cells(inference_controller: Any, runner: Any,
     if not callable(describe):
         if not explicit:
             raise ValueError("--rl-elastic-cells is required: this Miles fork cannot list its "
-                             "declared cells (describe_cells, F-R1)")
+                             "declared cells (describe_cells)")
         return explicit
     cells = dict(runner.run(_awaitable(describe())) or {})
     if not cells:
@@ -1574,14 +1537,14 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.7 restart recovery budget (--rl-elastic-max-recovery-attempts)
         **({"max_recovery_attempts": int(config["max_recovery_attempts"])}
            if config.get("max_recovery_attempts") is not None else {}),
-        # Q4 (C5): off-island copy of the state dir (--rl-elastic-checkpoint-store)
+        # off-island copy of the state dir (--rl-elastic-checkpoint-store)
         **({"checkpoint_store": config["checkpoint_store"]} if config.get("checkpoint_store") else {}),
         # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
            if config.get("trainer_edges") else {}),
         **_elastic_timeouts(config),
-        # rl-inter-island-scheduling 0.13: absent = legacy
+        # absent = legacy
         **({"island_scheduling": config["island_scheduling"]}
            if config.get("island_scheduling") else {}),
     )
@@ -1602,7 +1565,7 @@ def _elastic_timeouts(config: Any) -> dict:
 
 
 def check_elastic_miles_args(miles_args: Any) -> None:
-    """Miles preconditions of the fork verbs the E1 controller uses, refused before
+    """Miles preconditions of the fork verbs the elastic controller uses, refused before
     Ray: cordon / drain_cells / admit_cells / cordoned update_weights need the
     Miles router; member publication needs a resident partitioned rollout."""
     problems = []
@@ -1617,7 +1580,7 @@ def check_elastic_miles_args(miles_args: Any) -> None:
 
 
 def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> dict[str, Any]:
-    """The parallel layout this learner launches (rl-multinode-island Q4, C5): the
+    """The parallel layout this learner launches: the
     Megatron parallel sizes and actor shape from ``miles_args`` plus the role ->
     logical bundle map of the placement request (None = leading-bundle layout).
     Journaled with the ``topology`` record and compared against the baseline on a
@@ -1659,7 +1622,7 @@ def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> d
 def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any, *,
                                     node_probe: Callable[[], Any] | None = None,
                                     placement: Any = None) -> None:
-    """Multi-node startup precondition (rl-multinode-island D9, tasks 3.3), run right
+    """Multi-node startup precondition, run right
     after ``connect_island_ray()`` and before any Miles placement group exists: the
     controller writes its ``topology`` journal record from the live Ray node table and,
     with fewer alive nodes than declared, enters RECOVERY_REQUIRED; the learner then
@@ -1709,7 +1672,7 @@ def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *
                                  incarnation_probe: Callable[[Any, Any], Mapping[str, str]] | None = None,
                                  other_islands: Mapping[str, Any] | None = None,
                                  marker_writer: Callable[[Any, Any, str], None] | None = None) -> Any:
-    """Multi-node GPU uuid reconciliation (rl-multinode-island Q6, ruling 2026-10-04),
+    """Multi-node GPU uuid reconciliation (ruling 2026-10-04),
     run right after :func:`refuse_partial_island_preflight` and before any placement
     group: ``nvidia-smi --query-gpu=index,uuid`` is collected on every island node (a
     Ray task per node; an unreachable node fails closed), the pool is reconciled against
@@ -1893,7 +1856,7 @@ def island_smi_rows(out: str, use: str | None = None) -> list[tuple[int, str]]:
 
 
 def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
-    """``[(index, uuid), ...]`` per island node in logical order (Ray head first, D3,
+    """``[(index, uuid), ...]`` per island node in logical order (Ray head first,
     then the workers by address/node id), each collected by a Ray task pinned to that
     node (``NodeAffinitySchedulingStrategy``, hard). A node whose ``nvidia-smi`` count
     disagrees with its Ray ``GPU`` resource, or a node that cannot run the task, raises
@@ -1928,7 +1891,7 @@ def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
 
 
 def attach_engine_outage(driver: Any, topology: Any, *, environ: Mapping[str, str] | None = None) -> Any:
-    """S27 G-DI design v2: with ``YETO_ISLAND_ENGINE_RECOVERY_S`` (the launcher sets it
+    """With ``YETO_ISLAND_ENGINE_RECOVERY_S`` (the launcher sets it
     for a two-cluster island) the driver survives the loss of its engine nodes
     (:mod:`yeto.rl.engine.engine_outage`, :mod:`.engine_recovery`). Unset: nothing."""
     from yeto.rl.engine.engine_outage import arm_engine_outage, outage_budget_s
@@ -1943,7 +1906,7 @@ def attach_engine_outage(driver: Any, topology: Any, *, environ: Mapping[str, st
 
 
 def wait_island_nodes(nodes: int) -> dict[str, Any] | None:
-    """S27 G-DI: :func:`yeto.rl.engine.multinode.wait_for_island_nodes` on this Ray."""
+    """:func:`yeto.rl.engine.multinode.wait_for_island_nodes` on this Ray."""
     from yeto.rl.engine.multinode import ISLAND_NODE_WAIT_ENV, wait_for_island_nodes
 
     if not os.environ.get(ISLAND_NODE_WAIT_ENV):
@@ -1957,8 +1920,7 @@ def wait_island_nodes(nodes: int) -> dict[str, Any] | None:
 
 def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
     """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
-    built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
-    pin). Exactly one such node, else ``RuntimeError`` (fail closed)."""
+    built-in ``node:__internal_head__`` resource (head pin). Exactly one such node, else ``RuntimeError`` (fail closed)."""
     from yeto.rl.engine.multinode import HEAD_RESOURCE
 
     if nodes is None:
@@ -1973,7 +1935,7 @@ def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
 
 def pin_placement_group_to_head(gpus_per_node: int, *, pg_module: Any = None, head: Any = None,
                                 table: Any = None) -> Any:
-    """rl-multinode-island D3 head pin (ruling 2026-10-03): make the fork's
+    """Make the fork's
     startup placement group put logical node 0 (the trainer's block) on the Ray
     head, and refuse startup when it did not.
 
@@ -2011,7 +1973,7 @@ def pin_placement_group_to_head(gpus_per_node: int, *, pg_module: Any = None, he
             node_of_bundle = table(pg)
         blocks = [node_of_bundle[b] for b in reordered[:gpus_per_node]]
         if len(set(map(str, blocks))) != 1:
-            raise RuntimeError(f"D3 head pin: logical node 0 bundles span nodes {sorted(set(map(str, blocks)))}")
+            raise RuntimeError(f"head pin: logical node 0 bundles span nodes {sorted(set(map(str, blocks)))}")
         assert_head_block(blocks, head_id)
         return info
 
@@ -2023,7 +1985,7 @@ def pin_placement_group_to_head(gpus_per_node: int, *, pg_module: Any = None, he
 
 
 def _ray_bundle_node(pg: Any, bundle: int) -> Any:
-    """rl-multinode-island D3/Q6: the Ray node id hosting ``bundle`` of ``pg``
+    """The Ray node id hosting ``bundle`` of ``pg``
     (``ray.util.placement_group_table``), the runtime source of the node-block
     assertion; raises when Ray cannot tell (fail closed)."""
     import ray
@@ -2054,7 +2016,7 @@ def trainer_actor_import_done_unix(list_tasks: Callable[..., Any] | None = None)
     task; Miles' trainer ``__init__`` is light (the model is built in
     ``init``), so its end is the import end.  Read from the Ray state API
     (dashboard on, see the island run script); ``None`` when Ray has no such
-    record.  Unverified on GPU (L2.6 checks it).
+    record.  Unverified on GPU.
     """
 
     try:
@@ -2086,7 +2048,7 @@ def run_ports_island(
 ):
     """Run one ports-path island to completion on real upstream Miles.
 
-    ``harness_preflight`` (IR-1): injectable hook run by :func:`preflight_stage`
+    ``harness_preflight``: injectable hook run by :func:`preflight_stage`
     before Ray is connected and before any placement/model allocation.
     """
 
@@ -2097,28 +2059,19 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from yeto.rl.engine.overlap import loop_eval_starter
 
-    publish_member_cell(miles_args, learner_id)  # A16 (D5): island cell -> harness member key
+    publish_member_cell(miles_args, learner_id)  # island cell -> harness member key
     fingerprint, capabilities, profile, elastic = preflight_stage(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
     )  # contract preflight(...) + harness preflight: before connect_island_ray()
     if getattr(miles_args, "yeto_rl_resume", None):
         # the round cut's backend fingerprint (the elastic controller gets the same one;
-        # G2 A: a cut without it is refused "runtime: backend_fingerprint missing")
+        # a cut without it is refused "runtime: backend_fingerprint missing")
         miles_args.yeto_rl_resume["runtime_fingerprint"] = fingerprint
 
     from . import eval_wiring
 
-    eval_guard = eval_wiring.eval_guard_preflight(miles_args)  # D6.c: before any GPU action
-    from .e2_harness import load_plan as load_e2_harness_plan
-
-    e2_plan = load_e2_harness_plan()  # TEST ONLY: None unless an E2 harness snapshot
-    if e2_plan is not None:
-        from .rollout_meta_hook import ELASTIC_METADATA_ENV
-
-        # the harness cuts need the rollout data cursor (rollout-side metadata)
-        miles_args.yeto_rl_elastic_metadata = True
-        os.environ[ELASTIC_METADATA_ENV] = "1"
+    eval_guard = eval_wiring.eval_guard_preflight(miles_args)  # before any GPU action
     from yeto.rl.engine.telemetry import StartupTelemetry
 
     # fleet-dashboard 8.4: heartbeat/resource sampling from here until driver.run()
@@ -2130,7 +2083,7 @@ def run_ports_island(
     ).__enter__()  # stopped before driver.run() and in the finally below
     from yeto.rl.engine.start_phases import StartPhases
 
-    # rl-trainer-cold-start-cost L0: submitted / container_ready / setup_done /
+    # submitted / container_ready / setup_done /
     # ray_ready come from the launcher env and the setup shell's mark files.
     start_phases = StartPhases(
         lambda event, **fields: append_tape_event(miles_args, {"event": event, **fields}))
@@ -2138,22 +2091,22 @@ def run_ports_island(
     connect_island_ray(miles_args=miles_args)
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
-        # S27 G-DI two-cluster island: every node in the Ray before anything below
+        # two-cluster island: every node in the Ray before anything below
         # (None without YETO_ISLAND_NODE_WAIT_S: no wait, no event)
         nodes_ready = wait_island_nodes(topology.nodes)
         if nodes_ready is not None:
             append_tape_event(miles_args, {"event": "rl_island_nodes_ready", **nodes_ready})
-        # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
+        # a restarted learner on a partial island (worker node DEAD in the GCS)
         # must fail closed here; a placement group asking for the dead node's GPUs
         # would stay PENDING forever
         refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)
-        # Q6 (2026-10-04): runtime GPU uuid reconciliation, journal gpu_pool; a changed
+        # runtime GPU uuid reconciliation, journal gpu_pool; a changed
         # pool is accepted only with --rl-elastic-accept-rebind (fail closed otherwise)
         reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)
-        # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
+        # trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
     startup.step("ray_connected")
-    # S27 G-CK: fill the remote-code module cache on every island node before any
+    # fill the remote-code module cache on every island node before any
     # engine or trainer actor imports from it (concurrent first imports raced).
     prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
 
@@ -2192,14 +2145,14 @@ def run_ports_island(
             start_phases.mark("actor_import_done", imported)
         start_phases.mark("actor_init_done")
         start_phases.forward_setup_events()  # e.g. a late model_prefetch_failed
-        # rl-algo-critic-family 3.1: Miles creates a critic iff use_critic
+        # Miles creates a critic iff use_critic
         # (estimator ppo); it must agree with the AlgorithmSpec.
         if (critic is not None) != bool(algorithm.execution.needs_critic):
             raise RuntimeError(
                 f"Miles created {'a' if critic is not None else 'no'} critic but the algorithm "
                 f"spec says needs_critic={algorithm.execution.needs_critic}"
             )
-        # rl-infra-spec 4.3/4.4: one swappable handle shared by trainer,
+        # one swappable handle shared by trainer,
         # policy state, publisher and the eval dispatcher (EvalDispatcher keeps
         # self.actor_model and resolves methods per call, so the proxy is
         # enough); the disposer gets the proxy, whose async dispose() resolves
@@ -2230,7 +2183,7 @@ def run_ports_island(
 
         def build_driver() -> Any:
             """A fresh island driver over the components (one per trainer incarnation
-            of a convertible node, rl-trainer-start-stop L7.5; once otherwise)."""
+            of a convertible node; once otherwise)."""
             sync, progress = build_sync(
                 miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
             )
@@ -2266,26 +2219,26 @@ def run_ports_island(
             driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
             driver.resource_sample_interval_s = getattr(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
-            eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
-            driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+            eval_wiring.attach(driver, miles_args, eval_guard)
+            driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)
             driver.data_slot = ("dispense" if getattr(miles_args, "yeto_rl_data_dispense", None)
                                 else getattr(miles_args, "yeto_rl_data_slot", None))
             dispense = getattr(miles_args, "yeto_rl_data_dispense", None) or {}
-            if dispense.get("stream_record"):  # S27 P3
+            if dispense.get("stream_record"):
                 driver.data_streams = {"streams": dispense["stream_record"],
                                        "accept": dispense.get("accept")}
             driver.data_positions = data_position_log_for(miles_args, sync, learner_id=learner_id)
             driver.hf_exports = hf_exports_for(miles_args, actor_model=actor, runner=runner)
             driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
             driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
-            attach_engine_outage(driver, topology)  # S27 G-DI v2 (no-op without the env)
-            driver.start_phases = start_phases  # L0: first_step_done
+            attach_engine_outage(driver, topology)  # no-op without the env
+            driver.start_phases = start_phases  # first_step_done
             return driver
 
         from .convertible import convertible_node_name
 
         if convertible_node_name(miles_args) is not None:
-            # rl-trainer-start-stop L7.5: rollout node until the head converts it
+            # rollout node until the head converts it
             from .convertible import run_convertible_node
 
             startup.__exit__(None, None, None)
@@ -2293,19 +2246,10 @@ def run_ports_island(
                                         controller=controller, executor=executor, actor=actor,
                                         runner=runner)
         driver = build_driver()
-        if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
-            from .e2_harness import HarnessContext, run_harness
-
-            run_harness(HarnessContext(
-                driver=driver, actor=actor, miles_args=miles_args, rollout_executor=executor,
-                runner=runner, algorithm=algorithm, base_model_revision=base_model_revision,
-                backend_fingerprint=fingerprint, plan=e2_plan,
-            ))
-            return driver.published_state
         startup.__exit__(None, None, None)  # the driver's own heartbeat starts in run()
         from yeto.rl.engine import trainer_remote
 
-        if trainer_remote.commanded():  # rl-trainer-start-stop L5.3c: the head starts/stops us
+        if trainer_remote.commanded():  # the head starts/stops us
             return run_commanded_trainer(driver)
         state = driver.run()
         from .sampler_island import mark_trainer_end

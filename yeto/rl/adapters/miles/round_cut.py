@@ -1,5 +1,5 @@
 """Miles round cuts: the cut controller moved to :mod:`yeto.rl.engine.round_cut`
-(S25 N7.6b, shared with the verl island); this module keeps the Miles import path."""
+(shared with the verl island); this module keeps the Miles import path."""
 
 from __future__ import annotations
 

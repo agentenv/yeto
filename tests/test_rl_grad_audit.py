@@ -1,11 +1,8 @@
-"""Pre-optimizer LoRA gradient audit (rl-engine-ports tier 2, design D12)."""
+"""Pre-optimizer LoRA gradient audit (rl-engine-ports tier 2)."""
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,13 +11,11 @@ torch = pytest.importorskip("torch")
 
 from yeto.rl import grad_audit as ga  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
-    "rl_engine_equivalence_ga", Path(__file__).resolve().parents[1] / "scripts" / "rl_engine_equivalence.py")
-eq = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = eq
-_spec.loader.exec_module(eq)
-
 ON = {ga.GRAD_AUDIT_ENV: "1"}
+
+
+def _tensors(index, flat):
+    return {s["name"]: flat[s["offset"]: s["offset"] + s["numel"]] for s in index["specs"]}
 
 
 class Lora(torch.nn.Module):
@@ -99,7 +94,7 @@ def test_arm_captures_pre_clip_gradient_once_and_records_clip(tmp_path):
     assert opt.step == original  # one shot: restored
     assert not torch.allclose(m.A.grad, raw["A"])  # the optimizer did clip in place
     index, flat = ga.read(tmp_path / "round-00000001.grad.f32")
-    t = eq.grad_tensors(index, flat)
+    t = _tensors(index, flat)
     assert torch.allclose(torch.from_numpy(t["base_model.model.layers.0.q_proj.lora_A.weight"]),
                           raw["A"].flatten())
     norm = float(torch.cat([raw["A"].flatten(), raw["B"].flatten()]).norm())
@@ -147,8 +142,11 @@ def test_legacy_and_ports_layouts_align_to_the_same_gradient(tmp_path):
         ga.arm(args(d), 0, 0, opt, lambda m=model, p=prefix, tt=t: _bindings(m, prefix=p, transpose=tt),
                engine=d.name, environ=ON, dp_world=1)
         opt.step()
-    g = eq.grad_compare(tmp_path / "l" / "round-00000001.grad.f32", tmp_path / "p" / "round-00000001.grad.f32")
-    assert g["rel_l2"] == 0.0 and g["cosine"] == pytest.approx(1.0) and g["tensors"] == 2
+    a = _tensors(*ga.read(tmp_path / "l" / "round-00000001.grad.f32"))
+    b = _tensors(*ga.read(tmp_path / "p" / "round-00000001.grad.f32"))
+    assert sorted(a) == sorted(b) and len(a) == 2
+    for name in a:
+        assert (a[name] == b[name]).all()
 
 
 def test_ports_recorder_arms_from_train_one_step(tmp_path, monkeypatch):

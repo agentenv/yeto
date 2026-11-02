@@ -1,4 +1,4 @@
-"""After the trial: the recorded calls -> one trainable token stream (S28 G-120).
+"""After the trial: the recorded calls -> one trainable token stream.
 
 Both callers of :func:`~yeto.rl.agentic.run_agent_task` that record tokens
 through a :class:`~yeto.rl.agentic.TokenRecorder` (verl's ``HarborAgentLoop``

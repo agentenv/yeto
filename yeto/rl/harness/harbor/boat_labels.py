@@ -1,4 +1,4 @@
-"""Run / island / incarnation labels on boat sandboxes, and the orphan sweep (S29 D15).
+"""Run / island / incarnation labels on boat sandboxes, and the orphan sweep.
 
 A spot VM that is stopped hard (preemption) runs no atexit or signal handler,
 so :mod:`.boat_pool`'s exit cleanup never deletes its sandboxes; they ran
@@ -255,7 +255,7 @@ class OrphanWatchdog:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """S29 D19: ``python -m yeto.rl.harness.harbor.boat_labels sweep --run R [--island I]``
+    """``python -m yeto.rl.harness.harbor.boat_labels sweep --run R [--island I]``
     deletes every sandbox of run R (and island I): the operator's or a mirror's
     sweep for a release-store spot island whose VM was stopped and is not
     coming back (no relay trainer watches it, no new incarnation sweeps)."""

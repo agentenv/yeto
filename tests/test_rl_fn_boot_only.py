@@ -1,4 +1,4 @@
-"""S11 fnboot boot-only (``--rl-boot-only``): the learner runs every torch_dist-free
+"""Boot-only (``--rl-boot-only``): the learner runs every torch_dist-free
 check (real Flash-Next provider view from the 4layer config.json + Miles alias
 fixture, ports argv build, ref-load probe), writes ``~/yeto-rl/boot_only.json`` +
 ``FN_BOOT_ONLY_OK ref_load_present=<bool>`` and returns (exit 0) without training,
@@ -144,9 +144,9 @@ def test_fnrun_boot_only_switch():
 
 
 @pytest.mark.parametrize("boot, expect", [("0", False), ("1", True)])
-def test_s1run_dry_fn8s(boot, expect):
+def test_multinode_run_dry_fn8s(boot, expect):
     env = {**os.environ, "DRY": "1", "BOOT_ONLY": boot, "THREAD_MAX": "99999"}
-    r = subprocess.run(["bash", str(MG / "s1run.sh"), "fn8s", "pfx", "100", "200"],
+    r = subprocess.run(["bash", str(MG / "multinode_run.sh"), "fn8s", "pfx", "100", "200"],
                        env=env, capture_output=True, text=True, cwd=REPO)
     assert r.returncode == 0, r.stdout + r.stderr
     toks = shlex.split(r.stdout.splitlines()[-1])
@@ -167,8 +167,8 @@ def test_fp_fn_fingerprint_ignores_boot_only(monkeypatch):
 
 
 def test_chain_fnboot_uses_boot_only_and_fna_does_not():
-    src = (MG / "s11h200chain.sh").read_text()
-    assert subprocess.run(["bash", "-n", str(MG / "s11h200chain.sh")]).returncode == 0
+    src = (MG / "h200_chain.sh").read_text()
+    assert subprocess.run(["bash", "-n", str(MG / "h200_chain.sh")]).returncode == 0
     assert "fnrun fnboot ${HARD_FNBOOT:-3000} 1\n" in src
     assert "fnrun fna ${HARD_FNA:-3600}\n" in src
     assert "BOOT_ONLY=${3:-0}" in src

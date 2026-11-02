@@ -30,10 +30,10 @@ GUARD_DIR_ENV = "YETO_RL_STORE_GUARD_DIR"  # where the per-Volume lock files liv
 # where the island mounts the store Volume (yeto.launch.storage.MODAL_CHECKPOINT_STORE_MOUNT)
 MOUNT_ENV = "YETO_RL_STORE_MODAL_MOUNT"
 DEFAULT_MOUNT = "/root/yeto-checkpoint-store"
-# How put_directory / put_files reach the Volume (S27 G-DR). "mount" (the default):
+# How put_directory / put_files reach the Volume. "mount" (the default):
 # write under the store root through this container's mount, then commit. "upload":
 # Volume.batch_upload from the local files, which Modal bills as network egress
-# (S27 G-DE: about $2.79 per 63 GB HF export of the Y-1 run). "mount" is used only
+# (a 63 GB HF export costs a few dollars). "mount" is used only
 # while the Volume is mounted at the mount path (volume_mounted); otherwise the
 # store uploads when it can reach the Modal client (as before).
 PUT_ENV = "YETO_RL_STORE_MODAL_PUT"
@@ -97,7 +97,7 @@ def volume_mounted(path: str | os.PathLike[str], *, mountinfo: str = MOUNTINFO) 
 
     A Modal container (gVisor) mounts its Volumes under :data:`MODAL_VOLUMES_DIR`
     (one 9p filesystem) and makes each mount path of the function a symlink to
-    ``/__modal/volumes/<volume id>`` (S27 G-DR, checked in a container: the mount
+    ``/__modal/volumes/<volume id>`` (checked in a container: the mount
     path is in no line of /proc/self/mountinfo). Elsewhere: ``path`` is on another
     device than its parent directory, or a filesystem is mounted exactly there
     (the mount table of this process; ``os.path.ismount`` when it cannot be read)."""
@@ -131,7 +131,7 @@ def _guard_path(volume: str) -> str:
 
 # A store commit through the runner interpreter is cut off after this many seconds,
 # or after the uncommitted bytes of a commit_budget at COMMIT_MIN_BYTES_PER_S when that
-# is longer (S27 G-CD: the commit of a 473 GB round cut timed out at 600 s, s27-bb-b1).
+# is longer (the commit of a 473 GB round cut once timed out at 600 s).
 COMMIT_TIMEOUT_S = 600.0
 COMMIT_MIN_BYTES_PER_S = 100e6
 
@@ -355,8 +355,7 @@ class ModalVolumeStore(CheckpointStore):
 
     def hold_reader(self) -> StoreWriterGuard:
         """A reload with a Volume file open in any process of the container fails
-        (ConflictError "there are open files preventing the operation", S27 G-CC
-        E2: the trainer driver's release reload hit the payload reads of the
+        (ConflictError "there are open files preventing the operation": the trainer driver's release reload hit the payload reads of the
         buffer reader). A reader holds the same shared lock as a writer while
         its file is open, so such a reload is skipped instead."""
         return _VolumeWriterGuard(self.volume_name)

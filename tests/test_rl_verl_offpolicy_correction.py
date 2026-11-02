@@ -1,6 +1,6 @@
-"""rl-offpolicy-correction-passthrough, verl side (L6.4, L6.6, L6.11 CPU part).
+"""Off-policy correction passthrough, verl side (fully_async CPU part).
 
-CPU only: no verl install, no Ray. The parity tests (L6.6) load the correction
+CPU only: no verl install, no Ray. The parity tests load the correction
 functions straight from the verl fork and the Miles checkout on this machine
 and skip when either is absent.
 """
@@ -36,7 +36,7 @@ def _fields(mapping) -> set[str]:
     return {w.field for w in mapping.warnings}
 
 
-# ------------------------------------------------------------------ L6.4 / L6.7 mapping
+# ------------------------------------------------------------------ mapping
 
 
 def test_decoupled_ppo_writes_all_three_values_over_the_fully_async_defaults():
@@ -116,7 +116,7 @@ def test_backend_role_feeds_the_run_manifest_and_the_cross_island_warning():
                                                    "i1": oc.PROX_FIRST_LOCAL_STEP}
 
 
-# ------------------------------------------------------------------ L6.11 fully_async path
+# ------------------------------------------------------------------ fully_async path
 
 
 @pytest.mark.parametrize("limit", [2, 4])
@@ -135,11 +135,11 @@ def test_fully_async_plan_runs_the_correction_mapping(limit, tmp_path):
     args = SimpleNamespace(groups_per_round=8, samples_per_group=4, global_rounds=3,
                            event_tape=str(tape), learner_id=0)
     out, keys = fully_async_plan(limit, vconf.build_overrides(run), spec.to_dict(), args, "none")
-    # L6b.2: lower > 0 cannot map on verl; the tape keeps the record, the start is refused
+    # Lower > 0 cannot map on verl; the tape keeps the record, the start is refused
     with pytest.raises(oc.CorrectionConfigError, match="lower on backend 'verl'"):
         append_correction_record(args, spec.to_dict())
     append_correction_record(args, AlgorithmSpec().to_dict())  # default: tape unchanged
-    # D8: the island tape records the group, the verl values and prox_anchor
+    # The island tape records the group, the verl values and prox_anchor
     events = [json.loads(line) for line in tape.read_text().splitlines()]
     assert events[0]["event"] == oc.CORRECTION_RECORD_EVENT and events[0]["backend"] == "verl"
     assert events[0]["prox_anchor"] == oc.PROX_FIRST_LOCAL_STEP
@@ -184,11 +184,11 @@ def test_round_collection_drops_whole_groups_over_a_hard_and_feeds_the_gate():
     assert gate["truncation_by_turn"] is None
 
 
-# ------------------------------------------------------------------ L6.6 CPU parity
+# ------------------------------------------------------------------ CPU parity
 
 
-VERL_SRC = Path(os.environ.get("YETO_VERL_SRC", os.path.expanduser("~/work/verl-fork-acad9875")))
-MILES_SRC = Path(os.environ.get("YETO_MILES_SRC", os.path.expanduser("~/work/miles-next")))
+VERL_SRC = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent-verl-checkout"))
+MILES_SRC = Path(os.environ.get("YETO_MILES_SRC", "/nonexistent-miles-checkout"))
 VERL_HELPER = VERL_SRC / "verl/trainer/ppo/rollout_corr_helper.py"
 MILES_CORRECTIONS = MILES_SRC / "miles/backends/training_utils/loss_hub/corrections.py"
 
@@ -316,7 +316,7 @@ def test_verl_rejection_sampling_shrinks_the_denominator(engines):
 
 
 def test_verl_use_rollout_log_probs_is_not_read_by_any_code():
-    """L6.6: ``actor.use_rollout_log_probs`` (fully_async yaml: True) has no
+    """``actor.use_rollout_log_probs`` (fully_async yaml: True) has no
     reader in the fork, so with ``bypass_mode=False`` pi_prox is recomputed."""
     if not VERL_SRC.is_dir():
         pytest.skip("verl fork not on this machine")

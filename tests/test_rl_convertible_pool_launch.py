@@ -1,4 +1,4 @@
-"""L7.5 launch composition: a convertible pool (every island declared
+"""Launch composition: a convertible pool (every island declared
 ``--rl-node-class islandM=convertible``). Dry-run / plan level and the head
 binding over an in-memory store: no cloud, no Ray."""
 

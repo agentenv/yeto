@@ -1,15 +1,15 @@
-"""Replacement candidates and cost scoring after a reclaim (rl-spot-cost-saving 2.1-2.4, D4-D6).
+"""Replacement candidates and cost scoring after a reclaim (rl-spot-cost-saving).
 
 Pure functions plus one small planner object:
 
 * :func:`candidates` -- (cloud, region, gpu) offers -> kept / rejected with a reason
   (same compatibility group only; weights not in the target cloud add copy cost;
   a region probed as sold out is rejected, so the next region is tried).
-* :func:`score` -- D5: price / effective compute + prep cost / expected stay +
+* :func:`score` -- price / effective compute + prep cost / expected stay +
   reclaim rate x loss per reclaim. Fewer than ``MIN_RECLAIMS`` records in a
   (cloud, region) -> rate "unknown": the term is None, not used for ranking,
   and ``risks`` says so. Every term is returned with its source.
-* :class:`ReplacementPlanner` -- D6: auto launch is off by default. Off -> only
+* :class:`ReplacementPlanner` -- auto launch is off by default. Off -> only
   a ``spot_replace_advice`` event, the launch callable is never called. On ->
   check the run budget before every launch; over budget -> ``spot_budget_cap``
   event and no launch.
@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
-MIN_RECLAIMS = 3  # D5: proposed value, no measured basis; adjust once data exists
+MIN_RECLAIMS = 3  # proposed value, no measured basis; adjust once data exists
 ADVICE_EVENT = "spot_replace_advice"
 LAUNCH_EVENT = "spot_replace_launch"
 BUDGET_EVENT = "spot_budget_cap"
@@ -69,7 +69,7 @@ def candidates(offers: Iterable[Offer], *, compat_gpu: str, origin: tuple[str, s
 def score(offer: Offer, *, prep_s: float, prep_source: str, expected_stay_s: float,
           reclaim_summary: Mapping[tuple[str, str | None], Mapping[str, Any]] | None = None,
           loss_per_reclaim_usd: float | None = None) -> Candidate:
-    """D5 score in USD per hour-equivalent; lower is better."""
+    """Score in USD per hour-equivalent; lower is better."""
     c = Candidate(offer)
     if offer.price_per_hour is None:
         c.risks.append("price unknown")
@@ -116,7 +116,7 @@ def rank(cands: Iterable[Candidate]) -> list[Candidate]:
 
 @dataclass
 class ReplacementPlanner:
-    """Called by FleetController when an island is recovering (D4/D6)."""
+    """Called by FleetController when an island is recovering."""
 
     offers: Callable[[str], Iterable[Offer]]   # island name -> current offers
     compat_gpu: str
@@ -134,7 +134,7 @@ class ReplacementPlanner:
 
     def __post_init__(self) -> None:
         if self.auto_launch and (self.budget_usd is None or self.launch is None):
-            raise ValueError("auto launch needs both a run budget and a launch callable (D6)")
+            raise ValueError("auto launch needs both a run budget and a launch callable")
 
     def plan(self, island: str, origin: tuple[str, str] | None = None) -> dict[str, Any]:
         kept, rejected = candidates(self.offers(island), compat_gpu=self.compat_gpu, origin=origin)

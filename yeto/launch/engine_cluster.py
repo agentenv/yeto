@@ -1,4 +1,4 @@
-"""Two-cluster RL island (S27 G-DI): a trainer cluster and an engine cluster, one Ray.
+"""Two-cluster RL island: a trainer cluster and an engine cluster, one Ray.
 
 ``--rl-engine-cluster SPEC`` splits a sky RL island into two sky clusters. The ``--gpu``
 entry stays the LOGICAL island: every island rule (trainer shape, placement, Miles and
@@ -27,7 +27,7 @@ Launch (:class:`MixedIsland`):
    trainer node count and puts that address first in ``SKYPILOT_NODE_IPS``, so the
    island run script takes its worker branch and joins the head's Ray at port 6379.
 3. The driver waits (``YETO_ISLAND_NODE_WAIT_S``) until every island node is in its Ray
-   before it pins the trainer block to the Ray head (D3 head pin) and starts the engines.
+   before it pins the trainer block to the Ray head (the head pin) and starts the engines.
    The trainer therefore always lands on the trainer cluster, whatever the IP order.
 
 Network: the clusters must share one private network (same cloud, same region). Every
@@ -140,7 +140,7 @@ def plan(args, specs: list[ClusterSpec], names: list[str], *,
     if getattr(args, "training_mode", "sft") != "rl":
         raise ValueError("--rl-engine-cluster needs --training-mode rl")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError("--rl-engine-cluster needs --rl-backend miles (the D3 head pin and the "
+        raise ValueError("--rl-engine-cluster needs --rl-backend miles (the trainer head pin and the "
                          "engine recovery port are Miles adapter code; verl has neither)")
     from ..rl.engine import island_placement
     from . import trainer_loop
@@ -169,7 +169,7 @@ def plan(args, specs: list[ClusterSpec], names: list[str], *,
         if trainer_nodes != 1:
             raise ValueError(f"--rl-engine-cluster on {where}: the trainer cluster must be exactly "
                              f"1 node (island nodes {spec.num_nodes} - engine nodes "
-                             f"{engine.num_nodes} = {trainer_nodes}); the D3 head pin places only "
+                             f"{engine.num_nodes} = {trainer_nodes}); the trainer head pin places only "
                              "the Ray head's node")
         if m == held:
             raise ValueError(f"--rl-engine-cluster on {where}: the trainer scheduler's island")
@@ -261,7 +261,7 @@ def engine_cell_names(args, split: EngineSplit) -> list[str]:
 
 
 def with_declared_cells(run: str, cells: list[str], module: str) -> str:
-    """Append the fork F-R1 cell declaration to the island's learner command (the
+    """Append the fork cell declaration to the island's learner command (the
     Miles recovery port starts and stops those cells)."""
     lines = run.split("\n")
     hits = [i for i, line in enumerate(lines) if f"-m {module}" in line]

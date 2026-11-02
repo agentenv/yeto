@@ -1,4 +1,4 @@
-"""S27 R-5: Miles full-parameter cut -> HF directory, round trip on a tiny Qwen3 (CPU)."""
+"""Miles full-parameter cut -> HF directory, round trip on a tiny Qwen3 (CPU)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from yeto.rl.eval.cut_to_hf import MaterializeError, materialize_cut  # noqa: E4
 
 # Miles' Qwen2/Qwen3 converter imports only re + torch; load it straight from a Miles
 # checkout so the test exercises the real name/QKV mapping without importing Miles.
-_MILES_QWEN2 = [Path(os.environ.get("YETO_MILES_SRC", os.path.expanduser("~/work/miles-next"))),
+_MILES_QWEN2 = [Path(os.environ.get("YETO_MILES_SRC", "/nonexistent")),
                 Path.home() / "miles"]
 
 
@@ -160,8 +160,8 @@ def test_megatron_args_and_env_entry(tiny, monkeypatch):
 # --- TP/PP/EP merge on cuts written by real Megatron sharding (subprocess worker) -----------
 
 _REPO = Path(__file__).resolve().parents[1]
-_MEGATRON_PY = Path(os.environ.get("YETO_MEGATRON_PYTHON", os.path.expanduser("~/work/megatron-cpu-venv/bin/python")))
-_MEGATRON_SRC = Path(os.environ.get("YETO_MEGATRON_SRC", os.path.expanduser("~/work/third_party/megatron-lm-miles")))
+_MEGATRON_PY = Path(os.environ.get("YETO_MEGATRON_PYTHON", "/nonexistent"))
+_MEGATRON_SRC = Path(os.environ.get("YETO_MEGATRON_SRC", "/nonexistent"))
 
 
 def _miles_src():

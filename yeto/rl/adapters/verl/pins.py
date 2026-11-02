@@ -1,7 +1,7 @@
-"""verl pins (rl-verl-backend design D1, D10; user decision S16).
+"""verl pins (rl-verl-backend design; user decision).
 
 The user's fork https://github.com/michaellchung/verl at acad9875 (the commit
-S16 measured on Modal 1xH100, VERL-MODAL-CHECK-S16.md).  Dependencies come
+measured on Modal 1xH100).  Dependencies come
 from the fork's own ``uv.lock`` (``uv sync --frozen --all-packages --extra vllm
 --extra fsdp``), the same recipe as upstream ``docker/Dockerfile.uv.cu130``.
 """
@@ -15,7 +15,7 @@ VERL_BASE_IMAGE = "nvidia/cuda:13.0.2-devel-ubuntu24.04"
 VERL_PYTHON = "3.12"
 VERL_UV_VERSION = "0.9.5"
 VERL_ROOT = "/workspace/verl"
-# Versions S16 measured from that lock (env.json); the island asserts them.
+# Versions measured from that lock (env.json); the island asserts them.
 EXPECTED_VERSIONS = {
     "torch": "2.13.0+cu130",
     "vllm": "0.29.0",
@@ -37,7 +37,7 @@ STORE_CLIENT_REQUIREMENTS = ("boto3==1.43.104",)
 #     COMPILE_CUSTOM_KERNELS=1), MindSpeed core_r0.18.0, transformers 5.10.4;
 #   * fork ``docker/ascend/supported_tags.md`` (updated 09/28/2026) -- the
 #     910b / A3 / A5 tags, vLLM backend on CANN 9.1.0;
-#   * infra-drafts/S19-NPU-EXPLORE.md C2 and the version table -- torch and
+#   * the NPU exploration notes and their version table -- torch and
 #     torch_npu 2.10.0 / 2.10.0.post4 for vllm-ascend v0.23.0.
 # NOT VERIFIED on hardware: no 910B4 machine has run this image yet.
 VERL_NPU_BASE_IMAGE = (
@@ -81,7 +81,7 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
 
-# S27 G-EQ2 (npu1): where the verl checkout lives inside the island's image.
+# On npu1: where the verl checkout lives inside the island's image.
 # The island has to start verl with this directory as the working directory,
 # because verl's fully_async config names its search path relative to it
 # (``fully_async_ppo_trainer.yaml``: ``hydra.searchpath:
@@ -114,7 +114,7 @@ def verl_root() -> str | None:
     return None
 
 
-# --- Megatron engine image (S27 G-DC, V8) ------------------------------------
+# --- Megatron engine image (V8) ------------------------------------
 #
 # ``--rl-image verl-megatron-build:<commit>``: the FSDP image above plus the
 # fork's ``megatron`` extra (same lock: torch, vLLM and transformers stay the
@@ -122,7 +122,7 @@ def verl_root() -> str | None:
 # list (built from source for Hopper, the fork's Nemotron example installs
 # them by hand). Versions the Megatron island asserts on top of
 # EXPECTED_VERSIONS (uv.lock of acad9875; mamba-ssm / causal-conv1d are the
-# versions S27 G-R's import check passed with, NEMOTRON-VERL.md section 2).
+# versions the import check passed with, NEMOTRON-VERL.md section 2).
 MEGATRON_IMAGE_VARIANT = "megatron"
 VERL_MEGATRON_IMAGE = f"verl-{MEGATRON_IMAGE_VARIANT}-build:{VERL_COMMIT}"
 MAMBA_SSM_VERSION = "2.3.2.post1"
@@ -136,7 +136,7 @@ EXPECTED_VERSIONS_MEGATRON = {
 }
 
 
-# --- Megatron engine stack on Ascend (S27 G-FN) -------------------------------
+# --- Megatron engine stack on Ascend -------------------------------
 #
 # The NPU Megatron path is MindSpeed's, not the CUDA image's: a different
 # Megatron-Core, a different Bridge, the NPU Transformer Engine, and MindSpeed

@@ -1,7 +1,7 @@
 """fn-train: the formal Flash-Next RL launch (tests/multinode_gpu/fntrain.sh), CPU only.
 
 The printed argv must (1) parse with the real launcher CLI, (2) shape the formal 2x8
-island (FN-T8R8S0, user decision 2026-10-07) and the 4x8 upgrade island for both of its
+island (FN-T8R8S0) and the 4x8 upgrade island for both of its
 fixed configs, (3) reach the learner with recommend-mode, the checkpoint store,
 torch_dist ref-load, expert rank 8, dapo-math data and the math reward, and (4) render the
 full Miles argv through the FN recipe (same pipeline as fp_fn.py). No cloud call.

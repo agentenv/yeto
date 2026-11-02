@@ -1,5 +1,5 @@
 """fn8r (Flash-Next 4-layer stage-A rerun with a learning signal): dense length reward,
-learning-signal judge, fnrun/s1run/fp_fn case and the s11h200chain fn switches (CPU only)."""
+learning-signal judge, fnrun/multinode_run/fp_fn case and the h200_chain fn switches (CPU only)."""
 from __future__ import annotations
 
 import asyncio
@@ -15,10 +15,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MG = REPO / "tests" / "multinode_gpu"
-# Run logs are kept outside the repository (rl-code-quality-cleanup 0.3).
-EVIDENCE = Path(os.environ.get("YETO_EVIDENCE_DIR", os.path.expanduser("~/work/infra-drafts/evidence")))
-TRY27 = (EVIDENCE / "rl-infra-spec/evidence/fn/try27-s12-h100-20261006a/fna/pulled"
-         / "rl-island-0.jsonl")
 sys.path.insert(0, str(REPO / "scripts"))
 import judge_fn_learning_signal as jfs  # noqa: E402
 
@@ -36,7 +32,7 @@ def test_length_reward_is_dense_and_prefers_short_finished():
     assert r("x" * 5000, "TRUNCATED") == 0.0
     assert 0.0 < r("x" * 400, "TRUNCATED") < r("x" * 300, "TRUNCATED") < 0.5
     assert r("x" * 300, "COMPLETED") == pytest.approx(r("x" * 300, "TRUNCATED") + 0.5)
-    # all-truncated group still has variance (try27: 95% truncated -> gsm8k all 0)
+    # an all-truncated group still has variance
     group = [r("y" * n, "TRUNCATED") for n in (310, 355, 402, 290, 377, 333, 368, 345)]
     assert max(group) - min(group) > 0
     assert asyncio.run(lr.reward_func(None, SimpleNamespace(response=None))) == 0.5
@@ -52,18 +48,6 @@ def test_length_reward_spec_is_a_valid_callable_in_repo():
 
 
 # ------------------------------------------------------------------ judge
-@pytest.mark.skipif(not TRY27.exists(), reason="out-of-repo evidence log not present")
-def test_signal_judge_fails_try27():
-    r = subprocess.run([sys.executable, str(REPO / "scripts/judge_fn_learning_signal.py"), str(TRY27)],
-                       capture_output=True, text=True)
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "verdict: FAIL" in r.stdout and "nonzero_grad: FAIL" in r.stdout
-    res = jfs.judge(jfs.load(str(TRY27)))
-    assert res["checks"]["rounds"]["count"] == 6
-    assert not res["checks"]["group_variance"]["ok"]
-    assert res["checks"]["export_hash_change"]["status"] == "unchanged"
-
-
 def _synthetic(tmp_path, *, grads=(0.0, 0.12, 0.09), zv=(1.0, 0.25, 0.0), hashes=("aa", "aa", "bb", "cc")):
     ev = [{"event": "rl_local_round", "grad_norm": g, "zero_variance_group_ratio": z, "reward_std": 0.1}
           for g, z in zip(grads, zv)]
@@ -97,7 +81,7 @@ def test_signal_judge_edge_cases(tmp_path):
     assert jfs.main([str(tmp_path / "missing.jsonl")]) == 2
 
 
-# ------------------------------------------------------------------ fnrun / s1run / fp_fn
+# ------------------------------------------------------------------ fnrun / multinode_run / fp_fn
 def _fnrun(case, **env):
     e = {k: v for k, v in os.environ.items() if k not in ("BOOT_ONLY", "FN_GPU")} | env
     return shlex.split(subprocess.run(["bash", str(MG / "fnrun.sh"), case], env=e, check=True,
@@ -131,9 +115,9 @@ def test_fnrun_fn8r_differs_from_fn8s_only_in_reward_length_and_sampling():
     assert "nebius:1x8xh100@eu-north1" in _fnrun("fn8r", FN_GPU="h100")
 
 
-def test_s1run_dry_fn8r():
+def test_multinode_run_dry_fn8r():
     env = {**os.environ, "DRY": "1", "BOOT_ONLY": "0", "THREAD_MAX": "99999"}
-    r = subprocess.run(["bash", str(MG / "s1run.sh"), "fn8r", "pfx", "100", "200"],
+    r = subprocess.run(["bash", str(MG / "multinode_run.sh"), "fn8r", "pfx", "100", "200"],
                        env=env, capture_output=True, text=True, cwd=REPO)
     assert r.returncode == 0, r.stdout + r.stderr
     toks = shlex.split(r.stdout.splitlines()[-1])
@@ -167,7 +151,7 @@ def test_fp_fn_fn8r_fingerprint():
 def _plan(tmp_path, **env):
     e = {k: v for k, v in os.environ.items() if k not in ("FNA_CASE", "FNA_SKIP", "FN_CONV", "FN_GPU")}
     e |= {"FN_PLAN_ONLY": "1", "RUN_ROOT": str(tmp_path)} | env
-    return subprocess.run(["bash", str(MG / "s11h200chain.sh"), "pfx"], env=e, capture_output=True, text=True)
+    return subprocess.run(["bash", str(MG / "h200_chain.sh"), "pfx"], env=e, capture_output=True, text=True)
 
 
 def test_chain_plan_defaults_unchanged(tmp_path):
@@ -189,17 +173,17 @@ def test_chain_plan_switches(tmp_path):
 
 
 def test_chain_judge_args_and_signal_judge():
-    src = (MG / "s11h200chain.sh").read_text()
-    assert subprocess.run(["bash", "-n", str(MG / "s11h200chain.sh")]).returncode == 0
+    src = (MG / "h200_chain.sh").read_text()
+    assert subprocess.run(["bash", "-n", str(MG / "h200_chain.sh")]).returncode == 0
     assert 'FNJ="--num-gpus 8 --rollouts 6 --rank 16 --expert-rank 8"' in src
     assert "judge_qwen3_8_next_lora_log.py $B/$P-$1/pulled/run.log $FNJ " in src
     assert "judge_fn_learning_signal.py $B/$P-$1/pulled/rl-island-0.jsonl" in src
-    assert "$D/s1run.sh $FC $P-$1" in src and "fp_fn.py $REPO $FC " in src
+    assert "$D/multinode_run.sh $FC $P-$1" in src and "fp_fn.py $REPO $FC " in src
     assert 'if [ $FSKIP = 1 ]; then log "fna skipped' in src
 
 
 def test_fnprep_records_full_snapshot_marker():
-    src = (MG / "s11fnprep.sh").read_text()
+    src = (MG / "flash_next_prep.sh").read_text()
     assert "yeto-complete/Qwen--Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540.json" in src
     assert '"full_snapshot": g("FULL_SNAPSHOT")' in src
-    assert subprocess.run(["bash", "-n", str(MG / "s11fnprep.sh")]).returncode == 0
+    assert subprocess.run(["bash", "-n", str(MG / "flash_next_prep.sh")]).returncode == 0

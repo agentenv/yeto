@@ -20,7 +20,7 @@ from .contracts import LocalStepReceipt, TrainerUpdateManifest
 _ROLES_BY_ALGORITHM = {
     "grpo": frozenset({"actor"}),
     "sao": frozenset({"actor", "critic"}),
-    # rl-algo-critic-family D4: critic as a second role, own layout lane
+    # rl-algo-critic-family: critic as a second role, own layout lane
     "ppo": frozenset({"actor", "critic"}),
 }
 # Algorithms whose roles may be laid out as separate role lanes (stream_role):

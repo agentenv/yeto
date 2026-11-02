@@ -1,11 +1,11 @@
-"""D1 (tasks 6.1-6.3): shadow load attribution, gain prediction, semi-automatic
+"""Shadow load attribution, gain prediction, semi-automatic
 recommendations and re-validation before a human-approved request.
 
 Nothing here executes a transition on its own.  ``approve`` re-validates a
 recommendation and then calls the controller's ordinary ``request`` entry --
 the same transaction path as a manual request (no side channel).
 
-Gain model (design D1/D2):
+Gain model:
 * serial timeline: a window's wall time is ``rollout(gpu busy + tool wait +
   tail wait) + publish block + train/other``; only the GPU-busy rollout part
   scales with the engine count, tool wait and tail are not double counted and
@@ -17,7 +17,7 @@ Gain model (design D1/D2):
 * cost: per (profile_hash, source, target) upper bounds from 5.7.  Unknown
   cost -> no recommendation.  Recommend only if
   ``gain_lower * horizon > cost_upper + safety_margin``.
-* objective (S19 G2): every evaluation reports two measures, wall time and GPU
+* objective: every evaluation reports two measures, wall time and GPU
   seconds.  ``objective="wall"`` (default, unchanged behaviour) needs a wall-time
   net gain, so removing engines is never recommended.  ``objective="gpu_seconds"``
   needs a GPU-seconds net gain; the edge must carry GPU counts.  GPU seconds
@@ -39,7 +39,7 @@ class RecommendMode(str, enum.Enum):
     DISABLED = "disabled"
     MANUAL = "manual"
     RECOMMEND = "recommend"
-    AUTO = "auto"  # D2 6.4: driven only by ``auto.AutoController``; default off
+    AUTO = "auto"  # Driven only by ``auto.AutoController``; default off
 
 
 SERIAL = "serial"
@@ -338,7 +338,7 @@ class Recommender:
     min_windows: int = 3
     efficiency_lower: float = 0.7
     clock: Callable[[], float] = time.time
-    objective: str = WALL  # S19 G2; see module doc and design D9
+    objective: str = WALL  # see the module doc
 
     def __post_init__(self) -> None:
         if self.objective not in OBJECTIVES:

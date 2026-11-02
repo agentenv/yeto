@@ -1,9 +1,9 @@
-# yeto miles-ports image (MILES_NEXT_IMAGE) -- APPROXIMATE, UNVERIFIED
-# docker-build equivalent of scripts/build_miles_ports_image.sh (never built:
-# the build host has no docker).  The script produces the real image with
-# `crane append` (one layer from docker/miles-ports/make_layer.py) because the
-# build host has no docker daemon.  Pushed PRIVATE to
-# ghcr.io/michaellchung/yeto-miles-ports:<miles7>-<sglang7>.
+# Reference only, the real image is built by scripts/build_miles_ports_image.sh.
+#
+# yeto miles-ports image (MILES_NEXT_IMAGE): an approximate, unverified
+# docker-build equivalent of that script, which produces the real image with
+# `crane append` (one layer from docker/miles-ports/make_layer.py) and pushes
+# it to $DEST_REPO:<miles7>-<sglang7>.
 #
 #   docker build --platform linux/amd64 -f docker/miles-ports/Dockerfile \
 #     --build-arg MILES_COMMIT=... --build-arg SGLANG_COMMIT=... \
@@ -52,7 +52,7 @@ RUN cd /sgl-workspace/sglang \
 ARG PEFT_VERSION=0.20.0
 RUN pip install --no-deps "peft==$PEFT_VERSION"
 
-# Lazy modelopt (rl-trainer-cold-start-cost L2.2), as the crane layer: the
+# Lazy modelopt, as the crane layer: the
 # Megatron-Bridge package __init__ and the Megatron-LM patch.
 COPY megatron_bridge_init.py /opt/sglang/lib/python3.12/site-packages/megatron/bridge/__init__.py
 COPY megatron_lm_lazy_modelopt.patch /tmp/

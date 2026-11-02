@@ -1,7 +1,7 @@
-"""Runtime patches around defects of verl's own Megatron engine (S27 G-FT).
+"""Runtime patches around defects of verl's own Megatron engine.
 
 Everything else yeto does for the verl Megatron island is wiring on our side:
-fifteen blockers (S27 G-FN), eleven (G-FS), six (G-FU) -- every one of them was
+fifteen blockers, eleven, six -- every one of them was
 closed in yeto, with ``verl`` unchanged.  This module is the third kind, and so
 far the only member of it: **a defect inside verl that no configuration of ours
 avoids**, worked around at run time instead of by editing the shared
@@ -9,7 +9,7 @@ avoids**, worked around at run time instead of by editing the shared
 yeto (which would drift silently when verl changes).
 
 **The defect** (verified by reading verl at the two places named below, and by
-run ``ft-2`` on npu1):
+a training run):
 
 * ``verl/trainer/ppo/ray_trainer.py:1311`` reads the inference MFU of the
   old-log-prob pass as ``tu.get(output, "metrics")["mfu"]``, unconditionally;
@@ -51,7 +51,7 @@ MFU_KEY = "mfu"
 METRICS_KEY = "metrics"
 _INSTALLED = False
 
-# S28 G-120C: the old-log-prob entropy switch (megatron_engine.MegatronShape
+# The old-log-prob entropy switch (megatron_engine.MegatronShape
 # .old_logprob_entropy, written as the top-level key OLD_LOGPROB_ENTROPY_KEY).
 #
 # verl hard codes calculate_entropy=True in RayPPOTrainer._compute_old_log_prob
@@ -176,7 +176,7 @@ def install() -> bool:
             if key == METRICS_KEY:
                 return normalize_metrics(value)
             if key == ENTROPY_KEY and value is None and not entropy:
-                # S28 G-120C: the engine computed no entropy; verl's next line pads it, and
+                # The engine computed no entropy; verl's next line pads it, and
                 # the separation trainer averages it into "actor/entropy" and pops it
                 return entropy_placeholder(plain_get(tensordict, LOG_PROBS_KEY, None))
             return value

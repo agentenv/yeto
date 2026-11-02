@@ -95,7 +95,7 @@ def base_tree(tmp_path_factory):
 
 
 def _without_data_split(plan: dict) -> dict:
-    """The plan without the S27 data split records (``data_split``), which BASE
+    """The plan without the data split records (``data_split``), which BASE
     predates; the island commands keep everything else."""
     out = {k: v for k, v in plan.items() if k != "data_split"}
     out["island_requests"] = [{k: v for k, v in island.items() if k != "data_split"}
@@ -106,7 +106,7 @@ def _without_data_split(plan: dict) -> dict:
 def test_strict_mode_commands_equal_the_commands_before_the_modes(base_tree):
     before = _plans(base_tree, CONTROL_CASES)
     # --rl-data-split shared: every island reads every row, as before the data split
-    # (S27); the comparison is about the sync modes only
+    # was introduced; the comparison is about the sync modes only
     strict = _plans(ROOT, {name: (*extra, "--rl-sync-mode", "strict", "--rl-data-split", "shared")
                            for name, extra in CONTROL_CASES.items()})
     for name in CONTROL_CASES:
@@ -236,7 +236,7 @@ def test_one_island_keeps_the_strict_values(extra):
 
 
 def test_one_island_warns_that_async_does_not_apply_and_names_the_final_cut(capsys):
-    """S27 G-CD (GBC-120B-STAGEB §3): one full-parameter island with the default
+    """One full-parameter island with the default
     --rl-sync-mode async ran strict and downloaded the f32 model at the final cut."""
     from yeto.launch.rl_args import _apply_rl_sync_mode, rl_sync_mode_off_reasons
 
@@ -267,7 +267,7 @@ def test_peer_recovery_defaults_on_where_it_applies():
     assert args.rl_peer_recovery is True
     args, _ = _plan(FULL)  # no snapshot store: off
     assert args.rl_peer_recovery is False
-    # Off with asynchronous rounds (S27 G-DS): the store then keeps only the
+    # Off with asynchronous rounds: the store then keeps only the
     # islands' data positions for the catch-up, and no island gets a snapshot store.
     for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up")):
         args, plan = _plan(FULL + store + extra)

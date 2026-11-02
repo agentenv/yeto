@@ -1,4 +1,4 @@
-"""Dense strict sweep against the real Rust syncer (P0-1.7b.1, Q7 item 4).
+"""Dense strict sweep against the real Rust syncer.
 
 The syncer runs the exact actor command the launcher generates for
 ``--rl-sync-preset full-parameter``; the client binds the profile hash the
@@ -227,7 +227,7 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
 
 
 def test_streamed_sweep_matches_the_serial_sweep_bit_for_bit(syncer_binary, tmp_path):
-    """E3: fragment pipelining + async checkpoint changes timing, not results."""
+    """Fragment pipelining + async checkpoint changes timing, not results."""
     serial_dir, streamed_dir = tmp_path / "serial", tmp_path / "streamed"
     serial_dir.mkdir()
     streamed_dir.mkdir()
@@ -256,7 +256,7 @@ def test_streamed_flags_bind_the_profile_and_are_full_parameter_only():
 
 
 def test_bf16_pushes_stay_within_bf16_error_of_the_f32_sweep(syncer_binary, tmp_path):
-    """E3: bf16 outer deltas change results only by bf16 rounding of each delta."""
+    """Bf16 outer deltas change results only by bf16 rounding of each delta."""
     exact_dir, bf16_dir = tmp_path / "f32", tmp_path / "bf16"
     exact_dir.mkdir()
     bf16_dir.mkdir()
@@ -305,7 +305,7 @@ def _tail(data: bytes) -> torch.Tensor:
 
 
 def test_int8_pushes_stay_within_their_block_error_of_the_f32_sweep(syncer_binary, tmp_path):
-    """E3: int8 outer deltas change results only by half a scale step per delta."""
+    """Int8 outer deltas change results only by half a scale step per delta."""
     exact_dir, int8_dir = tmp_path / "f32", tmp_path / "int8"
     exact_dir.mkdir()
     int8_dir.mkdir()
@@ -331,7 +331,7 @@ def _downlink_run(binary, tmp_path, full_every: int, sweeps: int, **kwargs):
 
 
 def test_bf16_downlink_tracks_the_exact_broadcasts_and_leaves_the_merge_exact(syncer_binary, tmp_path):
-    """E3: BCAST deltas change only what islands hold between f32 refreshes;
+    """BCAST deltas change only what islands hold between f32 refreshes;
     the syncer's masters, versions, FINAL and checkpoint stay bit-identical."""
     exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
     exact_dir.mkdir()
@@ -355,7 +355,7 @@ def test_bf16_downlink_tracks_the_exact_broadcasts_and_leaves_the_merge_exact(sy
 
 
 def test_bf16_downlink_anchor_mismatch_reconnects_and_resyncs_with_f32(syncer_binary, tmp_path):
-    """E3 fallback: a learner whose anchor drifted fails the digest check,
+    """Fallback: a learner whose anchor drifted fails the digest check,
     reconnects, receives the shared anchor as FULL, and the run finishes
     with the same exact result."""
     exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
@@ -431,7 +431,7 @@ class _BytesSink:
 
 
 def test_bf16_downlink_through_a_streaming_sink_matches_the_buffered_path(syncer_binary, tmp_path):
-    """E3: the Miles path streams BCAST chunks into a transactional sink; the
+    """The Miles path streams BCAST chunks into a transactional sink; the
     downlink wrapper must hand it the same f32 anchor bytes."""
     buffered_dir, streamed_dir = tmp_path / "buffered", tmp_path / "streamed"
     buffered_dir.mkdir()
@@ -445,7 +445,7 @@ def test_bf16_downlink_through_a_streaming_sink_matches_the_buffered_path(syncer
 
 def _overlap_island_run(binary: Path, tmp_path: Path, extra: tuple[str, ...], dtype: int,
                         sweeps: int, progress: dict[tuple[int, int], list[float]]):
-    """One overlap island (E3 item 3) against the real syncer.
+    """One overlap island against the real syncer.
 
     Round s trains before sweep s-1 comes back; at boundary s the island waits
     for G_{s-1}, rebases ``theta <- G_{s-1} + (theta - base)`` and pushes
@@ -503,7 +503,7 @@ def _overlap_island_run(binary: Path, tmp_path: Path, extra: tuple[str, ...], dt
 
 
 def test_overlap_with_bf16_downlink_counts_each_round_once_without_a_resync(syncer_binary, tmp_path):
-    """E3: overlap + bf16 BCAST deltas. The island rebases on a bf16-tracked
+    """Overlap + bf16 BCAST deltas. The island rebases on a bf16-tracked
     anchor, but it pushes ``theta - anchor`` against that same anchor, so the
     syncer's f32 masters still get every round's progress exactly once; the
     downlink error stays out of the masters and never triggers a resync."""
@@ -533,7 +533,7 @@ def test_overlap_with_bf16_downlink_counts_each_round_once_without_a_resync(sync
 
 
 def test_bf16_downlink_sends_each_fragments_final_version_exact(syncer_binary, tmp_path):
-    """E3 (s26-e3-p06-D8): the last BCAST of a fragment has the same version as
+    """The last BCAST of a fragment has the same version as
     its FINAL. Islands keep one copy per (fragment, version) and refuse a
     second copy with other bytes, so that BCAST must be the exact f32 masters
     even when the FULL cadence (here M=100) would send a bf16 delta."""
@@ -610,7 +610,7 @@ def _sweep_until_final(client: SyncerClient, sweeps: int):
 @pytest.mark.parametrize("schedule", ["rr", "adaptive"])
 def test_stalled_stream_redials_and_the_replayed_push_keeps_the_exact_result(
         syncer_binary, tmp_path, schedule):
-    """E3b: a data stream that stops moving bytes (C32 first run) is dropped
+    """A data stream that stops moving bytes is dropped
     after the stall timeout; the syncer replays its PULL on the new group and
     the island pushes that fragment again, so versions and finals match a run
     without the stall bit for bit."""
@@ -648,7 +648,7 @@ def _initial_values(fid: int) -> list[float]:
 
 
 def test_init_interrupted_by_a_redial_is_replayed_and_the_result_stays_exact(syncer_binary, tmp_path):
-    """E3b (s26-e3b-p06-C32a): learner 0's group died after INIT of fragment 0
+    """Learner 0's group died after INIT of fragment 0
     and before fragment 1, so the syncer never finished initializing and no
     island got the initial cut. The client now replays INIT on the next group
     until the initial cut arrives; the result matches an undisturbed run. A
@@ -708,8 +708,8 @@ def test_init_interrupted_by_a_redial_is_replayed_and_the_result_stays_exact(syn
 
 
 def test_one_socket_lost_mid_init_is_redialed_and_the_result_stays_exact(syncer_binary, tmp_path):
-    """E3c: a single data socket of learner 0's group fails between INIT of
-    fragment 0 and fragment 1 (as in s26-e3b-p06-C32a, where one connection
+    """A single data socket of learner 0's group fails between INIT of
+    fragment 0 and fragment 1 (as in a GPU run where one connection
     reported BrokenPipe). The client replaces the whole group, replays INIT,
     and the final versions and bytes equal an undisturbed run."""
     exact = _run_sweeps(syncer_binary, tmp_path, STREAMED, sweeps=3)

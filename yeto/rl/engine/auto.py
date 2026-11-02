@@ -1,11 +1,11 @@
-"""D2 task 6.4: default-off automatic policy on top of the D1 recommender.
+"""Default-off automatic policy on top of the recommender.
 
 Every trigger goes through the very same path as a human approval:
 ``Recommender.approve`` -> ``Recommender.revalidate`` (expiry, epoch, profile,
 load, ``controller.plan`` pause guard / certification / capacity) ->
 ``controller.request``.  There is no side channel.
 
-Guards (design D2), all configurable, no paper numbers hard-coded:
+Guards, all configurable, no paper numbers hard-coded:
 * the controller's ``recommend_mode`` must be ``auto`` (default ``disabled``);
 * the last ``k_windows`` valid windows must ALL show net gain for the edge
   (``Recommender._net`` takes the minimum gain over the windows), so an

@@ -1,6 +1,6 @@
 """rlf-codex-rl 5.6: Qwen3-30B-A3B cyber baseline profile (CPU-only contracts).
 
-Covers the S21 audit gaps for task 5.6: the profile passes the closed
+Covers the audit gaps of the profile: the profile passes the closed
 allowlist checks, and the plan budgets (thinking mode, 32K window, 8192
 tokens/turn, 48 turns, 8192-byte tool output) are registered values rather
 than unsigned defaults.

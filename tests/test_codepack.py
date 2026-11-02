@@ -1,4 +1,4 @@
-"""rl-identity-tiering L9.4-L9.6: run code packs (no cloud; directory store)."""
+"""Run code packs (no cloud; directory store)."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_verify_tree_rejects_changed_tree(repo: Path) -> None:
 
 
 def test_unpack_keeps_a_tree_another_launch_placed_first(repo: Path, monkeypatch) -> None:
-    # S25 T-EVAL: two launches from one checkout unpack the same digest at once; the
+    # Two launches from one checkout unpack the same digest at once; the
     # later rename finds the earlier tree in place (ENOTEMPTY) and must reuse it
     pack, data = codepack.build_pack(repo)
     cache = repo.parent / "cache"
@@ -99,7 +99,7 @@ def test_unpack_keeps_a_tree_another_launch_placed_first(repo: Path, monkeypatch
 
 
 def test_an_unpacked_tree_can_be_zipped_for_a_remote_api_server(repo: Path) -> None:
-    # T-C1b: the pack's entries carry mtime 0; sky zips the workdir it uploads to a
+    # The pack's entries carry mtime 0; sky zips the workdir it uploads to a
     # remote API server and ZIP refuses times before 1980
     import os
     import zipfile
@@ -118,7 +118,7 @@ def test_an_unpacked_tree_can_be_zipped_for_a_remote_api_server(repo: Path) -> N
 
 
 def test_a_tree_that_lost_its_executable_bits_still_verifies(repo: Path) -> None:
-    # T-C1b: sky's upload to a remote API server unpacks the workdir zip without file
+    # Sky's upload to a remote API server unpacks the workdir zip without file
     # modes; the island restores the bits the pack lists before it checks the digest
     import os
 
@@ -232,7 +232,7 @@ def test_modal_volume_store_creates_the_volume_on_put(monkeypatch: pytest.Monkey
 
 
 # ---------------------------------------------------------------------------
-# release mode (L9.12)
+# release mode
 # ---------------------------------------------------------------------------
 IMAGE = "ghcr.io/x/yeto-release@sha256:" + "a" * 64
 OTHER_IMAGE = "ghcr.io/x/yeto-release@sha256:" + "b" * 64

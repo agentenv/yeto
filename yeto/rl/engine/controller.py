@@ -1,27 +1,27 @@
-"""``IslandController``: single-transaction in-island reconfiguration (rl-infra-spec 3.2-3.7).
+"""``IslandController``: single-transaction in-island reconfiguration.
 
-Design D1/D4/D6 and f-design §1.3. The controller lives inside the learner,
+The controller lives inside the learner,
 is owned by :class:`~yeto.rl.engine.driver.IslandDriver` and runs a
 transaction only when the driver hands it a safe point (3.1). It never talks
-to cells: every engine action goes through the E1 port verbs
+to cells: every engine action goes through the elastic port verbs
 (:class:`~yeto.rl.engine.ports.ElasticRolloutPool`,
 :class:`~yeto.rl.engine.ports.MemberPublisher`,
 :class:`~yeto.rl.engine.ports.ReconfigurablePlacement`).
 
-Scope (E1): only ``rollout-only`` edges (trainer untouched; engines are added
+Scope: only ``rollout-only`` edges (trainer untouched; engines are added
 or removed inside the fixed pool). Every other edge kind is rejected by
 :meth:`IslandController.plan`, as is any edge the capability attestation
 (PR #66 format, task 1.6) does not certify, an unknown config, a fingerprint
 mismatch or a profile the pause audit (1.5) does not allow.
 
-Entry points (D4): :meth:`plan` (pure), :meth:`request` (idempotent on
+Entry points: :meth:`plan` (pure), :meth:`request` (idempotent on
 ``request_id``; same id with another body, a stale ``expected_epoch`` or a
 second concurrent transaction are refused), :meth:`status` (answers after a
 lost commit acknowledgement from the journal), :meth:`cancel`. Local command
 files (:class:`CommandInbox`) forward requests from SSH/Sky; there is no
 network endpoint.
 
-Transaction phases (D4): VALIDATING -> WAIT_SAFE -> QUIESCING -> TRANSFERRING
+Transaction phases: VALIDATING -> WAIT_SAFE -> QUIESCING -> TRANSFERRING
 -> INITIALIZING -> VERIFYING -> COMMITTED -> RESUMING -> SUCCEEDED; failures end
 in CANCELLED (nothing destructive happened), REBUILD_OLD -> REBUILT_OLD (the old
 engine set was restored and serves the same policy), or RECOVERY_REQUIRED
@@ -53,7 +53,7 @@ from .pause_audit import DEFAULT_MARGIN, DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHAS
 from .resume import (FLAT_MANIFEST, ROUND_CUTS, CheckpointStore, restore_flat_mirror, store_for,
                      sync_flat_mirror)
 from .ports import ElasticRolloutPool, MemberPublisher, PlacementDescription, ReconfigurablePlacement
-try:  # E3 (4.7) module; absent until infra-e3 is integrated -> trainer edges refused
+try:  # optional module; when absent, trainer edges are refused
     from .trainer_transition import (
         READY_TO_COMMIT,
         TRAINER_EDGE_KINDS,
@@ -73,7 +73,7 @@ except ImportError:  # pragma: no cover - depends on the integrated tree
     def recovery_decision(*_a: Any, **_k: Any) -> dict[str, Any]:
         return {"action": "none"}
 
-# D4 phase names.
+# Transaction phase names.
 VALIDATING = "VALIDATING"
 WAIT_SAFE = "WAIT_SAFE"
 QUIESCING = "QUIESCING"
@@ -88,7 +88,7 @@ CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
-STORE_MANIFEST = FLAT_MANIFEST  # Q4 (C5): written last by sync_checkpoint_store
+STORE_MANIFEST = FLAT_MANIFEST  # Written last by sync_checkpoint_store
 STORE_ROUND_CUTS = ROUND_CUTS  # M4: round cuts live in the store itself (written by the adapter)
 LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
                "cross_node_tp", "cross_node_engine_tp")
@@ -104,11 +104,11 @@ TERMINAL = frozenset({SUCCEEDED, CANCELLED, REBUILT_OLD, RECOVERY_REQUIRED})
 # Phases after which the old engine set can no longer simply be resumed.
 DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD, REBUILDING_TRAINER})
 TRAINER_REBUILD = "trainer-rebuild"
-# Test-only learner kill at a phase (plan.md E1-D ⑤ COMMITTED, ⑥ QUIESCING).
+# Test-only learner kill at a phase (e.g. COMMITTED, QUIESCING).
 KILL_AT_ENV = "YETO_RL_TEST_KILL_LEARNER_AT"
 KILL_EXIT_CODE = 86
 
-E1_EDGE_KINDS = frozenset({"rollout-only"})
+ROLLOUT_EDGE_KINDS = frozenset({"rollout-only"})
 
 
 class Rejected(ValueError):
@@ -123,7 +123,7 @@ class TransactionFailed(RuntimeError):
 
 
 class RecoveryRequired(RuntimeError):
-    """The island is in RECOVERY_REQUIRED: stop consuming data (D4)."""
+    """The island is in RECOVERY_REQUIRED: stop consuming data."""
 
 
 class RebuildRefused(RuntimeError):
@@ -137,7 +137,7 @@ class _RebuildStuck(Exception):
 
 @dataclass(frozen=True)
 class Timeouts:
-    """``T_*`` of design D4 (seconds). Configuration values, set from measured P99."""
+    """``T_*`` transaction timeouts (seconds). Configuration values, set from measured P99."""
 
     safe_point: float = 600.0  # a request not reaching a usable safe point in time is cancelled
     drain: float = 120.0
@@ -159,7 +159,7 @@ class Plan:
     expected_pause_s: float
     pause_budget_s: float | None
     profile_hash: str | None
-    trainer: Mapping[str, Any] | None = None  # E3 (4.7): TrainerEdgePlan.to_dict()
+    trainer: Mapping[str, Any] | None = None  # TrainerEdgePlan.to_dict() for trainer edges
 
     @property
     def add(self) -> int:
@@ -251,7 +251,7 @@ class _Tx:
 
 @dataclass(frozen=True)
 class IslandStatus:
-    """f-design §1.1 (subset used by E1)."""
+    """Island configuration (the subset used by rollout-only edges)."""
 
     health: str  # RUNNING | RECONFIGURING | RECOVERY_REQUIRED
     config_id: str | None
@@ -266,7 +266,7 @@ class IslandStatus:
     last_result: Mapping[str, Any] | None = None
     recovery: Mapping[str, Any] | None = None  # 3.7 restart recovery awaiting confirm
     incarnation: Mapping[str, Any] | None = None
-    # rl-inter-island-scheduling (design Q1): scheduling fields. Filled only
+    # rl-inter-island-scheduling: scheduling fields. Filled only
     # from an existing source (journal pool_* records, scheduling_probe); None
     # otherwise -- never estimated.
     pool_epoch: int | None = None
@@ -352,7 +352,7 @@ class IslandController:
         self._on_watchdog = on_watchdog
         self.inbox = inbox
         # 6.5: disabled | manual | recommend | auto.  Default DISABLED keeps the
-        # pre-D1 behaviour; the mode never gates or bypasses ``plan``/``request``.
+        # the original behaviour; the mode never gates or bypasses ``plan``/``request``.
         self.recommend_mode = RECOMMEND_MODES[0]
         # 4.4: ``trainer_rebuilder(driver, *, epoch, cut_id) -> Mapping`` saves the
         # cut, rebuilds the trainer behind the ports and restores it (via
@@ -368,11 +368,11 @@ class IslandController:
         # the transaction cannot commit; once the commit began it cannot kill.
         self._watchdog_lock = threading.RLock()
         self._committing = False
-        # E3 (4.7): None keeps trainer edges refused. Otherwise returns
+        # None keeps trainer edges refused. Otherwise returns
         # {"spec", "args", "global_batch_size", "micro_batch_size", "ops"} where
         # ops is a trainer_transition.TrainerOps implemented by the backend adapter.
         self._trainer_edges = trainer_edges
-        # rl-multinode-island Q4 (C5): an off-island copy of the state dir (journal,
+        # An off-island copy of the state dir (journal,
         # epochs, cuts, ledger) kept by sync_checkpoint_store() after every commit
         # point; a learner starting on an EMPTY state dir (machine replaced) restores
         # it from there first. None = node0-local state only.
@@ -401,7 +401,7 @@ class IslandController:
         if int(max_recovery_attempts) < 1:
             raise Rejected("max_recovery_attempts must be >= 1")
         self.max_recovery_attempts = int(max_recovery_attempts)
-        # rl-multinode-island D9: (nodes, gpus_per_node) of the island and a probe
+        # (nodes, gpus_per_node) of the island and a probe
         # returning the alive node ids (or {node_id: gpus} mapping). None = single node.
         self.topology: tuple[int, int] | None = None
         self._topology_checked = False
@@ -468,7 +468,7 @@ class IslandController:
             return self.journal.append(kind, **fields)
 
     def _maybe_test_kill(self, phase: str) -> None:
-        """TEST ONLY (plan.md E1-D ⑤⑥): ``YETO_RL_TEST_KILL_LEARNER_AT=<PHASE>``
+        """TEST ONLY: ``YETO_RL_TEST_KILL_LEARNER_AT=<PHASE>``
         hard-kills the learner (``os._exit``) right after a transaction journals PHASE, once
         per state dir (marker file), so the restarted learner goes on."""
         import os
@@ -494,7 +494,7 @@ class IslandController:
             return []
         if tx.added:
             return sorted(tx.added)
-        # E3 trainer edges journal their new engines as add_intent
+        # Trainer edges journal their new engines as add_intent
         intent = next((r for r in reversed(self.journal.records)
                        if r["kind"] == "add_intent" and r.get("tx_id") == tx.tx_id), None)
         return sorted(intent["members"]) if intent else []
@@ -557,7 +557,7 @@ class IslandController:
                              error=f"watchdog could not kill the target generation in {phase}: "
                                     f"{list(errors)[:2]!r}")
 
-    # ------------------------------------------------------------- node topology (D9)
+    # ------------------------------------------------------------- node topology
     def set_topology(self, topology: tuple[int, int] | None,
                      node_probe: Callable[[], Any] | None = None, *,
                      layout: Mapping[str, Any] | None = None) -> None:
@@ -570,7 +570,7 @@ class IslandController:
             self._topology_checked = False  # refuse_partial_island() ran for this topology
         self.topology = topology
         self._node_probe = node_probe
-        # Q4 (C5): the island's parallel layout; defaults come from the startup config
+        # The island's parallel layout; defaults come from the startup config
         self.layout: dict[str, Any] | None = None
         if topology is not None:
             self.layout = island_layout(self.configs[self.initial_config], topology, layout)
@@ -630,7 +630,7 @@ class IslandController:
         return None
 
     def refuse_partial_island(self) -> str | None:
-        """Startup precondition (D9, tasks 3.3): one ``topology`` journal record (declared
+        """Startup precondition: one ``topology`` journal record (declared
         nodes/gpus_per_node, alive nodes, incarnation); on a partial island enter
         RECOVERY_REQUIRED and return why, else None. Runs once per incarnation: the entry
         preflight calls it right after the Ray connect (before any placement group is
@@ -649,12 +649,12 @@ class IslandController:
                      layout_accepted=layout_why is None, layout_error=layout_why)
         why = self.topology_rejection()
         if why is not None:
-            # D9: never touch the fork's membership epoch on a partial island; the
+            # never touch the fork's membership epoch on a partial island; the
             # restart precondition fails before any restore/start/stop call.
             self._enter_recovery(None, f"island topology: {why}; recovery refused on fewer nodes")
             return why
         if layout_why is not None:
-            # Q4 (C5): fail closed for this incarnation (admission closed, the entry
+            # Fail closed for this incarnation (admission closed, the entry
             # exits) but, like gpu_pool, NOT a journal terminal: the operator relaunches
             # with the same cfg/recipe (same shape) and the island resumes; no flag
             # overrides this, a rebuild must be same-shape.
@@ -666,7 +666,7 @@ class IslandController:
         return None
 
     def check_nodes(self) -> str | None:
-        """Driver poll (D9): any node loss -> ``node_lost`` journal record and the
+        """Driver poll: any node loss -> ``node_lost`` journal record and the
         RECOVERY_REQUIRED terminal state (admission closed). Returns the error, or
         None while every declared node is alive. Idempotent once entered."""
         if self.recovery_required:
@@ -771,7 +771,7 @@ class IslandController:
         self._on_watchdog = handler
 
     def set_trainer_edges(self, provider: Callable[[], Mapping[str, Any]] | None) -> None:
-        """E3 (4.7): wired by compose_island once the trainer/pool exist."""
+        """Wired by compose_island once the trainer/pool exist."""
         self._trainer_edges = provider
 
     # ------------------------------------------- dashboard events (5.1 / 5.2)
@@ -837,7 +837,7 @@ class IslandController:
             if phase in TERMINAL:
                 self._emit_cell_snapshot("tx_end:" + phase, tx.tx_id)
         if phase in (COMMITTED, SUCCEEDED):
-            self.sync_checkpoint_store(phase)  # Q4 (C5): after the durable CAS / cut commit
+            self.sync_checkpoint_store(phase)  # After the durable CAS / cut commit
         self._maybe_test_kill(phase)
 
     # ------------------------------------------------------------------ startup
@@ -889,7 +889,7 @@ class IslandController:
                            if r["kind"] == "request" and r["tx_id"] == tx_id)
             phases = [r["phase"] for r in self.journal.iter_tx(tx_id) if r["kind"] == "phase"]
             if epochs.last_tx_id == tx_id:
-                # the durable CAS happened: the transaction committed (3.7 "commit后恢复")
+                # the durable CAS happened: the transaction committed (recovery after commit)
                 self._record("phase", tx_id=tx_id, request_id=request["request_id"],
                              phase=SUCCEEDED, config_epoch=epochs.config_epoch,
                              fork_epoch=self._fork_epoch, recovered_after_restart=True)
@@ -899,12 +899,12 @@ class IslandController:
                              fork_epoch=self._fork_epoch, error="learner restarted before release")
             elif (request["body"].get("kind", "rollout-only") == "rollout-only"
                   and REBUILDING_TRAINER not in phases):
-                # 3.7 "release 后重建旧 rollout" (recovery-design.md §3.2, D1): the
+                # rebuild the old rollout set after release: the
                 # committed members are the old set; the recovery below rebuilds
                 # them and the transaction ends REBUILT_OLD.
                 rebuild_after_restart.append((tx_id, request["request_id"]))
             else:
-                # E3: the trainer was rebuilt from startup args; the hint names the cut
+                # the trainer was rebuilt from startup args; the hint names the cut
                 # a manual recovery would restore (trainer_transition.recovery_decision).
                 hint = recovery_decision(list(self.journal.iter_tx(tx_id)), epochs.config_id,
                                          epochs.last_tx_id)
@@ -942,7 +942,7 @@ class IslandController:
         """Why the committed config cannot be recovered by rollout cell start/stop
         (recovery-design.md §2): None when it can."""
         epochs = self.journal.epochs
-        topology_why = self.topology_rejection()  # D9: never recover onto fewer nodes
+        topology_why = self.topology_rejection()  # never recover onto fewer nodes
         if topology_why is not None:
             return f"island topology: {topology_why}"
         layout_why = self.layout_rejection()  # Q4: never recover onto another layout
@@ -1169,8 +1169,8 @@ class IslandController:
         request transaction that has no terminal record yet (``scope=request``,
         ``request_id=<id>``, ``cause``, ``island_record_seq`` -> the island record).
 
-        Revision (2026-10-02 user ruling, E1-D ④ chain 6r2): the island record alone left the
-        request (dn1) without a terminal record of its own; both are written now, with the
+        Why both: the island record alone would leave the
+        request without a terminal record of its own; both are written now, with the
         same error/epochs, so the request's status, the journal replay and the GPU judge
         agree on one terminal state. ``cause`` names the failure class
         (``stop_retry_deadline``, ``rebuild_old_failed``, ``watchdog_unresolved``, ...)."""
@@ -1269,11 +1269,11 @@ class IslandController:
         if not edges:
             raise Rejected(f"edge {source}->{target} is not certified")
         kinds = {k[2] for k in edges}
-        if kinds & TRAINER_EDGE_KINDS and not kinds & E1_EDGE_KINDS:
+        if kinds & TRAINER_EDGE_KINDS and not kinds & ROLLOUT_EDGE_KINDS:
             return self._plan_trainer(source, target, expected_epoch, deadline_s)
-        if not kinds & E1_EDGE_KINDS:
-            raise Rejected(f"edge {source}->{target} kinds {sorted(kinds)} are not E1 "
-                           "(rollout-only) edges")
+        if not kinds & ROLLOUT_EDGE_KINDS:
+            raise Rejected(f"edge {source}->{target} kinds {sorted(kinds)} are not "
+                           "rollout-only edges")
         src, dst = self.configs[source], self.configs[target]
         if src.trainer != dst.trainer or src.dims != dst.dims:
             raise Rejected("rollout-only edge changes the trainer")
@@ -1339,8 +1339,8 @@ class IslandController:
         return cancelled
     def _trainer_plan(self, source: str, target: str, expected_epoch: int):
         if self._trainer_edges is None or plan_trainer_edge is None:
-            raise Rejected(f"edge {source}->{target} is not E1 (rollout-only) and trainer edges "
-                           "are not enabled (E3)")
+            raise Rejected(f"edge {source}->{target} is not rollout-only and trainer edges "
+                           "are not enabled")
         ctx = self._trainer_edges()
         pool = getattr(self, "_pool", None)
         probe = getattr(pool, "member_gpus", None)
@@ -1359,7 +1359,7 @@ class IslandController:
             raise Rejected(str(exc)) from exc
 
     def _plan_trainer(self, source: str, target: str, expected_epoch: int, deadline_s: float) -> Plan:
-        """E3 (4.7): trainer-dp / role-transfer edges; validation in trainer_transition (no side effect)."""
+        """Trainer-dp / role-transfer edges; validation in trainer_transition (no side effect)."""
         if self.profile is None or self.profile.execution_mode == "colocated-serial":
             raise Rejected("trainer reconfiguration needs a partitioned profile")
         tplan = self._trainer_plan(source, target, expected_epoch)
@@ -1536,7 +1536,7 @@ class IslandController:
         return box.get("result")
 
     def cancel(self, request_id: str) -> str:
-        """``cancelled`` / ``recovery_started`` / ``already_committed`` / ``unknown`` (D4)."""
+        """``cancelled`` / ``recovery_started`` / ``already_committed`` / ``unknown`` """
         known = self._by_request.get(request_id)
         if known is None:
             return "unknown"
@@ -1559,7 +1559,7 @@ class IslandController:
         if mode not in RECOMMEND_MODES:
             raise Rejected(f"unknown recommend mode {mode!r}")
         if mode == "auto" and not getattr(self.attestation, "auto_controller", False):
-            # D2: auto needs the runtime to declare capabilities.auto_controller
+            # auto needs the runtime to declare capabilities.auto_controller
             raise Rejected("auto mode refused: the capability attestation does not declare "
                            "auto_controller")
         previous, self.recommend_mode = self.recommend_mode, mode
@@ -1667,7 +1667,7 @@ class IslandController:
             return CANCELLED
         self._phase(tx, WAIT_SAFE, safe_point_rollout_id=snapshot.rollout_id)
         # WAIT_SAFE covers step/outer/publication state; in-flight requests and
-        # tool waits are what QUIESCING fences and drains (D4/D6).
+        # tool waits are what QUIESCING fences and drains.
         from dataclasses import replace as _replace
 
         boundary = _replace(snapshot, active_requests=0, tool_wait=0, unfinished_trajectories=0)
@@ -1796,7 +1796,7 @@ class IslandController:
         else:
             removed = frozenset()
         tx.removed = removed
-        # ---- QUIESCING: admission fence + drain (3.3, D6) ----
+        # ---- QUIESCING: admission fence + drain ----
         self.admission_open = False
         self._phase(tx, QUIESCING, cut=cut, remove=sorted(removed))
         try:
@@ -1927,13 +1927,13 @@ class IslandController:
         return SUCCEEDED
 
     # -- the ONLY transaction commit point (durable epoch CAS), shared by the
-    # E1 rollout edges and the E3 trainer edges ----------------------------------
+    # rollout edges and trainer edges ----------------------------------------------
     def _commit(self, tx: _Tx, target: str, members: Any, *,
                 cut_id: str | None = None) -> int:
         """Durable CAS. A failed CAS (EpochConflict, fsync/rename error) leaves
         the new members/trainer running with the commit durable or not: never a
         silent continue -> RECOVERY_REQUIRED. For a trainer edge (``cut_id``)
-        the recovery hint is decided from the durable epochs file (E3 v3):
+        the recovery hint is decided from the durable epochs file:
         ``last_tx_id == tx`` -> ``restore_target`` (committed=True); another
         tx -> ``restore_old`` (committed=False); epochs unreadable ->
         ``recovery_required`` (committed=None)."""
@@ -1953,7 +1953,7 @@ class IslandController:
                     durable, why = None, f"epochs unreadable: {read_exc!r}"
                 else:
                     why = f"durable last_tx_id={durable.last_tx_id}"
-                # three states (E3 v3): durable commit / not committed / unknown
+                # three states: durable commit / not committed / unknown
                 committed = None if durable is None else durable.last_tx_id == tx.tx_id
                 action = ("recovery_required" if committed is None
                           else "restore_target" if committed else "restore_old")
@@ -1977,7 +1977,7 @@ class IslandController:
             )
 
     def _execute_trainer(self, tx: _Tx, driver: Any, snapshot: ReadinessSnapshot) -> str:
-        """E3 (4.7): run the trainer edge to the commit point, then commit here (single CAS)."""
+        """Run the trainer edge to the commit point, then commit here (single CAS)."""
         pool: ElasticRolloutPool = driver.rollout
         self._pool = pool
         plan = tx.plan
@@ -2064,7 +2064,7 @@ class IslandController:
         """3.3: admission is fenced; wait for engine requests AND tool waits to reach 0.
 
         ``active_requests == 0`` does not imply no trajectory waits on a tool
-        (D6); while ``tool_wait > 0`` the old routing is kept and nothing is
+        while ``tool_wait > 0`` the old routing is kept and nothing is
         released. A timeout cancels the switch; nothing is aborted or replayed.
         """
         budget = min(self.timeouts.drain, self._remaining(tx))
@@ -2076,7 +2076,7 @@ class IslandController:
             load = probe() if callable(probe) else None
             if load is None:
                 # unknown load: only the serial round boundary proves quiescence
-                # (generate returned, D6 round-boundary drain); any other mode fails closed
+                # (generate returned, round-boundary drain); any other mode fails closed
                 return self.profile is not None and self.profile.execution_mode == "partitioned-serial"
             if "blockers" in load:  # tool_wait.drain_blockers: unknown counts fail closed
                 blockers = list(load["blockers"])
@@ -2131,7 +2131,7 @@ class IslandController:
 
     def _rebuild_old(self, tx: _Tx, driver: Any, old_members: frozenset[str], error: str, *,
                      cause: str = "other", inconsistent_engines: Any = ()) -> str:
-        """E1 failure path (D5): restore the old engine count and republish the same policy.
+        """Rollout-edge failure path: restore the old engine count and republish the same policy.
 
         ``cause`` / ``inconsistent_engines`` (publication cause enum, disagreeing engine ids)
         go on the REBUILD_OLD and REBUILT_OLD journal records."""
@@ -2140,7 +2140,7 @@ class IslandController:
             self._tx = None
             raise RecoveryRequired(self.recovery_required)
         detail = {"cause": cause, "inconsistent_engines": sorted(inconsistent_engines)}
-        # 2026-10-02 ruling (E1-D ④): exactly one bounded REBUILD_OLD after the transaction
+        # Exactly one bounded REBUILD_OLD after the transaction
         # deadline; its limit is deadline_wall + T_recovery, the transaction deadline itself
         # is never reset or extended, and a second failure is RECOVERY_REQUIRED at once.
         self._phase(tx, REBUILD_OLD, error=error, deadline_wall=tx.deadline_wall,
@@ -2202,7 +2202,7 @@ def request_status(records: Any, request_id: str) -> dict[str, Any]:
 
 
 class CommandInbox:
-    """Restricted command files (D4 manual entry): ``<dir>/<request_id>.<verb>.json``.
+    """Restricted command files (manual entry): ``<dir>/<request_id>.<verb>.json``.
 
     Verbs: ``request`` (``{"target", "expected_config_epoch", "deadline_s"}``),
     ``rebuild`` (4.4 same-shape trainer rebuild: ``{"kind", "expected_config_epoch",

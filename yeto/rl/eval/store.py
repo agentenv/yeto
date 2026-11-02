@@ -1,4 +1,4 @@
-"""Durable eval store (rl-eval-difficulty-buckets D11.2/D11.3/D11.7).
+"""Durable eval store.
 
 A plain directory tree; on the first version it is a Modal Volume mounted on
 both the training island (or uploaded through the Modal API when training is

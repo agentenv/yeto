@@ -1,4 +1,4 @@
-"""D1/D2 wiring into the driver safe point (rl-infra-spec 6.5, branch d2-wire).
+"""Elastic reconfiguration wiring into the driver safe point.
 
 ``ElasticHook.at_safe_point(driver, rollout_id)`` is called by
 ``IslandDriver.safe_point`` after the command inbox is polled and before the

@@ -234,6 +234,6 @@
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），再与岛契约 v3（后端身份、学习率计划、语义哈希、代码包摘要）绑定（yeto.rl.engine.backend_identity），离线不可得",
- "title": "decoupled 外层同步（--rl-sync-preset decoupled）"
+ "session_contract_hash_note": "computed at run time from the LoRA tensor layout (yeto.protocol.layout_fingerprint), then bound to the island contract v3 (backend identity, LR schedule, semantic hash, code pack digest; yeto.rl.engine.backend_identity); not available offline",
+ "title": "decoupled outer sync (--rl-sync-preset decoupled)"
 }

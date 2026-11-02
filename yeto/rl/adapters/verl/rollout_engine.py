@@ -1,4 +1,4 @@
-"""verl's own rollout servers behind the records proxy (S25 N10.9).
+"""verl's own rollout servers behind the records proxy.
 
 In a verl training run the policy is served by verl's rollout replicas (vLLM
 or SGLang, started and updated by verl).  ``HarborAgentLoop`` needs a token
@@ -34,7 +34,7 @@ keeps them per trajectory (the records proxy's ``CURRENT_TRAJECTORY``) and
 :meth:`VerlRolloutEngine.served_version` returns None: the version is known
 only after a reply, not before it.
 
-Aborted calls (S26 E9.5): verl's fully-async rollouter aborts the requests in
+Aborted calls: verl's fully-async rollouter aborts the requests in
 flight when it pauses for a weight update.  An aborted model call recorded
 no tokens and the agent has not seen it, so the engine sends it again after
 a back-off, sampled by the updated policy; the Harbor trial (sandbox, agent,

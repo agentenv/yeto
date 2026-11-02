@@ -1,4 +1,4 @@
-"""Cross-site store on Alibaba Cloud OSS (rl-cross-site-sample-store N3.1-N3.4; CPU,
+"""Cross-site store on Alibaba Cloud OSS (rl-cross-site-sample-store; CPU,
 fake S3 client; no cloud resource): the OSS store and its credentials, one buffer
 shard per sampler island merged by the trainer, complete releases only, multipart
 transfer of large files, and the trainer scheduler's store check."""
@@ -49,7 +49,7 @@ def _objects(fake=None, **transfer):
     return oss_store.OssObjectStore(URI, client=fake or FakeOss(), transfer=TransferSettings(**transfer))
 
 
-# ---------------------------------------------------------------- N3.1 store + credentials
+# ---------------------------------------------------------------- store + credentials
 def test_store_for_builds_a_staged_oss_store_through_the_registry_hook(tmp_path):
     fake = FakeOss()
     store = store_for("/ignored", environ=_env(tmp_path), client=fake)
@@ -129,7 +129,7 @@ def test_island_envs_carry_the_settings_and_ship_the_secret_as_a_task_secret(tmp
     assert set(secrets) == {oss_store.SECRET_ENV} and oss_store.SECRET_ENVS <= SECRET_ENV_NAMES
 
 
-# ---------------------------------------------------------------- N3.1 sharded buffer
+# ---------------------------------------------------------------- sharded buffer
 def _entry(sample_id, version=0, appended_at=0.0):
     return SampleIndexEntry(sample_id, version, "", 1, appended_at)
 
@@ -204,7 +204,7 @@ def test_a_sampler_caps_its_backlog_on_its_own_shard(tmp_path):
     assert loop.backlog() == 1  # 3 written, 2 read in this shard; the merged 9 does not apply
 
 
-# ---------------------------------------------------------------- N3.2 complete releases only
+# ---------------------------------------------------------------- complete releases only
 def test_a_reader_never_loads_a_partial_release(tmp_path):
     fake = FakeOss()
     trainer = store_for("/t", environ=_env(tmp_path / "trainer"), client=fake)
@@ -271,7 +271,7 @@ def test_a_mirror_uploads_data_then_the_release_record_then_the_pointer(tmp_path
     assert uploads == ["a.bin", "z.bin", RECORD, LATEST]
 
 
-# ---------------------------------------------------------------- N3.4 large files
+# ---------------------------------------------------------------- large files
 def test_a_large_sparse_file_goes_up_in_parts_and_comes_back_by_ranges(tmp_path):
     fake = FakeOss()
     objects = _objects(fake, part_bytes=MIN_PART_BYTES, concurrency=4)
@@ -347,7 +347,7 @@ def test_transfer_settings_keep_a_300_gb_file_within_the_part_limit():
         TransferSettings(part_bytes=1 << 20)
 
 
-# ---------------------------------------------------------------- N3.3 launch + scheduler check
+# ---------------------------------------------------------------- launch + scheduler check
 def test_store_reachability_by_island_cloud():
     assert store_unreachable_reason("oss://b/p", "nebius") is None
     assert store_unreachable_reason("s3://b/p", "aws") is None

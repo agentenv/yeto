@@ -1,4 +1,4 @@
-"""Driver features of a verl full-parameter island beyond the sync (S27 G-DS).
+"""Driver features of a verl full-parameter island beyond the sync.
 
 Kept out of :mod:`.trainer` (which imports verl) so the wiring is testable on
 the CPU without verl.
@@ -17,7 +17,7 @@ from yeto.rl.engine.driver import MODAL_INCARNATION_ENV
 
 
 def wire_full_parameter_extras(driver, island, plan: dict) -> None:
-    """S27 G-DS: the driver's data position log and HF exports of a full-parameter
+    """The driver's data position log and HF exports of a full-parameter
     island (``full_parameter_stream.full_parameter_extras``; nothing when the plan has neither).
 
     * data positions (``yeto.rl.engine.data_position``): the driver records the
@@ -26,7 +26,7 @@ def wire_full_parameter_extras(driver, island, plan: dict) -> None:
       the last record, as on a Miles island (``miles.entry.data_position_log_for``);
     * HF exports (``yeto.rl.engine.hf_export``): the driver exports the due
       rounds at their boundary with :class:`.hf_export.VerlHfWriter`;
-    * observation (S27 G-EC, :func:`.train_options.wire_observation`): the
+    * observation (:func:`.train_options.wire_observation`): the
       driver's timeline, heartbeat and resource sampler, as on a Miles island."""
     store = plan.get("data_position_store")
     if store:
@@ -43,7 +43,7 @@ def wire_full_parameter_extras(driver, island, plan: dict) -> None:
 
         driver.hf_exports = hf_round_exports(exports, group=island.full_group, model_path=plan["model_path"],
                                              run=_LoopRunner().run)
-    from .train_options import wire_observation  # S27 G-EC: timeline and samplers
+    from .train_options import wire_observation  # timeline and samplers
 
     wire_observation(driver, plan)
 
@@ -53,7 +53,7 @@ class TestExitPublisher:
     published ``version``, in its first process only, so a relaunched island
     rejoins and finishes.
 
-    A process is the first one when all hold (S27 G-EC; before, only the first):
+    A process is the first one when all hold:
     1. its first publication is policy version 0 (a relaunched LoRA island
        starts from the syncer's committed version > 0);
     2. it runs in the island's first Modal container (``YETO_MODAL_INCARNATION``

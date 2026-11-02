@@ -1,4 +1,4 @@
-"""verl separate mode: trainer cards apart from the rollout cards (S27 G-DC, G-EK).
+"""verl separate mode: trainer cards apart from the rollout cards.
 
 One verl island, two pools on its cards (``--rl-placement fixed-partition``):
 
@@ -13,7 +13,7 @@ One verl island, two pools on its cards (``--rl-placement fixed-partition``):
 * weights reach the rollout servers through verl's NCCL checkpoint engine
   (``standalone_checkpoint_manager.update_weights``): :class:`SeparatePublisher`.
 
-Rollout ahead (S27 G-EV, VERL-PARITY #10; ``--rl-rollout-ahead 1``,
+Rollout ahead (``--rl-rollout-ahead 1``,
 ``yeto.rl.engine.rollout_ahead``): the driver submits round r+1 to the rollout
 servers with the published policy r before the trainer trains round r, and
 waits for that batch before it publishes r+1 (``VerlRolloutPool.start_generate``
@@ -22,9 +22,8 @@ that age under the bounded-staleness contract (:func:`policy_age_of`), and the
 trainer's TIS on the rollout log-probs corrects it. Off (the default), the
 profile, the capabilities and the driver are those of the serial island.
 
-Everything here is independent of the training engine. G-DC wrote it for the
-Megatron island (s27-verl-megatron); G-EK moved the engine-neutral part here so
-the FSDP2 full-parameter island runs the same mode (VERL-PARITY #13). The
+Everything here is independent of the training engine, so the Megatron island
+and the FSDP2 full-parameter island run the same mode. The
 Megatron-only keys stay in ``megatron_engine`` and ``megatron_ports``.
 """
 
@@ -72,14 +71,15 @@ def validate_pools(pools: SeparatePools, error: type[ValueError] = SeparatePoolE
     """Raise ``error`` naming the first violated pool rule."""
     for name in ("trainer_nodes", "trainer_gpus_per_node", "rollout_nodes", "rollout_gpus_per_node", "rollout_tp"):
         if int(getattr(pools, name)) < 1:
-            raise error(f"{name} 必须 >= 1，得到 {getattr(pools, name)}")
+            raise error(f"{name} must be >= 1, got {getattr(pools, name)}")
     if pools.rollout_tp > pools.rollout_gpus_per_node or pools.rollout_gpus_per_node % pools.rollout_tp:
-        raise error(f"rollout TP={pools.rollout_tp} 必须整除每个 rollout 节点的卡数 {pools.rollout_gpus_per_node}")
+        raise error(f"rollout TP={pools.rollout_tp} must divide the card count of every rollout node "
+                    f"({pools.rollout_gpus_per_node})")
     if not 0.0 < float(pools.gpu_memory_utilization) < 1.0:
-        raise error(f"gpu_memory_utilization 必须在 (0, 1)，得到 {pools.gpu_memory_utilization}")
+        raise error(f"gpu_memory_utilization must be in (0, 1), got {pools.gpu_memory_utilization}")
 
 
-def pools_from_args(args: Any, total_gpus: int, *, what: str = "verl 分离岛") -> SeparatePools:
+def pools_from_args(args: Any, total_gpus: int, *, what: str = "verl separate island") -> SeparatePools:
     """The pools from the island flags the launcher computed (``launch.topology.
     rl_trainer_shape``: ``--actor-num-nodes``, ``--actor-num-gpus-per-node``,
     ``--rollout-num-gpus``, ``--rollout-num-gpus-per-engine``). The two pools must
@@ -91,9 +91,10 @@ def pools_from_args(args: Any, total_gpus: int, *, what: str = "verl 分离岛")
     trainer_gpus_per_node = int(getattr(args, "actor_num_gpus_per_node", None) or per_node)
     trainer_gpus = int(getattr(args, "actor_num_nodes", 1) or 1) * trainer_gpus_per_node
     if rollout_gpus <= 0 or rollout_gpus % min(per_node, rollout_gpus):
-        raise SystemExit(f"{what}：--rollout-num-gpus {rollout_gpus} 不能按每节点 {per_node} 卡排布")
+        raise SystemExit(f"{what}: --rollout-num-gpus {rollout_gpus} cannot be laid out at {per_node} cards per node")
     if trainer_gpus + rollout_gpus != total_gpus:
-        raise SystemExit(f"{what}：训练 {trainer_gpus} + rollout {rollout_gpus} 卡 != 岛内 Ray 的 {total_gpus} 卡")
+        raise SystemExit(f"{what}: trainer {trainer_gpus} + rollout {rollout_gpus} cards != the island Ray's "
+                         f"{total_gpus} cards")
     rollout_per_node = min(per_node, rollout_gpus)
     return SeparatePools(
         trainer_nodes=int(getattr(args, "actor_num_nodes", 1) or 1), trainer_gpus_per_node=trainer_gpus_per_node,
@@ -102,8 +103,8 @@ def pools_from_args(args: Any, total_gpus: int, *, what: str = "verl 分离岛")
         gpu_memory_utilization=float(getattr(args, "sglang_mem_fraction_static", None) or 0.8))
 
 
-def trainer_only_pools(args: Any, total_gpus: int, *, what: str = "verl 缓冲训练岛") -> SeparatePools:
-    """S27 G-FN: the pools of an island whose every card is a training card.
+def trainer_only_pools(args: Any, total_gpus: int, *, what: str = "verl buffer trainer island") -> SeparatePools:
+    """The pools of an island whose every card is a training card.
 
     A buffer trainer island (``--rl-sample-role trainer``) holds no rollout engine, so
     there is no rollout pool to place: ``trainer_nodes`` x ``trainer_gpus_per_node``
@@ -114,16 +115,16 @@ def trainer_only_pools(args: Any, total_gpus: int, *, what: str = "verl 缓冲�
     role the launcher would be reserving cards nothing runs on."""
     rollout_gpus = int(getattr(args, "rollout_num_gpus", None) or 0)
     if rollout_gpus:
-        raise SystemExit(f"{what}：--rollout-num-gpus {rollout_gpus} 不接（这个角色没有 rollout 引擎，"
-                         "采样在采样岛上做）")
+        raise SystemExit(f"{what}: --rollout-num-gpus {rollout_gpus} is not accepted (this role has no rollout "
+                         "engine; the sampler islands generate)")
     nodes = int(getattr(args, "actor_num_nodes", 1) or 1)
     per_node = int(getattr(args, "actor_num_gpus_per_node", None) or getattr(args, "rl_island_gpus_per_node", None)
                    or (total_gpus // nodes if nodes else total_gpus))
     if nodes < 1 or per_node < 1:
-        raise SystemExit(f"{what}：--actor-num-nodes {nodes} 与每节点 {per_node} 卡都必须 >= 1")
+        raise SystemExit(f"{what}: --actor-num-nodes {nodes} and {per_node} cards per node must both be >= 1")
     if nodes * per_node != total_gpus:
-        raise SystemExit(f"{what}：训练 {nodes} x {per_node} = {nodes * per_node} 卡 != 岛内 Ray 的 "
-                         f"{total_gpus} 卡（这个角色的全部卡都是训练卡）")
+        raise SystemExit(f"{what}: trainer {nodes} x {per_node} = {nodes * per_node} cards != the island Ray's "
+                         f"{total_gpus} cards (every card of this role is a training card)")
     return SeparatePools(
         trainer_nodes=nodes, trainer_gpus_per_node=per_node,
         gpu_memory_utilization=float(getattr(args, "sglang_mem_fraction_static", None) or 0.8))
@@ -278,7 +279,7 @@ def wire_rollout_ahead(driver: Any, plan: dict) -> None:
         driver.rollout_ahead = ahead
 
 
-# ----------------------------------------------------------------------------- the FSDP2 island (S27 G-EK)
+# ----------------------------------------------------------------------------- the FSDP2 island
 def full_parameter_publisher(island: Any, plan: dict, colocated_cls):
     """The publisher of a full-parameter FSDP2 island: :class:`SeparatePublisher` with
     ``plan["separate"]``, else ``colocated_cls`` (``ports_impl.VerlFullParameterPublisher``:

@@ -59,7 +59,7 @@ def test_legacy_cli_disagreeing_with_spec_file(tmp_path):
 
 
 def test_learner_unverified_allowance_refused_with_outer_sync(capsys):
-    # design D11 as written: the learner CLI always joins a syncer (outer
+    # by design the learner CLI always joins a syncer (outer
     # sync), so the allowance is refused even for one island (F9/F10).
     for extra in ((), ("--num-learners", "2")):
         with pytest.raises(SystemExit):
@@ -120,13 +120,90 @@ def test_expected_hash_missing_warns(tmp_path):
     assert event["level"] == "warning"
 
 
-def test_learner_checks_before_the_bridge():
-    import inspect
+def drive_run_miles(tmp_path, *, verify_raises=False, trust_remote_code=None):
+    """Drive the real ``run_miles`` (Flash-Next no-sync island, CPU) to ``_run_ports``.
 
-    source = inspect.getsource(rl_learner.run_miles)
-    assert source.index("verify_ports_algorithm(") < source.index("_run_ports(")
-    ports = inspect.getsource(rl_learner._run_ports)
-    assert "verify_ports_algorithm" not in ports  # no bridge/sync before it
+    ``verify_ports_algorithm`` / ``print_attestation_fingerprint`` / ``_run_ports``
+    are recorders; returns the ordered call list (one dict per call) and, when
+    ``verify_raises``, the error text.
+    """
+    pytest.importorskip("transformers")
+    from test_rl_fn_provider_view import CONFIGS, REPO, _probe
+
+    snapshot = tmp_path / "fn-4layer"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_bytes(CONFIGS["4layer"].read_bytes())
+    body = f"""
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        sys.path.insert(0, {str(REPO / 'tests')!r})
+        sys.path.insert(0, {str(REPO / 'tests' / 'multinode_gpu')!r})
+        import _pytest.monkeypatch as _m
+        from rl_e2e_launch import island_run, learner_from_run
+        from fp_fn import fnrun_cli
+        from yeto.rl.adapters.miles import island_entry as learner
+        from yeto.rl.engine import run_config
+        from yeto.rl.adapters.miles import config as mac
+        from yeto.rl.adapters.miles import state as mas
+
+        mp = _m.MonkeyPatch()
+        run = island_run(tuple(fnrun_cli("fn8s")), mp)
+        args, _env = learner_from_run(run, Path(tempfile.mkdtemp()) / "home")
+        args.event_tape = str(Path(tempfile.mkdtemp()) / "tape.jsonl")
+        if {trust_remote_code!r} is not None:
+            args.trust_remote_code = {trust_remote_code!r}
+        mp.setattr(run_config, "_resolve_ref_load",
+                   lambda a, model_path: a.megatron_ref_load or str(model_path))
+        mp.setattr(mas, "require_run_plugin", lambda: None)
+        mp.setattr(mac, "parse_miles_args", lambda launch: SimpleNamespace())
+        mp.setattr(learner, "require_ports_router_mode", lambda *a: None)
+        calls = []
+        launches = {{}}
+
+        def key(launch):
+            return launches.setdefault(id(launch), len(launches))
+
+        def verify(a, miles_args, launch):
+            calls.append({{"call": "verify", "launch": key(launch)}})
+            if {verify_raises!r}:
+                raise learner.AlgorithmMismatchError("refusing to join (test)")
+
+        real_print = learner.print_attestation_fingerprint
+
+        def printed(a, launch, *rest):
+            calls.append({{"call": "print", "launch": key(launch)}})
+            return real_print(a, launch, *rest)
+
+        def run_ports(a, miles_args, launch, algorithm, **kw):
+            calls.append({{"call": "run_ports", "launch": key(launch),
+                          "yeto_policy_sync": kw["yeto_policy_sync"],
+                          "args_trust": a.trust_remote_code,
+                          "trust": getattr(miles_args, "yeto_rl_trust_remote_code", "MISSING")}})
+
+        mp.setattr(learner, "verify_ports_algorithm", verify)
+        mp.setattr(learner, "print_attestation_fingerprint", printed)
+        mp.setattr(learner, "_run_ports", run_ports)
+        error = None
+        try:
+            learner.run_miles(args, model_path={str(snapshot)!r},
+                              prompt_path="/root/yeto-rl/prompts.jsonl",
+                              yeto_policy_sync=False)
+        except learner.AlgorithmMismatchError as exc:
+            error = str(exc)
+        print(json.dumps({{"calls": calls, "error": error}}))
+    """
+    return _probe(body)
+
+
+def test_learner_checks_before_the_bridge(tmp_path):
+    out = drive_run_miles(tmp_path)
+    order = [c["call"] for c in out["calls"]]
+    assert order.index("verify") < order.index("run_ports")
+    # a refused algorithm stops the island: no bridge / sync / training starts
+    refused = drive_run_miles(tmp_path / "refused", verify_raises=True)
+    assert "refusing to join" in refused["error"]
+    assert [c["call"] for c in refused["calls"]] == ["verify"]
 
 
 # -- 5.2 launcher --------------------------------------------------------------------
@@ -343,18 +420,27 @@ def test_expected_hash_on_miles_args(tmp_path):
     assert miles_args.yeto_rl_expected_algorithm_sha256 is None
 
 
-def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
-    import inspect
-
-    from yeto import launcher
+def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys, monkeypatch):
+    from yeto.launcher import _prepare_rl_args
+    from yeto.rl.engine import selection
 
     args = rl_learner.parse_args(_learner_argv(("--rl-placement", "fixed-partition",
                                                 "--rollout-num-gpus", "1")))
     assert args.rl_placement == "fixed-partition"
     with pytest.raises(SystemExit):  # without --rl-placement it is still refused
         rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
-    assert 'placement=getattr(iargs, "rl_placement", "colocated")' in inspect.getsource(
-        launcher._prepare_rl_args)
+    # the launcher's ports selection check sees each island's placement
+    seen = []
+    real = selection.require_ports_supported
+    monkeypatch.setattr(selection, "require_ports_supported",
+                        lambda **kw: (seen.append(kw["placement"]), real(**kw))[1])
+    _prepare_rl_args(_launcher_args("ports", ("--rl-placement", "fixed-partition",
+                                              "--rl-rollout-gpus", "1"),
+                                    gpu="aws:2xa100@us-east-1"))
+    assert seen == ["fixed-partition"]
+    seen.clear()
+    _prepare_rl_args(_launcher_args("ports"))
+    assert seen == ["colocated"]
 
 
 # -- single-island no-sync entry (main-agent decision, alignment §7b) -----------------
@@ -401,11 +487,39 @@ def test_no_sync_marks_event_and_namespace(tmp_path):
     assert event["rl/outer_sync"] is False
 
 
-def test_main_runs_without_policy_sync_in_no_sync_mode():
-    import inspect
+def _main_policy_sync(monkeypatch, argv):
+    """Run the learner ``main`` with every remote/Miles step faked; ``run_miles`` records."""
+    import sys
+    import types
 
-    assert 'yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False)' in \
-        inspect.getsource(rl_learner.main)
+    import yeto.provenance as provenance
+
+    monkeypatch.setattr(provenance, "verify_source_tree_sha256", lambda value: value)
+    monkeypatch.setattr(provenance, "python_spec_sha256", lambda spec: "e" * 64)
+    monkeypatch.setattr(rl_learner, "verify_miles_revision", lambda *a, **k: None)
+    monkeypatch.setattr(rl_learner, "probe_syncers", lambda a: None)
+    monkeypatch.setattr(rl_learner, "probe_wan_link", lambda a: None)
+    misc = types.ModuleType("miles.utils.misc")
+    misc.load_function = lambda path: None
+    for name in ("miles", "miles.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "miles.utils.misc", misc)
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kw: "/models/x")
+    monkeypatch.setattr(rl_learner, "prepare_prompt_data", lambda *a, **k: "/p.jsonl")
+    seen = []
+    monkeypatch.setattr(rl_learner, "run_miles",
+                        lambda args, **kw: seen.append(kw["yeto_policy_sync"]))
+    rl_learner.main(argv)
+    return seen
+
+
+def test_main_runs_without_policy_sync_in_no_sync_mode(monkeypatch):
+    extra = ("--data-revision", "f" * 40)
+    assert _main_policy_sync(monkeypatch, _no_sync_argv(
+        ("--rl-allow-unverified-mechanism", "features:clip_higher", *extra))) == [False]
+    assert _main_policy_sync(monkeypatch, _learner_argv(extra)) == [True]
 
 
 def test_launcher_no_sync_island_and_refusals():
@@ -423,14 +537,7 @@ def test_launcher_no_sync_island_and_refusals():
     assert "--syncer $SYNCER_ADDR" in normal and "no-sync" not in normal
 
 
-def test_launcher_run_skips_syncer_in_no_sync_mode():
-    import inspect
-
-    from yeto import launcher
-
-    source = inspect.getsource(launcher.run)
-    assert 'syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")' in source
-    assert "if no_sync:\n            syncer_task = syncer_job = None" in source
+# test_launcher_run_skips_syncer_in_no_sync_mode: test_rl_launcher_island_failure.py
 
 
 def test_no_sync_run_export_is_marked_from_its_event_tape(tmp_path, monkeypatch):
@@ -582,7 +689,7 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
         def cancel(self, call_id):
             events.append(("cancel", call_id))
 
-        def app_status(self):  # provider view after stop (P0 teardown check)
+        def app_status(self):  # provider view after stop (teardown check)
             return None if getattr(self, "_stopped", False) else ("deployed", 1)
 
         def stop_app(self):
@@ -685,7 +792,7 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
         def cancel(self, call_id):
             pass
 
-        def app_status(self):  # provider view after stop (P0 teardown check)
+        def app_status(self):  # provider view after stop (teardown check)
             return None if getattr(self, "_stopped", False) else ("deployed", 1)
 
         def stop_app(self):
@@ -705,7 +812,7 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
                                     "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
                           gpu="modal:1xa100")
     args.keep = False
-    assert launcher.run(args) == 0  # S17 N16: island succeeded, no --output -> 0 (was 2)
+    assert launcher.run(args) == 0  # island succeeded, no --output -> 0 (was 2)
     [local] = list((tmp_path / "runs" / args.cluster_prefix / "events").glob("*.jsonl"))
     assert local.read_text() == island_tape.read_text()  # line for line
     # and --rl-event-tape export reads it
@@ -781,7 +888,7 @@ def test_echo_line_is_the_written_line(tmp_path, monkeypatch, capsys):
 
 def test_two_island_strict_run_echoes_every_tape_writer(tmp_path, monkeypatch, capsys):
     """Driver, bridge (rl_local_round, rl_publication ...) records: all echoed, per island
-    identical to the island tape (the 1a G3 gap: bridge writes bypassed the echo)."""
+    identical to the island tape (bridge writes once bypassed the echo)."""
     import torch
 
     from test_rl_engine_driver import _engine, _run_threads, _strict_driver, _strict_syncer
@@ -810,7 +917,7 @@ def test_two_island_strict_run_echoes_every_tape_writer(tmp_path, monkeypatch, c
         assert {"rl_local_round", "rl_driver_phase", "rl_publication"} <= kinds, kinds
 
 def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch, tmp_path, capsys):
-    """G3 shape: two Modal islands + a syncer; island 1's stream is cut mid-line."""
+    """Two Modal islands + a syncer; island 1's stream is cut mid-line."""
     import types
 
     import yeto.launcher as launcher
@@ -855,7 +962,7 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def cancel(self, call_id):
             pass
 
-        def app_status(self):  # provider view after stop (P0 teardown check)
+        def app_status(self):  # provider view after stop (teardown check)
             return None if getattr(self, "_stopped", False) else ("deployed", 1)
 
         def stop_app(self):

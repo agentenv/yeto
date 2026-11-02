@@ -1,10 +1,10 @@
-"""When a buffer trainer's lane cursor record is written (S27 G-EQ4).
+"""When a buffer trainer's lane cursor record is written.
 
 The island must read a round's groups again when it stopped after collecting them
 but before training them -- what :mod:`yeto.rl.engine.data_position` promises
 ("again, the rows of the round that was running when the process stopped").
 
-Measured on npu1 before this change: a kill during round 4 left the record
+Measured on Ascend hardware before this change: a kill during round 4 left the record
 ``cursor 32, positions [28, 29, 30, 31]`` for a round that never trained, and the
 relaunch started at 32, so four groups were generated and never trained.
 """
@@ -70,7 +70,7 @@ def test_a_round_that_trains_is_not_read_again():
 
 
 def test_a_round_collected_but_never_trained_is_read_again():
-    """The npu1 case: the island died between collection and the optimizer step."""
+    """The measured case: the island died between collection and the optimizer step."""
     log, buffer = _Log(), _Buffer()
     feed = _feed(log, buffer)
 

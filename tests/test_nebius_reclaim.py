@@ -1,5 +1,5 @@
 """Nebius preemptible reclaim path on CPU: host hook script, notice-file poller,
-droppable listener wiring, launcher install hook (S19 real-spot experiment, option C)."""
+droppable listener wiring, launcher install hook (real-spot experiment)."""
 
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def test_launcher_installs_hook_only_for_nebius_droppable(monkeypatch):
 
 
 def test_host_runner_takes_credentials_from_a_remote_api_server(monkeypatch, tmp_path):
-    # T-C1b: with the sky API server on another machine the cluster yaml is not here
+    # With the sky API server on another machine the cluster yaml is not here
     pytest.importorskip("sky")
     from sky.utils import command_runner
 

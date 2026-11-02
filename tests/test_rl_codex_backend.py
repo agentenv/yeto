@@ -220,7 +220,7 @@ def test_existing_deepseek_v4_stock_codex_profile_is_unchanged():
     }
 
 
-# ----------------------------------------------------------- rl-fn-codex-rollout 0.1 (D1)
+# ----------------------------------------------------------- rl-fn-codex-rollout 0.1 ----
 
 from yeto.rl.codex_backend import (  # noqa: E402
     QWEN38_NEXT_4LAYER_MODEL,
@@ -284,7 +284,7 @@ def test_fn_profiles_pin_identity_from_the_qwen3_8_next_profile_module():
 
 @pytest.mark.parametrize("profile_name", sorted(FN_PROFILES))
 def test_fn_full_lora_configuration_passes_validation(profile_name):
-    # Scenario: FN 全尺寸 LoRA 配置通过校验 (and the 4-layer twin).
+    # Scenario: the full-size FN LoRA config passes the check (and the 4-layer twin).
     profile = _validate_fn(profile_name)
     assert profile["chat_template_kwargs"] == QWEN38_KWARGS
     assert profile["identity_label"] == FN_PROFILES[profile_name][2]
@@ -302,7 +302,7 @@ def test_fn_full_lora_configuration_passes_validation(profile_name):
     ],
 )
 def test_fn_lora_target_drift_is_rejected_with_identity_label(overrides):
-    # Scenario: LoRA 目标漂移被拒.
+    # Scenario: a drifted LoRA target is refused.
     with pytest.raises(ValueError, match="Qwen3.8-Flash-Next model identity drifted"):
         _validate_fn("qwen38_next", **overrides)
 
@@ -313,7 +313,7 @@ def test_fn_profile_requires_the_qwen4exp_tito_family():
 
 
 def test_legacy_profiles_keep_attention_zero_layout():
-    # Scenario: 旧 profile 不受影响.
+    # Scenario: older profiles are unaffected.
     for name in ("deepseekv4", "qwen38", "qwen35", "qwen35_08b"):
         assert stock_codex_lora_layout(name) == ("attention", 0)
         assert "lora_targets" not in stock_codex_backend_profile(name)

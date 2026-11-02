@@ -1,4 +1,4 @@
-"""Train-gap probe and compact R3 fill (S27 G-CT, ``yeto/rl/adapters/miles/train_gap_probe.py``).
+"""Train-gap probe and compact R3 fill (``yeto/rl/adapters/miles/train_gap_probe.py``).
 
 CPU only, no Ray.  The Miles equivalence tests run when Miles is importable
 (``PYTHONPATH=<miles worktree>``); the rest use a hand-built reference of the
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import random
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -279,7 +280,9 @@ def test_probe_prints_one_record_per_fill_and_keeps_legacy_result():
     assert calls == ["iter", "legacy"]
     (record,) = records
     assert record["mode"] == "legacy" and record["rollout"] == 4 and record["mbs"] == 2
-    assert record["samples"] == 6 and record["pages"] > 0 and "src_map" in record  # first fill names it
+    assert record["samples"] == 6 and record["pages"] > 0
+    # the first fill names the source mapping, read from /proc/self/maps (Linux only)
+    assert ("src_map" in record) == os.path.exists("/proc/self/maps")
     for key in ("iter_s", "touch_s", "fill_s", "register_s", "prepare_s", "touch", "fill", "threads"):
         assert key in record
     assert set(record["fill"]) == {"utime_s", "stime_s", "minflt", "majflt", "nvcsw", "nivcsw"}

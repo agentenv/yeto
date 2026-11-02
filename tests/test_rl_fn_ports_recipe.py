@@ -1,4 +1,4 @@
-"""G1: Qwen3.8-Flash-Next on the ports path (``--rl-engine ports``) renders the
+"""Qwen3.8-Flash-Next on the ports path (``--rl-engine ports``) renders the
 same model + native-LoRA flags as ``scripts/run_qwen3_8_next.py`` (CPU only)."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""S19 6.4b async5 fix: LoRA config + phases over verl's checkpoint engine."""
+"""LoRA config + phases over verl's checkpoint engine."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_header_round_trip():
 
 
 def test_marker_tensors_keep_later_tensors_aligned():
-    """s19-verl64b-async6-20261010a: a 1113-byte header shifted the next fp32
+    """On a GPU run a 1113-byte header shifted the next fp32
     tensor to an odd bucket offset; markers are padded to ALIGN bytes."""
     stream = list(lw.sender_stream(_worker(_Engine()), device="cpu"))
     offset = 0

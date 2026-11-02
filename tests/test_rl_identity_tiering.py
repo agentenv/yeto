@@ -1,4 +1,4 @@
-"""rl-identity-tiering L9.1/L9.2: semantic hash, dual write, tolerant PluginRef."""
+"""Semantic hash, dual write, tolerant PluginRef."""
 
 from __future__ import annotations
 

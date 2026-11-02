@@ -5,7 +5,7 @@
   "base_image": {
     "name": "inference-xpu-pytorch-opt:v0.5.17",
     "reference": null,
-    "note": "registry path and digest unknown: read on ppu1 with docker inspect (N0.1 saw the tag only)"
+    "note": "registry path and digest unknown: read on a PPU node with docker inspect (the survey saw the tag only)"
   },
   "python": null,
   "packages": {
@@ -34,7 +34,7 @@
   "required_files": [],
   "decisions": [
     "ray: the base has 2.31.0, Miles cc76e2391 requires >= 2.56.0. The image installs ray 2.56.0 (Miles floor). Not checked: sglang 0.5.17 with ray 2.56. The NPU sampler talks HTTP, not Ray, so the two images need not share a ray version.",
-    "fla: the base 1.0.0 is kept; Miles pins 0.5.2 plus a KDA patch. Compatibility of Miles glm5_next kda.py with fla 1.0.0 is the first PPU probe (N7.5).",
+    "fla: the base 1.0.0 is kept; Miles pins 0.5.2 plus a KDA patch. Compatibility of Miles glm5_next kda.py with fla 1.0.0 is the first PPU probe.",
     "TransformerEngine: recorded, optional. Megatron runs with TE by default; --transformer-impl local is the fallback (main agent 10-19). The PPU probe decides.",
     "tilelang: optional; the DSA SparseMLA path needs it, its PPU support is unknown.",
     "megatron commit: not pinned (Miles' image follows radixark/Megatron-LM miles-main); the build requires MEGATRON_COMMIT and records it.",

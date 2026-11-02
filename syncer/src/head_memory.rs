@@ -1,4 +1,4 @@
-//! Head memory of the strict full-parameter syncer (S27 P4): a byte model
+//! Head memory of the strict full-parameter syncer: a byte model
 //! for real model sizes and a scaled-down measurement on CPU.
 //!
 //! Test-only.  The model counts the large buffers the head holds; it leaves
@@ -99,7 +99,7 @@ struct Session {
     downlink_anchor: bool,
 }
 
-/// Peak head bytes, buffered (S26) and streaming (S27 P4).
+/// Peak head bytes, buffered and streaming.
 struct Estimate {
     resident: f64,
     rounds_buffered: f64,
@@ -147,8 +147,8 @@ fn gib(bytes: f64) -> f64 {
 #[test]
 fn head_memory_model_for_27b_with_two_and_four_islands() {
     println!(
-        "islands | resident | rounds S26 | rounds P4 in-order/worst | \
-         async ckpt S26/P4 | resume S26/P4 | peak S26 | peak P4 (worst)  [GiB]"
+        "islands | resident | rounds buffered | rounds streaming in-order/worst | \
+         async ckpt buffered/snapshot | resume buffered/streamed | peak buffered | peak streaming (worst)  [GiB]"
     );
     let mut peaks = Vec::new();
     for islands in [2.0, 4.0] {
@@ -180,7 +180,7 @@ fn head_memory_model_for_27b_with_two_and_four_islands() {
         peaks.push((before, after));
     }
     // The f32 resident state (params, momentum, downlink anchor) dominates
-    // after P4 and is not reduced by it.
+    // with the streaming fold and is not reduced by it.
     let (_, after_four) = peaks[1];
     assert!(gib(after_four) > 300.0);
 }
@@ -244,7 +244,7 @@ fn folded_round_peak(st: &GlobalState, arrival: &[u32], numel: usize) -> isize {
 
 /// Measured on a 4M-parameter state (4 fragments x 1M, f32, RDA): the
 /// streaming fold, snapshot checkpoint and streamed resume against the
-/// buffered S26 paths.  Values are heap bytes in units of one fragment.
+/// buffered paths.  Values are heap bytes in units of one fragment.
 #[test]
 fn head_memory_measured_scaled_down() {
     const FRAGMENTS: usize = 4;
@@ -310,7 +310,7 @@ fn head_memory_measured_scaled_down() {
     let file_len = std::fs::metadata(&path).unwrap().len() as f64 / frag_bytes;
     println!(
         "resume: streamed load {load_peak:.2} fragments \
-         (S26 also held the {file_len:.2}-fragment file)"
+         (the buffered load also held the {file_len:.2}-fragment file)"
     );
     // The restored copy (2 per fragment) is built before the old one drops;
     // the rest is the 1 MiB read buffer and one 64 KiB decode block.
@@ -358,14 +358,14 @@ fn head_memory_model_for_27b_tp2_with_split_vocabulary() {
     }
 }
 
-/// S27 P4b: per-process head bytes for 27B with the streaming weighted fold
+/// Per-process head bytes for 27B with the streaming weighted fold
 /// (any quorum, token weights) and the head split into N syncer shards.
 ///
 /// A shard keeps params, momentum and the bf16-downlink anchor of its own
 /// fragments only (3·n/N) and runs its own pipeline of rounds; a streaming
 /// round holds its accumulators (2 for RDA) plus the push being folded,
 /// whatever the quorum, where the buffered merge holds every responder's
-/// push plus the reduced delta.  Checkpoint and resume stream as in P4.
+/// push plus the reduced delta.  Checkpoint and resume stream as without sharding.
 #[test]
 fn head_memory_model_for_27b_sharded_streaming_rounds() {
     println!(

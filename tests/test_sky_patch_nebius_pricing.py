@@ -1,5 +1,5 @@
 """yeto.sky_patches.nebius: a preemptible Nebius InstanceSpec carries a pricing model
-(the Nebius API refused sky 0.13.0's request without one, S19 real-spot drill 10-10)."""
+(the Nebius API refused sky 0.13.0's request without one in a real-spot drill)."""
 
 from __future__ import annotations
 

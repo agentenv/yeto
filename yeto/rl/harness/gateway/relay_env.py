@@ -1,4 +1,4 @@
-"""Environment names of the Harbor agent's gate relay (S26 E9.5; S27 G-DA).
+"""Environment names of the Harbor agent's gate relay.
 
 A dependency-free module so the launch layer (Modal islands: the relay tunnel)
 and the Miles adapter (``harbor_agent.relay_settings``) share one spelling

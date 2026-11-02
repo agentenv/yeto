@@ -25,7 +25,7 @@ from .trainable_state import TRAINABLE_LAYOUTS
 CAPABILITY_SCHEMA = "yeto-rl-engine-capabilities-v1"
 
 # Mechanism dimensions beyond R0's advantage_estimators/dynamic_sampling_filters
-# (change rl-algorithm-capabilities, design D4). Absent keys in an older
+# Absent keys in an older
 # declaration read as the R0 mechanism set, so R0 declarations keep their
 # meaning. They are extra top-level attestation keys, ignored by #66's reader.
 R0_MECHANISMS: dict[str, frozenset[str]] = {
@@ -38,7 +38,7 @@ R0_MECHANISMS: dict[str, frozenset[str]] = {
 }
 
 PLACEMENTS = frozenset({"colocated", "fixed-partition"})
-# E1-E3 verbs reserved on the ports (design D9); declared only when implemented.
+# Elastic verbs reserved on the ports; declared only when implemented.
 RESERVED_PORT_VERBS = frozenset(
     {
         "RolloutPool.add_engines",
@@ -52,7 +52,7 @@ RESERVED_PORT_VERBS = frozenset(
 )
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 
-# Neutral weight-transport names (decoupling 2.6, audit E4/V2): same-device
+# Neutral weight-transport names: same-device
 # inter-process sharing, collective broadcast, files on disk. The backend (x
 # device family) translates them to its own implementation name.
 WEIGHT_TRANSPORTS = frozenset({"same-device-ipc", "collective-broadcast", "disk"})
@@ -64,10 +64,10 @@ class CapabilityMismatch(ValueError):
 
 @dataclass(frozen=True)
 class ExecutionCapabilities:
-    """What the execution mode of this engine can provide (design D4, A1).
+    """What the execution mode of this engine can provide.
 
     ``max_policy_staleness`` is the largest policy age the declared execution
-    mode may produce (rl-infra-spec ``ExecutionProfile.max_policy_age``);
+    mode may produce (``ExecutionProfile.max_policy_age``);
     serial-colocated and partitioned-serial produce 0.
     """
 
@@ -166,7 +166,7 @@ class EngineCapabilities:
     features: frozenset[str] = R0_MECHANISMS["features"]
     execution: ExecutionCapabilities = ExecutionCapabilities()
     # Mechanisms admitted for a single-island smoke without being declared
-    # (--rl-allow-unverified-mechanism, design D11). Recorded in the
+    # (--rl-allow-unverified-mechanism). Recorded in the
     # attestation so every artifact shows it contains unverified mechanisms.
     unverified_mechanisms: frozenset[str] = frozenset()
     # Algorithm spec fields (dotted paths, ``AlgorithmSpec.set_fields``) this
@@ -232,7 +232,7 @@ class EngineCapabilities:
         return getattr(self, dimension)
 
     def with_unverified(self, names: Iterable[str]) -> "EngineCapabilities":
-        """Same declaration plus a D11 allowance (``dimension:name`` entries)."""
+        """Same declaration plus an unverified-mechanism allowance (``dimension:name`` entries)."""
 
         from dataclasses import replace
 
@@ -327,8 +327,8 @@ class EngineCapabilities:
         Checks the run shape, then every mechanism the algorithm requires
         (``required_mechanisms``), its execution requirements and the
         rejection matrix (``rejections``). ``max_policy_age`` is the age the
-        selected execution profile may produce (rl-infra-spec
-        ``ExecutionProfile.max_policy_age``); None means the declared
+        selected execution profile may produce
+        (``ExecutionProfile.max_policy_age``); None means the declared
         ``execution.max_policy_staleness``. Unverified-mechanism allowances
         exempt only the "not declared" problem of the named mechanisms.
         """
@@ -375,7 +375,7 @@ class EngineCapabilities:
                 problems.append(
                     f"algorithm needs a critic, which engine {self.engine!r} does not declare "
                     "(execution.critic=false); a critic mechanism is declared only after its "
-                    "single-GPU G1 smoke passes -- before that a single-island run without "
+                    "single-GPU smoke passes -- before that a single-island run without "
                     "outer sync may pass --rl-allow-unverified-mechanism execution:critic"
                 )
             if execution.needs_rollout_logprobs and not self.execution.rollout_logprobs:

@@ -10,35 +10,35 @@ from ..gpu_spec import DEVICE_FAMILIES, parse_gpu_spec
 from .rl_backend import _rl_backend_module
 
 
-# rl-multinode-island D6: per-cloud NCCL/GLOO socket settings for a multi-node
-# island (values are the CPU-side best guess; GPU task G1 confirms them).
+# Per-cloud NCCL/GLOO socket settings for a multi-node island.
 # "auto": the first non-virtual interface that is up, resolved on the node
-# (G1 2026-10-03: a Nebius L40S node's NIC is "network-interface-0", shown
+# (a Nebius L40S node's NIC is "network-interface-0", shown
 # truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
 # address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
 # own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
 MULTINODE_IB_CLOUDS = frozenset({"modal"})
 MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
 _DETECT_IFACE = (
-    "YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
-    "case \"$n\" in lo|docker*|veth*|br-*|virbr*) continue;; esac; "
-    "[ \"$(cat \"$d/operstate\" 2>/dev/null)\" = up ] && { echo \"$n\"; break; }; done)}"
+    "YETO_IFACE=${NCCL_SOCKET_IFNAME:-}; [ -n \"$YETO_IFACE\" ] || "
+    "YETO_IFACE=$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
+    "case \"$n\" in (lo|docker*|veth*|br-*|virbr*) continue;; esac; "
+    "[ \"$(cat \"$d/operstate\" 2>/dev/null)\" = up ] && { echo \"$n\"; break; }; done)"
 )
 
 
 
-# rl-ssh-node-pool D5: collective-communication variables of an SSH-pool
+# Collective-communication variables of an SSH-pool
 # island, from the inventory's device family and fabric instead of a cloud
 # name. The cloud path above is unchanged.
 #
 # Variable names per family:
 #  - cuda: NCCL/GLOO, as the cloud path already writes them.
 #  - npu: HCCL. HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME and HCCL_CONNECT_TIMEOUT
-#    are confirmed (task N1.4): the Ascend deployment guides in
+#    are confirmed: the Ascend deployment guides in
 #    sglang/docs/hardware-platforms/ascend-npus export HCCL_SOCKET_IFNAME next
 #    to GLOO_SOCKET_IFNAME, and HCCL_CONNECT_TIMEOUT / HCCL_EXEC_TIMEOUT appear
 #    in the CANN collective-communication variable reference. ``HCCL_IF_IP``
-#    (named in design D5) is NOT confirmed, so this module does not write it.
+#    is NOT confirmed, so this module does not write it.
 #  - ppu: ACCL-P keeps the NCCL names (T-PPU-gaps.md 2.3), so a PPU island
 #    exports NCCL/GLOO variables; a 16-card node uses interface hpn0.
 HCCL_CONNECT_TIMEOUT_S = 1800
@@ -107,7 +107,7 @@ def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
 # Clouds that accept sky's ``network_tier="best"`` only for some shapes: Nebius
 # offers the InfiniBand tier for H100:8 / H200:8 nodes only and REJECTS the
 # request for anything else ("Catalog does not contain any instances"), so a
-# 2x1xL40S island must not ask for it (G1 of rl-multinode-island: the D6
+# 2x1xL40S island must not ask for it (the multi-node
 # prelude already runs NCCL over TCP with NCCL_IB_DISABLE=1 there).
 NETWORK_TIER_BEST_SHAPES = {"nebius": {("H100", 8), ("H200", 8)}}
 
@@ -173,7 +173,7 @@ def rl_island_placement_args(args) -> list:
 
 def rl_island_placement_records(args) -> list[dict]:
     """Run manifest / dry-run rows: every island's placement values and the
-    AlgorithmSpec hash it receives (the same on every island, P4-Q4)."""
+    AlgorithmSpec hash it receives (the same on every island)."""
     from ..rl.engine import island_placement
 
     algorithm = getattr(args, "rl_expected_algorithm_sha256", None)
@@ -198,7 +198,7 @@ def rl_island_gpu_env(args, spec) -> str:
 
 # Clouds whose RL island runs in sky's docker runtime with a fixed /dev/shm:
 # Ray refuses an object store larger than /dev/shm at `ray start`. Nebius gives
-# the container 200 GB (G-DF yeto-df-6: "configured object store size (644 GB)
+# the container 200 GB ("configured object store size (644 GB)
 # exceeds /dev/shm size (200 GB)").
 SHM_CAPPED_STORE_CLOUDS = frozenset({"nebius"})
 SHM_STORE_FRACTION = (9, 10)  # the store gets at most 90% of /dev/shm
@@ -253,13 +253,13 @@ def rl_island_ray_head_env(args) -> str:
 
     ``--rl-island-ray-head-preallocate`` sets RAY_preallocate_plasma_memory=1:
     the head raylet's plasma store maps its whole store with MAP_POPULATE at
-    start (S27 RAY-SEGV R1).  In Ray 2.58 the store binds its socket only
+    start.  In Ray 2.58 the store binds its socket only
     after that populate, while the raylet connects to it with
     raylet_client_num_connect_attempts tries 1 s apart (default 10) and
     aborts on failure; ``ray start`` waits raylet_start_wait_time_s for the
     node to register (read from the Ray source).  Both get the start-wait
     seconds.  On a Modal CPU container (gVisor) the populate returned at once
-    and a 300 GiB preallocated head started in 8.4 s (S27 G-CQ)."""
+    and a 300 GiB preallocated head started in 8.4 s."""
     prealloc = bool(getattr(args, "rl_island_ray_head_preallocate", False))
     wait_s = getattr(args, "rl_island_ray_head_start_wait_s", None)
     if wait_s is not None and int(wait_s) < 1:
@@ -305,7 +305,7 @@ def rl_actor_gpus_per_node(args, spec) -> int:
 
 def rl_trainer_shape(args, spec) -> tuple[int, int]:
     """``(actor_num_nodes, actor_num_gpus_per_node)`` of the island's trainer
-    (rl-multinode-island D5). Colocated: every GPU. Fixed partition: the island
+    Colocated: every GPU. Fixed partition: the island
     total minus ``--rl-rollout-gpus`` and ``--rl-standby-gpus`` (island totals),
     laid out as the leading logical bundles; it must occupy the same number of
     GPUs on every node it uses (Miles' rectangle) and keep every TP*PP group
@@ -450,7 +450,7 @@ def rl_island_bundle_map_flag(args, spec) -> str:
 
 
 def rl_min_nodes(args, spec) -> int:
-    """Minimum learner nodes (rl-multinode-island D8): one trainer model-parallel
+    """Minimum learner nodes: one trainer model-parallel
     replica + one rollout engine + standby, or ``--rl-min-nodes-per-learner``
     when that is larger."""
     from ..rl.engine.multinode import TopologyError, min_nodes, trainer_replica_gpus
@@ -486,14 +486,14 @@ def rl_min_nodes(args, spec) -> int:
 # + RayWorkerManager helpers 0.2 each + CommandActor/router 0.001 each, i.e.
 # ~4+ CPUs before sglang's own processes. A 4-vCPU node (AWS g5.xlarge /
 # g6e.xlarge) left Ray with "Pending Demands: {'CPU': 1.0}" and the job hung
-# (aws-g0-20261004c). 8+ keeps headroom; Nebius' smallest L40S (8 vCPU) and
+# 8+ keeps headroom; Nebius' smallest L40S (8 vCPU) and
 # H100/H200 shapes (16/128 vCPU) already satisfy it, so they are unchanged.
 # Applies per node, so multi-node islands get the same floor. An explicit
 # --learner-cpus or --learner-instance-type wins. Pre-provisioned pools
 # (ssh/kubernetes) and Modal size themselves and are left untouched.
 RL_ISLAND_MIN_CPUS = "8+"
 
-# Island roles (rl-eval-difficulty-buckets 5.1, D11.1). A "train" island trains,
+# Island roles. A "train" island trains,
 # publishes and joins the merge pool; an "eval" island only serves inference for
 # the eval store (yeto.cloud.modal_eval_island) and never joins the pool or
 # submits a delta (yeto.rl.engine.island_ledger refuses it).

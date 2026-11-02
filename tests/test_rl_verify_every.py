@@ -1,4 +1,4 @@
-"""S27 C5 (G-CT): ``--rl-verify-every N`` on a no-sync full-parameter island.
+"""``--rl-verify-every N`` on a no-sync full-parameter island.
 
 The island hashes every rank's shard (about 8.4 s a round on Nano 8xH200) only on
 the first publication, every N-th version, the last round and rounds that keep a

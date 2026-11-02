@@ -51,7 +51,7 @@ def test_verl_refuses_over_sampling_before_launch():
 
     args = _args(["--over-sampling-batch-size", "16"])
     args.rl_backend = "verl"
-    with pytest.raises(ValueError, match="verl 后端尚未实现多发截止"):
+    with pytest.raises(ValueError, match="does not implement the over-sampling cut-off"):
         _prepare_rl_args(args)
 
 
@@ -59,7 +59,7 @@ def test_verl_declares_stage_two_and_limit_zero_overrides_are_empty():
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.policy_age import SUPPORT, policy_age_overrides
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 4)  # 6.4b; L6.9 raised the cap
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 4)  # 6.4b; later raised the cap
     assert verl_capabilities("sha256:" + "0" * 64).execution.max_policy_staleness == 0
     assert policy_age_overrides(0) == ()
     with pytest.raises(PolicyAgeError, match="backend 'verl' supports up to stage 2"):

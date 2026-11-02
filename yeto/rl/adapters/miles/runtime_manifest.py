@@ -57,7 +57,7 @@ def image_manifest() -> dict[str, Any]:
 
 
 def overlay_record() -> dict[str, Any] | None:
-    # S13: a critic-family overlay patches ~/miles after the image was built, so
+    # A critic-family overlay patches ~/miles after the image was built, so
     # neither git HEAD nor the image build manifest describes the running code.
     from yeto.rl.adapters.miles import overlay as miles_overlay
 

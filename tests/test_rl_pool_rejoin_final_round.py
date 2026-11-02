@@ -1,5 +1,5 @@
-"""S17 M1: a re-JOINed elastic island ends on the syncer's final outer version, not on its
-local round count (s17-m1-20261008a: island 1's local count ran one ahead after the rejoin,
+"""A re-JOINed elastic island ends on the syncer's final outer version, not on its
+local round count (in a GPU run island 1's local count ran one ahead after the rejoin,
 so it left after v5 and the last outer step merged island 0 alone). CPU, no Ray."""
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def test_base_jumping_to_final_stops_early(tmp_path):
 
 def test_events_carry_the_syncer_outer_version_next_to_the_local_counter(tmp_path):
     """Cross-island comparisons (hash checks, lateness, dashboard) must key on the syncer's
-    version: after the rejoin the local policy_version runs one ahead (s17-g1-island, M1 run a)."""
+    version: after the rejoin the local policy_version runs one ahead."""
     _, _, ev = _run(tmp_path, [1, 1, 2, 3])
     applies = [e for e in ev if e.get("event") == "rl_policy_apply"]
     assert [e["policy_version"] for e in applies] == [0, 1, 2, 3, 4]  # local counter (publication/ledger)

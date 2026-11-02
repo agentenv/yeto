@@ -1,4 +1,4 @@
-"""S16 §6.6: an island the elastic syncer removed from the pool owes no
+"""An island the elastic syncer removed from the pool owes no
 rl_learner_finalized; only islands neither departed nor finalized keep exit 3."""
 import json
 

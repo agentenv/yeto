@@ -1,4 +1,4 @@
-"""E1 observation: where the trainer process spends one training step.
+"""Observation: where the trainer process spends one training step.
 
 Opt-in (``--rl-profile-trainer``): around each ``train_one_step`` call it records the
 wall time, the main thread's CPU time, the whole process's CPU time, garbage

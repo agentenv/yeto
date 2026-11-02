@@ -1,4 +1,4 @@
-"""Head-side ``fleet.jsonl`` writer (fleet-dashboard 2.3).
+"""Head-side ``fleet.jsonl`` writer.
 
 ``FleetController`` reports island lifecycle edges here; every
 ``tick_s`` (default 5 min) a ``cost_tick`` carries each island's $/h,
@@ -124,7 +124,7 @@ class FleetLog:
         priced = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
         rec = {"event": "cost_tick", "time_unix": now, "islands": rows,
                "total_usd": sum(priced) if priced else None, "budget_usd": self.budget_usd,
-               "estimate": "价目表 x (GPU + CPU + 内存) x 墙钟；非账单"}
+               "estimate": "price table x (GPU + CPU + memory) x wall clock; not billing data"}
         self._write(rec)
         return rec
 

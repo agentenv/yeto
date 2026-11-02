@@ -1,12 +1,12 @@
-"""``Placement.reconfigure`` for E1 rollout reconfiguration (rl-infra-spec 3.4/3.4a).
+"""``Placement.reconfigure`` for rollout reconfiguration.
 
 Wraps the startup :class:`~.placement.MilesPlacement` (fork M1 explicit
-role->bundle map). E1 never moves a trainer GPU: a plan must keep the trainer
+role->bundle map). Rollout reconfiguration never moves a trainer GPU: a plan must keep the trainer
 GPUs, its rollout GPUs must be pool GPUs outside the trainer set, and the
 epoch must be the next config epoch. The physical engines are started and
 stopped by :class:`~.rollout.MilesRolloutPool`; this object records the
 committed role->GPU description the driver and the controller report.
-Trainer DP changes / role transfer are E3 (4.7) and are refused here.
+Trainer DP changes / role transfer are a separate edge (4.7) and are refused here.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class ElasticPlacement:
         description names GPUs ``bundle<b>`` / ``bundle<b>:gpu<g>`` (or pool uuids
         with trainer edges). Nested engine lists are flattened in order; ids
         already in the pool are kept; anything unresolvable is kept verbatim so the
-        pool checks below refuse it with a clear message (S8 M3: an unhashable
+        pool checks below refuse it with a clear message (an unhashable
         nested list reached ``set()`` after the commit -> RECOVERY_REQUIRED).
         """
         flat: list[Any] = []
@@ -83,7 +83,7 @@ class ElasticPlacement:
             if m and self._gpus_per_node:
                 return self._bundle_id(int(m.group(1)) * self._gpus_per_node + int(m.group(2)))
             if m and int(m.group(1)) == 0:
-                # Single-node island (no --rl-island-gpus-per-node -> topology None, S11
+                # Single-node island (no --rl-island-gpus-per-node -> topology None
                 # H100 e1): every slot is on node 0, so ``n0:<g>`` is logical bundle g.
                 # Before, it stayed verbatim and the post-commit bookkeeping refused it as
                 # "outside the pool" -> RECOVERY_REQUIRED.
@@ -99,7 +99,7 @@ class ElasticPlacement:
                                 epoch=epoch)
 
     def reconfigure_trainer(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription:
-        """E3 (4.7): record a committed trainer DP change / role transfer (nested trainer GPU sets)."""
+        """(4.7): record a committed trainer DP change / role transfer (nested trainer GPU sets)."""
         current = self._current
         if epoch != self.epoch + 1:
             raise PlacementPlanError(f"placement epoch {epoch}, expected {self.epoch + 1}")
@@ -124,9 +124,9 @@ class ElasticPlacement:
         if epoch != self.epoch + 1:
             raise PlacementPlanError(f"placement epoch {epoch}, expected {self.epoch + 1}")
         if plan.kind != current.kind or current.kind != "fixed-partition":
-            raise PlacementPlanError("E1 reconfigures only a fixed partition")
+            raise PlacementPlanError("rollout reconfiguration supports only a fixed partition")
         if tuple(plan.trainer_gpus) != tuple(current.trainer_gpus):
-            raise PlacementPlanError("E1 keeps the trainer GPUs (role transfer is E3)")
+            raise PlacementPlanError("rollout reconfiguration keeps the trainer GPUs (role transfer is a trainer edge)")
         rollout = self.resolve_gpus(plan.rollout_gpus)
         if len(set(rollout)) != len(rollout):
             raise PlacementPlanError("duplicate rollout GPU")

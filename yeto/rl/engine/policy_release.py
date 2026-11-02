@@ -1,4 +1,4 @@
-"""Policy releases: trainer -> sampler weight hand-off through the store (L4.6, D5).
+"""Policy releases: trainer -> sampler weight hand-off through the store.
 
 A trainer island whose samplers run elsewhere releases every published policy
 version into the checkpoint store; a sampler island loads the newest release
@@ -26,7 +26,7 @@ the load must get the same value). ``files`` lists every weight file with its
 size; ``buffer_shards`` is the trainer's read position per sampler shard when
 the buffer is sharded (``sample_buffer`` module doc).
 
-Complete releases only (rl-cross-site-sample-store D4): a reader loads a release
+Complete releases only (rl-cross-site-sample-store): a reader loads a release
 only when every file in ``files`` exists with that size, in the mount or as an
 object. Otherwise (an upload still running, a store whose overwrite is not yet
 visible) :class:`PolicyFollower` keeps the release it serves and tries again on
@@ -51,7 +51,7 @@ other weights (a new lineage): that is a new release with a higher ``seq``.
 differs from the one its engines serve. When the trainer stops, no new release
 appears and the sampler keeps the last version.
 
-Latency phases (S26 E5): the trainer side (:meth:`PolicyReleaseStore.release`)
+Latency phases: the trainer side (:meth:`PolicyReleaseStore.release`)
 and the sampler side (:meth:`PolicyFollower.refresh`) time their phases with
 :class:`PhaseTimer` (``last_timings``, seconds); the islands write them in their
 release and load events. They only measure: no phase changes its order or work.
@@ -73,7 +73,7 @@ A load hook that checks the weight files itself while it copies them
 (``verifies_files``, :func:`copy_with_digest`) reads a LoRA release once instead
 of twice; the follower then skips its own check.
 
-Staged releases (S27 G-AT): the trainer exports a full checkpoint into a
+Staged releases: the trainer exports a full checkpoint into a
 directory on its local disk, and :meth:`PolicyReleaseStore.release_staged`
 publishes that directory: the weight files in one store put
 (``CheckpointStore.put_directory``: through the trainer's mount and one commit;
@@ -85,7 +85,7 @@ on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
 while the samplers' release is written; releases stay in version order (the next
 one waits for the upload of the previous one).
 
-Delta releases (S27 G-BG, ``--rl-release-delta-full-every N``): a staged full
+Delta releases (``--rl-release-delta-full-every N``): a staged full
 release may be uploaded as the bf16 delta against the trainer's previous release
 (:class:`DeltaBase`, its files kept on the trainer's local disk;
 :mod:`.release_delta`). The record's ``delta`` names the base and the digest of
@@ -158,14 +158,14 @@ class PolicyRelease:
     # A release made from another one (a W4A8 re-quantization of a BF16 release):
     # {"release_dir", "seq", "version", "policy_hash", "scheme", ...}; None: trained weights.
     derived_from: dict[str, Any] | None = None
-    # Who released it when the trainers sync (S25 C3, yeto.rl.engine.merged_release):
+    # Who released it when the trainers sync (yeto.rl.engine.merged_release):
     # {"kind": "merged", "learner_id", "num_learners", "local_version"}; None: one trainer.
     origin: dict[str, Any] | None = None
     # A bf16 delta release (yeto.rl.engine.release_delta): {"base_seq", "base_path",
     # "base_version", "ratio", "files": {name: {"mode", "size", "sha256"}}}; the
     # directory holds the deltas, ``files`` above lists them. None: the weights themselves.
     delta: dict[str, Any] | None = None
-    # sha256 of each weight file of a full release (``file_digests``; S27 G-CD: the full
+    # sha256 of each weight file of a full release (``file_digests``: the full
     # releases of a delta chain); None: not digested file by file
     file_sha256: dict[str, str] | None = None
     schema: str = SCHEMA
@@ -378,7 +378,7 @@ class DeltaChain:
 
     def adopt(self, release: PolicyRelease, directory: str | os.PathLike[str]) -> None:
         """Start the chain from a release that is already in the store and whose
-        files are readable at ``directory`` (S27 G-EQ3): the trainer's first
+        files are readable at ``directory``: the trainer's first
         release of the process is then a delta against it instead of a full
         upload. The usual case is the base policy (version 0) that both sides
         hold -- the sampler's own copy of the base checkpoint -- so the first
@@ -535,7 +535,7 @@ class PolicyReleaseStore:
     def records(self) -> list[PolicyRelease]:
         """The release records still in the store (pruning keeps the newest
         ``keep``) and LATEST, in ``seq`` order. A restarted trainer restores its
-        published versions from them (S27 L11)."""
+        published versions from them."""
         found: dict[int, PolicyRelease] = {}
         raws: list[bytes | str] = []
         objects = self.store.objects
@@ -699,7 +699,7 @@ class PolicyReleaseStore:
 
         A base is read from this writer's own deltas (``_bases``) and, for a
         release this process did not write, from the release's record in the
-        store (S27 G-EQ3): a restarted trainer starts with an empty ``_bases``,
+        store: a restarted trainer starts with an empty ``_bases``,
         and without the record it deleted the base its kept delta needs -- after
         which no sampler could rebuild that delta (measured on npu1: a restarted
         island pruned ``r1-v0`` while keeping the delta ``r2-v1``). An unreadable

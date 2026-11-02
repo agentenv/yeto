@@ -1,4 +1,4 @@
-"""yeto-framework-decoupling phase 5 (6.1 / 6.2, design D7): backend identity
+"""yeto-framework-decoupling backend identity
 hash beside the algorithm/contract hashes, bound into the syncer session."""
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def test_golden_samples_keep_both_old_hashes_and_carry_the_identity():
             continue
         sample = json.loads(path.read_text())
         # the identity is a parallel hash; the golden keeps it without the engine
-        # commit (rl-identity-tiering L9.10, design D5)
+        # commit
         recorded = {k: v for k, v in expected.to_dict().items() if k != "engine_commit"}
         assert sample["backend_identity"] == {**recorded, "compat_group": "nvidia-h100"}, path.name
         assert sample["algorithm_sha256"] == sample["execution_profile"]["profile"]["algorithm_spec_sha256"]
@@ -100,12 +100,12 @@ def test_bridges_send_the_identity_bound_contract():
 def test_full_parameter_session_contracts_reference_the_identity():
     from yeto.rl.adapters.miles.full_parameter import role_stream
 
-    # P0-D5/D8: every full-parameter role stream (dense and SAO) binds the ports identity.
+    # every full-parameter role stream (dense and SAO) binds the ports identity.
     assert "backend_identity().sha256()" in Path(role_stream.__file__).read_text()
 
 
 def test_lr_schedule_is_bound_into_the_island_contract():
-    """S17 N17: islands with different LR schedules (e.g. --rl-lr-schedule constant
+    """Islands with different LR schedules (e.g. --rl-lr-schedule constant
     vs linear) declare different identities, so the syncer refuses the second."""
     from types import SimpleNamespace
 
@@ -133,7 +133,7 @@ def test_lr_schedule_is_bound_into_the_island_contract():
 
 
 def test_island_contract_binds_algorithm_spec():
-    """rl-code-quality-cleanup 4.8 (contract v3: the semantic hash, L9.7): the
+    """rl-code-quality-cleanup 4.8 (contract v3: the semantic hash): the
     algorithm is part of the island contract; islands that run different
     algorithms declare different contracts."""
     from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256

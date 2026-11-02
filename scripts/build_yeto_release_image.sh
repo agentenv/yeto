@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Build the yeto release image (rl-identity-tiering L9.12, release mode): the
+# Build the yeto release image (release mode): the
 # pinned miles-ports image (MILES_NEXT_IMAGE) plus one layer that holds the yeto
 # source tree of one clean commit at /opt/yeto/src. In release mode the image
-# digest is the run code pack digest (design D2); see docker/yeto-release/README.md.
+# digest is the run code pack digest; see docker/yeto-release/README.md.
 #
 #   scripts/build_yeto_release_image.sh            # layer + local image tarball only
 #   scripts/build_yeto_release_image.sh --push     # also push; prints the digest
 #
 # Inputs (env):
 #   CRANE      crane binary (go-containerregistry >= 0.20)
-#   DEST_REPO  ghcr.io/michaellchung/yeto-release
+#   DEST_REPO  required: target image repository, e.g. ghcr.io/<owner>/yeto-release
 #   OUT        output directory (default: a new /tmp/yeto-release-XXXXXX)
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
 # Writes: $OUT/{layer.tar,release-manifest.json,build-record.json[,image.tar]}
@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PUSH=0; [ "${1:-}" = "--push" ] && PUSH=1
 CRANE=${CRANE:-crane}
-DEST_REPO=${DEST_REPO:-ghcr.io/michaellchung/yeto-release}
+DEST_REPO=${DEST_REPO:?set DEST_REPO to the target image repository, e.g. ghcr.io/<owner>/yeto-release}
 OUT=${OUT:-$(mktemp -d /tmp/yeto-release-XXXXXX)}
 PREFIX=opt/yeto/src
 

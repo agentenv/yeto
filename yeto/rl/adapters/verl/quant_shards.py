@@ -1,4 +1,4 @@
-"""FSDP2 (verl / HF) parameters -> re-quantization source slices (S25 N8.2 / N8.5b adapter).
+"""FSDP2 (verl / HF) parameters -> re-quantization source slices (adapter).
 
 FSDP2 shards every parameter on dim 0 over a 1-D mesh (``Shard(0)``): rank
 ``r`` holds rows ``[r * c, min((r + 1) * c, N))`` with ``c = ceil(N / world)``

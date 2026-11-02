@@ -1,8 +1,8 @@
 """Train/inference mismatch observation and correction (change
-``rl-algo-mismatch-correction``, design D2-D7).
+``rl-algo-mismatch-correction``).
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. It
-adds, on top of the P0 ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
+adds, on top of the base ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
 
 * named correction mechanisms, detected on the spec, so that an engine can
   declare them one by one (``EngineCapabilities.corrections``):
@@ -11,7 +11,7 @@ adds, on top of the P0 ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
   mechanism           spec                                             masks
   ==================  ===============================================  =========
   mismatch_observe    method=custom, function=:data:`OBSERVE_PATH`     no
-  tis (P0 built-in)   method=tis, upper, lower                        no
+  tis (built-in)      method=tis, upper, lower                        no
   icepop              method=custom, function=:data:`ICEPOP_PATH`      yes
   opsm_trainer        OPSM, opsm_old_logprob_source=trainer            yes
   opsm_rollout        OPSM, opsm_old_logprob_source=rollout            yes
@@ -29,11 +29,11 @@ adds, on top of the P0 ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
 * MIS parameters as Miles namespace attributes (``register_runtime_attrs``;
   ``mis.py`` reads ``args.tis_mode`` etc., which have no CLI flag).
 
-Every threshold is explicit (design D3): nothing inherits a Miles default.
-``execution.max_policy_staleness`` stays 0 (P0 rejection matrix): these
+Every threshold is explicit: nothing inherits a Miles default.
+``execution.max_policy_staleness`` stays 0 (base rejection matrix): these
 mechanisms correct numeric train/inference differences under the *same*
 policy version (the serial driver's policy token guarantees
-pi_behav = pi_old weights, design D1); they are not an off-policy license.
+pi_behav = pi_old weights); they are not an off-policy license.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ from yeto.rl.engine.algorithm import (
 OBSERVE_PATH = "yeto.rl.algos.mismatch_observe.observe_mismatch"
 ICEPOP_PATH = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
 MIS_PATH = "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp"
-# S26 E2: adaptive TIS (AIS), yeto.rl.algos.adaptive_tis; CPU-tested, not declared on any
+# Adaptive TIS (AIS), yeto.rl.algos.adaptive_tis; CPU-tested, not declared on any
 # engine until a GPU run shows it takes effect (declaration policy, entry.MILES_DECLARED).
 ADAPTIVE_TIS_PATH = "yeto.rl.algos.adaptive_tis.ais_tis_function"
 # SHA256 of miles/backends/training_utils/loss_hub/corrections.py at
@@ -83,7 +83,7 @@ CORRECTION_MECHANISMS = (
     "mis_mask",
     "adaptive_tis",
 )
-# Mechanisms whose masking may legitimately zero a whole round (design D7).
+# Mechanisms whose masking may legitimately zero a whole round.
 MASKING_MECHANISMS = frozenset({"icepop", "opsm_trainer", "opsm_rollout", "mis_mask"})
 
 
@@ -98,7 +98,7 @@ def _function(spec: AlgorithmSpec) -> str | None:
 
 
 def _uses_opsm(spec: AlgorithmSpec) -> bool:
-    # ``opsm_delta`` marks OPSM (P0: method='opsm'; 1a-shared.patch lets it
+    # ``opsm_delta`` marks OPSM (base spec: method='opsm'; 1a-shared.patch lets it
     # combine with tis/custom, and this detection covers both forms).
     return spec.correction.opsm_delta is not None
 
@@ -119,7 +119,7 @@ def selected_corrections(spec: AlgorithmSpec) -> tuple[str, ...]:
         out.append("mis_mask" if c.mis_mode == "mask" else "mis")
     if fn == ADAPTIVE_TIS_PATH:
         out.append("adaptive_tis")
-    if c.ratio_mask == "mis":  # neutral MIS ratio mask (rl-offpolicy-correction D3)
+    if c.ratio_mask == "mis":  # neutral MIS ratio mask (rl-offpolicy-correction)
         out.append("mis_mask")
     if _uses_opsm(spec):
         out.append(f"opsm_{c.opsm_old_logprob_source}")
@@ -182,13 +182,13 @@ register_field("correction", "mis_batch_normalize", default=False, parse=_boolea
 
 
 # --------------------------------------------------------------------------
-# mechanisms (design D7/D8)
+# mechanisms
 # --------------------------------------------------------------------------
 
 # With 1a-shared.patch these functions no longer also require the generic
 # ("corrections", "custom") mechanism, so an engine can declare them alone.
 if hasattr(_algorithm, "register_named_correction_function"):
-    # P0 accepts yeto. and miles. paths (integ-decl): IcePop's built-in
+    # The base spec accepts yeto. and miles. paths (integ-decl): IcePop's built-in
     # function is named too, claimed by ("corrections", "icepop").
     for _path, _owners in ((OBSERVE_PATH, ("mismatch_observe",)),
                            (MIS_PATH, ("mis", "mis_mask")),
@@ -198,7 +198,7 @@ if hasattr(_algorithm, "register_named_correction_function"):
 
 for _name in CORRECTION_MECHANISMS:
     if _name == "tis":
-        continue  # P0 built-in ("corrections", "tis"), masks nothing
+        continue  # built-in ("corrections", "tis"), masks nothing
     register_mechanism(
         "corrections", _name,
         lambda spec, n=_name: n in selected_corrections(spec),
@@ -207,7 +207,7 @@ for _name in CORRECTION_MECHANISMS:
 
 
 # --------------------------------------------------------------------------
-# rejections (spec: 阈值必须显式给出 / 至多一种修正方式 / OPSM 来源)
+# rejections (spec: thresholds must be explicit / at most one correction method / OPSM source)
 # --------------------------------------------------------------------------
 
 
@@ -351,7 +351,7 @@ def mis_config(spec: AlgorithmSpec) -> dict[str, Any]:
 
 
 def neutral_mis_config(c: Any) -> dict[str, Any]:
-    """MIS attributes for the neutral ``ratio_mask='mis'`` (rl-offpolicy-correction D3).
+    """MIS attributes for the neutral ``ratio_mask='mis'`` (rl-offpolicy-correction).
 
     Mask mode over ``[lower, upper]`` at ``level``. ``veto`` needs Miles'
     rejection-sampling branch (``use_rs``); its RS range is the same interval,
@@ -377,7 +377,7 @@ register_runtime_attrs("mismatch_mis", mis_config)
 
 
 # --------------------------------------------------------------------------
-# masked fraction (design D7): derived from the Miles reported-loss metrics
+# masked fraction: derived from the Miles reported-loss metrics
 # --------------------------------------------------------------------------
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install Harbor into an engine image without moving the engine's packages (S26 E0.4).
+"""Install Harbor into an engine image without moving the engine's packages.
 
 Harbor runs in the engine's own Python (yeto's HarborAgentLoop and the Miles
 Harbor example import it in-process), so it shares one environment with
@@ -81,7 +81,7 @@ def unpin_duplicates(lock: dict, names: set[str]) -> dict:
     Which ``.dist-info`` ``importlib.metadata`` reports first follows the
     directory listing order, and that order differed between the Modal build
     and the running container (Miles base image, peft 0.18.1 and 0.20.0: the
-    build saw 0.18.1, the container 0.20.0; S26 agentic check). Neither
+    build saw 0.18.1, the container 0.20.0). Neither
     version can be asserted, so the start check only requires the package."""
     packages = dict(lock["packages"])
     for name in sorted(names):

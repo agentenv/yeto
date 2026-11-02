@@ -1,4 +1,4 @@
-"""rl-infra-spec 4.7 (CPU, protocol only): trainer DP change + in-pool role transfer (T2R2 <-> T1R3).
+"""CPU, protocol only: trainer DP change + in-pool role transfer (T2R2 <-> T1R3).
 
 Engines, publisher and the fork rebuild are fakes; ranks are the pure-torch
 stand-ins of ``tests/rl_reshard_fakes.py``. Not GPU acceptance (A9).
@@ -345,7 +345,7 @@ def test_slice_pg_info_signature_is_checked():
 
 
 def test_rollout_to_trainer_unbinds_stopped_cells_and_rebinds_them_on_rollback(tmp_path):
-    """E1 patch infra-e1-e3-unbind-after-stop: drain -> stop -> unbind -> trainer M6; rollback binds back."""
+    """Unbind after stop: drain -> stop -> unbind -> trainer M6; rollback binds back."""
     ranks, actor, ops, built = _world_trainer(1, tmp_path, fail=lambda n, i: n == 2)
     ops.trainer.rebind_args(ranks[0].args)
     pool = Pool({"e0", "e1", "e2"})

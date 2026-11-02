@@ -43,8 +43,8 @@ _GPU_CANONICAL = {
     "910b2": "910B2",
     "910b3": "910B3",
     "910c": "910C",
-    # Alibaba T-Head PPU (rl-ssh-node-pool D2). 810E and M890 are different
-    # cards (infra-drafts/SESSION24/T-PPU-gaps.md 2.9).
+    # Alibaba T-Head PPU (rl-ssh-node-pool). 810E and M890 are different
+    # cards.
     "810e": "810E",
     "m890": "M890",
 }
@@ -166,7 +166,7 @@ def parse_gpu_spec(spec: str) -> list[ClusterSpec]:
 
 
 def require_min_nodes(spec: ClusterSpec, min_nodes: int) -> ClusterSpec:
-    """rl-multinode-island D8: refuse a learner island smaller than the recipe's
+    """rl-multinode-island: refuse a learner island smaller than the recipe's
     minimum node count (pure; returns the spec unchanged)."""
     if isinstance(min_nodes, bool) or not isinstance(min_nodes, int) or min_nodes < 1:
         raise ValueError("min_nodes must be a positive int")
@@ -178,7 +178,7 @@ def require_min_nodes(spec: ClusterSpec, min_nodes: int) -> ClusterSpec:
     return spec
 
 
-# --- npu-smi card assertion (task 3.9) ---------------------------------------
+# --- npu-smi card assertion ------------------------------------------------
 #
 # ``npu-smi info`` prints one table row per chip, e.g.
 #

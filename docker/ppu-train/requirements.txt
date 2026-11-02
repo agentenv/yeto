@@ -1,4 +1,4 @@
-# Python packages yeto-ppu-train adds on top of the PPU base image (S25 N0.2).
+# Python packages yeto-ppu-train adds on top of the PPU base image.
 # Installed with `-c /opt/yeto/image/base-constraints.txt`: a package that would
 # replace a base package (torch, triton, sglang, fla, transformers, ...) fails
 # the build instead of changing the base. ray is the one deliberate exception

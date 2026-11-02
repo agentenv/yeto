@@ -1,4 +1,4 @@
-"""rl-algo-supplement follow-up (S19 #13): per-step advantage and PPO-ratio statistics
+"""rl-algo-supplement follow-up: per-step advantage and PPO-ratio statistics
 recorded by the Miles state plugin (4.7 advantage variance, 5.2 clipfrac offline check).
 CPU only; Miles is replaced by fake modules."""
 

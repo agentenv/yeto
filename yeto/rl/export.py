@@ -301,7 +301,7 @@ def export_rl_checkpoint(
 
     The engine (``rl_engine: ports``) is recorded in ``yeto_rl_provenance.json``.
 
-    Change rl-algorithm-capabilities D9/D11: ``algorithm_spec``
+    ``algorithm_spec``
     (an ``AlgorithmSpec``, a mapping or a JSON string) is recorded as its
     canonical JSON ``algorithm_spec`` plus ``algorithm_spec_sha256`` -- the
     same values as the run's ``rl_engine_selected`` event; unverified

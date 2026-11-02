@@ -830,7 +830,7 @@ def test_decoupled_zero_lr_after_the_final_cut_is_announced_is_not_a_failure(tmp
     assert final.policy_version == 2
 
 
-# -- failure-path node-loss attribution (rl-multinode-island D9 / tasks 3.3) ------
+# -- failure-path node-loss attribution  ------
 
 class _NodeController:
     """Minimal multi-node controller: ``check_nodes`` returns the loss on the
@@ -913,7 +913,7 @@ def test_failure_on_single_node_island_never_polls_or_sleeps(tmp_path):
 def test_colocated_publish_offloaded_sleeps_before_publish(tmp_path):
     """Miles --offload-train order (train.py): the actor sleeps before update_weights
     and the engines' KV resume, so the publication never shares the GPU with the
-    resident training state (S13 FN smoke OOM). The next generate does not offload
+    resident training state (an OOM seen in a Flash-Next smoke run). The next generate does not offload
     again; the export/apply at the sync boundary still sees the resident trainer."""
     engine = _engine()
     engine.trainer.publish_offloaded = True
@@ -967,7 +967,7 @@ def test_first_optimizer_step_records_the_last_start_phase_once(tmp_path):
 
 
 def test_colocated_publish_offloaded_prepares_a_due_cut_before_offloading(tmp_path):
-    """E1: with round cuts, the trainer part of a due cut is written while the trainer
+    """With round cuts, the trainer part of a due cut is written while the trainer
     is still resident (before the offload for the publication), not after it."""
     engine = _engine()
     engine.trainer.publish_offloaded = True
@@ -1001,7 +1001,7 @@ def test_colocated_publish_offloaded_prepares_a_due_cut_before_offloading(tmp_pa
 
 
 def test_rollout_offload_after_generate_runs_in_its_own_phase(tmp_path):
-    """E1: Miles --offload-rollout frees the engine memory after generating; the
+    """Miles --offload-rollout frees the engine memory after generating; the
     driver times it as its own phase so "generate" matches Miles' rollout_time."""
     engine = _engine()
     calls = []

@@ -1,4 +1,4 @@
-"""fleet-dashboard 9.9: our own stop of the app shows "已停止", not RECOVERY_REQUIRED."""
+"""Our own stop of the app shows "stopped", not RECOVERY_REQUIRED."""
 
 import json
 import os
@@ -40,7 +40,7 @@ def test_failure_after_our_stop_is_stopped_not_recovery(tmp_path):
     ov = _ov([str(tape)])
     assert ov["islands"][0]["status"] == "stopped" and ov["islands"][0]["stopped_by_us"]
     assert not [a for a in ov["alerts"] if a["rule"] in ("recovery_required", "heartbeat")]
-    assert ov["global_status"]["text"].startswith("已停止") and ov["operator_stop"]["cause"] == "gate"
+    assert ov["global_status"]["text"].startswith("stopped") and ov["operator_stop"]["cause"] == "gate"
 
 
 def test_failure_before_our_stop_stays_recovery(tmp_path):

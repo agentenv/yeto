@@ -104,7 +104,7 @@ def _store_root(value: str) -> str:
 
 
 def island_store_path(args, value: str, *, flag: str) -> str:
-    """S27 G-EL: the island path of a second store option (``flag``, e.g.
+    """The island path of a second store option (``flag``, e.g.
     ``--rl-peer-recovery-store``) given as a path or a URI.
 
     The island mounts only the run's ``--rl-checkpoint-store`` (Modal: its Volume at
@@ -112,8 +112,8 @@ def island_store_path(args, value: str, *, flag: str) -> str:
     :data:`ELASTIC_CHECKPOINT_STORE_MOUNT`). So a URI must name the same Volume or
     bucket, and becomes the same path :func:`rl_checkpoint_store_plan` gives its
     prefix. Before this check the URI reached the island as it was and the island's
-    ``CheckpointStore`` took it for a relative directory on its local disk (run
-    s27-elastic-a: the donor's 473 GB snapshot never left the donor container).
+    ``CheckpointStore`` took it for a relative directory on its local disk (a
+    donor's 473 GB snapshot then never left the donor container).
     A path must be absolute or ``~/``; with a ``modal-volume://`` checkpoint store
     it must lie under the Volume mount (any other container path is local)."""
     value = str(value)
@@ -270,8 +270,8 @@ def model_store_env(model, revision, mount=MODEL_STORE_MOUNT):
 
 def modal_volume_store_env(model, revision, mount=MODEL_STORE_MOUNT, cache="/root/yeto-hub"):
     """Shell: serve ``model@revision`` from a Modal model Volume mounted at
-    ``mount`` (``hf/<name>/<rev[:8]>/`` + MANIFEST.json, written by
-    infra-drafts/fn-modal/dl_hf.py) through a symlinked HF hub cache, so the
+    ``mount`` (``hf/<name>/<rev[:8]>/`` + MANIFEST.json, written by the
+    model upload tool) through a symlinked HF hub cache, so the
     learner's snapshot_download finds every file locally.  Never fails: on a
     mismatch it WARNs and leaves the Hub download path untouched."""
     if not revision or len(revision) != 40:

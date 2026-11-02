@@ -10,12 +10,12 @@ Miles rollout process:
 * :func:`response_token_versions` -- the version segments of one sample: the
   yeto policy version of every response token, read from the per-call
   ``weight_versions`` spans SGLang reports (the span version is the plain policy
-  version the publisher stamps on the engines, P0-S; older engines carry the
+  version the publisher stamps on the engines; older engines carry the
   full ``yeto:<version>:<hash>`` label);
 * :func:`carry_over_buffer_filter` -- Miles' ``--buffer-filter-path`` under a
   limit > 0: groups whose oldest token is at most N versions behind the round
   being generated continue; older ones (and groups whose token versions are
-  unknown) are discarded and counted (spec "超过上限": discarded, reported);
+  unknown) are discarded and counted (spec "over the limit": discarded, reported);
 * :func:`take_carry_stats` -- what the buffer filter carried in / discarded
   this round, for the rollout metadata (driver event ``rl_rollout_carry_over``);
 * :func:`estimate_cross_version_truncation` -- the truncated fraction of the
@@ -206,7 +206,7 @@ def take_carry_stats(args: Any, current_version: int | None) -> dict[str, Any]:
     """This round's carry-over counts (zeros when nothing was buffered); consumed.
 
     Also carries the dropped response lengths under :data:`GATE_DROPPED_LENGTHS`
-    (rl-offpolicy-correction-passthrough D6); the driver turns them into
+    (rl-offpolicy-correction-passthrough); the driver turns them into
     ``offpolicy_gate`` and removes the key from ``rl_rollout_carry_over``."""
     counts, lengths = take_carry_round(args, current_version)
     return {**counts, GATE_DROPPED_LENGTHS: lengths}
@@ -264,7 +264,7 @@ Scorer = Callable[[Any], "list[float] | None"]
 # Router policies that route by the X-SMG-Routing-Key header (Miles
 # ``policy_uses_routing_key``). Under ``manual`` -- the default once Miles' session
 # server is on (agentic runs) -- the router rejects a request without the key
-# with a 4xx before any engine sees it (S18 ARU-3 M1: one router "client error"
+# with a 4xx before any engine sees it (one router "client error"
 # per unscored sample, rounds 1-5: 16/8/8/8/8).
 ROUTING_KEY_POLICIES = ("consistent_hashing", "manual")
 ROUTING_KEY_HEADER = "X-SMG-Routing-Key"
@@ -383,7 +383,7 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
     if unknown_tokens:
         extra["cross_version_unknown_version_tokens"] = unknown_tokens
-    if by_turn:  # rl-offpolicy-correction D6 (absent when none: old key set kept)
+    if by_turn:  # rl-offpolicy-correction (absent when none: old key set kept)
         extra[TRUNCATED_BY_TURN] = {turn: tuple(c) for turn, c in sorted(by_turn.items())}
     if near_zero:  # absent when none (old key set kept)
         extra["cross_version_ratio_near_zero"] = near_zero
@@ -472,7 +472,7 @@ INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
 
 
 def _infrastructure_reason(sample: Any) -> str:
-    """The legacy key, else the reason of a Harbor-path ABORTED outcome (S26 E9.5)."""
+    """The legacy key, else the reason of a Harbor-path ABORTED outcome."""
     meta = getattr(sample, "metadata", None)
     if not isinstance(meta, dict):
         return ""

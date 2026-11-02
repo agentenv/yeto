@@ -1,4 +1,4 @@
-"""S27 B10 phase 1: the full-parameter boundary of a verl FSDP2 island.
+"""The full-parameter boundary of a verl FSDP2 island.
 
 CPU only: the layout and name rules are pure, and the worker-side operations
 run against plain ``torch`` tensors (no DTensor, no verl, no Ray).
@@ -34,7 +34,7 @@ class _Module:
             )
             for name, shape in shapes.items()
         }
-        # persistent buffers, as a leaf nn.Module holds them (S27 G-EQ3: the HF
+        # persistent buffers, as a leaf nn.Module holds them (the HF
         # export reads them too, a MoE router's correction bias is one)
         self._buffers = {f"{prefix}{name}": torch.full(shape, 0.5, dtype=dtype)
                          for name, shape in dict(buffers).items()}
@@ -86,7 +86,7 @@ def test_specs_are_sorted_fp32_and_complete():
 
 
 def test_an_empty_boundary_is_refused():
-    with pytest.raises(fp.VerlFullParameterError, match="没有任何参数"):
+    with pytest.raises(fp.VerlFullParameterError, match="has no parameters"):
         fp.island_specs({})
 
 
@@ -133,7 +133,7 @@ def test_a_frozen_parameter_stays_out_of_the_boundary():
 
 
 def test_bf16_parameters_are_refused_instead_of_exported_as_masters():
-    with pytest.raises(fp.VerlFullParameterError, match="FP32 主权重"):
+    with pytest.raises(fp.VerlFullParameterError, match="FP32 master"):
         fp.remote_manifest(_worker(_Module(dtype=torch.bfloat16)))
 
 
@@ -154,7 +154,7 @@ def test_only_the_reading_rank_returns_the_fragments_bytes():
 
 
 def test_an_export_of_an_unknown_parameter_is_refused():
-    with pytest.raises(fp.VerlFullParameterError, match="模型里没有的参数"):
+    with pytest.raises(fp.VerlFullParameterError, match="parameters the model does not have"):
         fp.remote_export_fragment(_worker(_Module()), ("model.absent.weight",), True)
 
 
@@ -171,7 +171,7 @@ def test_apply_writes_the_fragment_and_export_reads_it_back():
 
 def test_apply_refuses_a_shape_that_is_not_the_models():
     module = _Module()
-    with pytest.raises(fp.VerlFullParameterError, match="形状不符"):
+    with pytest.raises(fp.VerlFullParameterError, match="shape mismatch"):
         fp.remote_apply_fragment(_worker(module), {"model.norm.weight": torch.zeros(9)}, False)
 
 
@@ -204,7 +204,7 @@ def test_a_full_parameter_island_needs_no_adapter_and_fp32_masters():
     assert vconf.full_parameter(cfg)
     with pytest.raises(vconf.VerlConfigError, match="lora_rank=0"):
         vconf.validate(_run(parameter_mode="full", lora_rank=32))
-    with pytest.raises(vconf.VerlConfigError, match="FP32 主权重"):
+    with pytest.raises(vconf.VerlConfigError, match="FP32 master"):
         vconf.validate(_run(parameter_mode="full", lora_rank=0, model_dtype="bf16"))
     with pytest.raises(vconf.VerlConfigError, match="parameter_mode"):
         vconf.validate(_run(parameter_mode="adapter"))
@@ -229,7 +229,7 @@ def test_the_lora_island_command_is_unchanged():
 
 
 def test_the_manifest_and_the_export_include_persistent_buffers():
-    """S27 G-EQ3: a checkpoint tensor can be a persistent buffer, so the export
+    """A checkpoint tensor can be a persistent buffer, so the export
     must read it; the sync layout stays parameters only."""
     module = _Module(buffers={"gate.bias": (4,)})
     manifest = fp.remote_manifest(_worker(module))
@@ -243,7 +243,7 @@ def test_the_manifest_and_the_export_include_persistent_buffers():
 
 
 def test_a_rank_whose_buffer_differs_stops_the_island():
-    """S27 G-EQ3: persistent buffers are not sharded, so each rank's forward reads
+    """Persistent buffers are not sharded, so each rank's forward reads
     its own copy; a rank that did not get the checkpoint's values computes wrong
     log-probs while the parameters are fine."""
     good = fp.remote_manifest(_worker(_Module(buffers={"gate.bias": (4,)})))
@@ -252,8 +252,8 @@ def test_a_rank_whose_buffer_differs_stops_the_island():
     other = _Module(buffers={"gate.bias": (4,)})
     other._buffers["gate.bias"] = torch.zeros(4)  # an uninitialised copy
     bad = fp.remote_manifest(_worker(other))
-    with pytest.raises(fp.VerlFullParameterError, match="持久 buffer 不分片"):
+    with pytest.raises(fp.VerlFullParameterError, match="persistent buffer is not sharded"):
         fp.agree_on_buffers([good, bad])
-    with pytest.raises(fp.VerlFullParameterError, match="buffer 集合不一致"):
+    with pytest.raises(fp.VerlFullParameterError, match="different buffer sets"):
         fp.agree_on_buffers([good, fp.remote_manifest(_worker(_Module()))])
     assert fp.agree_on_buffers([{"shapes": {}}]) == {}  # an older worker: no field, no failure

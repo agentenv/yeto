@@ -1,6 +1,6 @@
 """Round cuts of a run without an outer syncer: save at safe points, resume at start.
 
-Neutral core (moved from the Miles adapter for the verl island, S25 N7.6b): the
+Neutral core (moved from the Miles adapter for the verl island): the
 backend gives a ``CuttableTrainer`` (``save_cut`` / ``restore_cut`` /
 ``actual_layout``) and a rollout pool with ``data_cursor`` / ``seek_data_cursor``;
 :class:`CutSource` builds the cut context from the driver, and
@@ -66,9 +66,9 @@ def _algorithm_identity(algorithm: Any, *, ref_model: Mapping[str, Any] | None) 
 
 
 class CutSource:
-    """What the driver contributes to a cut (E2 ``CutContext``) and what a
-    restore must match (``RestoreExpectation``); shared by the 4.4 same-shape
-    rebuilder and E3's ``MilesTrainerOps`` (4.7)."""
+    """What the driver contributes to a cut (``CutContext``) and what a
+    restore must match (``RestoreExpectation``); shared by the same-shape
+    rebuilder and ``MilesTrainerOps``."""
 
     # backend check of an in-flight export: problems refuse the cut (None: no check;
     # the Miles adapter overrides it with its export check)
@@ -109,7 +109,7 @@ class CutSource:
 
         driver = self.driver
         if pending is not None:
-            # the token is read last (below): a deferred digest (E1) hashes meanwhile
+            # the token is read last (below): a deferred digest hashes meanwhile
             version, state = int(pending[0]), pending[1]
             settled, token = True, None
         else:
@@ -118,7 +118,7 @@ class CutSource:
         if state is None or version is None:
             raise RebuildRefused("no published policy to cut")
         if getattr(state, "verified", True) is False:
-            # E1: a cut carries the policy's content hash (resume checks it); a round
+            # a cut carries the policy's content hash (resume checks it); a round
             # whose publication was not hashed is never committed as a cut
             raise RebuildRefused(f"the publication of policy v{version} was not verified "
                                  "(no content hash); see --rl-verify-every-round")
@@ -150,7 +150,7 @@ class CutSource:
             data["buffer_length"] = int(exported["buffer_groups"])
             summary["carried_over"] = len(in_flight)
             summary["max_policy_age"] = limit
-        # S27 G-ED: a peer-recovered trainer continues the donor's scheduler, so its
+        # a peer-recovered trainer continues the donor's scheduler, so its
         # steps count from the restored position (FullParameterSync.start sets it)
         base_steps = int(getattr(driver, "recovered_scheduler_samples", None) or 0) // self.global_batch_size
         progress = CutProgress(
@@ -209,7 +209,7 @@ class _PreparedCut:
 class RoundCutCheckpoint:
     """``save`` at a safe point, ``resume`` at sync start (see the module doc).
 
-    rl-resume-from-checkpoint (S17 C4): ``every`` (``--rl-cut-every``) cuts only every N
+    ``every`` (``--rl-cut-every``) cuts only every N
     rounds (plus the last round and our own stop, ``final=True``); the pointer carries
     ``run_fingerprint`` / ``lr_at_next_round`` / ``consumed_prompt_ids_digest``; a resume
     checks the fingerprint (refused on a difference unless ``allow_config_change``), the
@@ -223,7 +223,7 @@ class RoundCutCheckpoint:
 
         if getattr(controller, "checkpoint_store", None) is None:
             raise ValueError("round cuts need the checkpoint store")
-        # S27 R-2: when a cut is due (cut_interval: every N rounds, or by wall time)
+        # when a cut is due (cut_interval: every N rounds, or by wall time)
         self.interval = FixedCutInterval(every) if interval is None else interval
         self.controller = controller
         self.source = source  # rebuild_wiring.CutSource (cut_root is set here)
@@ -237,16 +237,16 @@ class RoundCutCheckpoint:
         self.pending_lr_check: dict[str, Any] | None = None
         # set by resume(): where the rollout data source continues (the cut's cursor)
         self.resume_data_cursor: dict[str, int] | None = None
-        # rl-trainer-start-stop D4: the durable sample buffer's consumed watermark,
+        # the durable sample buffer's consumed watermark,
         # written into the cut record (None: the run reads no sample buffer).
         # buffer_watermark(next_rollout_id) commits and returns the position after the
         # last trained round; buffer_resume(watermark) continues there after a restore
         # (buffer_rollout.wire_sample_buffer sets both).
         self.buffer_watermark: Any = None  # callable(int) -> int | None
         self.buffer_resume: Any = None  # callable(int) -> int
-        # E1: a cut prepared before the trainer offloads (see prepare()), consumed by save()
+        # a cut prepared before the trainer offloads (see prepare()), consumed by save()
         self._prepared: _PreparedCut | None = None
-        # E1: a periodic cut writes its shards and commits the store in the background
+        # a periodic cut writes its shards and commits the store in the background
         # (the controller must offer commit_checkpoint_store); completed before the next
         # cut and at the final cut. YETO_RL_CUT_BACKGROUND_COMMIT=0 does it all inline.
         if background_commit is None:
@@ -255,11 +255,11 @@ class RoundCutCheckpoint:
         self.background_commit = bool(background_commit) and callable(
             getattr(controller, "commit_checkpoint_store", None))
         self._commit: tuple[Any, dict[str, Any]] | None = None  # (thread, result box)
-        # E1: a periodic cut captured at its safe point, completed by join_commit()
+        # a periodic cut captured at its safe point, completed by join_commit()
         self._deferred: dict[str, Any] | None = None
         self._commit_info: dict[str, Any] | None = None  # the running commit's cut
         self.skipped_busy = 0  # periodic cuts skipped while a commit was running
-        # E1: prepared cuts a busy commit made the safe point skip; their trainer-side
+        # prepared cuts a busy commit made the safe point skip; their trainer-side
         # writers are collected (and their files dropped) at the next cut, when done
         self._abandoned: list[_PreparedCut] = []
         self._declined: int | None = None  # rollout whose prepare met a running commit
@@ -284,7 +284,7 @@ class RoundCutCheckpoint:
         os.replace(tmp, target)
 
     def _stage(self, cut_id: str) -> Path:
-        """E1: a copy of the state dir as it is now (small: ledger, journal, pointer),
+        """A copy of the state dir as it is now (small: ledger, journal, pointer),
         next to it, for a store sync that runs after later rounds."""
         from yeto.rl.engine.resume import stage_state_dir
 
@@ -353,7 +353,7 @@ class RoundCutCheckpoint:
         return None
 
     def prepare(self, driver: Any, *, rollout_id: int, state: Any, final: bool = False) -> bool:
-        """E1: take the trainer part of the cut due at the safe point before rollout
+        """Take the trainer part of the cut due at the safe point before rollout
         ``rollout_id`` NOW, while the trainer is still resident, for the ``state`` the
         driver is about to publish as ``rollout_id``. Saves the wake/sleep a cut of an
         offloaded colocated trainer costs. The pointer and the store sync stay at the
@@ -399,7 +399,7 @@ class RoundCutCheckpoint:
         return StoreWriterGuard()
 
     def _commit_busy(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
-        """E1: a periodic cut is skipped while the previous cut's store commit still
+        """A periodic cut is skipped while the previous cut's store commit still
         runs (a slow store, e.g. a Modal volume commit of 2-10 s, would otherwise hold
         the round); the next safe point cuts again. The final cut waits for it."""
         if final or self._commit is None or not self._commit[0].is_alive():
@@ -413,7 +413,7 @@ class RoundCutCheckpoint:
 
     def _unprepared_wake(self, driver: Any, rollout_id: int, prepared: "_PreparedCut | None", *,
                          final: bool) -> bool:
-        """E1: skip a periodic cut whose prepare was declined (it met a running commit)
+        """Skip a periodic cut whose prepare was declined (it met a running commit)
         when it would wake the offloaded trainer
         (~2 s on the Modal A10G sync run e1a7) and a committed cut already exists; the
         next safe point cuts again. The final cut and the first cut are always taken."""
@@ -433,7 +433,7 @@ class RoundCutCheckpoint:
         """Write the trainer shards and commit the store in the background: periodic
         cuts only (the final cut is complete when the run ends), and not when a sample
         buffer commits the same store during the round (no two commits at once). The
-        store's first cut is deferred too (E1: with ``--rl-cut-every`` N > 1 it falls in
+        store's first cut is deferred too (with ``--rl-cut-every`` N > 1 it falls in
         the steady rounds); :meth:`_start` marks it first, since a store holding cuts but
         no LATEST refuses to start unless they are all such marked first cuts."""
         return self.background_commit and not final and self.buffer_watermark is None
@@ -522,7 +522,7 @@ class RoundCutCheckpoint:
                 "collect_s": round(time.monotonic() - started, 3), **({"writer": writer} if writer else {})}
 
     def _commit_in_background(self, deferred: dict[str, Any], commit_manifest: Any) -> None:
-        """E1: off the round's critical path: the cut manifest (``commit_manifest``, None
+        """Off the round's critical path: the cut manifest (``commit_manifest``, None
         when the trainer committed it already), the pointer with the cut record, the
         state dir copied into the store, the store commit. Until the pointer moves the
         previous cut stays the pointed one; a failure before that drops the new cut's
@@ -608,7 +608,7 @@ class RoundCutCheckpoint:
             return None
         if self._commit_busy(driver, rollout_id, final=final):
             # its trainer may still be writing the shards: collect them at the next
-            # cut instead of waiting for the writer here (E1: up to ~0.9 s per round)
+            # cut instead of waiting for the writer here (up to ~0.9 s per round)
             if prepared is not None:
                 self._abandoned.append(prepared)
             return None
@@ -699,7 +699,7 @@ class RoundCutCheckpoint:
                  "save_s": round(save_s, 3)}
         capture = pending.get("capture") if isinstance(pending, Mapping) else None
         if capture:
-            # E1: per rank, device copies or the host path (and why: e.g. low device memory)
+            # per rank, device copies or the host path (and why: e.g. low device memory)
             extra["cut_capture"] = capture
         if defer:
             # the state dir (ledger, journal) as it is at this cut: its store sync runs
@@ -712,7 +712,7 @@ class RoundCutCheckpoint:
         if pending is not None:
             self.trainer.finish_cut(pending)
         cut_bytes = directory_bytes(Path(self.root) / cut_id)
-        with commit_budget(getattr(ctl, "store", None), cut_bytes):  # S27 G-CD: a 473 GB cut
+        with commit_budget(getattr(ctl, "store", None), cut_bytes):  # a 473 GB cut
             saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
         guard.release()  # the store sync committed (or failed): nothing uncommitted is left
         info[CUT_KEY] = saved[CUT_KEY]
@@ -934,7 +934,7 @@ def _cut_data_cursor(manifest: Any) -> dict[str, int] | None:
 def wire_round_cuts(driver: Any, *, controller: Any, source: Any, **options: Any) -> RoundCutCheckpoint | None:
     """Give a driver round cuts when a checkpoint store is configured and its sync
     takes them (:class:`~.bridges.RoundCutHooks`): :class:`~.bridges.LocalOnlySync`
-    resumes from them; a synced island (S27 R-2) only writes them, its syncer stays
+    resumes from them; a synced island only writes them, its syncer stays
     authoritative for the policy at start."""
     from .bridges import RoundCutHooks
 

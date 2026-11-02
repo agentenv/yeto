@@ -1,4 +1,4 @@
-"""HF exports of a verl full-parameter island (``--rl-export-hf-rounds``, S27 G-DS).
+"""HF exports of a verl full-parameter island (``--rl-export-hf-rounds``).
 
 The engine-neutral :class:`yeto.rl.engine.hf_export.HfRoundExports` decides
 when a round is exported and puts the directory into the run's checkpoint
@@ -13,7 +13,7 @@ What the writer does, all on the island driver:
    function the sync already uses (``VerlFullParameterGroup.export_parameters``:
    ``DTensor.full_tensor`` on every rank, rank 0 returns the tensors);
 2. writes them in the **source checkpoint's own layout** when it can
-   (:func:`.hf_checkpoint_keys.base_export`, S27 G-EQ3): the same files, the
+   (:func:`.hf_checkpoint_keys.base_export`): the same files, the
    same tensor names, the same dtypes, each file's safetensors header copied
    verbatim (:func:`write_like`), and the source's
    ``model.safetensors.index.json``.  The model's tensors go back through the
@@ -22,7 +22,7 @@ What the writer does, all on the island driver:
    expert), so an unchanged model exports byte-identical files.  Why: a
    ``release_delta`` only encodes a file that the base holds under the same
    name with the same size, and a sampler loads a release with the base's
-   names (S27 G-EQ2 found the gap: Nemotron Nano loads ``backbone.*`` and
+   names (e.g. Nemotron Nano loads ``backbone.*`` and
    6243 per-expert tensors into ``model.*`` and 46 stacked ones);
 3. otherwise casts them to the model's own dtype (``config.json``
    ``torch_dtype`` or ``dtype``; bf16 when it names none) and writes one
@@ -193,7 +193,7 @@ class VerlHfWriter:
         cached and the next training step needs the room). Returns the largest
         reserved bytes before and after, or None when the group cannot do it.
         ``host``: with ``YETO_HOST_MEMORY=trim`` also trim the workers' host heap
-        (S27 G-EZ3); the per-file calls skip it, the one after the export does it."""
+       ; the per-file calls skip it, the one after the export does it."""
         release = getattr(self.group, "release_memory", None)
         if release is None:
             return None
@@ -207,7 +207,7 @@ class VerlHfWriter:
         freed = {"reserved_before": max(int(r["before"]["reserved"]) for r in results),
                  "reserved_after": max(int(r["after"]["reserved"]) for r in results),
                  "workers": len(results)}
-        hosts = [r["host"] for r in results if r.get("host")]  # YETO_HOST_MEMORY=trim (S27 G-EZ3)
+        hosts = [r["host"] for r in results if r.get("host")]  # YETO_HOST_MEMORY=trim
         if hosts:
             freed["host_rss_anon_mib_before"] = sum(int(h.get("rss_anon_mib_before") or 0) for h in hosts)
             freed["host_rss_anon_mib_after"] = sum(int(h.get("rss_anon_mib_after") or 0) for h in hosts)
@@ -243,7 +243,7 @@ class VerlHfWriter:
                     cache.pop(name, None)
             # Free the device blocks of this file's gathers before the next one: the
             # step after an export has to fit on the same card, and on a 64 GiB card
-            # the margin is under one activation group (S27 G-EQ3, npu1).
+            # the margin is under one activation group.
             self._release_memory(host=False)
         if plan.index:
             shutil.copyfile(plan.model_path / INDEX_FILE, directory / INDEX_FILE)

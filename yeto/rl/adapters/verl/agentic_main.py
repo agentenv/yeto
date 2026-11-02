@@ -1,4 +1,4 @@
-"""verl's own synchronous trainer on the Harbor agentic path (S25 N10.9; runs inside the verl image).
+"""verl's own synchronous trainer on the Harbor agentic path (runs inside the verl image).
 
 ``python -m yeto.rl.adapters.verl.agentic_main <hydra overrides>`` is verl's
 ``main_ppo.main`` unchanged (``--fully-async``: verl's ``fully_async_main.main``), with Ray started here so that every Ray worker:
@@ -7,8 +7,7 @@
   ``core_algos`` is imported (Ray ``worker_process_setup_hook`` installs an
   import hook).  The hook itself must not import verl or torch: it runs
   before Ray sets the actor's ``CUDA_VISIBLE_DEVICES``, and an early CUDA
-  init puts every rank on GPU 0 (NCCL "Duplicate GPU detected"; S24 T-GLM,
-  S25 T-N109 run a).  The ``yeto_harbor`` agent loop is imported by verl
+  init puts every rank on GPU 0 (NCCL "Duplicate GPU detected").  The ``yeto_harbor`` agent loop is imported by verl
   through ``agent_loop_config_path``;
 * carries the agentic environment: ``YETO_*`` (recorder, records proxy, boat
   caps), ``HARBOR_*`` (task directory, provider) and ``BOAT_API_KEY`` (the

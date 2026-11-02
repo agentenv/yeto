@@ -2,7 +2,7 @@
 
 A-TRN report #8: restoring optimizer state on some stacks (seen on PPU) silently
 resets the Adam ``step``. Bias correction and the LR schedule then restart while
-every other check passes. This module is the backend-neutral guard (S25 N7.6):
+every other check passes. This module is the backend-neutral guard:
 
 1. At save time each rank records an :class:`OptimizerResumeState`: the Adam
    ``step`` of every parameter group (min and max over its parameters), the LR

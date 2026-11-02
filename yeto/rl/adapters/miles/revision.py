@@ -74,7 +74,7 @@ def miles_execution_source_sha256(root: str | Path) -> str:
 def _overlay_tree_matches(root: Path, base_commit: str) -> bool:
     """A dirty checkout is accepted only when the island setup applied the critic
     overlay (record present, same patch sha256, same base) AND the whole worktree,
-    untracked files included, hashes to the fork result tree (S13 forkg1 fix)."""
+    untracked files included, hashes to the fork result tree."""
 
     from yeto.rl.adapters.miles.overlay import (CRITIC_C357_BASE_COMMIT, CRITIC_C357_PATCH_SHA256,
                                 CRITIC_C357_RESULT_TREE, read_applied_record)

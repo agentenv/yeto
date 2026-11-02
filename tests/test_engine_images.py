@@ -1,4 +1,4 @@
-"""S25 N0.2: the image catalog, the version locks and the start check."""
+"""The image catalog, the version locks and the start check."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def test_canonical_cpu_arch_accepts_the_docker_spellings_and_refuses_others():
 
 @pytest.mark.parametrize("reference, expected", [
     ("reg.example/yeto-ppu-train:1", "ppu-train"),
-    ("reg.example/a/b/yeto-npu-sampler:tag@sha256:ab", "npu-sampler"),
+    ("reg.example/a/b/yeto-ppu-train:tag@sha256:ab", "ppu-train"),
     ("reg.example/yeto-ppu-train", "ppu-train"),
     ("reg.example/site-own:1", None),
     ("yeto-ppu-train-extra:1", None),
@@ -70,9 +70,9 @@ def test_catalog_image_recognizes_a_reference_by_repository(reference, expected)
 
 def test_image_mismatch_only_judges_catalog_images():
     assert images.image_mismatch("site/own:1", cpu_arch="aarch64", device_family="npu") is None
-    assert images.image_mismatch("r/yeto-npu-sampler:1", cpu_arch="aarch64", device_family="npu") is None
-    assert "the node is x86_64" in images.image_mismatch(
-        "r/yeto-npu-sampler:1", cpu_arch="x86_64", device_family="npu")
+    assert images.image_mismatch("r/yeto-ppu-train:1", cpu_arch="x86_64", device_family="ppu") is None
+    assert "the node is aarch64" in images.image_mismatch(
+        "r/yeto-ppu-train:1", cpu_arch="aarch64", device_family="ppu")
     assert "device_family cuda" in images.image_mismatch(
         "r/yeto-ppu-train:1", cpu_arch="x86_64", device_family="cuda")
 
@@ -100,19 +100,9 @@ def test_ppu_lock_keeps_the_ppu_base_versions_the_survey_read():
     assert packages["flash-linear-attention"]["version"] == "1.0.0"
     assert packages["sglang"]["version"] == "0.5.17"
     # TransformerEngine and tilelang must not fail the start check before the
-    # first PPU probe says whether they work (N7.5).
+    # first PPU probe says whether they work.
     assert packages["transformer-engine"]["optional"] and packages["tilelang"]["optional"]
     assert packages["megatron-core"]["import"].endswith("hyper_connection")  # mHC
-
-
-def test_npu_lock_matches_the_vllm_ascend_release_line():
-    lock = _lock("npu-sampler")
-    assert lock["packages"]["vllm-ascend"]["version"] == "0.30.0rc1"
-    assert lock["packages"]["torch-npu"]["version"] == "2.10.0.post4"
-    assert lock["cann"]["version"] == "9."  # 9.x in the container, not the host's 8.0.1
-    assert lock["driver"]["enforce"] is False
-    assert any("option A" in d for d in lock["decisions"])
-    assert any("option B" in d for d in lock["decisions"])
 
 
 def test_requirements_of_the_ppu_image_leave_the_base_packages_alone():
@@ -123,8 +113,8 @@ def test_requirements_of_the_ppu_image_leave_the_base_packages_alone():
     assert "ray[default]==2.56.0" in text  # the one deliberate base change
 
 
-def test_both_new_images_run_the_start_check_from_their_entrypoint():
-    for name in ("ppu-train", "npu-sampler"):
+def test_catalog_images_run_the_start_check_from_their_entrypoint():
+    for name in images.IMAGES:
         text = _dockerfile(name)
         assert 'ENTRYPOINT ["/opt/yeto/image/entrypoint.sh"]' in text, name
         assert "docker/image-assert/assert_image_versions.py" in text, name
@@ -207,10 +197,14 @@ def test_start_check_fails_a_driver_below_the_minimum_unless_the_lock_says_other
 
 def test_start_check_exit_code_and_report_file(tmp_path):
     lock_path = tmp_path / "lock.json"
-    lock_path.write_text(json.dumps({**BASE_LOCK, "cpu_arch": "aarch64"}))
+    host = images.canonical_cpu_arch(__import__("platform").machine())
+    lock_path.write_text(json.dumps({**BASE_LOCK, "cpu_arch": "x86_64" if host == "aarch64" else "aarch64"}))
     report = tmp_path / "report.json"
     assert checker.main([str(lock_path), "--report", str(report)]) == 1
     assert json.loads(report.read_text())["rows"][0]["check"] == "cpu_arch"
-    lock_path.write_text(json.dumps({**BASE_LOCK, "cpu_arch": images.canonical_cpu_arch(
-        __import__("platform").machine())}))
+    lock_path.write_text(json.dumps({**BASE_LOCK, "cpu_arch": host}))
     assert checker.main([str(lock_path)]) == 0
+
+
+def test_start_check_accepts_the_arm64_spelling_of_aarch64():
+    assert not checker.run({**BASE_LOCK, "cpu_arch": "aarch64"}, machine="arm64").failed

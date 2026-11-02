@@ -4,7 +4,7 @@ Pure Python; no torch/ray/miles imports. The spec is translated to engine
 arguments only by adapters (``yeto.rl.adapters.miles.algorithm_flags``,
 decoupling 4.3/E14).
 
-Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
+Structure:
 
 * grouped frozen dataclasses ``AdvantageSpec`` / ``LossSpec`` / ``KlSpec`` /
   ``CorrectionSpec`` / ``SamplingSpec`` / ``ExecutionSpec`` plus
@@ -42,14 +42,14 @@ from typing import Any
 
 ALGORITHM_SPEC_SCHEMA = "yeto-rl-algorithm-spec-v1"
 ALGORITHM_SPEC_SCHEMA_V2 = "yeto-rl-algorithm-spec-v2"
-# rl-identity-tiering D1: domain of AlgorithmSpec.semantic_sha256().
+# Domain of AlgorithmSpec.semantic_sha256().
 ALGORITHM_SEMANTIC_SCHEMA = "yeto-rl-algorithm-semantic-v1"
 ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
-# Neutral dynamic-sampling filter names (yeto-framework-decoupling 4.4, design
-# D6).  The backend adapter binds each name to its implementation (Miles:
-# ``yeto.rl.adapters.miles.binding``).  Specs written with the pre-4.4 Miles
+# Neutral dynamic-sampling filter names (see yeto-framework-decoupling).
+# The backend adapter binds each name to its implementation (Miles:
+# ``yeto.rl.adapters.miles.binding``).  Specs written with the older Miles
 # module paths still load: they are normalized to these names, which gives a
-# *new* ``AlgorithmSpec.sha256()`` (hash-migration.md, 阶段 4 记录).
+# *new* ``AlgorithmSpec.sha256()`` (see hash-migration.md).
 BOUNDED_NONZERO_STD_FILTER = "nonzero_reward_std_bounded"
 STOCK_NONZERO_STD_FILTER = "nonzero_reward_std"
 LEGACY_FILTER_NAMES = {
@@ -78,10 +78,10 @@ ADVANTAGE_ESTIMATORS = (
     "ppo",
 )
 CRITIC_ESTIMATORS = frozenset({"ppo"})
-# rl-algo-critic-family (design D1/D9): critic vocabulary. Expressible is not
+# rl-algo-critic-family: critic vocabulary. Expressible is not
 # supported -- what the pinned Miles cannot run is refused by the rejection
 # matrix (``critic_not_at_pin``) until the fork's GAE extension point (group 6).
-# CompactionRL (design D8): ``cross_segment_per_sample`` = the paper's form (one
+# CompactionRL: ``cross_segment_per_sample`` = the paper's form (one
 # sample per compaction segment, eq. 13-15); ``cross_segment_whole_rollout`` =
 # explicit control mode (one sample per rollout + per-token segment ids; earlier
 # segments see no terminal reward). The ambiguous ``cross_segment`` is refused.
@@ -99,7 +99,7 @@ CRITIC_ADVANTAGE_DEFAULTS = (
 LENGTH_ADAPTIVE_ALPHA = 1.5
 DECOUPLED_CRITIC_LAMBD = 1.0  # VAPO / VC-PPO value-target lambda
 HL_GAUSS_BINS = 51
-# Execution requirements a single-island G1 smoke may allow with
+# Execution requirements a single-island GPU smoke may allow with
 # --rl-allow-unverified-mechanism (they are not registered mechanisms).
 EXECUTION_ALLOWANCES = frozenset({"execution:critic"})
 # Estimators whose advantage drops a reward-side KL (Miles loss_hub/advantages.py).
@@ -113,23 +113,23 @@ LOSS_AGGREGATIONS = ["default", "token", "constant"]
 KL_PLACEMENTS = ("none", "reward", "loss")
 KL_ESTIMATORS = ("k1", "k2", "k3", "low_var_kl")
 CORRECTION_METHODS = ["none", "tis", "opsm", "custom"]
-# rl-offpolicy-correction-passthrough D1/D3: neutral correction fields.
+# Neutral correction fields.
 CORRECTION_LEVELS = ("token", "sequence", "geometric")
 # Optional ratio masks on top of method='tis' (default none, design A2).
 RATIO_MASKS = ("none", "icepop", "mis")
-# The correction group as every pre-D1 hash saw a default spec. sha256() hashes
-# a default group as this constant, so default specs keep their hash (D8, L6b.1).
+# The correction group as every hash before the bounds were renamed saw a default spec. sha256() hashes
+# a default group as this constant, so default specs keep their hash.
 DEFAULT_CORRECTION_IDENTITY = (
     ("function", None), ("method", "none"), ("mismatch_metrics", False), ("opsm_delta", None),
     ("tis_clip", None), ("tis_clip_low", None), ("use_rollout_logprobs", False),
 )
-# Pre-D1 names of the bounds, still accepted on input (constructor and JSON).
+# Old names of the bounds, still accepted on input (constructor and JSON).
 CORRECTION_FIELD_ALIASES = {"tis_clip": "upper", "tis_clip_low": "lower"}
 DYNAMIC_SAMPLING_FILTERS = {BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER}
-# Plugins may only live in yeto or in Miles' own (built-in) namespace (D7).
+# Plugins may only live in yeto or in Miles' own (built-in) namespace.
 PLUGIN_NAMESPACES = ["yeto.", "miles."]
 
-# Mechanism dimensions (design D4). ``EngineCapabilities`` has one declared
+# Mechanism dimensions. ``EngineCapabilities`` has one declared
 # set per dimension; ``required_mechanisms`` yields (dimension, name) pairs.
 MECHANISM_DIMENSIONS = (
     "advantage_estimators",
@@ -156,7 +156,7 @@ def valid_masked_fraction(value: Any) -> float | None:
 # are part of that estimator's mechanism, not separately declared features:
 # GSPO's explicit clip range (sequence_ratio_without_clip) and the rpp
 # family's advantage normalization (rpp_requires_whiten). Decision: main
-# agent, rl-infra-spec alignment §7b (may be overridden by the user).
+# agent (may be overridden by the user).
 ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
     "gspo": frozenset({("features", "eps_clip"), ("features", "clip_higher")}),
     "reinforce_plus_plus": frozenset({("features", "whiten_advantages")}),
@@ -256,7 +256,7 @@ def _strip_plugin_hashes(value: Any) -> Any:
 
 
 # --------------------------------------------------------------------------
-# PluginRef (design D7)
+# PluginRef
 # --------------------------------------------------------------------------
 
 
@@ -583,7 +583,7 @@ def register_gradient_rule(
     The rule is bound to ``mechanism`` (``"dimension:name"``) and is consulted
     only when the spec requires that mechanism, so a registered rule can never
     change the default GRPO judgement. Tightening (``True``) is allowed by
-    design D6 (each mechanism's change supplies its rule) and is the safer
+    design (each mechanism's change supplies its rule) and is the safer
     direction; a non-finite grad norm is checked by the driver regardless."""
 
     if name in _GRADIENT_RULES:
@@ -829,7 +829,7 @@ class KlSpec(_Group):
 
 @dataclass(frozen=True)
 class CorrectionSpec(_Group):
-    """Off-policy / mismatch correction (rl-offpolicy-correction-passthrough D1).
+    """Off-policy / mismatch correction.
 
     The neutral fields are written in full because the backends have
     different defaults: ``level`` (token | sequence | geometric), ``lower`` and
@@ -837,9 +837,9 @@ class CorrectionSpec(_Group):
     ``C``), ``veto``, ``batch_normalize`` and ``ratio_mask`` (none | icepop |
     mis, on top of ``method='tis'``). Adapters map them to backend settings;
     yeto never computes the weights. ``tis_clip`` / ``tis_clip_low`` are the
-    pre-D1 names of ``upper`` / ``lower``: accepted on input, read-only after.
+    old names of ``upper`` / ``lower``: accepted on input, read-only after.
 
-    Phase 1 (design D8): the group does not enter ``AlgorithmSpec.sha256()``;
+    Phase 1: the group does not enter ``AlgorithmSpec.sha256()``;
     the run manifest and the island tapes record it instead.
     """
 
@@ -950,7 +950,7 @@ def _correction_init_with_aliases(self, *args: Any, **kwargs: Any) -> None:
     _correction_init(self, *args, **_rename_correction_aliases(kwargs))
 
 
-# The pre-D1 keyword names stay accepted; dataclasses.replace() sees only fields.
+# The old keyword names stay accepted; dataclasses.replace() sees only fields.
 CorrectionSpec.__init__ = _correction_init_with_aliases  # type: ignore[method-assign]
 
 
@@ -987,7 +987,7 @@ class ExecutionSpec(_Group):
     GROUP = "execution"
     needs_critic: bool = False
     # Largest policy age the algorithm tolerates. Fixed at 0 for every
-    # algorithm of this change family (rl-infra-spec alignment A1/A6); a
+    # algorithm of this change family; a
     # non-zero value is expressible but rejected by the rejection matrix.
     max_policy_staleness: int = 0
     group_required: bool = True
@@ -1010,7 +1010,7 @@ def _optional_choice(path: str, value: Any, allowed: Iterable[str]) -> str | Non
 
 @dataclass(frozen=True)
 class CriticSpec(_Group):
-    """rl-algo-critic-family D1/D9: the critic role of a critic algorithm.
+    """The critic role of a critic algorithm.
 
     Every field defaults to None ("not given"). A spec with
     ``execution.needs_critic`` gets the concrete defaults filled in
@@ -1018,7 +1018,7 @@ class CriticSpec(_Group):
     critic algorithms; on any other algorithm a non-None field is rejected.
     ``critic_lr=None`` on a critic spec means "inherit the actor lr" (Miles
     arguments.py:3609-3610). ``param_mode='lora'`` and the ``lora_*`` fields
-    are the reserved D9 interface (refused in this round).
+    are a reserved interface (refused in this round).
     """
 
     GROUP = "critic"
@@ -1104,7 +1104,7 @@ def _critic_alpha(path: str, value: Any) -> float | None:
     return _number(path, value, low=0.0, low_open=True)
 
 
-# rl-algo-critic-family D1: advantage-side critic fields (registered extension
+# Advantage-side critic fields (registered extension
 # fields: absent from the canonical JSON while None, i.e. on every non-critic
 # spec; a critic spec fills CRITIC_ADVANTAGE_DEFAULTS).
 register_field("advantage", "lambd", default=None, parse=_critic_unit)
@@ -1209,7 +1209,7 @@ class AlgorithmSpec:
                 raise AlgorithmSpecError("kl_coef must be a number")
             if not math.isfinite(kl_coef) or kl_coef < 0:
                 raise AlgorithmSpecError("kl_coef must be finite and non-negative")
-            kl = KlSpec(placement="reward", coef=float(kl_coef))  # design D5
+            kl = KlSpec(placement="reward", coef=float(kl_coef))
         dynamic_sampling_filter = normalize_filter_name(dynamic_sampling_filter)  # 4.4
         if dynamic_sampling_filter is not None or dynamic_sampling_max_replacements is not None:
             if sampling is not None:
@@ -1254,7 +1254,7 @@ class AlgorithmSpec:
         s(self, "plugins", tuple(sorted(refs, key=lambda r: r.path)))
         if self.execution.needs_critic:
             load_extensions()  # advantage.gamma is an extension field (seq_adv)
-            # rl-algo-critic-family D1: critic fields enter the identity only
+            # Critic fields enter the identity only
             # for critic algorithms, always with explicit values.
             filled = {name: default for name, default in CRITIC_ADVANTAGE_DEFAULTS
                       if getattr(self.advantage, name) is None}
@@ -1285,7 +1285,7 @@ class AlgorithmSpec:
     def dynamic_sampling_max_replacements(self) -> int | None:
         return self.sampling.max_replacements
 
-    # -- identity (design D2) -----------------------------------------------
+    # -- identity -----------------------------------------------
     def is_v1_expressible(self) -> bool:
         return (
             self.advantage.estimator in SUPPORTED_ADVANTAGE_ESTIMATORS
@@ -1323,7 +1323,7 @@ class AlgorithmSpec:
         return {
             "schema": ALGORITHM_SPEC_SCHEMA_V2,
             **{name: getattr(self, name).to_dict() for name in _GROUPS if name != "critic"},
-            # rl-algo-critic-family D1: absent unless the algorithm has a critic
+            # Absent unless the algorithm has a critic
             # (or a stray critic field the rejection matrix will refuse), so
             # every pre-existing v2 hash is unchanged.
             **({"critic": self.critic.to_dict()}
@@ -1373,8 +1373,7 @@ class AlgorithmSpec:
         return frozenset(out)
 
     def effective_default_at(self, path: str) -> Any:
-        """:meth:`default_at`, except the critic defaults a critic spec fills in
-        (rl-algo-critic-family D1): a filled value is not a user choice."""
+        """:meth:`default_at`, except the critic defaults a critic spec fills in: a filled value is not a user choice."""
 
         if self.execution.needs_critic:
             head, _, tail = path.partition(".")
@@ -1391,10 +1390,10 @@ class AlgorithmSpec:
         )
 
     def identity_dict(self) -> dict[str, Any]:
-        """The payload of :meth:`sha256` (rl-offpolicy-correction-passthrough D8, L6b.1).
+        """The payload of :meth:`sha256`.
 
         The correction group is hashed as written. A default group is hashed
-        as the pre-D1 default group (:data:`DEFAULT_CORRECTION_IDENTITY`), so
+        as the default group from before the rename (:data:`DEFAULT_CORRECTION_IDENTITY`), so
         every spec whose correction group is the default keeps its hash.
         """
 
@@ -1410,7 +1409,7 @@ class AlgorithmSpec:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def semantic_dict(self) -> dict[str, Any]:
-        """The numerics-relevant part of the spec (rl-identity-tiering D1).
+        """The numerics-relevant part of the spec.
 
         The full v2 form with every plugin reduced to its path: a plugin
         source change alone does not change it; any configuration change does.
@@ -1466,7 +1465,7 @@ class AlgorithmSpec:
         values.update(changes)
         return AlgorithmSpec(**values)
 
-    # -- plugins (design D7) -------------------------------------------------
+    # -- plugins -------------------------------------------------
     def referenced_plugins(self) -> tuple[PluginRef, ...]:
         refs = {p.path: p for p in self.plugins}
         for group in (self.advantage, self.loss, self.correction):
@@ -1482,7 +1481,7 @@ class AlgorithmSpec:
                     for ref in self.referenced_plugins())
         return tuple(w for w in warnings if w is not None)
 
-    # -- derived (design D4/D6) ----------------------------------------------
+    # -- derived ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:
         """(dimension, mechanism) pairs the engine must declare.
 
@@ -1607,7 +1606,7 @@ class AlgorithmSpec:
 
 
 # --------------------------------------------------------------------------
-# built-in mechanisms (design D4) and rejection matrix (spec: 不兼容组合)
+# built-in mechanisms and rejection matrix (spec: incompatible combinations)
 # --------------------------------------------------------------------------
 
 
@@ -1784,7 +1783,7 @@ def _reject_critic_lora(s: AlgorithmSpec) -> str | None:
     c = s.critic
     if c.param_mode == "lora":
         return (
-            "critic.param_mode='lora' is planned (rl-algo-critic-family design D9) but not "
+            "critic.param_mode='lora' is planned but not "
             "implemented yet: Miles trains the critic full-parameter (it skips the critic's "
             "LoRA setup). Use critic.param_mode='full'"
         )
@@ -1802,9 +1801,9 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
     pending = []
     # decoupled / length_adaptive / cross_segment_* run on the fork's --gae-variant /
     # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment_* and
-    # critic_updates_per_step != 1 (CompactionRL, change 9.3) are translated but stay
+    # critic_updates_per_step != 1 (CompactionRL) are translated but stay
     # undeclared mechanisms (features:gae_cross_segment / critic_multi_update) until
-    # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the
+    # verified on GPU. --critic-updates-per-step (= --num-critic-epochs) and the
     # classification value loss are in the critic fork pin (algos/critic_fork.py,
     # yeto-critic-family e07e51c07). hl_gauss is translated only by the SAO fork
     # argv (miles_adapter.algo_flag_rows.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
@@ -1847,7 +1846,7 @@ def _reject_critic_init(s: AlgorithmSpec) -> str | None:
     if c.init == "load" and c.warmup_steps:
         return (
             "critic.warmup_steps > 0 is the warm-up of a critic copied from the actor "
-            "(critic.init='copy_actor_backbone', design D5); a loaded critic is not warmed up"
+            "(critic.init='copy_actor_backbone'); a loaded critic is not warmed up"
         )
     return None
 
@@ -1860,7 +1859,7 @@ def _reject_staleness(s: AlgorithmSpec) -> str | None:
         return (
             f"execution.max_policy_staleness={s.execution.max_policy_staleness} needs a "
             "cross-version importance-sampling correction (correction.method 'tis' or "
-            "'custom'; agentic-rollout-utilization bounded-staleness contract; rl-infra-spec alignment A6). Use 0 otherwise"
+            "'custom'; agentic-rollout-utilization bounded-staleness contract). Use 0 otherwise"
         )
     return None
 
@@ -1912,7 +1911,7 @@ _builtin_rejections()
 
 
 # --------------------------------------------------------------------------
-# user input (design D8/D9/D11): shared by learner and launcher
+# user input: shared by learner and launcher
 # --------------------------------------------------------------------------
 
 
@@ -1944,14 +1943,14 @@ def resolve_ports_algorithm(args: Any) -> "AlgorithmSpec":
     return spec
 
 
-# rl-algo-critic-family (user decision 2026-10-07): the critic mechanisms may be
+# The critic mechanisms may be
 # allowed (still explicitly, via --rl-allow-unverified-mechanism) on several
 # islands / with outer sync, but only under a preset with a critic channel:
-# strict-avg, whose critic channel is the second syncer (DualStrictAvgSync,
-# design D4), and sao-streaming-full, whose critic role has its own syncer
-# (P0-D8, 2026-10-13; the preset requires the critic).
+# strict-avg, whose critic channel is the second syncer (DualStrictAvgSync),
+# and sao-streaming-full, whose critic role has its own syncer
+# (the preset requires the critic).
 # decoupled + critic stays refused (critic_run_problems). Every other
-# unverified mechanism keeps D11 as written.
+# unverified mechanism keeps the base rule.
 CRITIC_CHANNEL_SYNC_PRESETS = frozenset({"strict-avg", "sao-streaming-full"})
 CRITIC_STRICT_AVG_ALLOWANCES = frozenset({
     "advantage_estimators:ppo",
@@ -1970,13 +1969,13 @@ def check_unverified_allowance(
     names: Iterable[str], *, islands: int, outer_sync: bool,
     sync_preset: str | None = None,
 ) -> tuple[str, ...]:
-    """D11 as written: refused with multiple islands *or* any outer sync.
+    """Base rule: refused with multiple islands *or* any outer sync.
 
-    Exception (critic family, design D4): when ``sync_preset`` has a critic
+    Exception (critic family): when ``sync_preset`` has a critic
     channel (:data:`CRITIC_CHANNEL_SYNC_PRESETS`) and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
     ``execution:critic`` among them), the allowance is accepted on several
     islands / with outer sync. ``sync_preset=None`` (caller does not know the
-    preset) keeps D11 as written.
+    preset) keeps the base rule.
 
     Names are qualified ``dimension:name`` mechanisms.
     """

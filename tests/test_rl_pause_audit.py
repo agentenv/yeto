@@ -1,4 +1,4 @@
-"""rl-infra-spec task 1.5: per-profile pause audit (pure)."""
+"""Per-profile pause audit (pure)."""
 
 from __future__ import annotations
 

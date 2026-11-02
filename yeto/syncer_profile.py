@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # encoding that is hashed moved to v2 when ``resume`` left it.
 SYNCER_SEMANTIC_PROFILE_SCHEMA = "yeto.syncer-semantic-profile.v1"
 # v2 drops ``resume`` (how a run starts, not its semantics): a restarted
-# syncer keeps the hash every island carries in HELLO (P0-1.7b.1-Q7).
+# syncer keeps the hash every island carries in HELLO.
 _DOMAIN = b"yeto-syncer-semantic-profile-v2\0"
 _FIELDS = {
     "schema",

@@ -1,4 +1,4 @@
-"""rl-infra-spec 3.8 (X6) CPU protocol tests: manual bidirectional rollout
+"""CPU protocol tests: manual bidirectional rollout
 switching on one island of a two-island strict-avg fleet.
 
 The syncer and fork are fakes (FakeStrictSyncer re-sends the same PULL the
@@ -25,7 +25,7 @@ from yeto.rl.engine.journal import read_journal
 from yeto.rl.engine.pause_audit import PAUSABLE_PHASE
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
-from test_rl_reconfig_e1 import CONFIGS, FP, MODES, NAME, _attestation, _profile, _setup
+from test_rl_reconfig_controller import CONFIGS, FP, MODES, NAME, _attestation, _profile, _setup
 
 
 def _counting(syncer):

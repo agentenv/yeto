@@ -1,4 +1,4 @@
-"""Teacher-forcing replay for the legacy-vs-ports equivalence check (rl-engine-ports 6.2/6.3 tier 2).
+"""Teacher-forcing replay of recorded rollouts into a Miles island.
 
 ``replay_generate`` is a Miles ``--custom-generate-function-path`` callable
 (legacy signature ``(args, sample, sampling_params)``, accepted by the legacy

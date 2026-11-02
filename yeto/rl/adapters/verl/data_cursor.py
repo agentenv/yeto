@@ -1,6 +1,6 @@
 """verl island data cursor (RolloutPool ``data_cursor`` / ``seek_data_cursor``).
 
-S17 N16: V2 relaunched island 1 at v2 in a new container; verl's train
+When an island is relaunched in a new container, verl's train
 dataloader started at offset 0 again, so from round 2 on it re-drew the prompts
 of its own round 0 (same ``prompts_sha256``). The neutral driver can move the
 data source by whole rounds (``bridges.whole_round_restart_cursor``) only when

@@ -2,13 +2,13 @@
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. The
 computation lives in the Miles fork (``michaellchung/miles`` ``yeto/ports``,
-``--policy-loss-variant``, design D1 route B); yeto only describes, translates
-and validates. Through the P0 registry (never by editing the shared files) it
+``--policy-loss-variant``); yeto only describes, translates
+and validates. Through the algorithm registry (never by editing the shared files) it
 adds:
 
-* spec fields (design D2) in the ``loss`` group
+* spec fields in the ``loss`` group
   - ``loss.policy_loss_variant`` in ``policy_loss`` (default, not emitted:
-    Miles' PPO clip objective) / ``cispo`` / ``sapo`` / ``gmpo``. P0's
+    Miles' PPO clip objective) / ``cispo`` / ``sapo`` / ``gmpo``. The registry's
     ``loss.variant`` is already ``--loss-type`` (``policy_loss`` /
     ``custom_loss``); the variants run inside ``--loss-type policy_loss`` and
     only replace its pg_loss, so they are a separate field;
@@ -23,8 +23,8 @@ adds:
   validation paused by the user 2026-09-30, alignment §7b): expressible, not
   opened;
 * flag rows (absorption + conflict detection) for the fork flags;
-* rejections (design D4), launch checks (fork pin, GMPO context parallel) and
-  the GMPO gradient rule (design D5).
+* rejections, launch checks (fork pin, GMPO context parallel) and
+  the GMPO gradient rule.
 
 Import-light: no torch/miles at import time.
 """
@@ -74,7 +74,7 @@ FORK_COMMITS: frozenset[str] = miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
 
-# D5: GMPO fully clipped when the clip fraction reaches 1 (float slack).
+# GMPO fully clipped when the clip fraction reaches 1 (float slack).
 FULL_CLIP_THRESHOLD = 1.0 - 1e-9
 
 
@@ -149,7 +149,7 @@ for _name in VARIANTS:
 
 
 # --------------------------------------------------------------------------
-# rejections (design D4)
+# rejections
 # --------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def _reject_gmpo_per_token(s) -> str | None:
 
 register_rejection("loss_variant_params", _reject_param_mismatch)
 def _reject_cispo_aggregation(s) -> str | None:
-    # Spec "CISPO 数值契约": the loss MUST be token-normalized (MiniMax-M1
+    # Spec "CISPO numeric contract": the loss MUST be token-normalized (MiniMax-M1
     # normalizes by the total token count of the batch); Miles' default
     # aggregation is the per-sample mean, so CISPO needs --calculate-per-token-loss.
     if variant(s) == "cispo" and s.loss.aggregation != "token":
@@ -296,7 +296,7 @@ register_launch_check("loss_variants", launch_problems)
 
 
 # --------------------------------------------------------------------------
-# gradient rule (design D5)
+# gradient rule
 # --------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""S19 G2: wall-time and GPU-seconds measures; removing an engine can be
+"""Wall-time and GPU-seconds measures; removing an engine can be
 recommended only under objective="gpu_seconds" (default stays "wall")."""
 from types import SimpleNamespace as NS
 

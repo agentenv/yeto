@@ -1,4 +1,4 @@
-"""S13 fork merge: critic-family specs pass the fork pin (CPU only, no Ray)."""
+"""Fork merge: critic-family specs pass the fork pin (CPU only, no Ray)."""
 
 from __future__ import annotations
 

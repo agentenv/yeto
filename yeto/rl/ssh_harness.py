@@ -762,7 +762,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError("plan rl_engine must be 'ports'")
     _require_ports_plan(learner)
     if plan.get("secrlenv_daemon") is not None:
-        raise HarnessError("secrlenv daemon plans are no longer supported (S26 E0.5)")
+        raise HarnessError("secrlenv daemon plans are no longer supported")
     tms_patch = plan.get("tms_preload_patch")
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if learner.get("rl_offload_train"):
@@ -832,7 +832,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if sync_preset not in {"strict-avg", "decoupled"}:
         raise HarnessError("plan has an invalid learner sync_preset")
     if learner.get("evaluation") is not None or plan.get("eval_checkpoint") is not None:
-        # SSH evaluation ran only the SecRLEnv agent, removed in S26 E0.5.
+        # SSH evaluation ran only the SecRLEnv agent, since removed.
         raise HarnessError("SSH evaluation is restricted to the removed secrlenv agent")
     fragments = learner.get("fragments", 1)
     pipeline = learner.get("pipeline", 1)
@@ -2946,7 +2946,7 @@ def _event_path(artifacts: Path, learner_id: int) -> Path:
 def _run_algorithm_provenance(
     plan: dict[str, Any], artifacts: Path
 ) -> tuple[str | None, tuple[str, ...]]:
-    """The ports run's algorithm for export (rl-algorithm-capabilities D9).
+    """The ports run's algorithm for export.
 
     Taken from what the islands actually ran: every island's
     ``rl_engine_selected`` events must carry one and the same canonical

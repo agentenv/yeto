@@ -85,9 +85,9 @@ def test_old_declaration_reads_as_r0_mechanisms():
 
 # -- 3.2 ------------------------------------------------------------------------
 
-# One spec per P0 mechanism beyond R0 (each produces that mechanism; some
+# One spec per built-in mechanism beyond R0 (each produces that mechanism; some
 # produce companions too). Tests pick the ones an engine has NOT declared, so
-# a later declaration (a follow-up change's G1) never turns them into no-ops.
+# a later declaration (a follow-up change) never turns them into no-ops.
 _REF = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
 # With rl-algo-grpo-knobs registered, the only allowed reward post-process is
 # its dispatcher, and specs are completed by the same fixture as the flags test.
@@ -130,28 +130,28 @@ CANDIDATES = {
     "reward_postprocessors:custom_reward_postprocess": dict(
         advantage=dict(reward_postprocess=_POSTPROCESS)),
 }
-R0_MECHANISMS_P0 = {
+R0_BUILTIN_MECHANISMS = {
     "advantage_estimators:grpo", "losses:policy_loss", "loss_aggregations:default",
     "kl_placements:none", "kl_placements:reward", "corrections:none",
     f"dynamic_sampling_filters:{alg.BOUNDED_NONZERO_STD_FILTER}",
     f"dynamic_sampling_filters:{alg.STOCK_NONZERO_STD_FILTER}",
 }
-# P0 built-ins without a candidate, with the reason.
+# Built-ins without a candidate, with the reason.
 EXEMPT = {"advantage_estimators:ppo": "critic: refused by the rejection matrix"}
 
 
-def test_candidates_cover_the_p0_mechanism_registry():
+def test_candidates_cover_the_builtin_mechanism_registry():
     registered = alg.mechanism_names()
     assert set(CANDIDATES) <= registered
-    p0_builtin = set(CANDIDATES) | set(EXEMPT) | R0_MECHANISMS_P0
-    # every P0 built-in beyond R0 has a candidate (extension mechanisms may add more)
+    covered_builtin = set(CANDIDATES) | set(EXEMPT) | R0_BUILTIN_MECHANISMS
+    # every built-in beyond R0 has a candidate (extension mechanisms may add more)
     builtin = {
         f"{m.dimension}:{m.name}" for m in alg.registered_mechanisms()
-        if m.detect.__module__ == alg.__name__  # registered by P0 itself
+        if m.detect.__module__ == alg.__name__  # registered by the algorithm module itself
     }
-    missing = sorted(builtin - p0_builtin)
-    assert not missing, f"P0 mechanisms without a candidate: {missing}"
-    assert not (set(CANDIDATES) - builtin), "a candidate names a non-P0 mechanism"
+    missing = sorted(builtin - covered_builtin)
+    assert not missing, f"built-in mechanisms without a candidate: {missing}"
+    assert not (set(CANDIDATES) - builtin), "a candidate names a non-built-in mechanism"
     for mechanism, kwargs in CANDIDATES.items():
         dimension, name = mechanism.split(":")
         assert (dimension, name) in _combine(kwargs).required_mechanisms(), mechanism
@@ -228,13 +228,13 @@ def test_miles_accepts_each_declared_mechanism():
     _check(caps, AlgorithmSpec())  # the R0 declarations
     assert covered, "no declared non-R0 mechanism was exercised"
     assert {"corrections:tis", "corrections:opsm"} <= set(covered)
-    # rl-algo-supplement 4.4 (Miles 64b591a4b): dual_clip declared after G1
+    # rl-algo-supplement 4.4 (Miles 64b591a4b): dual_clip declared after the declaration gate
     assert "features:dual_clip" in declared
 
 
 def test_critic_rejected_with_the_real_reason():
     # rl-algo-critic-family 2.4: the message names the undeclared critic and the
-    # G1 allowance, never "only legacy supports critics" (legacy has none).
+    # declaration-gate allowance, never "only legacy supports critics" (legacy has none).
     caps = fake_capabilities(advantage_estimators={"grpo", "ppo"})
     spec = AlgorithmSpec(advantage=AdvantageSpec(estimator="ppo"),
                          execution=ExecutionSpec(needs_critic=True))
@@ -253,7 +253,7 @@ def test_staleness_requirement_not_met():
     stale_mode = fake_capabilities(execution=ExecutionCapabilities(max_policy_staleness=2))
     with pytest.raises(CapabilityMismatch, match="policy age 2"):
         _check(stale_mode, AlgorithmSpec())
-    with pytest.raises(CapabilityMismatch, match="max_policy_staleness=1.*A6"):
+    with pytest.raises(CapabilityMismatch, match="max_policy_staleness=1.*correction"):
         _check(caps, AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1)))
     _check(caps, AlgorithmSpec(), max_policy_age=0)
 
@@ -378,7 +378,7 @@ def test_miles_and_fake_declarations():
     miles = miles_capabilities(FP)
     assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
     assert miles.declared_mechanisms() == (
-        R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+        R0_BUILTIN_MECHANISMS | EXPECTED_MILES_DECLARED
     )
     assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
     # the fake declares every correction for CPU tests (and nothing else extra)

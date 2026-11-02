@@ -1,6 +1,6 @@
-"""Policy release exports executed inside every Megatron rank (L4.6).
+"""Policy release exports executed inside every Megatron rank.
 
-Full weights (S27 G-AT, :func:`write_full_checkpoint`): the trainer island stages
+Full weights (:func:`write_full_checkpoint`): the trainer island stages
 each release on its local disk; every rank writes its share of the HF
 safetensors files (Megatron-Bridge ``distributed_save``) instead of rank 0
 writing all of them. The gather and conversion are Miles' ``export_hf`` (same
@@ -8,7 +8,7 @@ bridge, same completion marker); only the file writes are spread. A model the
 bridge path does not export (``--megatron-to-hf-mode raw``, LoRA) is written by
 ``export_hf`` itself.
 
-LoRA policy release export (L4.6 LoRA):
+LoRA policy release export (LoRA):
 
 Loaded through ``TrainGroup.run_plugin`` like :mod:`.cut_plugin`. A trainer
 island in LoRA mode releases only its adapter: ``write_lora_adapter`` writes

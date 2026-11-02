@@ -72,7 +72,7 @@ def test_verda_island_runs_in_vm_docker(monkeypatch):
     # secret-handling-hardening: a sky secret (sky exports it on the host, redacted in records)
     assert "HF_TOKEN" not in task.envs and task.secrets["HF_TOKEN"] == "hf_sekrit"
     # the task is launched through the live-stock path, which wants no retry_until_up
-    assert launcher.effective_recover_timeout(args) == 0  # --no-island-relaunch: G0 never relaunches
+    assert launcher.effective_recover_timeout(args) == 0  # --no-island-relaunch: never relaunches
 
 
 def test_verda_island_without_registry_login_pulls_anonymously(monkeypatch):

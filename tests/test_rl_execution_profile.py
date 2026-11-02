@@ -1,4 +1,4 @@
-"""rl-infra-spec task 1.4: ExecutionProfile / readiness (pure, no GPU)."""
+"""ExecutionProfile / readiness (pure, no GPU)."""
 
 from __future__ import annotations
 

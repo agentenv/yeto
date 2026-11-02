@@ -1,4 +1,4 @@
-"""L5.4 launch composition: one launch of a sampler island and a trainer island
+"""Launch composition: one launch of a sampler island and a trainer island
 over one checkpoint store (``--rl-island-sample-role``), the trainer island held
 back for the head's scheduler. Dry-run / plan level only: no cloud, no Ray."""
 
@@ -110,7 +110,7 @@ def test_pair_island_commands_pass_the_island_parser_and_no_sync_checks():
 
 
 def test_full_parameter_on_a_no_sync_island_with_both_roles_is_accepted():
-    """S26 E11: a single no-sync island with both roles trains every parameter."""
+    """A single no-sync island with both roles trains every parameter."""
     from yeto.rl.adapters.miles import island_entry
 
     args = types.SimpleNamespace(parameter_mode="full", rl_single_island_no_sync=True,
@@ -167,7 +167,7 @@ DEDICATED_ENGINE = ("--tuning", "full", "--rl-single-island-no-sync",
 
 
 def test_tuning_full_on_one_island_with_a_dedicated_engine_card_is_accepted():
-    """S26 E6: one no-sync island, 1 training card + 1 engine card; the island takes
+    """One no-sync island, 1 training card + 1 engine card; the island takes
     full parameter mode and the placement (Miles' own full-parameter update)."""
     from yeto.launcher import dry_run_plan
     from yeto.rl.engine import sample_roles
@@ -193,7 +193,7 @@ def test_dedicated_engine_island_command_passes_the_island_checks():
 
 
 def test_tuning_full_on_one_island_needs_no_sync():
-    # a colocated single no-sync island also trains every parameter (S26 E11)
+    # a colocated single no-sync island also trains every parameter
     with pytest.raises(ValueError, match="requires --tuning lora"):
         _args(_replace(DEDICATED_ENGINE, ("--rl-single-island-no-sync",), ()),
               gpu="modal:2xh100", base=())

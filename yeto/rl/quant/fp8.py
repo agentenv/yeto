@@ -1,4 +1,4 @@
-"""Symmetric per-output-channel FP8 E4M3 weight quantization (S26 E6, tier 2).
+"""Symmetric per-output-channel FP8 E4M3 weight quantization.
 
 Target format: compressed-tensors ``float-quantized`` with weights
 ``num_bits=8, type=float, symmetric=True, strategy=channel`` and dynamic

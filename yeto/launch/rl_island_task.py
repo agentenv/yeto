@@ -52,7 +52,7 @@ def submitted_unix() -> float:
 
 
 def _wan_transport_flags(args) -> str:
-    """S26 E3b island transport options; emitted only when not the default."""
+    """Island transport options; emitted only when not the default."""
     flags = ""
     schedule = getattr(args, "wan_stream_schedule", "rr")
     if schedule != "rr":
@@ -80,7 +80,7 @@ def _wan_transport_flags(args) -> str:
 
 
 def _rl_matrix_merge_flag(args) -> str:
-    """S27 P1: decoupled islands build their fragment layout with the syncer's
+    """Decoupled islands build their fragment layout with the syncer's
     merge modes; omitted at the default so the island command is unchanged."""
     merge = getattr(args, "rl_sync_matrix_merge", "avg")
     return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
@@ -111,7 +111,7 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     for sao-streaming-full this island's hash-bound runtime contract.
 
     the full-parameter preset trains every parameter, unless DeepSeek V4 expert-full selects
-    the LoRA hybrid (attention LoRA plus clone experts, P0 1.7b.2)."""
+    the LoRA hybrid (attention LoRA plus clone experts)."""
     if rl_sao_streaming(args):
         island = args.rl_sao_manifest.island(learner_id)
         return (" --parameter-mode full"
@@ -120,7 +120,7 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
                 f" --sao-context-sha256 {island.context_sha256}")
     lora = f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
     if not rl_dense_sweep(args):
-        if getattr(args, "tuning", "lora") == "full":  # L4.6 buffer island (checked at launch)
+        if getattr(args, "tuning", "lora") == "full":  # buffer island (checked at launch)
             return " --parameter-mode full"
         return lora
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
@@ -321,7 +321,7 @@ def make_miles_island_task(
         value = getattr(args, name, None)
         if value is not None:
             flags += f" {flag} {shlex.quote(str(value))}"
-    if getattr(args, "rl_rollout_quant_tier", 0):  # S26 E6 (validated by the launcher)
+    if getattr(args, "rl_rollout_quant_tier", 0):  # validated by the launcher
         flags += f" --rl-rollout-quant-tier {int(args.rl_rollout_quant_tier)}"
         from yeto.rl.quant.tiers import FP8_SOURCE_ENGINE, fp8_source
 
@@ -353,7 +353,7 @@ def make_miles_island_task(
             " --custom-agent-function-path "
             f"{shlex.quote(args.custom_agent_function_path)}"
         )
-    if getattr(args, "rl_agentic_harbor", False):  # S27 G-FS (VERL-PARITY #33)
+    if getattr(args, "rl_agentic_harbor", False):  
         flags += " --rl-agentic-harbor"
     if getattr(args, "agent_max_seq_len", None) is not None:
         flags += f" --agent-max-seq-len {args.agent_max_seq_len}"
@@ -398,7 +398,7 @@ def make_miles_island_task(
     if spec.num_nodes > 1 and not is_local_reference(model):
         # Same call and cache as the learner's own snapshot_download on the
         # head (python3 of the image; `huggingface-cli` is not on the run
-        # shell's PATH there: s1-mn-20261003f), so the two nodes resolve the
+        # shell's PATH there), so the two nodes resolve the
         # same snapshot directory.
         fetch_py = (
             "from huggingface_hub import snapshot_download; "
@@ -424,7 +424,7 @@ def make_miles_island_task(
         **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
            if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
-        # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
+        # Phase ``submitted`` (launcher clock)
         SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
         # card raises here, before any cloud spend (no default). An explicit
@@ -468,7 +468,7 @@ def make_miles_island_task(
                 "NVTE_GROUPED_LINEAR_SINGLE_PARAM": "0",
             }
         )
-    # S27 G-FL: one-run diagnostics of the pipeline-parallel sync island
+    # One-run diagnostics of the pipeline-parallel sync island
     # (megatron_full_parameter._pp_probe); absent unless set on the launching shell.
     for name in ("YETO_MEGATRON_PP_PROBE", "NCCL_DEBUG"):
         if os.environ.get(name):
@@ -487,7 +487,7 @@ def make_miles_island_task(
         envs["YETO_RUN_GROUP"] = args.cluster_prefix
         if os.environ.get("WANDB_API_KEY"):
             envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
-    # rl-trainer-cold-start-cost L0: the setup shell records its start/end and
+    # The setup shell records its start/end and
     # the run shell records ray_ready (start_phases.MARK_DIR); the island replays them.
     setup_steps = [shell_reset(), shell_mark("container_ready"),
                    WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
@@ -520,7 +520,7 @@ def make_miles_island_task(
     # finder maps only megatron.core and megatron.training; megatron.
     # post_training (imported by megatron.training.get_model whenever
     # nvidia-modelopt is importable, i.e. every raw/native-provider run such
-    # as Flash-Next) is then unresolvable (S11 try25 fnA).  Miles' own
+    # as Flash-Next) is then unresolvable.  Miles' own
     # launchers always put the checkout on PYTHONPATH; do the same, after
     # our own sources so it shadows nothing of ours.  The driver's
     # PYTHONPATH reaches every Ray actor through the job runtime_env.
@@ -568,15 +568,15 @@ def make_miles_island_task(
             "}\n"
             "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
-            # S27 RAY-SEGV R1: head-only RAY_* (plasma preallocation, start wait); "" when unset.
+            # Head-only RAY_* (plasma preallocation, start wait); "" when unset.
             f"  {rl_island_ray_head_env(args)}ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
             # On a multi-node island the dashboard must listen on the node
             # ip, not 127.0.0.1: Ray registers the dashboard address in GCS
             # as given, and a Miles manager actor scheduled on a worker node
-            # then asks 127.0.0.1:8265 and fails (rl-multinode-island G1,
-            # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
+            # then asks 127.0.0.1:8265 and fails (ServerUnavailable in
+            # compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
             + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
@@ -592,12 +592,12 @@ def make_miles_island_task(
             f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m {_rl_backend_module(args, 'launch_flags').ISLAND_ENTRY_MODULE}{flags}"
             f"{_island_post_cmd(args)}\n"
             "else\n"
-            # rl-multinode-island D1: the trap is armed before the join loop so a
+            # The trap is armed before the join loop so a
             # worker killed while joining still cleans its Miles Ray; the join is
             # bounded (head never came up -> the node exits non-zero instead of
             # looping forever).
             "  trap stop_miles_ray EXIT\n"
-            # rl-multinode-island G1 (2026-10-03): the learner (head) resolves
+            # The learner (head) resolves
             # the model to its own HF-cache snapshot path and hands that path
             # to the rollout engines; an engine on a worker node needs the
             # same snapshot in the worker's cache.  The setup prefetch is a
@@ -663,7 +663,7 @@ def make_miles_island_task(
             storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
                 source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
     if getattr(args, "rl_elastic", False):
-        # rl-multinode-island Q4 (C5): the consistent checkpoint (journal + cuts) must
+        # The consistent checkpoint (journal + cuts) must
         # outlive node0 for a rebuild on other machines; a bucket URI is mounted on
         # every island node, a shared path is left to the deployment (fail open with
         # a warning: single-node and node0-local behavior is unchanged).
@@ -722,7 +722,7 @@ def _island_compat_group(args, spec, learner_id: int) -> str:
 
 
 def _worker_node_ip_flag(cloud: str) -> str:
-    """Modal only (CLOUD-OPTIONS-S16 A.5 item 4): a Modal container has both an
+    """Modal only: a Modal container has both an
     i6pn IPv6 and an IPv4 interface, so a worker lets Ray pick and may register an
     unreachable address.  Pin it to this rank's IPv4 from SKYPILOT_NODE_IPS
     (modal_runner maps the IPv4 list, rank order).  Other clouds: unchanged argv."""

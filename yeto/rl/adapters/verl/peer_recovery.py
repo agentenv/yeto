@@ -1,4 +1,4 @@
-"""Peer recovery of a verl full-parameter island (S27 G-ED, VERL-PARITY #17).
+"""Peer recovery of a verl full-parameter island (VERL-PARITY #17).
 
 The exchange with the syncer and the snapshot store is
 :mod:`yeto.rl.peer_recovery`; the rank list, the layout tag, the digest check

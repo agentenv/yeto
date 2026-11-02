@@ -6,8 +6,7 @@ assistant(think+text) / user) with the fork pin's template for ``qwen35`` and
 ``qwen4exp`` and asserts the *first* assistant's think text survives the render
 exactly when the profile declares ``True``.
 
-The fork checkout is located via ``YETO_MILES_FORK_DIR`` or the usual
-``~/work`` checkouts; the template file must be byte-identical to the one at
+The fork checkout is located via ``YETO_MILES_FORK_DIR``; the template file must be byte-identical to the one at
 ``MILES_NEXT_COMMIT`` (checked via ``git rev-parse <commit>:<path>``), so a
 checkout whose HEAD moved on is still accepted as long as the jinja did not.
 Rendering goes through the fork's ``chat_template_verify.get_standard_result``
@@ -33,7 +32,7 @@ FIXED_TEMPLATES = {  # fork tito_tokenizer.py @ MILES_NEXT_COMMIT: TITOTokenizer
     "qwen35": ("qwen3.5_fixed.jinja", {"preserve_thinking": True}),
     "qwen4exp": ("qwen3.8_small_and_flash_next_fixed.jinja", {"preserve_thinking": True}),
 }
-CANDIDATES = [os.environ.get("YETO_MILES_FORK_DIR"), "~/work/miles-fr1", "~/work/miles-critic-c357-tied"]
+CANDIDATES = [os.environ.get("YETO_MILES_FORK_DIR")]
 
 FIRST_THINK = "FIRST-TURN-REASONING-7f3a"
 SECOND_THINK = "SECOND-TURN-REASONING-9c1e"
@@ -113,7 +112,7 @@ def test_keeps_history_reasoning_declaration_matches_fork_template(profile_name)
 
 
 def test_dropping_preserve_thinking_would_falsify_the_declaration():
-    """Scenario 声明与模板不符: the same qwen4exp template with preserve_thinking=False drops the first think."""
+    """Scenario: the declaration contradicts the template: the same qwen4exp template with preserve_thinking=False drops the first think."""
     found = _pinned_template(FIXED_TEMPLATES["qwen4exp"][0])
     if found is None:
         pytest.skip("no fork checkout at MILES_NEXT_COMMIT")

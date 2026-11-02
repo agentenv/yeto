@@ -1,5 +1,5 @@
 """Runtime check: a learner island must not hold cloud credentials
-(secret-handling-hardening, design D4).
+(secret-handling-hardening).
 
 The launcher never ships cloud credentials to a learner island (the head keeps
 them). This module checks that promise inside the island process at start-up:

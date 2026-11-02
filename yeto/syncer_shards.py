@@ -1,4 +1,4 @@
-"""Island side of a fragment-sharded syncer head (S27 P4b).
+"""Island side of a fragment-sharded syncer head.
 
 The head can run as N syncer processes. Shard ``i`` owns the contiguous
 fragment range ``[i*P//N, (i+1)*P//N)`` and runs its own rounds, state and

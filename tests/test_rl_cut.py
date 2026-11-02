@@ -1,4 +1,4 @@
-"""rl-infra-spec 4.2: ReconfigurationCut manifest (CPU)."""
+"""ReconfigurationCut manifest (CPU)."""
 
 from __future__ import annotations
 
@@ -184,7 +184,7 @@ def test_iter_plugin_refs_walks_nested_dataclasses():
     assert AlgorithmIdentity.from_spec(Spec()).plugin_sha256 == (f"yeto.rl.algos.reducers.x@{'e' * 64}",)
 
 
-# -- rl-identity-tiering L9.8: semantic hash at cut resume -------------------------
+# -- semantic hash at cut resume -------------------------
 
 _PLUGIN = "yeto.rl.algos.seq_adv.maxrl_advantage"
 
@@ -235,8 +235,8 @@ def test_new_cut_whose_spec_does_not_match_its_hash_is_refused(tmp_path):
 
 
 def test_old_cut_keeps_the_whole_hash_rule(tmp_path):
-    """A cut from before L9.8 holds hashes only: its manifest bytes are unchanged,
-    and it resumes only when the whole identity is equal (GOAL §6 L9.8 rule)."""
+    """A cut from before the semantic hash holds hashes only: its manifest bytes are unchanged,
+    and it resumes only when the whole identity is equal."""
     spec = _spec()
     new = _semantic_identity(spec)
     old = replace(new, semantic_sha256=None, algorithm_spec=None)

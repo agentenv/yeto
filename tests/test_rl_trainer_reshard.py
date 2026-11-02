@@ -1,4 +1,4 @@
-"""rl-infra-spec 4.6 (CPU, protocol only): DP1<->2 resharding from a name-keyed cut.
+"""CPU, protocol only: DP1<->2 resharding from a name-keyed cut.
 
 The ranks are pure-torch stand-ins (``tests/rl_reshard_fakes.py``); these
 tests prove the protocol and the refusals, not Megatron/fork-M5 behaviour on
@@ -332,7 +332,7 @@ def _with_updaters(ranks, version):
 
 @pytest.mark.parametrize("src,dst", [(1, 2), (2, 1)])
 def test_weight_version_continues_across_a_dp_change(tmp_path, src, dst):
-    """Review L-2 / E2 f898516: a resharded trainer re-publishes from the saved weight version, not 0."""
+    """Review L-2: a resharded trainer re-publishes from the saved weight version, not 0."""
     ranks = _with_updaters(_trained(src), 4)
     _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
     new = _with_updaters(make_world(dst, seed=9), 0)
@@ -358,7 +358,7 @@ def test_dp_shards_must_agree_on_the_miles_counters(tmp_path):
 
 @pytest.mark.parametrize("src,dst", [(1, 2), (2, 1)])
 def test_reshard_checks_the_run_wide_resume_counters(tmp_path, src, dst):
-    """S25 N7.6: a DP change still checks global step, every rank's Adam step and the
+    """A DP change still checks global step, every rank's Adam step and the
     scheduler against the cut, and the first step and data cursor after it."""
     from yeto.rl.engine.resume_manifest import ResumeAssertionError
 

@@ -22,13 +22,13 @@ from .island_tasks import _check_data_split, _check_island_tasks
 
 
 def _prepare_ports_algorithm(args) -> None:
-    """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
+    """Algorithm capability checks, before any cloud or GPU work.
 
     ports: build the run's AlgorithmSpec once (``--rl-algorithm-spec`` or the
     legacy CLI; the launcher has no extra Miles argv, so nothing is absorbed
     here), refuse the rejection matrix, the registered launch checks, anything
     the Miles adapter does not declare, and every unverified-mechanism
-    allowance (a launched run always has outer sync, design D11); keep the
+    allowance (a launched run always has outer sync); keep the
     canonical JSON + expected hash every island receives. An island whose
     learner absorbs extra argv into a different hash is refused there
     (``rl_algorithm_mismatch``).
@@ -80,8 +80,8 @@ def _prepare_ports_algorithm(args) -> None:
         no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
         from ..rl.engine import sample_roles
 
-        # L5.4: a store-coupled pair (one trainer, one or more samplers: S25 C1) and a
-        # convertible pool (L7.5) are two or more no-sync islands (sample_roles holds
+        # A store-coupled pair (one trainer, one or more samplers) and a
+        # convertible pool are two or more no-sync islands (sample_roles holds
         # their own rules).
         no_sync_islands = (islands if sample_roles.is_convertible_pool(args)
                            or sample_roles.is_pair(args) else 1)
@@ -105,7 +105,7 @@ def _prepare_ports_algorithm(args) -> None:
             _entry.miles_capabilities, _entry.with_partitioned_serial)
 
         # Each island checks its own placement; the AlgorithmSpec hash does not
-        # depend on it (P4-Q4: placement capabilities stay out of the hash).
+        # depend on it (placement capabilities stay out of the hash).
         for partitioned in sorted({getattr(iargs, "rl_placement", "colocated") == "fixed-partition"
                                    for iargs in rl_island_placement_args(args)}):
             capabilities = miles_capabilities(
@@ -128,9 +128,9 @@ def _prepare_ports_algorithm(args) -> None:
 
 
 def _offpolicy_correction_manifest(args, spec) -> dict:
-    """rl-offpolicy-correction-passthrough D8/L6.5: every island's correction
+    """Every island's correction
     record. A warning (unmappable field, island difference) refuses the launch
-    (phase 2, L6b.2)."""
+    (phase 2)."""
 
     from ..rl.engine.offpolicy_correction import (refuse_correction_warnings,
                                                   run_correction_manifest)
@@ -184,7 +184,7 @@ _ELASTIC_PAUSE_FLAGS = rl_forward_pairs(
     "rl_elastic_quorum_timeout_s",
     "rl_elastic_idle_flow_timeout_s",
     "rl_elastic_pause_margin",
-    # controller D4 timeouts T_drain / T_recovery (plan.md E1-C, E1-D 4)
+    # controller timeouts T_drain / T_recovery
     "rl_elastic_drain_timeout_s",
     "rl_elastic_recovery_timeout_s",
     # 3.7 restart recovery budget (recovery-design.md §3)
@@ -215,7 +215,7 @@ _ELASTIC_TEST_EXPORTS = tuple(
         ("rl_test_inject_stop_failures", "YETO_RL_TEST_INJECT_STOP_FAILURES"),
         ("rl_test_kill_learner_at", "YETO_RL_TEST_KILL_LEARNER_AT"),
         ("rl_test_inject_rebuild_fail", "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
-        # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
+        # read by miles_adapter.cut_injection
         ("rl_test_inject_cut_save_kill_rank", "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
         ("rl_test_inject_cut_restore_kill_rank", "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
         ("rl_test_inject_cut_restore_sleep", "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
@@ -224,7 +224,7 @@ _ELASTIC_TEST_EXPORTS = tuple(
 )
 KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
                "RESUMING", "REBUILDING_TRAINER")
-# In-place learner restarts (E1-D ⑤⑥⑦): the learner command runs in a loop that
+# In-place learner restarts: the learner command runs in a loop that
 # re-executes it with the same arguments (same --rl-elastic-state-dir) after a
 # non-zero exit, at most N times. The Ray head stays up; the old driver's job
 # (fork controller, engines, trainer) dies with it, so the fork restarts at
@@ -247,12 +247,12 @@ _CUT_LAUNCH_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-c
                      ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
                      ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
                      ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"))
-# what turns on the round cuts of a synced launch (S27 R-2)
+# what turns on the round cuts of a synced launch
 _ISLAND_CUT_TRIGGERS = ("rl_cut_every", "rl_cut_auto_mtbf_s")
 
 
 def island_cuts_requested(args) -> bool:
-    """S27 R-2: a synced launch (a syncer, no ``--rl-elastic``) with
+    """A synced launch (a syncer, no ``--rl-elastic``) with
     ``--rl-checkpoint-store`` and a cut interval: every island writes its own round
     cuts under ``<store>/island-cuts`` (forwarded as ``--rl-island-cut-store``)."""
     return (bool(getattr(args, "rl_checkpoint_store", None))
@@ -262,7 +262,7 @@ def island_cuts_requested(args) -> bool:
 
 
 def data_positions_kept(args) -> bool:
-    """S27 task assignment (``yeto.rl.engine.data_position``): a synced
+    """Task assignment (``yeto.rl.engine.data_position``): a synced
     full-parameter island that generates and trains keeps its data position in
     ``--rl-checkpoint-store`` (forwarded as ``--rl-data-position-store``), so a
     relaunched island continues at its next row. Its round counter restarts at 0
@@ -302,7 +302,7 @@ def _synced_launch_uses_store(args) -> bool:
 
 
 def _catch_up_keeps_data_positions(args) -> bool:
-    """S27 G-DS: asynchronous full-parameter rounds without peer recovery
+    """Asynchronous full-parameter rounds without peer recovery
     (``--rl-island-state-source catch-up``) keep the islands'
     data positions in the store (:func:`data_positions_kept`), so a relaunched
     island that takes the syncer's catch-up continues at its next row."""
@@ -326,7 +326,7 @@ def _check_hf_export_launch_flags(args) -> None:
     if not getattr(args, "rl_checkpoint_store", None):
         raise ValueError(f"{EXPORT_HF_FLAG} needs --rl-checkpoint-store (the exports go to <store>/hf)")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        # S27 G-DC: a backend may wire it for some of its runs (verl: the Megatron island)
+        # A backend may wire it for some of its runs (verl: the Megatron island)
         supported = getattr(_rl_backend_module(args, "run_config_rules"), "hf_export_supported", None)
         if not (callable(supported) and supported(args)):
             raise ValueError(f"{EXPORT_HF_FLAG} is wired for --rl-backend miles and the runs its backend's "
@@ -363,7 +363,7 @@ def store_export_only(args) -> bool:
 
 
 def _check_export_only_store(args) -> None:
-    """``--rl-checkpoint-store-export-only`` (S27 G-CO): only a single-island store with
+    """``--rl-checkpoint-store-export-only`` only a single-island store with
     HF exports, and none of the flags that need the resume store."""
     flag = "--rl-checkpoint-store-export-only"
     if not getattr(args, "rl_checkpoint_store", None):
@@ -404,8 +404,8 @@ def _check_resume_launch_flags(args) -> bool:
                      auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
                      max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
     if store and not elastic and not getattr(args, "rl_single_island_no_sync", False):
-        # S25 C3: the store holds the sample buffer and the releases of synced trainers
-        # (forwarded as --rl-sample-store). S27 R-2: with a cut interval every synced
+        # The store holds the sample buffer and the releases of synced trainers
+        # (forwarded as --rl-sample-store). With a cut interval every synced
         # island also writes its own round cuts there; it does not resume from them
         # (the syncer is authoritative), so the resume switches stay refused.
         for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
@@ -413,14 +413,14 @@ def _check_resume_launch_flags(args) -> bool:
             if getattr(args, name, None):
                 raise ValueError(f"{flag}: a synced launch does not resume from round cuts (the "
                                  "syncer is authoritative; multi-island resume: rl-resume-from-checkpoint 3.3)")
-        # S27 E-3: --rl-peer-recovery keeps its peer snapshots in the store
+        # --rl-peer-recovery keeps its peer snapshots in the store
         if not _synced_launch_uses_store(args):
             raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-single-island-no-sync, "
                              "synced trainers, a cut interval (--rl-cut-every / --rl-cut-auto-mtbf-s: "
                              "island round cuts), HF exports (--rl-export-hf-rounds) or --rl-peer-recovery")
         if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
             raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
-        # S27 G-ED: the verl island writes island cuts too (adapters/verl/round_cuts.py)
+        # The verl island writes island cuts too (adapters/verl/round_cuts.py)
         if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") not in ("miles", "verl"):
             raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
                              "launch) are wired for --rl-backend miles and verl only")
@@ -501,7 +501,7 @@ def _check_ports_eval(args) -> int | None:
 
 
 def _check_ports_infra_switches(args) -> None:
-    """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in;
+    """``--rl-overlap-eval`` / ``--rl-elastic``: opt-in;
     the elastic manifest is read here so a bad file fails locally."""
 
     from ..rl.engine import island_placement
@@ -545,16 +545,16 @@ def _check_ports_infra_switches(args) -> None:
     check_verify_every(args)
     from ..rl.engine import sample_roles
 
-    if sample_roles.is_convertible_pool(args):  # L7.5: every island convertible
+    if sample_roles.is_convertible_pool(args):  # Every island convertible
         sample_roles.check_pool(args, rl_island_count(args))
-    elif sample_roles.is_pair(args):  # L5.4 --rl-island-sample-role: per-island roles
+    elif sample_roles.is_pair(args):  # --rl-island-sample-role: per-island roles
         sample_roles.check_pair(args, rl_island_count(args))
     else:
-        # S25 C3; a synced group checks each island's own role (its sampler options
+        # A synced group checks each island's own role (its sampler options
         # belong to its sampler islands)
         sample_roles.check_synced_trainers(args, rl_island_count(args))
         if not sample_roles.is_synced_group(args):
-            sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
+            sample_roles.check_launch(args)  # --rl-sample-role (both checks nothing)
     sample_roles.check_sampler_follow(args, rl_island_count(args))
     if (stop := sample_roles.describe_sampler_stop(args, rl_island_count(args))) is not None:
         print(f"[launcher] {stop}", file=sys.stderr, flush=True)
@@ -592,7 +592,7 @@ def _check_ports_infra_switches(args) -> None:
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
               if getattr(args, name, None) is not None and getattr(args, name) is not False
-              and flag not in given]  # rank 0 is a valid value (E2 cut injections)
+              and flag not in given]  # rank 0 is a valid value (cut injections)
     if getattr(args, "rl_elastic_state_dir", None) is not None:
         given.append("--rl-elastic-state-dir")
     if getattr(args, "rl_test_hold_before_check_s", None) is not None and not any(
@@ -728,8 +728,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     from ..rl.engine.sample_roles import is_synced_trainer as sample_role_is_synced_trainer
     from ..rl.engine.sample_roles import substore_uri
 
-    flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
-    if int(getattr(args, "rl_spot_subscribers", 0) or 0):  # S27 G-EA: 0 (default) adds nothing
+    flags += sample_role_flags(args)  # Role both (default) adds nothing
+    if int(getattr(args, "rl_spot_subscribers", 0) or 0):  # 0 (default) adds nothing
         flags += f" --rl-spot-subscribers {int(args.rl_spot_subscribers)}"
     if getattr(args, "rl_sample_relay", False):
         if getattr(args, "rl_single_island_no_sync", False):
@@ -751,19 +751,19 @@ def _ports_infra_flags(args) -> tuple[str, str]:
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)
     if resume_store is not None and data_positions_kept(args):
-        # S27 task assignment: a relaunched full-parameter island continues at its row
+        # Task assignment: a relaunched full-parameter island continues at its row
         flags += f" --rl-data-position-store {shlex.quote(resume_store[0])}"
     if resume_store is not None and island_cuts_requested(args):
-        # S27 R-2: every synced island writes its round cuts (island<learner id> below)
+        # Every synced island writes its round cuts (island<learner id> below)
         flags += f" --rl-island-cut-store {shlex.quote(island_cut_store(resume_store[0]))}"
         if getattr(args, "rl_cut_keep", None) is not None:
             flags += f" --rl-cut-keep {int(args.rl_cut_keep)}"
     if resume_store is not None and sample_role_is_synced_trainer(args):
-        # S25 C3: synced trainers mount the store for the buffer and the releases; a
+        # Synced trainers mount the store for the buffer and the releases; a
         # trainer whose samplers follow it reads its own sub-store (one lane)
         substore = getattr(args, "rl_sample_substore", None)
         sample_store = resume_store[0] if substore is None else substore_uri(resume_store[0], substore)
-        # S27 G-EE: a relay trainer reads its own relay channel through a local buffer
+        # A relay trainer reads its own relay channel through a local buffer
         # that only it fills, so it reads that whole buffer (one lane)
         own = substore or getattr(args, "rl_sample_relay", False)
         lanes = 1 if own else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
@@ -772,7 +772,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)
     if resume_store is not None and store_export_only(args):
-        resume_store = None  # S27 G-CO: the store holds only the HF exports (below)
+        resume_store = None  # the store holds only the HF exports (below)
     if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
         flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
@@ -859,7 +859,7 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
             f"{shlex.quote(args.rl_algorithm_spec_json)} > ~/yeto-rl/algorithm_spec.json\n"
         )
         flags += " --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json"
-    # rl-infra-spec 2.1 placement options, forwarded only when non-default
+    # Fixed partition placement options, forwarded only when non-default
     # (the default argv is unchanged).
     if getattr(args, "rl_placement", "colocated") != "colocated":
         flags += f" --rl-placement {shlex.quote(args.rl_placement)}"

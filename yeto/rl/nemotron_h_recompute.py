@@ -1,9 +1,9 @@
-"""Activation recompute for transformers' NemotronH blocks (S27 G-EQ4, npu1).
+"""Activation recompute for transformers' NemotronH blocks (Ascend NPU).
 
 Why this exists. A full-parameter RL step of Nemotron-3 Nano 30B-A3B did not fit
 on a 910B3 (64 GiB, 60.96 GiB usable): the backward asked for 8.5-10 GiB on top
 of **54-55 GiB of live tensors** and ran out of memory, so an island only ever
-completed one optimizer step (S27 G-EQ3, four attempts, VERL-ASCEND-RL.md section 31).
+completed one optimizer step (four attempts).
 The live tensors are mostly stored activations, because this island trains with
 recompute **off** -- and it does so for a reason:
 
@@ -11,7 +11,7 @@ recompute **off** -- and it does so for a reason:
   ``supports_gradient_checkpointing = False`` and its source mentions
   ``gradient_checkpointing`` **zero** times: it has no recompute hook at all, so
   verl's ``enable_gradient_checkpointing`` cannot help and flipping the class
-  attribute would recompute nothing (S27 G-EQ4, read in the island's own image).
+  attribute would recompute nothing (read in the island's own image).
   yeto therefore turns the verl flag off for this model
   (``island_entry.gradient_checkpointing_for``).
 * the checkpoint's own ``modeling_nemotron_h.py`` *does* support it
@@ -43,7 +43,7 @@ storing activations, as before. Three signals decide, in this order:
    declaration of the card it runs on, present in the container environment.
 3. this node's device family (``yeto.hw.catalog.device_family``).
 
-Signal 3 alone is **not** enough, and S27 G-EQ4 found that out by running it: in
+Signal 3 alone is **not** enough, as running it showed: in
 the engine worker the model is built before the card is visible to that process,
 so ``available_type()`` answers ``"cpu"`` and ``device_family()`` falls back to
 its documented CPU default ``"nvidia"`` -- the hook reported

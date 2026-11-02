@@ -1,4 +1,4 @@
-"""E1 observation (``--rl-profile-trainer``): where the island driver's main thread
+"""Observation (``--rl-profile-trainer``): where the island driver's main thread
 spends each driver phase.
 
 When enabled, a daemon thread samples the stack of the thread that reports the

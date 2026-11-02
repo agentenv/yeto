@@ -1,6 +1,6 @@
-"""Real Megatron-Core HybridModel + real verl ``model_forward_fused`` on gloo (S28 FCE).
+"""Real Megatron-Core HybridModel + real verl ``model_forward_fused`` on gloo.
 
-Run by ``tests/test_s28_chunked_logprob.py`` in an interpreter that has Megatron-Core
+Run by ``tests/test_chunked_logprob.py`` in an interpreter that has Megatron-Core
 (``YETO_MEGATRON_LM_PATH``) and verl's import closure (``YETO_VERL_FORK_PATH``, plus
 ``YETO_VERL_EXTRA_SITE`` for packages that interpreter lacks); not collected by pytest.
 

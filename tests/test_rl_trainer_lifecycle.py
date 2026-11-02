@@ -75,7 +75,7 @@ def test_transitions_move_forward_or_to_stopped():
 
 
 def test_three_start_stop_cycles_continue_the_policy(tmp_path):
-    """L3.1 + L3.4: start -> train -> stop three times on fresh fake trainers; each
+    """Start -> train -> stop three times on fresh fake trainers; each
     start restores the SCHEDULED cut of the previous stop and goes on at v+1."""
     island = _Island(tmp_path)
     lc = island.lifecycle()
@@ -163,7 +163,7 @@ def test_stop_before_any_round_keeps_the_previous_cut(tmp_path):
     assert island.membership.tape[-2:] == [("JOIN", 1), ("LEAVE", 1, LeaveReason.STOPPED)]
 
 
-def test_training_failure_stops_with_the_p5_code(tmp_path):
+def test_training_failure_stops_with_the_failed_step_code(tmp_path):
     island = _Island(tmp_path, failed_step_rounds={1})
     lc = island.lifecycle()
     h = lc.start(lc.plan_start({}), resume_from=None)

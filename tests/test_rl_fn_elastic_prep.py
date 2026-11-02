@@ -6,7 +6,7 @@
 * the launcher shapes both fixed configs (trainer 2 nodes x 8, TP2 PP8 EP2; 1 or 2
   TP8 SGLang engines; standby = a whole node) without any cloud call;
 * a placeholder / foreign / wrong-kind attestation never yields a candidate and
-  auto mode only holds until E1 certifies the FN edges.
+  auto mode only holds until the FN edges are certified.
 """
 import json
 from pathlib import Path
@@ -72,7 +72,7 @@ def test_launcher_dry_shapes_both_fn_configs(monkeypatch, tmp_path, config, roll
 
 
 def test_2x8_manifest_matches_the_declaration_and_shapes_the_launch(monkeypatch, tmp_path):
-    """Formal 2x8 shape (user decision 2026-10-07): one config FN-T8R8S0, n0 = trainer
+    """Formal 2x8 shape: one config FN-T8R8S0, n0 = trainer
     TP2 PP4 EP2, n1 = one TP8 engine, no standby, no edges (nothing to recommend)."""
     raw = json.loads(MANIFEST_2X8.read_text())
     decl = q.flash_next_elastic_declaration(nodes=2, trainer_gpus=8)
@@ -148,7 +148,7 @@ def test_e1_certified_fn_attestation_yields_exactly_the_declared_edge():
             for e in hook.candidates(controller)] == [(SMALL, BIG, 1, 2)]
 
 
-def test_auto_without_e1_certification_only_holds(tmp_path):
+def test_auto_without_elastic_certification_only_holds(tmp_path):
     driver, ctl, h, _ = setup(tmp_path, certified=False, mode="auto", events=_ev("saturated"),
                               costs=cost_table(tmp_path), rounds=6)
     driver.run()

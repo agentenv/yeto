@@ -1,4 +1,4 @@
-"""The agentic outer layer: admit, run the harness, classify (S25 N10.2).
+"""The agentic outer layer: admit, run the harness, classify.
 
 Both backends call :func:`run_agent_task`; only the harness (Harbor) and the
 backend sample conversion differ.  Order per trajectory:

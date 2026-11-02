@@ -1,4 +1,4 @@
-"""S26 E3b: per-stream accounting, stall watchdog and rate-aware striping."""
+"""Per-stream accounting, stall watchdog and rate-aware striping."""
 
 from __future__ import annotations
 
@@ -201,7 +201,7 @@ def test_watchdog_notices_an_inbound_message_that_stops_growing():
 
 
 def test_meter_stall_clock_starts_at_the_enqueue_of_an_idle_stream():
-    # s27-gh-a: a stream idle for 2206 s got a chunk; the watchdog read it
+    # A GPU run: a stream idle for 2206 s got a chunk; the watchdog read it
     # before the sender thread picked it up and dropped the group as stalled.
     clock = _Clock()
     meter = StreamMeter(clock)

@@ -1,4 +1,4 @@
-"""Trainable-state export/apply executed *inside* every Megatron rank (task 3.4, D4).
+"""Trainable-state export/apply executed *inside* every Megatron rank .
 
 Loaded by upstream's generic entry point (``michaellchung/miles`` ``yeto/ports``):
 ``TrainGroup.run_plugin(fn_path, kwargs)`` -> ``train_actor.run_plugin`` ->
@@ -43,10 +43,10 @@ EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
 COLLECT_DIGEST = f"{_PLUGIN_MODULE}.collect_digest"
 WEIGHTS_VERSION = f"{_PLUGIN_MODULE}.weights_version"
-# A no-sync full-parameter island (L4.6): per-rank digest of every model parameter.
+# A no-sync full-parameter island: per-rank digest of every model parameter.
 EXPORT_FULL_DIGEST = f"{_PLUGIN_MODULE}.export_full_digest"
 
-# rl-publish-fastpath D3: version of the weights this trainer process holds.
+# rl-publish-fastpath: version of the weights this trainer process holds.
 # Kept in each trainer process (module state), bumped on every path that writes
 # trainable weights: each optimizer step (wrapped train_one_step), apply_state,
 # cut restore (cut_plugin).  The process id makes a rebuilt / restarted trainer
@@ -207,7 +207,7 @@ def _require_carried(policy: PackedAdapterPolicy, names: Iterable[str], what: st
 
 
 # The FP32 masters (complete and DistributedOptimizer-sharded) live in the
-# backend-neutral yeto.rl.megatron_masters (S27 G-FG: the verl Megatron island
+# backend-neutral yeto.rl.megatron_masters (the verl Megatron island
 # reads them too); re-exported here under the names this module always had.
 from yeto.rl.megatron_masters import (  # noqa: E402,F401
     _dp_all_reduce_sum,
@@ -235,7 +235,7 @@ def refresh_actor_backup(actor: Any) -> None:
     not needed (fixed partition; colocated LoRA, where the memory saver's host copy of
     the frozen base serves weight sync), and ``backup("actor")`` on a backuper that
     never took one allocates a fresh pinned copy of every weight -- the whole frozen
-    base per rank (S24 T-27B: +133 GB host on Qwen3.8-27B, Ray OOM-killed the island).
+    base per rank (+133 GB host on Qwen3.8-27B, Ray OOM-killed the island).
     A backuper without ``backup_tags`` (older Miles) keeps the unconditional refresh.
     """
     backuper = getattr(actor, "weights_backuper", None)
@@ -382,7 +382,7 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
 
 
 def _digest_staging(actor: Any) -> Any:
-    """The pinned host buffer this trainer's digests reuse every round (E1). A
+    """The pinned host buffer this trainer's digests reuse every round. A
     deferred digest still hashing it is waited for first."""
     from yeto.rl.engine.policy_digest import HostStaging
 
@@ -402,7 +402,7 @@ def export_digest(
     the tensors.  The hash definitions are those of ``yeto.rl.core.policy_tensor_hash``
     and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves.
 
-    ``deferred`` (E1, sync colocated mode): return once the tensors are staged on the
+    ``deferred`` (sync colocated mode): return once the tensors are staged on the
     host (layout only, ``"deferred": True``) and hash them in a thread of this
     process, so the trainer can offload meanwhile; :func:`collect_digest` returns
     the digest (the same values)."""
@@ -414,7 +414,7 @@ def export_digest(
     started = time.monotonic()
     install_grad_norm_recorder()
     with trainer_resident(actor):
-        # E1: the tensors are only hashed here, so they may be staged in one pinned buffer
+        # the tensors are only hashed here, so they may be staged in one pinned buffer
         exported = _export_state(actor, policy_version=policy_version, staging=_digest_staging(actor))
     export_seconds = round(time.monotonic() - started, 3)
     if exported is None:
@@ -478,7 +478,7 @@ def export_full_digest(actor: Any, *, policy_version: int) -> dict[str, Any]:
     Every rank returns its own shard digest (name, dtype, shape and raw bytes of
     each local parameter, sorted by name); the caller combines the ranks in
     ``run_plugin`` order.  No tensor leaves the trainer and no collective runs.
-    The main rank also reports its weights version (rl-publish-fastpath D3).
+    The main rank also reports its weights version (rl-publish-fastpath).
     """
 
     import hashlib
@@ -634,7 +634,7 @@ def _pp_gather_default(local: dict[str, Any] | None, is_main: bool) -> list[dict
 
 
 def _export_flash_next(actor: Any, *, policy_version: int, exporter=None, pp_gather=None) -> dict[str, Any] | None:
-    """Fingerprint export for the no-sync Flash-Next island (S11 try24 fix).
+    """Fingerprint export for the no-sync Flash-Next island.
 
     Uses Miles' own collective HF export (every rank must call it: TP/EP
     gathers inside one PP stage). Names are Miles' SGLang adapter names
@@ -707,7 +707,7 @@ def _tp_ep_leader(actor: Any) -> bool:
 def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
     """``staging`` (a :class:`~yeto.rl.engine.policy_digest.HostStaging`): copy the
     tensors into its pinned buffer with one GPU synchronization; the result is then
-    only valid until the next call with it (digest path, E1). Same values either way."""
+    only valid until the next call with it (digest path). Same values either way."""
 
     import torch
 
@@ -737,7 +737,7 @@ def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> di
 
 
 def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[str, Any]:
-    """TP/PP/EP: Bridge adapter export is collective; masters exposed per D4."""
+    """TP/PP/EP: Bridge adapter export is collective; masters exposed per rank."""
 
     import torch
     from miles.backends.megatron_utils.hf_export import _get_hf_bridge
@@ -950,7 +950,7 @@ def _apply_state(
 _STEP_GRAD_NORMS: list[float] = []
 # LR each optimizer step applies, read on entry to ``train_one_step`` (before
 # ``optimizer.step()`` and the scheduler step that follows it); upstream logs
-# only the post-step LR (fix-decoupled-lr-schedule D4).
+# only the post-step LR (fix-decoupled-lr-schedule).
 _STEP_APPLIED_LRS: list[float] = []
 # Per optimizer step: ``pg_clipfrac`` from the loss dict ``train_one_step``
 # returns (last pipeline stage only) and the step's loss token count. Upstream
@@ -985,7 +985,7 @@ def install_grad_norm_recorder() -> bool:
         _POLICY_STATS.clear()
         try:
             if getattr(args[0] if args else kwargs.get("args"), "yeto_rl_profile_trainer", False):
-                from .train_profile import profiled  # E1 observation (--rl-profile-trainer)
+                from .train_profile import profiled  # observation (--rl-profile-trainer)
 
                 result = profiled(original, *args, **kwargs)
             else:
@@ -1008,7 +1008,7 @@ def install_grad_norm_recorder() -> bool:
     return True
 
 
-# rl-algo-supplement follow-up (S19 #13, 4.7 / 5.2): per optimizer step, sufficient
+# rl-algo-supplement follow-up: per optimizer step, sufficient
 # statistics of the advantages Miles trains on and of the PPO ratio against the clip
 # bounds.  Observation only: the wrapped functions' return values are passed through
 # untouched.  Per rank (no data-parallel / CP reduction).  Reset on entry to
@@ -1148,7 +1148,7 @@ _VALUE_METRICS_INSTALLED = False
 # current optimizer step (critic process): n, sum G, sum G^2, sum R, sum R^2
 # with R = G - v.  Per-micro-batch EV is undefined at the default
 # --micro-batch-size 1 under PPO with gamma = lambd = 1 and no KL reward: one
-# sample's returns are one constant, Var(G) = 0 (s13-g1-modal-20261007b, every
+# sample's returns are one constant, Var(G) = 0 (observed: every
 # round's explained_variance missing).  Reset on entry to train_one_step.
 _EV_STATS: list[float] = []
 
@@ -1171,7 +1171,7 @@ def _accumulate_ev_stats(returns: Any, values: Any, mask: Any = None) -> None:
 # Var(G) at or below this fraction of mean(G^2) (floor 1) is rounding noise,
 # not return spread. Miles' returns are advantages + values in fp32, so a
 # step whose rewards are all 0 leaves |G| ~ 1e-8 instead of exactly 0; EV then
-# divides by ~1e-16 (s14-forkg1-sao-20261007a round 5: EV -3.3e12).
+# divides by ~1e-16 (observed EV -3.3e12).
 _EV_RELATIVE_VARIANCE_FLOOR = 1e-8
 
 
@@ -1266,7 +1266,7 @@ def critic_state_summary(actor: Any) -> dict[str, Any]:
 
     The colocated critic is asleep (memory paused) between its train steps;
     reading paused parameters fails with ``CUDA error: invalid argument``
-    (s13-g1-modal-20261007a), so wake it like the other plugins."""
+    (observed on GPU), so wake it like the other plugins."""
 
     with trainer_resident(actor):
         return _critic_state_summary(actor)
@@ -1325,7 +1325,7 @@ def _rank() -> int:
 #
 # Critic optimizer state (moments, step counts, LR scheduler) is kept across
 # strict-avg rounds -- only the weights are replaced; the actor's optimizer is
-# reset every round. This is the first-version choice (design D4).
+# reset every round. This is the first-version choice.
 
 
 def _critic_masters(actor: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1340,7 +1340,7 @@ def _critic_masters(actor: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     leaves = [leaf for leaf in _optimizer_leaves(optimizer) if _is_distributed(leaf)] if optimizer is not None else []
     # Single-rank DP groups need no collective: gather on the CPU, so the
     # export/import does not need a full FP32 critic copy on the GPU
-    # (s19-compaction-g3-20261010a: OOM with the actor still resident).
+    # (observed OOM with the actor still resident).
     device = "cpu" if leaves and all(_single_rank_dp(leaf) for leaf in leaves) else None
     masters = full_masters(optimizer, [params[k] for k in keys], device=device)
     return dict(zip(keys, masters, strict=True))
@@ -1507,7 +1507,7 @@ def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
 def install_actor_recorders(actor: Any) -> bool:
     """Plugin: the per-step recorders in an actor process (idempotent).
 
-    Also installs the train-gap probe (``train_gap_probe``, S27 G-CT): timing
+    Also installs the train-gap probe (``train_gap_probe``): timing
     of the R3 replay fill before each step, and the ``YETO_REPLAY_FILL``
     choice. A bad ``YETO_REPLAY_FILL`` stops the run here; any other probe
     failure is printed and ignored."""
@@ -1584,7 +1584,7 @@ def applied_lrs(actor: Any) -> list[float]:
 
 
 def _arm_grad_audit(original: Any, args: tuple, kwargs: dict) -> bool:
-    """``YETO_RL_AUDIT_GRADS=1``: capture this step's pre-clip LoRA gradients (D12).
+    """``YETO_RL_AUDIT_GRADS=1``: capture this step's pre-clip LoRA gradients.
 
     Same capture point and semantics as the legacy hook (``yeto.rl.grad_audit``):
     entry of ``optimizer.step()``, after DP reduction, before clipping.
@@ -1626,7 +1626,7 @@ _GRAD_BINDINGS: dict[int, Any] = {}
 
 
 def align_weight_version(actor: Any, *, next_version: int) -> None:
-    """Plugin (P0-S): make Miles' next ``update_weights`` stamp ``next_version``.
+    """Plugin: make Miles' next ``update_weights`` stamp ``next_version``.
 
     Miles increments ``weight_updater.weight_version`` once per update, writes
     it to the inference engines and gives it to the rollout executor as the

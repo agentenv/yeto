@@ -1,12 +1,11 @@
 """CPU tests of the numeric final-answer reward (yeto.rl.numeric_answer_reward).
 
 REAL_TAILS are the last 260 characters of real responses to DAPO-Math-17k rows
-(the S27 task prompt "... Answer: \\boxed{$Answer} ...") from the S27 offline
-cut evaluations (infra-drafts/SESSION27/logs/<run>/eval-island*/cuts/*.json,
-labels from s1-runs/s27-x/eval/heldout-0.6b.jsonl). Each row stores the score of
+(the task prompt "... Answer: \\boxed{$Answer} ...") from offline cut
+evaluations of earlier runs (eval-island cut files and their held-out labels). Each row stores the score of
 the old ``gsm8k_grade`` and of the new grader; the old scores reproduce the
 recorded rewards. NEMOTRON_HEADS are the response heads Miles printed for
-Nemotron-3 Nano in s27-gr-g2/launch.stream.log ("First rollout sample" /
+Nemotron-3 Nano in a launch log ("First rollout sample" /
 "Finish rollout", 512-character previews). As text cut off before an answer,
 they must score 0.
 """
@@ -30,40 +29,40 @@ from yeto.rl.rewards.types import Trajectory
 
 # (response tail, label, old gsm8k_grade, new numeric_answer_grade)
 REAL_TAILS = [
-    # GK/s27-xk-x1-k1go20-b h0
+    # run xk-x1-k1go20-b h0
     ('\n\nFrom earlier, we have $P = 2Q$. Substitute this into the equation above:\n\n$$\nQ - 12(2Q) = -416\n\\Rightarrow Q - 24Q = -416\n\\Rightarrow -23Q = -416 \\Rightarrow Q = \\frac{416}{23} = 18\n$$\n\nThen $P = 2Q = 36$\n\nSo the value of $xy + yz + zx$ is:\n\n$$\n\\boxed{36}\n$$',
      '672', 0.0, 0.0),
-    # GK/s27-xk-x1-k1go20-b h46
+    # run xk-x1-k1go20-b h46
     ("m/s}$\n- Cate's speed = $6 \\, \\text{m/s}$\n\nSince they are moving towards each other, the time it takes for Dan to reach Cate is:\n\n$$\nt = \\frac{50 \\, \\text{m}}{8 + 6} = \\frac{50}{14} = \\frac{25}{7} \\approx 3.571 \\, \\text{seconds}\n$$\n\nAnswer: \\boxed{\\frac{25}{7}}",
      '25', 1.0, 0.0),
-    # GK/s27-xk-x1-k1go20-b h56
+    # run xk-x1-k1go20-b h56
     ("\n\\frac{6050}{3}\n$$\n\nPerforming the division:\n\n$$\n\\frac{6050}{3} = 2016.666...\n$$\n\nBut since we can't have fractional triangles, the **maximum number of non-overlapping non-collinear triangles** is thus:\n\n$$\n2016\n$$\n\n---\n\n### Final answer:\n\nAnswer: \\boxed{2016}",
      '2016', 1.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h94
+    # run xk-x1-k1go20-b h94
     ('^{(0)}|} = \\frac{1}{3^7}\n$$\n\nSo:\n\n$$\n\\frac{|OA_{2014}^{(7)}|}{|OA_{2014}^{(0)}|} = \\frac{1}{3^7}\n$$\n\nWe can now write:\n\n$$\n\\boxed{\\frac{1}{3^7} = \\frac{1}{2187}}\n$$\n\nSo, $ p = 1 $, $ q = 2187 $, and $ p+q = 2188 $.\n\n---\n\n### ✅ Final Answer:\n\n$$\n\\boxed{2188}\n$$',
      '2188', 1.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h115
+    # run xk-x1-k1go20-b h115
     ('solve for $ x $:\n\n$$\n12x - 225 = 17(-x + 200).\n$$\n\nExpand the right-hand side:\n\n$$\n12x - 225 = -17x + 3400.\n$$\n\nCombine like terms:\n\n$$\n12x + 17x = 3400 + 225,\n$$\n\n$$\n29x = 3625.\n$$\n\nSolve for $ x $:\n\n$$\nx = \\frac{3625}{29}.\n$$\n\nAnswer: \\boxed{\\frac{3625}{29}}',
      '125', 0.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h152
+    # run xk-x1-k1go20-b h152
     ('\nSo assume that $ x = 1 $, $ y = 2 $ and check:\n\nFirst equation: $ 1 - 3(1)(4) = 1 - 12 = -11 \\ne 3 $\n\nTry $ x = 1 $, $ y = 1.5 \\Rightarrow -1.5 $ each time.\n\nEventually, desired $ x = a^2 $ and $ y = b^2 $ such that:\n\n$$\nx^3 - 3xy^2 = 3, \\quad y^3 - 3x^2y = 3',
      '3', 1.0, 0.0),
-    # GK/s27-xk-x1-k1go20-b h224
+    # run xk-x1-k1go20-b h224
     ('mes 25 \\times 36 \\times 49 \\times 64 \\times 81) = (1 \\times 2^2 \\times 3^2 \\times 5^2 \\times 6^2 \\times 7^2)\n$$\n\nNow this is a square of:\n\n$$\n(2 \\times 3 \\times 5 \\times 7)^2 = 210^2\n$$\n\n---\n\n### Step 3: Conclude the result\n\n$$\n\\text{Answer: } \\boxed{210^2}\n$$',
      '44100', 0.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h253
+    # run xk-x1-k1go20-b h253
     (' between two options based on the remaining value.\n\nThis behavior ensures that the player who starts (Euhan) will **always be the one forced to say it**, so **Minjune has a winning strategy** for any $N > 2019$.\n\n---\n\n### Final Answer:\n\n$$\nAnswer: \\boxed{2020}',
      '2020', 1.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h2
+    # run xk-x1-k1go20-b h2
     ('ble value** of $a$ is:\n\n$$\n\\boxed{9997}\n$$\n\n---\n\n### Step 4: Find the sum of the **smallest** and **largest** values\n\n$$\n\\text{Smallest } a = 3 \\\\\n\\text{Largest } a = 9997 \\\\\n\\text{Sum} = 3 + 9997 = \\boxed{9997 + 3 = 10000}\n$$\n\n---\n\n**Answer: $\\boxed{10000}$**',
      '10000', 1.0, 1.0),
-    # GK/s27-xk-x1-k1go20-b h52
+    # run xk-x1-k1go20-b h52
     (' = 4 $\n- $ xy = 2 $, $ x + y + (x, y) = 4 $ → So this is **not valid**\n\nHence, we discard this pair.\n\n---\n\nSo the **only valid pair** is:\n\n- $ x = 2 $, $ y = 3 $\n\n---\n\n**Answer: $ \\frac{1}{\\text{Once}} $**\n\nBut when writing Answer:\n\n---\n\nAnswer: \\boxed{(2, 3)}',
      '3', 1.0, 0.0),
-    # X1/s27-x1-k1-a h251
+    # run x1-k1-a h251
     ('{3}{2} \\right)^2 } = \\sqrt{ \\left( \\frac{1}{2} \\right)^2 + \\left( -1 \\right)^2 } = \\frac{1}{\\sqrt{2}}\n$$\n\nSo the area of square $PQRS$ is:\n\n$$\n\\text{Area} = s^2 = \\left( \\frac{1}{\\sqrt{2}} \\right)^2 = \\frac{1}{2}\n$$\n\n### Final Answer:\n$$\n\\boxed{\\frac{1}{2}}\n$$',
      '1', 1.0, 0.0),
-    # X1/s27-x1-strict20-a h50
+    # run x1-strict20-a h50
     (' A_{\\text{large}}\n$$\n$$\n14 = \\frac{4}{9} \\times A\n$$\n$$\nA = \\frac{14 \\times 9}{4} = \\frac{126}{4} = 31.5\n$$\n\nSo, the area of the large square is **31.5**, or in **fractional form** as $ \\frac{63}{2} $.\n\n---\n\n### Final Answer\n\n$$\nAnswer: \\boxed{\\frac{63}{2}}\n$$',
      '63', 1.0, 0.0),
 ]

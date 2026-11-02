@@ -1,8 +1,8 @@
-"""Cloud binding of a convertible pool (rl-trainer-start-stop L7.5).
+"""Cloud binding of a convertible pool.
 
 A launch whose ``--gpu`` islands are all declared ``--rl-node-class
 islandM=convertible`` runs as a convertible pool: every island boots as a
-rollout node, and the head's trainer loop (S1, :mod:`.trainer_loop`) converts the
+rollout node, and the head's trainer loop (:mod:`.trainer_loop`) converts the
 best node to trainer when a wave of samples is waiting, then back
 (:mod:`yeto.rl.engine.convertible_remote`). The declaration is the switch: the
 trainer loop runs without ``--rl-trainer-scheduler``, no island is held back,
@@ -117,7 +117,7 @@ class MergedBacklog:
     Only samples the trainer can train count (behavior version at most
     ``max_policy_age`` behind ``current_version``): a node that has not converted
     since keeps generating with the version it last served, and the trainer
-    passes over its older samples (P0-S gate), so they must not start a trainer."""
+    passes over its older samples (the sample-age gate), so they must not start a trainer."""
 
     files: Any
     nodes: tuple[str, ...]

@@ -1,4 +1,4 @@
-"""S27 G-DI two-cluster island (yeto.launch.engine_cluster): plan, tasks, launch, ops.
+"""Two-cluster island (yeto.launch.engine_cluster): plan, tasks, launch, ops.
 
 CPU only: no sky, no Ray. A fake sky module records launches, execs and cancels."""
 

@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L5.5 / L5.7: merge metrics folded from the elastic
+"""Merge metrics folded from the elastic
 syncer tape, and the tape clock fields. No Ray, no GPU."""
 from __future__ import annotations
 

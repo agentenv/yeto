@@ -24,7 +24,7 @@ def verl_capabilities(fingerprint: str, *, unverified_mechanisms=(), fully_async
     fully_async path -- rollouter and trainer on separate GPUs (fixed partition,
     driver still serial), policy age up to the limit (checked against SUPPORT).
 
-    ``megatron`` (S27 G-DC): the Megatron island -- full parameters kept in the
+    ``megatron``: the Megatron island -- full parameters kept in the
     trainer (``fragments`` layout), trainer and rollout pools apart (fixed
     partition, driver serial), age 0."""
     from yeto.rl.engine.capabilities import EngineCapabilities, ExecutionCapabilities
@@ -70,7 +70,7 @@ miles_capabilities = verl_capabilities  # launcher call-site name (decoupling re
 
 
 def with_partitioned_serial(capabilities):
-    """Launcher-side declaration of the fixed-partition placement (S27 G-DC): the verl
+    """Launcher-side declaration of the fixed-partition placement: the verl
     Megatron island (trainer and rollout pools apart, driver serial) and the
     fully_async path run it. No partitioned-overlap mode on verl."""
     import dataclasses
@@ -81,4 +81,4 @@ def with_partitioned_serial(capabilities):
 
 
 def connect_island_ray(*_args, **_kwargs):
-    raise NotImplementedError("verl 岛自己在 verl_main 里连接 Ray（stage W 不适用）")
+    raise NotImplementedError("a verl island connects to Ray itself in verl_main (stage W does not apply)")

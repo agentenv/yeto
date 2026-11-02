@@ -17,7 +17,7 @@ the yeto ``IslandDriver`` calls through the ports of :mod:`.fully_async_ports`:
 * ``yeto_export_lora`` / ``yeto_call_workers`` -- the LoRA hooks of
   ``ports_impl.VerlPolicyState`` on the trainer's actor worker group (6.4b item 2);
   ``yeto_call_workers`` / ``yeto_call_workers_shared`` also carry a full-parameter
-  island's fragment reads and applies (S27 G-EW, :mod:`.fully_async_full`).
+  island's fragment reads and applies (:mod:`.fully_async_full`).
 
 Only exercised on a GPU (rl-verl-backend 6.6); the logic it relies on is in the
 CPU-tested :mod:`.fully_async_round` and :mod:`.fully_async_ports`.
@@ -127,7 +127,7 @@ class _YetoTrainerMixin:
         return crit
 
     def _yeto_offpolicy_source(self, batch) -> dict:
-        """Per-source log-prob mismatch of the step (S25 N2.5); ``rollout_id`` is set by the driver."""
+        """Per-source log-prob mismatch of the step; ``rollout_id`` is set by the driver."""
         from .ports_impl import source_error, source_event
 
         version = int(self.current_param_version)
@@ -152,7 +152,7 @@ class _YetoTrainerMixin:
         batch, self._yeto_batch = self._yeto_batch, None
         if batch is None:
             raise RuntimeError("yeto_train_step without an assembled batch")
-        # S27 G-FT (blocker B16): verl's own old-log-prob pass reads an MFU entry
+        # verl's own old-log-prob pass reads an MFU entry
         # its Megatron engine never fills, so the first Megatron training step
         # raises before any of our code runs.  One narrow run-time patch, logged
         # once; see .verl_megatron_patches for the defect and when to drop this.
@@ -161,7 +161,7 @@ class _YetoTrainerMixin:
         install_verl_patches()
         t0 = time.time()
         batch = self._fit_compute_reward(batch)
-        # S29 MFU-C: YETO_ONPOLICY_OLD_LOGPROB (onpolicy_old_logprob); off = verl unchanged
+        # YETO_ONPOLICY_OLD_LOGPROB (onpolicy_old_logprob); off = verl unchanged
         from . import onpolicy_old_logprob as oplp
 
         oplp_mode = oplp.mode()
@@ -213,7 +213,7 @@ class _YetoTrainerMixin:
 
     async def yeto_call_workers_shared(self, fn, *args):
         """``yeto_call_workers`` with every argument put in the object store once
-        (S27 G-EW: whole parameter tensors of a full-parameter apply)."""
+        (whole parameter tensors of a full-parameter apply)."""
         return await self.yeto_call_workers(fn, *[ray.put(arg) for arg in args])
 
     async def yeto_export_lora(self):
@@ -231,7 +231,7 @@ YetoFullyAsyncTrainer = ray.remote(num_cpus=10)(type("YetoFullyAsyncTrainer", (_
 
 
 # verl decorates its task runner with @ray.remote too; Ray refuses subclasses of
-# actor classes (found by the S19 Modal dry run), so subclass the plain class.
+# actor classes (found by a Modal dry run), so subclass the plain class.
 _TaskRunnerBase = getattr(fa_main.FullyAsyncTaskRunner, "__ray_actor_class__", fa_main.FullyAsyncTaskRunner)
 
 
@@ -246,7 +246,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     def run(self, config, plan: dict):
         from yeto.island_credential_guard import check_island_credentials
 
-        check_island_credentials()  # secret-handling-hardening D4 (fully_async Ray actor)
+        check_island_credentials()  # secret-handling-hardening (fully_async Ray actor)
         self._initialize_components(config)
         from omegaconf import OmegaConf
 
@@ -260,13 +260,13 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
             state["future"] = rollouter.fit.remote()
 
         def seek_rollouter(prompts: int):
-            # S26 E9.2: before fit, in the rollouter actor (fully_async_cut)
+            # before fit, in the rollouter actor (fully_async_cut)
             from .fully_async_cut import skip_rollouter_prompts
 
             return ray.get(rollouter.__ray_call__.remote(skip_rollouter_prompts, int(prompts)))
 
         def call(name, *args, timeout=None):
-            # timeout (s): S19 async5 hung 33 min in a push whose vLLM side had died;
+            # timeout (s): a run once hung 33 min in a push whose vLLM side had died;
             # a call that does not return in time raises TimeoutError.
             ref = getattr(trainer, name).remote(*args)
             deadline = None if timeout is None else time.monotonic() + float(timeout)
@@ -293,7 +293,7 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     def _create_trainer(self, config) -> None:
         """verl's ``_create_trainer`` (fork acad9875, fully_async_main.py:138), building
         :attr:`trainer_actor`.  Setting ``fa_main.FullyAsyncTrainer`` did not
-        reach verl's method inside the Ray actor (s19-verl64b-async7-20261010a: the
+        reach verl's method inside the Ray actor (the
         trainer was verl's own class, "no attribute yeto_configure"), so the method is
         overridden here instead of relying on that module global."""
         from verl.experimental.separation.utils import create_resource_pool_manager

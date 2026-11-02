@@ -1,5 +1,5 @@
 """Expert load report and ``weight_packed`` rename inside an SGLang server process
-(S25 N2.3 post-load check 1; A-INF section 2.3 option A, item 1).
+(post-load check 1).
 
 SGLang's GLM5.3 ``load_weights`` maps ``experts.<e>.gate_proj.weight`` to the
 fused ``experts.w13_weight`` parameter. A compressed-tensors MXFP4 release

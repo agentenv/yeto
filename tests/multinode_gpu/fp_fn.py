@@ -4,7 +4,7 @@ argv + attestation ``runtime_fingerprint`` for the 4x8 H200 cases, on CPU.
 usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s|fn8r> [--seed N] [--total-steps N] [extra cli args]
 
 The fingerprint is the pinned Miles commit + the FULL Miles argv, so it changes
-with seed / total-steps / any flag: an E1 attestation is valid only for the exact
+with seed / total-steps / any flag: an attestation is valid only for the exact
 parameters it was generated with (re-run this script with the run's params).
 """
 from __future__ import annotations

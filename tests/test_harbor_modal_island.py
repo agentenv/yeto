@@ -1,4 +1,4 @@
-"""Harbor agent on a Modal island (S27 G-DA): rollout function, example imports,
+"""Harbor agent on a Modal island: rollout function, example imports,
 boat token, Harbor image layer, gate relay tunnel, abort hook."""
 
 from __future__ import annotations
@@ -214,7 +214,7 @@ def test_miles_finds_the_abort_hook_next_to_the_agent_function():
     assert module == harbor_agent.__name__ and callable(getattr(harbor_agent, "abort"))
 
 
-# ------------------------------------------------- verl agentic islands (S27 G-FS)
+# ------------------------------------------------- verl agentic islands -----------
 
 VERL_IMAGE_REF = "verl-build:" + "a" * 40
 

@@ -1,4 +1,4 @@
-"""Stacked native source (N8.5b), per-rank re-quantization (N8.2) and the trainer adapters.
+"""Stacked native source, per-rank re-quantization and the trainer adapters.
 
 Both schemes use the tiny artefacts of tests/test_rl_quant_requant.py (W4A8, R2
 AWQ) and tests/test_rl_quant_mxfp4.py (MXFP4 RTN). The reference output is the
@@ -116,7 +116,7 @@ def _assert_same_files(a: Path, b: Path) -> None:
         assert (a / name).read_bytes() == (b / name).read_bytes(), name
 
 
-# -- N8.5b: stacked native source --------------------------------------------------
+# -- stacked native source --------------------------------------------------
 
 def test_unstack_round_trips_the_per_expert_tensors(world):
     stacked = _stack(world["src"])
@@ -143,7 +143,7 @@ def test_source_with_stacked_and_per_expert_experts_is_rejected():
         StackedSourceIndex.from_names(names, lambda n: (1, 4, 4))
 
 
-# -- N8.2: parts and merge -----------------------------------------------------------
+# -- parts and merge -----------------------------------------------------------
 
 def _row_split(src: dict[str, torch.Tensor], ranks: int) -> list[list[SourceSlice]]:
     """Per-expert matrices round robin; other tensors of dim >= 2 split by rows; small ones on rank 0."""
@@ -317,7 +317,7 @@ def test_two_gloo_ranks_write_the_single_process_bytes(tmp_path, scheme):
     _assert_same_files(out, case / "reference")
 
 
-# -- N8.3: release directories, records and the reader check ---------------------------
+# -- release directories, records and the reader check ---------------------------
 
 def test_release_directories_are_named_by_scheme_with_the_old_w4a8_name():
     assert release_dir_for(BF16) == RELEASE_DIR == "policy-releases"

@@ -36,7 +36,7 @@ def handle(token=TOKEN, payload="PACK"):
         rollout_id=3, policy_version=3, policy_hash=H,
         groups=(
             GroupMetadata("g0", ("s0", "s1"), token, 0.5, 0.5, 10),
-            GroupMetadata("g1", ("s10", "s11"), TOKEN, 1.0, 0.0, 7),
+            GroupMetadata("g1", ("s2", "s3"), TOKEN, 1.0, 0.0, 7),
         ),
         completed=2, aborted=0, payload=payload,
     )
@@ -91,7 +91,7 @@ def test_train_step_receipt_and_release():
     assert released == ["PACK"]
     assert receipt.optimizer_step_succeeded and receipt.optimizer_steps == 1
     assert receipt.trained_tokens == 17
-    assert receipt.trajectory_ids == ("r3:g0:s0", "r3:g0:s1", "r3:g1:s10", "r3:g1:s11")
+    assert receipt.trajectory_ids == ("r3:g0:s0", "r3:g0:s1", "r3:g1:s2", "r3:g1:s3")
     assert receipt.base_policy_version == 3 and receipt.base_policy_hash == H
     assert receipt.input_batch_hash == batch_hash(handle()) and receipt.parameter_layout_hash == L
     assert t.last_grad_norm == 0.3
@@ -255,7 +255,7 @@ class PluginActor:
 
 
 def test_miles_update_is_aligned_to_stamp_the_policy_version(monkeypatch):
-    """P0-S: Miles' update_weights stamps its counter; the counter is aligned first."""
+    """Miles' update_weights stamps its counter; the counter is aligned first."""
     from yeto.rl.adapters.miles import publish as publish_module
 
     calls = []
@@ -350,7 +350,7 @@ def test_publish_full_manifest_with_members():
     assert m.target_policy_version == 4 and m.target_policy_hash == s.policy_tensor_hash()
     assert m.payload_bytes == (8 + 12) * 4
     assert result.members == frozenset({"engine:c0", "engine:c1"})
-    # P0-S: the engines carry the plain policy version; the label stays with yeto
+    # The engines carry the plain policy version; the label stays with yeto
     assert all(e.version == "4" for e in engines)
     assert calls == ["update_weights"] and ctl.log == ["start", "end"]
     assert set(pub.last_engine_checksums) == {"http://e0", "http://e1"}
@@ -450,7 +450,7 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
     from yeto.rl.adapters.miles import state_plugin
     from yeto.rl.adapters.miles.state_plugin import STEP_LOSSES
 
-    # loss dict keys exactly as Miles aggregates them (algo-2a G1 attempt6
+    # loss dict keys exactly as Miles aggregates them (algo-2a GPU attempt 6
     # gspo_s2 log line minus the "train/" prefix log_train_step adds)
     miles_losses = [
         {"loss": -3.7e-09, "pg_loss": -3.7e-09, "entropy_loss": 0.0, "pg_clipfrac": 0.5,
@@ -519,7 +519,7 @@ def _rank_actor_draining_state_plugin():
 
 
 def test_default_grpo_drains_step_losses_every_round_so_save_cut_is_not_refused(tmp_path):
-    """Integ-s2 finding 1: default GRPO never consumed _STEP_LOSSES, so the list
+    """Regression: default GRPO used to leave _STEP_LOSSES unconsumed, so the list
     grew per round and save_cut refused with "per-step records not drained"."""
     from yeto.rl.adapters.miles import cut_plugin, state_plugin
 
@@ -594,7 +594,7 @@ def test_trainer_only_island_publishes_without_engines(monkeypatch):
     assert calls == [] and result.members == frozenset() and pub.last_engine_checksums is None
 
 
-# E1: publication checks at the round-cut interval
+# Publication checks at the round-cut interval
 def test_an_unverified_publication_skips_only_the_engine_read_back():
     from dataclasses import replace as dc_replace
 

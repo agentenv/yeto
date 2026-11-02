@@ -1,5 +1,5 @@
 """Card-tool adapters: one record shape for ``nvidia-smi``, ``npu-smi`` and
-``ppu-smi`` (rl-ssh-node-pool design D3).
+``ppu-smi`` (rl-ssh-node-pool).
 
 Every family has a parser that turns the tool output into
 :class:`CardRecord` values (index, card name, HBM GiB, health). The launcher
@@ -16,10 +16,9 @@ Verification state of the output formats:
   from ``yeto/hw/catalog.py``, which already reads ``npu-smi info -l`` and
   ``-t board``. The driver version of that sample is not recorded, and
   driver 25.x is not checked.
-- ``ppu-smi``: NOT verified. ``infra-drafts/SESSION24/T-PPU-gaps.md`` 2.2 says
+- ``ppu-smi``: NOT verified. The PPU vendor notes say
   the PPU stack offers NVML-compatible APIs, so the parser accepts the
-  NVIDIA CSV form and a ``key: value`` form. A real machine must confirm it
-  (task N1.2, GPU half).
+  NVIDIA CSV form and a ``key: value`` form. A real machine must confirm it.
 """
 
 from __future__ import annotations

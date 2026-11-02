@@ -1,4 +1,4 @@
-"""yeto reward post-processing dispatcher (change ``rl-algo-grpo-knobs``, design D4/D5).
+"""yeto reward post-processing dispatcher (change ``rl-algo-grpo-knobs``).
 
 This is the only ``--custom-reward-post-process-path`` of the ports path::
 
@@ -10,7 +10,7 @@ normalization, so the dispatcher re-implements that built-in path exactly
 (``grpo_default``) and composes it with yeto stages::
 
     post_process(args, samples)
-      cfg    = pipeline_config(args)                 # args.yeto_algo_plugins (D5), hash-checked
+      cfg    = pipeline_config(args)                 # args.yeto_algo_plugins, hash-checked
       raw    = [s.get_reward_value(args) for s]      # as Miles
       shaped = raw
       for stage in cfg.reward_shapers:               # REWARD_SHAPERS, in order
@@ -46,10 +46,10 @@ Frozen interface (consumed by ``rl-algo-seq-and-adv``)
   grouping and multi-segment merging, for transforms that need them.
 * ``PIPELINE_ATTR`` (``args.yeto_algo_plugins``) and
   ``plugins_payload(config) / read_plugins(args)``: the runtime-attrs
-  channel (D5).
+  channel.
 
-Registering a new advantage transform (P2)
-------------------------------------------
+Registering a new advantage transform
+-------------------------------------
 
 1. In your extension module (listed in ``yeto.rl.algos.EXTENSION_MODULES``),
    define a *module-level* ``fn`` and call ``register_advantage_transform``
@@ -58,8 +58,8 @@ Registering a new advantage transform (P2)
    transform is covered. ``stage_plugin_refs()`` gives one PluginRef per such
    module (sorted by module name); a spec that uses the dispatcher must list
    exactly these in ``plugins`` (``grpo_knobs.with_pipeline_plugins(spec)``
-   adds them). The run code pack pins their source (rl-identity-tiering
-   L9.11 removed the per-process source hash re-check).
+   adds them). The run code pack pins their source (no
+   per-process source hash re-check).
 3. Select it from the spec: ``advantage.transform = "<name>"`` (and
    ``advantage.transform_params``) plus
    ``advantage.reward_postprocess = dispatcher_ref()``. Unknown names are
@@ -169,7 +169,7 @@ def register_advantage_transform(name: str, fn, *, validate=None) -> StageDef:
 
 
 # --------------------------------------------------------------------------
-# runtime attrs channel (design D5)
+# runtime attrs channel
 # --------------------------------------------------------------------------
 
 
@@ -431,7 +431,7 @@ register_advantage_transform(DEFAULT_TRANSFORM, grpo_default)
 
 
 def overlong_penalty_value(length: int, max_length: int, cache_length: int) -> float:
-    """DAPO soft overlong punishment (design D6)."""
+    """DAPO soft overlong punishment."""
 
     if length <= max_length - cache_length:
         return 0.0
@@ -500,7 +500,7 @@ def post_process(args: Any, samples: list[Any]) -> tuple[list[float], list[float
     """Miles ``--custom-reward-post-process-path`` entry."""
 
     _check_multi_lora(args)
-    _load_extensions()  # stages registered by other extension modules (e.g. P2)
+    _load_extensions()  # stages registered by other extension modules
     cfg = pipeline_config(args)
     raw = [sample.get_reward_value(args) for sample in samples]
     shaped = raw

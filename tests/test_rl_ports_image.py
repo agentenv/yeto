@@ -121,8 +121,8 @@ def test_ports_setup_reuses_the_image_forks_and_still_verifies():
         f"python3 -m pip install -q --no-deps -e ~/miles 'peft=={rl.MILES_PEFT_VERSION}'\nfi"
     )
     # SGLang: reuse /sgl-workspace/sglang only if it is exactly the pinned,
-    # clean fork checkout and the image manifest names it there (no import:
-    # L2.3); without a manifest entry the import check is the fallback.
+    # clean fork checkout and the image manifest names it there (no import
+    # needed); without a manifest entry the import check is the fallback.
     s = rl.SGLANG_NEXT_COMMIT
     assert sglang.startswith("SGLANG_IN_IMAGE=0\nif ")
     guard, rest = sglang.split("; then\n", 1)
@@ -266,7 +266,7 @@ def test_pure_python_check_rejects_build_inputs(tmp_path):
 
 
 def test_layer_drops_megatron_bridges_eager_modelopt_import():
-    """L2.2: the trainer imports megatron.bridge without paying for modelopt (21-30 s)."""
+    """The trainer imports megatron.bridge without paying for modelopt (21-30 s)."""
     import ast
     import importlib.util
 
@@ -316,7 +316,7 @@ def test_patched_files_applies_a_patch_to_the_commits_files(tmp_path):
 
 
 def test_megatron_lm_patch_drops_the_module_level_modelopt_imports():
-    """L2.2: the three Megatron-LM imports a trainer process ran (traced in the image) become lazy."""
+    """The three Megatron-LM imports a trainer process ran (traced in the image) become lazy."""
     ml = _make_layer_module()
     patch = ml.MEGATRON_LM_PATCH.read_text()
     files = [line[len("--- a/"):] for line in patch.splitlines() if line.startswith("--- a/")]
@@ -533,7 +533,7 @@ def test_ports_miles_setup_falls_back_to_the_editable_install_without_manifest(t
 
 
 # ------------------------------------------------- optional login injection
-# MILES_NEXT_IMAGE is public since 2026-10-07: by default NO registry login
+# MILES_NEXT_IMAGE is public: by default NO registry login
 # is injected anywhere (island task secrets, Modal pull secret, head job).
 # It is injected only when SKYPILOT_DOCKER_* is set or --rl-image-private asks.
 
@@ -634,7 +634,7 @@ def test_modal_public_image_config_has_no_login(monkeypatch, no_login):
 
 
 def test_gpu_model_pin_refuses_an_a10g_for_an_a10():
-    """E1: Modal "A10G" containers are an NVIDIA A10 or an A10G; --modal-gpu-name pins one."""
+    """Modal "A10G" containers are an NVIDIA A10 or an A10G; --modal-gpu-name pins one."""
     from yeto.gpu_spec import parse_gpu_spec
 
     mr.check_gpu_model("NVIDIA A10", ["NVIDIA A10"] * 2, 2)

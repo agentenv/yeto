@@ -1,11 +1,11 @@
 """tools/modal_container_guard.py: the shared container guard and cost guard of the
 Modal run scripts, run offline on made-up ``modal container list --json`` output.
 
-s27-ch-d0a (2026-10-25): two extra containers of the island function appeared at
+Extra containers: two extra containers of the island function appeared at
 00:56:15Z while the two original containers trained (step 66 at 00:56:11Z); the old
 shell rule ("more distinct containers than NODES") stopped the healthy run.
 
-s27-ex-1 (2026-10-25): Modal built the image in the app first (two build containers, 12 min);
+Image build: Modal built the image in the app first (two build containers, 12 min);
 the guard took them for the island containers and stopped the app when the islands'
 containers came (18:06:21Z). The islands' own container lines now name the island containers."""
 
@@ -21,8 +21,8 @@ import pytest
 from tools.modal_container_guard import (COST, EXIT_STOPPED, RESCHED, ContainerGuard, GuardConfig,
                                          IslandEnds, ProgressCounter, main)
 
-APP = "yeto-s27-ch-d0a"
-# the ids of s27-ch-d0a: the two original containers and the two extra ones
+APP = "yeto-guard-test"
+# the ids of the extra-containers run: the two original containers and the two extra ones
 A, B = "ta-01M5R4W5WHK9E8PRNKV39YPG3R", "ta-01M5R4W5YGC327G6WNV0BVDZZR"
 C, D = "ta-01M5R8XCBTK74HQYEZT6NWTW2R", "ta-01M5R8XC9EK8226E1ZF5AXREER"
 T_ORIG, T_EXTRA = "2026-10-24T23:45:50Z", "2026-10-25T00:56:08Z"
@@ -34,7 +34,7 @@ def _row(cid: str, start: str, app: str = APP) -> dict:
 
 def _island_lines(*slots: tuple[int, int, str]) -> str:
     """The launch log lines of islands that name their containers: (island, rank, container id)."""
-    return "".join(f"[s27-test-l{i}-modal] [modal-island {i}] rank {r} container {cid}\n" for i, r, cid in slots)
+    return "".join(f"[guard-test-l{i}-modal] [modal-island {i}] rank {r} container {cid}\n" for i, r, cid in slots)
 
 
 def _guard(**kw) -> ContainerGuard:
@@ -44,7 +44,7 @@ def _guard(**kw) -> ContainerGuard:
 
 
 ORIGINALS = [_row(A, T_ORIG), _row(B, T_ORIG)]
-ORIG_LOG = _island_lines((0, 0, A), (1, 0, B))  # the log of an s27-ch-d0a style run with two 1-container islands
+ORIG_LOG = _island_lines((0, 0, A), (1, 0, B))  # the log of an extra-containers style run with two 1-container islands
 WITH_EXTRAS = ORIGINALS + [_row(C, T_EXTRA), _row(D, T_EXTRA)]
 
 
@@ -78,15 +78,15 @@ def test_an_original_gone_while_an_extra_is_present_stops_the_run():
         e for e in decision.events if e["event"] == "original_gone").items()
 
 
-# s27-ek-b (2026-10-25): both islands finalized; an idle container of island 1's function
+# Idle extra container: both islands finalized; an idle container of island 1's function
 # started at 14:43:25Z; island 1's container left at its normal end.
 EK_I0, EK_I1, EK_X = ("ta-01M5SQHXHTE3G91GN7YZSGMPER", "ta-01M5SQHXNQ4FPENB16T90SWYTR",
                       "ta-01M5SR86VJ7924QF3BRVTR6AXR")
 EK_T0, EK_TX = "2026-10-25 14:31:13+00:00", "2026-10-25 14:43:25+00:00"
 EK_ORIG = [_row(EK_I0, EK_T0), _row(EK_I1, EK_T0)]
-EK_LOG = (f"[s27-ek-b-l0-modal] [modal-island 0] rank 0 container {EK_I0}\n"
-          f"[s27-ek-b-l1-modal] [modal-island 1] rank 0 container {EK_I1}\n"
-          '[s27-ek-b-l1-modal] YETO_RL_EVENT {"event":"rl_learner_finalized","island_id":1,"time_unix":1.0}\n')
+EK_LOG = (f"[guard-ek-l0-modal] [modal-island 0] rank 0 container {EK_I0}\n"
+          f"[guard-ek-l1-modal] [modal-island 1] rank 0 container {EK_I1}\n"
+          '[guard-ek-l1-modal] YETO_RL_EVENT {"event":"rl_learner_finalized","island_id":1,"time_unix":1.0}\n')
 
 
 def test_an_original_of_a_finished_island_leaving_beside_an_extra_does_not_stop():
@@ -377,7 +377,7 @@ def test_extra_log_capture_names_the_function_in_a_time_window(tmp_path, monkeyp
     monkeypatch.setattr(guard_mod.subprocess, "Popen", FakePopen)
     args = guard_mod.parse_args(["--run-dir", str(tmp_path), "--app", APP, "--nodes", "2", "--rate", "1",
                                  "--max-polls", "1"])
-    now = 1792939422.0  # 2026-10-25T14:43:42Z, the poll that saw the s27-ek-b extra container
+    now = 1792939422.0  # 2026-10-25T14:43:42Z, the poll that saw the idle extra container
     guard_mod._diagnose_extra(args, guard_mod.RunFiles(tmp_path), "ap-x", EK_X, EK_TX, now)
     guard_mod._diagnose_extra(args, guard_mod.RunFiles(tmp_path), None, EK_X, EK_TX, now)  # no app id
     assert len(commands) == 1
@@ -424,9 +424,9 @@ def test_older_cli_column_names_are_read(tmp_path):
     assert failed is None and why.startswith("rc=2")
 
 
-# -- the island containers are the ones the islands name (s27-ex-1) ---------------------------------
+# -- the island containers are the ones the islands name ---------------------------------------
 
-# s27-ex-1 (2 islands x 1 container, new image): "Built image ... in 723.62s" (12 min) and a second
+# Image build run (2 islands x 1 container, new image): "Built image ... in 723.62s" (12 min) and a second
 # image "in 10.40s" ran in containers of the app. The guard listed B1 from 18:03:46Z, B2 from
 # 18:05:50Z, the island containers I0, I1 (function calls at 18:05:58Z) at 18:06:21Z and stopped the
 # app there: "original container(s) [B1, B2] gone while extra container(s) [I0, I1]". The ids and
@@ -448,7 +448,7 @@ def _names(owners=(), others=()):
 
 
 def test_build_containers_before_the_islands_do_not_stop_the_run():
-    """s27-ex-1 on the guard's data: the build containers come and go, the islands' containers
+    """The image-build run on the guard's data: the build containers come and go, the islands' containers
     come, their lines reach the log one poll later."""
     guard = _guard(rate=11.5)
     events = []
@@ -470,7 +470,7 @@ def test_build_containers_before_the_islands_do_not_stop_the_run():
 
 
 def test_the_old_rule_without_names_stops_on_the_same_poll_sequence():
-    """The positional rule (no names) still takes B1, B2 for the originals: what s27-ex-1 did."""
+    """The positional rule (no names) still takes B1, B2 for the originals: what the image-build run did."""
     guard = _guard(rate=11.5)
     for t, rows in ((0.0, EX_BUILD1), (30.0, EX_BUILD1), (60.0, EX_BUILD2)):
         assert guard.observe(t, rows, progress=0).stop is None
@@ -502,13 +502,13 @@ def test_after_all_islands_are_named_the_rules_are_the_old_ones():
     guard = _guard(extra_max_s=600.0)
     owners = [EX_I0, EX_I1]
     guard.observe(0.0, EX_ISLANDS, progress=1, names=_names(owners))
-    # an idle extra container beside the islands (G-EO): only a warning, then the 600 s limit
+    # an idle extra container beside the islands: only a warning, then the 600 s limit
     extra = [_row(EX_X, "2026-10-25 18:30:00+00:00")]
     seen = guard.observe(60.0, EX_ISLANDS + extra, progress=2, names=_names(owners))
     assert seen.stop is None and [e["event"] for e in seen.events] == ["extra_seen"]
     assert guard.observe(660.0, EX_ISLANDS + extra, progress=3, names=_names(owners)).stop is None
     assert guard.observe(661.0, EX_ISLANDS + extra, progress=4, names=_names(owners)).stop is not None
-    # an island that finished and left beside an extra container (s27-ek-b): not a replacement
+    # an island that finished and left beside an extra container: not a replacement
     done = _guard()
     done.observe(0.0, EX_ISLANDS, progress=1, names=_names(owners))
     done.observe(30.0, EX_ISLANDS + extra, progress=2, names=_names(owners), finished={EX_I1})
@@ -524,7 +524,7 @@ def test_after_all_islands_are_named_the_rules_are_the_old_ones():
 
 def test_a_container_that_runs_the_island_script_again_is_an_extra_at_once():
     """The log names a second container for a slot that has one: Modal ran the island again in a
-    new container (s27-gr-h). That is a proof, so it counts before the other island is named."""
+    new container. That is a proof, so it counts before the other island is named."""
     guard = _guard()
     guard.observe(0.0, [EX_ISLANDS[0]], progress=1, names=_names([EX_I0]))
     replaced = guard.observe(30.0, [_row(EX_X, "2026-10-25 18:30:00+00:00")], progress=2,
@@ -606,7 +606,7 @@ def test_island_ends_names_the_first_container_of_each_slot(tmp_path):
 
 
 def test_cli_build_containers_before_the_islands_do_not_stop_the_run(tmp_path):
-    """The s27-ex-1 poll sequence through the command line. With the positional rule of
+    """The image-build poll sequence through the command line. With the positional rule of
     0024e104 this run ends with exit 3 and RESCHED_FIRED."""
     steps = ([{"rows": EX_BUILD1}] * 4 + [{"rows": EX_BUILD2}, {"rows": EX_ISLANDS},  # lines not in the log yet
               {"rows": EX_ISLANDS, "log": EX_LINES, "progress": True}] + [{"rows": EX_ISLANDS, "progress": True}] * 2)

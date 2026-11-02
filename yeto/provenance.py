@@ -117,7 +117,7 @@ def python_spec_sha256(spec: str, *, base_dir: str | Path | None = None) -> str:
     return file_sha256(python_spec_path(spec, base_dir=base_dir))
 
 
-# rl-identity-tiering L9.1 transition: until run code packs exist, an RL run's
+# Transition: until run code packs exist, an RL run's
 # ``code_pack_digest`` is the attested :func:`source_tree_sha256`.
 CODE_PACK_MODE_SOURCE_TREE = "source-tree"
 

@@ -1,6 +1,6 @@
 """refresh_actor_backup: refresh an existing pinned "actor" copy, never create one.
 
-S24 T-27B: the cut restore called ``weights_backuper.backup("actor")`` on a Miles
+The cut restore called ``weights_backuper.backup("actor")`` on a Miles
 backuper that had skipped the actor backup (colocated LoRA / fixed partition), which
 allocated a pinned host copy of the whole frozen base per rank (+133 GB on 27B).
 """

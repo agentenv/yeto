@@ -1,4 +1,4 @@
-"""Write the text subset of a VL checkpoint as a plain text-only checkpoint (S27 G-EZ).
+"""Write the text subset of a VL checkpoint as a plain text-only checkpoint.
 
 The selection itself is :mod:`yeto.rl.engine.text_subset`; this module only
 moves bytes. Tensor data is copied byte for byte from the source shard to the

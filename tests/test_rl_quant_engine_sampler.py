@@ -1,4 +1,4 @@
-"""Rollout quant tiers on the engine sampler island (S26 E6): the spec written by the
+"""Rollout quant tiers on the engine sampler island: the spec written by the
 launch layer, the settings filled on the node, the dense expert count."""
 
 from __future__ import annotations

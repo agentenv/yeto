@@ -1,4 +1,4 @@
-"""Neutral name -> verl binding and the three-way check (rl-verl-backend D11; decoupling 4.4a style).
+"""Neutral name -> verl binding and the three-way check (rl-verl-backend; decoupling 4.4a style).
 
 What the verl island binds by name, and how each binding is checked before launch:
 

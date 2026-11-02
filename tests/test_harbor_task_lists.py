@@ -1,7 +1,7 @@
-"""S26 E9.5: TB2 hold-out / training split / curriculum over Harbor task directories (CPU).
+"""TB2 hold-out / training split / curriculum over Harbor task directories (CPU).
 
 Synthetic checkouts in ``tmp_path`` for the rules; the real TB2 checkout
-(``YETO_TB2_DIR``, default ~/work/tb2-data) for byte identity with the lists
+(``YETO_TB2_DIR``, skipped when unset) for byte identity with the lists
 in ``data/eval`` (skipped when absent).
 """
 
@@ -97,10 +97,10 @@ def test_split_fails_closed_on_unknown_or_clashing_tasks(tmp_path):
         tl.load_unusable(bad)
 
 
-@pytest.mark.skipif(not (Path(os.environ.get("YETO_TB2_DIR", Path.home() / "work" / "tb2-data")) / "fix-git").is_dir(),
+@pytest.mark.skipif(not (Path(os.environ.get("YETO_TB2_DIR", "/nonexistent-tb2-dir")) / "fix-git").is_dir(),
                     reason="TB2 checkout tb2@2fd12b8 not present")
 def test_tb2_checkout_reproduces_the_lists_in_data_eval():
-    root = Path(os.environ.get("YETO_TB2_DIR", Path.home() / "work" / "tb2-data"))
+    root = Path(os.environ.get("YETO_TB2_DIR", "/nonexistent-tb2-dir"))
     tasks = tl.HarborTaskSet(root)
     if tasks.version != "tb2@2fd12b8":
         pytest.skip(f"checkout is {tasks.version}")

@@ -1,4 +1,4 @@
-"""S25 C3V end to end on CPU: two synced verl buffer trainers, the real Rust
+"""End to end on CPU: two synced verl buffer trainers, the real Rust
 syncer (elastic OuterStep merge), one engine sampler island that follows the
 merged releases.
 
@@ -7,7 +7,7 @@ The trainers are the verl buffer trainer of test_rl_verl_buffer_trainer.py
 merged checkpoint) over one lane each of one buffer, with ``PoolAvgSync``.
 The sampler is the real engine sampler island (fake engine) in a thread.
 
-Checks (the same as the GPU run's, SESSION25/gpu-review/T-C3V.md):
+Checks (the same as the GPU run's):
 1. both trainers apply the same merged policy hash at every outer version;
 2. the sampler loads only versions the publisher released, in order, and each
    released hash is the merged hash of that outer version; learner 1 releases

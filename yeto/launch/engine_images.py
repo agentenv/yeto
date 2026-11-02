@@ -1,4 +1,4 @@
-"""Engine images by CPU architecture (S25 N0.2, N1.6).
+"""Engine images by CPU architecture.
 
 yeto defines one image per (device family, CPU architecture) pair. Each image
 has a Dockerfile and a version lock under ``docker/<name>/``; the lock is the
@@ -62,8 +62,6 @@ class ImageSpec:
 IMAGES: dict[str, ImageSpec] = {spec.name: spec for spec in (
     # PPU trainer and SGLang sampler (stage 1): Alibaba PPU nodes are x86_64.
     ImageSpec("ppu-train", "yeto-ppu-train", "x86_64", "ppu", ("trainer", "sampler")),
-    # Ascend 910B sampler (stage 2): Kunpeng hosts are aarch64.
-    ImageSpec("npu-sampler", "yeto-npu-sampler", "aarch64", "npu", ("sampler",)),
 )}
 
 

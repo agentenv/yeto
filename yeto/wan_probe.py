@@ -1,6 +1,6 @@
-"""Island-to-syncer link-bandwidth probe (S26 E3b).
+"""Island-to-syncer link-bandwidth probe.
 
-E3/E3b showed that the sync share follows the island *container*: on a slow
+Measurements showed that the sync share follows the island *container*: on a slow
 container every TCP stream is slow at once (1-5 MB/s each, both directions),
 so no stream scheduling can help. An island can measure its link to the head
 before it loads a model and exit early when the link is too slow; the

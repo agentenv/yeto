@@ -3,7 +3,7 @@
 Two checks run BEFORE the launcher creates any cloud resource:
 
 * thread preflight: the number of threads of this user (the same number as
-  ``ps -L -u <user> | wc -l`` without the header line).  The s1run thread
+  ``ps -L -u <user> | wc -l`` without the header line).  The multinode_run.sh thread
   guard (THREAD_MAX 3300, ulimit -u 4096) tears down a live run when the user
   goes over its limit, so a launch must not start near that limit.
 * memory preflight: an upper-bound estimate of the per-GPU memory peak of each
@@ -49,7 +49,7 @@ class PreflightError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# thread counting (task 1.1)
+# thread counting
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ThreadCount:
@@ -166,13 +166,13 @@ class ThreadConfig:
 
 
 def thread_message(count: ThreadCount, cfg: ThreadConfig, headline: str) -> str:
-    """The text of a thread preflight error or wait line (task 1.4)."""
+    """The text of a thread preflight error or wait line."""
 
     if count.sky_api_found:
         sky = (f"SkyPilot API server: {count.sky_api} threads "
                f"({count.sky_api_share:.0%} of {count.total})")
     else:
-        sky = "SkyPilot API server: not found (未找到 SkyPilot API 服务)"
+        sky = "SkyPilot API server: not found"
     return "\n".join([
         f"[preflight] {headline}",
         f"[preflight]   user threads {count.total}, start threshold {cfg.start}, hard limit {cfg.hard}",
@@ -205,7 +205,7 @@ def thread_relaxations(cfg: ThreadConfig) -> dict:
 
 def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
                      clock: Callable[[], float] = time.monotonic,
-                     sleep: Callable[[float], None] = time.sleep,
+                     sleep: Callable[[float], None] | None = None,
                      out=None) -> dict:
     """Run the thread preflight; return the manifest record.
 
@@ -214,6 +214,8 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
     n >= ``hard``: stop now in every mode.  ``off``: no read, a warning."""
 
     out = sys.stderr if out is None else out
+    # Looked up at call time, so a patched ``time.sleep`` is honoured.
+    sleep = time.sleep if sleep is None else sleep
     cfg = ThreadConfig.from_args(args)
     relaxed = thread_relaxations(cfg)
     if relaxed:
@@ -222,7 +224,7 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
               file=out, flush=True)
     if cfg.mode == "off":
         print("[preflight] WARNING: thread preflight is OFF (--preflight-threads off); the "
-              "s1run thread guard may tear down this run", file=out, flush=True)
+              "multinode_run.sh thread guard may tear down this run", file=out, flush=True)
         return {"mode": "off", "disabled": True, "relaxed": relaxed}
     counter = counter or count_threads
     started = clock()
@@ -312,7 +314,7 @@ def memory_preflight(args, specs, *, out=None) -> dict:
     for rec in report.islands:
         if not rec.get("estimated"):
             print(f"[preflight] WARNING: GPU memory not estimated for island {rec['learner_id']} "
-                  f"(显存未估算): {rec.get('reason')}", file=out, flush=True)
+                  f"(memory not estimated): {rec.get('reason')}", file=out, flush=True)
             continue
         print(f"[preflight] island {rec['learner_id']} {rec['gpu']}: estimated peak "
               f"{rec['peak_gib']:.1f} GiB / limit {rec['limit_gib']:.1f} GiB "
@@ -386,7 +388,7 @@ def add_cli_args(p) -> None:
                    "base, never from a checkpoint store); repeatable; an island without a role is "
                    "an anchor; replaces --spot")
     g.add_argument("--rl-island-sample-role", action="append", default=None, metavar="ISLAND:ROLE",
-                   help="rl-trainer-start-stop L5.4: one launch of sampler islands and a trainer "
+                   help="One launch of sampler islands and a trainer "
                    "island over one --rl-checkpoint-store (ROLE sampler or trainer, one entry per "
                    "--gpu island; exactly one trainer, one or more samplers; several samplers "
                    "split --total-steps). Needs --rl-single-island-no-sync: no "
@@ -411,7 +413,7 @@ def add_cli_args(p) -> None:
                    "its adapters")
 
 
-def launch_preflight(args, specs, *, counter=None, sleep=time.sleep, clock=time.monotonic,
+def launch_preflight(args, specs, *, counter=None, sleep=None, clock=time.monotonic,
                      out=None) -> dict:
     """Thread then memory preflight; the ``preflight`` record of the run manifest.
     Raises PreflightError (no cloud resource created)."""
@@ -420,7 +422,7 @@ def launch_preflight(args, specs, *, counter=None, sleep=time.sleep, clock=time.
     return {"threads": threads, "memory": memory}
 
 
-def pre_cloud_checks(args, *, counter=None, sleep=time.sleep, clock=time.monotonic, out=None,
+def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, out=None,
                      threads: bool = True) -> dict:
     """Every launch-preflight-guards check that must pass before any cloud
     resource, on PREPARED args (``prepare_launch_args`` already ran), except the
@@ -467,8 +469,8 @@ def check_policy_age_spec(args) -> None:
     """``--rl-max-policy-age N`` (global or a per-island override) needs an
     algorithm spec with ``execution.max_policy_staleness >= N`` -- the same rule
     the Miles island applies in its config translation (adapters/miles/config.py)
-    and its A1 preflight, now checked before any cloud resource (10-09 ruling of
-    the main agent: S18 LPG run s18-lpg-age-20261009a failed on the island).
+    and its A1 preflight, now checked before any cloud resource (a run once failed this check
+    only on the island).
     Needs prepared args (``rl_algorithm_spec_json`` resolved)."""
     if getattr(args, "training_mode", "sft") != "rl":
         return

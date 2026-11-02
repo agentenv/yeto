@@ -1,5 +1,5 @@
 """rl-offpolicy-correction-passthrough (CPU): neutral correction fields,
-hash (L6b.1), Miles mapping, decoupled PPO refusals, refusals (L6b.2),
+hash, Miles mapping, decoupled PPO refusals, refusals,
 offpolicy_gate, A_hard >= 2, start-version gap and observe-only bounds."""
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def decoupled(upper: float = 2.0, **kw) -> AlgorithmSpec:
     return AlgorithmSpec(correction=CorrectionSpec(method="tis", lower=0.0, upper=upper, **kw))
 
 
-# -- L6.1 neutral fields ------------------------------------------------------
+# -- neutral fields ------------------------------------------------------
 
 
 def test_fields_written_in_full_with_defaults():
@@ -75,7 +75,7 @@ def test_valid_specs():
                .rejections())
 
 
-# -- L6.2 / L6b.1 hash and records -------------------------------------------
+# -- hash and records -------------------------------------------
 
 
 @pytest.mark.parametrize("correction", [
@@ -86,7 +86,7 @@ def test_valid_specs():
     CorrectionSpec(method="opsm", opsm_delta=1e-4),
 ])
 def test_correction_group_changes_the_hash(correction):
-    # L6b.1: the correction group is in the hash (and in the semantic hash)
+    # The correction group is in the hash (and in the semantic hash)
     base = AlgorithmSpec(entropy_coef=0.01)
     spec = base.replace(correction=correction)
     assert spec.sha256() != base.sha256()
@@ -147,7 +147,7 @@ def test_backend_without_mapping_is_recorded_and_warned():
 
 
 def test_island_tape_gets_record_and_warnings_then_refuses(tmp_path):
-    # L6b.2: the tape keeps the record and the warning; the island start is refused
+    # The tape keeps the record and the warning; the island start is refused
     from yeto.rl.adapters.miles import island_entry
 
     events = []
@@ -168,7 +168,7 @@ def test_island_tape_gets_record_and_warnings_then_refuses(tmp_path):
         (oc.CORRECTION_CONFIG_WARNING, "level", "miles")]
 
 
-# -- L6.3 Miles mapping -------------------------------------------------------
+# -- Miles mapping -------------------------------------------------------
 
 
 def test_miles_tis_row():
@@ -217,7 +217,7 @@ def test_miles_unmappable_fields_warn(kw, field):
     assert event["event"] == "correction_config_warning" and "ran_with" in event
 
 
-# -- L6.7 decoupled PPO: refused Miles flags -----------------------------------
+# -- decoupled PPO: refused Miles flags -----------------------------------
 
 
 @pytest.mark.parametrize("flag", ["--use-rollout-logprobs", "--skip-actor-forward-only",
@@ -242,7 +242,7 @@ def test_decoupled_ppo_records_per_step_anchor():
     assert mapping.argv == ("--use-tis", "--tis-clip", "2.0", "--tis-clip-low", "0.0")
 
 
-# -- L6.5 cross-island comparison ---------------------------------------------
+# -- cross-island comparison ---------------------------------------------
 
 
 def _record(upper: float, anchor: str) -> dict:
@@ -272,7 +272,7 @@ def test_launcher_manifest_section():
     args = _args([])
     section = _offpolicy_correction_manifest(args, decoupled())
     assert "0" in section["islands"] and section["warnings"] == []
-    # L6b.2: an unmappable field refuses the launch
+    # An unmappable field refuses the launch
     with pytest.raises(ValueError, match="level on backend 'miles'"):
         _offpolicy_correction_manifest(args, decoupled(level="sequence"))
 
@@ -288,7 +288,7 @@ def test_refuse_names_every_warning():
     assert "islands differ in ['upper']" in str(exc.value)
 
 
-# -- L6.8 offpolicy_gate --------------------------------------------------------
+# -- offpolicy_gate --------------------------------------------------------
 
 
 def test_dropped_length_histogram_fixed_buckets():
@@ -385,7 +385,7 @@ def test_driver_labels_offpolicy_gate_with_the_batch_backend(backend, label):
     assert emitted[0][1]["backend"] == label
     assert emitted[0][1]["granularity"] == oc.GRANULARITY_TRAJECTORY
 
-# -- L6.9 A_hard >= 2 ----------------------------------------------------------
+# -- A_hard >= 2 ----------------------------------------------------------
 
 
 def test_a_hard_two_passes_support_and_maps_to_both_backends():
@@ -409,7 +409,7 @@ def test_miles_admission_mapping():
         mo.admission_argv(2, admission_limit=3)
 
 
-# -- L6.12 start version --------------------------------------------------------
+# -- start version --------------------------------------------------------
 
 
 def test_continued_trajectory_gap_from_start_version():
@@ -427,7 +427,7 @@ def test_tape_segments_check():
         "checked": 2, "oldest_is_start": 1, "oldest_before_start": 1}
 
 
-# -- L6.13 cross_version_is: observe-only, from the spec ---------------------------
+# -- cross_version_is: observe-only, from the spec ---------------------------
 
 
 def test_cross_version_bounds_follow_the_spec():
@@ -446,7 +446,7 @@ def test_staleness_policy_correction_is_derived():
 
 
 def test_miles_rollout_handle_keeps_the_gate_inputs():
-    # L6.10 GPU: the Miles handle dropped the gate keys, so the driver taped no offpolicy_gate
+    # GPU: the Miles handle dropped the gate keys, so the driver taped no offpolicy_gate
     from yeto.rl.adapters.miles.rollout import _carry_over_fields
 
     payload = {"max_policy_age": 1, "over_age_discarded_groups": 1,

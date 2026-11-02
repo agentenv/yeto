@@ -1,4 +1,4 @@
-"""Start-time hold-out checks (rl-eval-difficulty-buckets D6.c, tasks 2.1/2.2).
+"""Start-time hold-out checks.
 
 Run by the training driver before any GPU action, on CPU. Refuses to start when
 
@@ -24,7 +24,7 @@ from typing import Any, Iterable, Mapping
 from yeto.rl.harness.reward_env.benchmark import holdout_ids, holdout_sha256, task_id_of
 
 HOLDOUT_ENV = "YETO_RL_EVAL_HOLDOUT"   # "path[@sha256][,path[@sha256]...]"
-EVAL_DATA_ENV = "YETO_RL_EVAL_DATA"    # "path[,path...]" eval jsonl (rows in D6.a shape)
+EVAL_DATA_ENV = "YETO_RL_EVAL_DATA"    # "path[,path...]" eval jsonl (eval rows)
 
 
 class EvalGuardError(RuntimeError):

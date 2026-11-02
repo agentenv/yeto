@@ -1,4 +1,4 @@
-"""Gate between rollout quantization tiers (S26 E6): statistics, verdict, collection, CLI."""
+"""Gate between rollout quantization tiers: statistics, verdict, collection, CLI."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Harness verdict -> OK / POLICY_LIMIT / ABORTED (S25 N10.2; was L7 of the Codex harness).
+"""Harness verdict -> OK / POLICY_LIMIT / ABORTED (formerly part of the Codex harness).
 
 yeto rule, kept from the Codex harness: an infrastructure failure is never a
 0 reward.  Only exceptions known to be the policy's own budget become a
@@ -42,7 +42,7 @@ POLICY_OUTPUT_ERROR_REASON = "policy_output_error"
 def policy_output_failure(trajectory: AgentTrajectory, policy_errors: Sequence[str]) -> AgentTrajectory:
     """ABORTED by the agent's exit after the recorder refused a malformed model reply -> POLICY_LIMIT, reward 0.
 
-    S25 N10.9 (main agent decisions): a tool call that is not valid JSON, and
+    A tool call that is not valid JSON, and
     a conversation that outgrew the context (the policy's own length budget),
     are the policy's failures, trained as a 0 reward, not infrastructure aborts.
     Fail closed: only the agent-exit exception, and only with a recorded

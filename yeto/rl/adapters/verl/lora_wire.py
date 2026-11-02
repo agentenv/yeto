@@ -1,11 +1,11 @@
-"""LoRA over verl's disaggregated checkpoint engine (6.4b, S19 async5 fix).
+"""LoRA over verl's disaggregated checkpoint engine (6.4b).
 
 The fork (acad9875) pushes weights trainer -> rollouter through
 ``checkpoint_engine.send_weights`` and drops the PEFT config on both ends
 (``engine_workers.py`` ``per_tensor_param, _ = get_per_tensor_param()``;
 ``CheckpointEngineWorker.update_weights`` calls the rollout without it).  With
 ``lora.merge=False`` the rollout vLLM then loads ``...base_layer.weight``
-names as plain weights and fails (s19-verl64b-async5-20261009a).  Only the
+names as plain weights and fails.  Only the
 colocated ("naive") path passes ``peft_config``/``base_sync_done`` and so
 reaches ``add_lora``.
 
@@ -36,7 +36,7 @@ PHASE_END = "__yeto_lora_phase_end__"
 # The checkpoint engine packs tensors back to back into byte buckets and the
 # receiver views each slice as its dtype; a uint8 tensor whose size is not a
 # multiple of the widest element size misaligns every tensor after it
-# (s19-verl64b-async6-20261010a: "storage_offset() must be divisible by 4").
+# ("storage_offset() must be divisible by 4").
 # Marker tensors are therefore padded to ALIGN bytes.
 ALIGN = 256
 

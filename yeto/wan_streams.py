@@ -1,5 +1,5 @@
 """Per-stream accounting, stall detection and rate-aware striping for the
-island side of a striped syncer connection (S26 E3b).
+island side of a striped syncer connection.
 
 A ``SyncerClient`` stripes one logical message over ``num_streams`` TCP data
 sockets as 4 MiB CHUNK envelopes. The syncer reassembles a message by
@@ -73,8 +73,8 @@ class StreamMeter:
         with self._lock:
             if nbytes > 0 and self._item_started is None and self.queued_bytes <= 0:
                 # An idle stream starts its stall clock at the enqueue, not
-                # at the last byte it sent minutes ago (s27-gh-a: a stream
-                # idle for 2206 s was dropped as stalled on its next chunk).
+                # at the last byte it sent minutes ago (a stream
+                # idle for 2206 s was once dropped as stalled on its next chunk).
                 self._last_progress = self._clock()
             self.queued_bytes += nbytes
 

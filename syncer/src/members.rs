@@ -1,9 +1,9 @@
-//! Island process members with a lease (S27 P4): who is live, which
+//! Island process members with a lease: who is live, which
 //! incarnation of an island is current, and which incarnations are retired
 //! (fenced). Shared by every service of the syncer that keeps per-process
 //! state for islands outside the learner session: the task dispenser
 //! (`dispense.rs`), the spot rollout subscribers (`server.rs`) and the
-//! sample relay producers (`sample_relay.rs`, S27 G-EA). The syncer process
+//! sample relay producers (`sample_relay.rs`). The syncer process
 //! holds one table ([`SharedMembers`]) and gives it to all three, so that
 //! one sampler process has one membership and one lease whatever channel it
 //! talks on.

@@ -1,4 +1,4 @@
-"""Write real Megatron cut shards and a reference HF state for test_rl_eval_cut_to_hf (S27 R-5).
+"""Write real Megatron cut shards and a reference HF state for test_rl_eval_cut_to_hf.
 
 Run with a Python that has megatron-core and a Miles checkout on ``PYTHONPATH``
 (CPU, gloo; no GPU)::

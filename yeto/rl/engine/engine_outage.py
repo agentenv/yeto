@@ -1,4 +1,4 @@
-"""Engine outage: the rollout engines go away, the trainer stays (S27 G-DI, design v2).
+"""Engine outage: the rollout engines go away, the trainer stays.
 
 A two-cluster island (``yeto.launch.engine_cluster``) runs its rollout engines on a
 second, preemptible sky cluster. When that cluster is reclaimed the trainer must not
@@ -26,7 +26,7 @@ The driver calls this object at three points (``IslandDriver`` with ``engine_out
   (the deferred one, else the last published) and regenerates the lost batch.
 
 The backend port (:class:`EngineRecoveryPort`) owns the engine verbs. Miles:
-``yeto.rl.adapters.miles.engine_recovery``. verl (S27 G-EW): ``yeto.rl.adapters.verl.
+``yeto.rl.adapters.miles.engine_recovery``. verl: ``yeto.rl.adapters.verl.
 engine_recovery``, for a separate-mode island (standalone vLLM replicas); the
 launcher still refuses a two-cluster island on verl (VERL-PARITY #15).
 

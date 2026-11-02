@@ -1,4 +1,4 @@
-//! Peer recovery of an island that lost its trainer state (S27 E-3).
+//! Peer recovery of an island that lost its trainer state.
 //!
 //! A short drop (TCP link lost, trainer alive) keeps the reconnect catch-up
 //! in `server.rs`. This module covers the long failure: the island process

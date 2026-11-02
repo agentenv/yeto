@@ -8,12 +8,12 @@ from yeto.rl.engine.recommend import (
     EdgeCost, LoadWindow, Recommender, RecommendMode, attribute, predict_gain, to_load_window)
 
 PH = "a" * 64
-EDGE = CandidateEdge("P2", "P4", 2, 4)
-COSTS = {(PH, "P2", "P4"): EdgeCost(PH, "P2", "P4", 30.0, 60.0, 30.0)}
+EDGE = CandidateEdge("cfg2", "cfg4", 2, 4)
+COSTS = {(PH, "cfg2", "cfg4"): EdgeCost(PH, "cfg2", "cfg4", 30.0, 60.0, 30.0)}
 
 
 class FakeController:
-    def __init__(self, epoch=3, config="P2", phash=PH, pause_ok=True):
+    def __init__(self, epoch=3, config="cfg2", phash=PH, pause_ok=True):
         self.journal = NS(epochs=NS(config_epoch=epoch, config_id=config))
         self.profile = NS(contract_hash=phash)
         self.pause_ok = pause_ok
@@ -82,7 +82,7 @@ def test_unknown_cost_gives_no_recommendation():
 
 
 def test_no_net_gain_holds():
-    big = {(PH, "P2", "P4"): EdgeCost(PH, "P2", "P4", 1e5, 1e6)}
+    big = {(PH, "cfg2", "cfg4"): EdgeCost(PH, "cfg2", "cfg4", 1e5, 1e6)}
     r = rec_mode().recommend(FakeController(), stable(), [EDGE], big)
     assert not r.actionable and "no net gain" in r.rejection_reason
     r = rec_mode().recommend(FakeController(), stable(busy=0.05, tool=0.8, queued=0), [EDGE], COSTS)
@@ -92,7 +92,7 @@ def test_no_net_gain_holds():
 def test_recommendation_fields_and_no_execution():
     c = FakeController()
     r = rec_mode().recommend(c, stable(), [EDGE], COSTS)
-    assert r.actionable and (r.source, r.target, r.expected_epoch, r.profile_hash) == ("P2", "P4", 3, PH)
+    assert r.actionable and (r.source, r.target, r.expected_epoch, r.profile_hash) == ("cfg2", "cfg4", 3, PH)
     assert r.gain_lower <= r.gain_upper and r.cost_upper == 60.0 and r.expires_at > r.issued_at
     assert r.evidence["n"] == 4
     assert c.requests == [] and c.plans == []
@@ -108,7 +108,7 @@ def test_approve_uses_same_request_entry():
     rm = rec_mode()
     r = rm.recommend(c, stable(), [EDGE], COSTS)
     out = rm.approve(r, c, stable(), [EDGE], COSTS, deadline_s=600)
-    assert c.requests == [(r.request_id, "P4", 3, 600)] and out == {"request_id": r.request_id}
+    assert c.requests == [(r.request_id, "cfg4", 3, 600)] and out == {"request_id": r.request_id}
 
 
 @pytest.mark.parametrize("change,msg", [
@@ -132,7 +132,7 @@ def test_revalidation_rejects(change, msg):
     elif change == "load":
         ws = stable(busy=0.05, tool=0.8, queued=0)
     elif change == "edge":
-        edges = [CandidateEdge("P2", "P6", 2, 6)]
+        edges = [CandidateEdge("cfg2", "cfg6", 2, 6)]
     with pytest.raises(Rejected, match=msg):
         rm.approve(r, c, ws, edges, COSTS, deadline_s=600)
     assert c.requests == []

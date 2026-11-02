@@ -4,7 +4,7 @@
 set -u
 PY=${PY:-/tmp/review-miles-venv/bin/python}
 RAY=${RAY:-$(dirname "$PY")/ray}
-OUT=${OUT:-${YETO_HOME:-$HOME}/work/infra-drafts/s1-sim}
+OUT=${OUT:-/tmp/yeto-multinode-sim}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" YETO_SIM_RAY="$RAY"
 export YETO_SIM_HEAD_DIR=/tmp/yeto-s1-ray-h YETO_SIM_WORKER_DIR=/tmp/yeto-s1-ray-w YETO_SIM_ADDRESS=127.0.0.1:6379

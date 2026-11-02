@@ -1,6 +1,6 @@
-"""CPU tests for the no-sync full-parameter policy state (T-FPUB, L5.4 run i).
+"""CPU tests for the no-sync full-parameter policy state.
 
-GPU run s24-l54-pair-20261014i: a full-parameter trainer island without an outer
+In a GPU run, a full-parameter trainer island without an outer
 sync published through the LoRA digest export and failed with "Megatron produced
 an empty or duplicate LoRA mapping".  A full-parameter island now gets
 ``MilesFullParameterLocalPolicyState``: a trainer-side content digest of every

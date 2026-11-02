@@ -123,7 +123,7 @@ def first_push_phase(fragment_id: int, fragments: int, horizon: int) -> int:
 
 
 # Lazy capture: every N-th local round still captures with content hashes
-# Switches of the deferred and lazy capture (S27 G-AA / G-AY), the same for
+# Switches of the deferred and lazy capture, the same for
 # every engine that offers them: "0" keeps the whole capture.
 DEFER_CAPTURE_ENV = "YETO_FULL_PARAMETER_DEFER_CAPTURE"
 LAZY_CAPTURE_ENV = "YETO_FULL_PARAMETER_LAZY_CAPTURE"
@@ -179,10 +179,10 @@ class RoleStreamConfig:
     training_contract_hash: str
     syncer_profile_hash: str
     pipeline_depth: int
-    # P0-4.8: the island's AlgorithmSpec hash; placement capabilities stay out.
+    # The island's AlgorithmSpec hash; placement capabilities stay out.
     algorithm_spec_sha256: str
     wan_streams: int = 4
-    # S26 E3b transport options (yeto/wan_streams.py); not part of the session
+    # Transport options (yeto/wan_streams.py); not part of the session
     # contract: they change how bytes travel, never which bytes.
     wan_stream_schedule: str = "rr"
     wan_stall_timeout: float = 0.0  # seconds; 0 = off
@@ -190,7 +190,7 @@ class RoleStreamConfig:
     poll_seconds: float = 0.01
     max_fragment_bytes: int = 2 << 30
     max_chunk_bytes: int = 256 << 20
-    # S26 E3 wire options (default exact f32): push outer deltas as bf16
+    # Wire options (default exact f32): push outer deltas as bf16
     # (session dtype 4), block-scaled int8 (dtype 5) or the q4 block codec
     # (dtype 6, int4); receive BCAST as bf16
     # deltas against a shared f32 anchor. FINAL always stays f32.
@@ -212,11 +212,11 @@ class RoleStreamConfig:
     # syncer checkpoint binds the session contract, and a mismatch is refused.
     push_tensor_blocks: bool = True
     bcast_delta: bool = False
-    # S26 E3: train round k+1 while sweep k syncs, then rebase the trainer
+    # Overlap: train round k+1 while sweep k syncs, then rebase the trainer
     # (see FullParameterSync._overlap_boundary); the local weights lag the
     # global policy by one outer step (yeto.rl.engine.sync_overlap).
     overlap: bool = False
-    # S27 P2 asynchronous rounds: the syncer may close a fragment round
+    # Asynchronous rounds: the syncer may close a fragment round
     # without this island (quorum K below the island count); a newer PULL then
     # supersedes an unanswered older one and the broadcast overwrites.
     partial_quorum: bool = False
@@ -231,7 +231,7 @@ class RoleStreamConfig:
     # of the session contract: shards run the unsharded step schedule, so
     # the shard count changes where bytes go, never which bytes.
     syncer_shards: tuple[tuple[str, int], ...] = ()
-    # S27 E-3: the syncer incarnation this island was launched for (a newer
+    # The syncer incarnation this island was launched for (a newer
     # syncer refuses the HELLO), and peer recovery (donor snapshots, and
     # recovery of a fresh trainer). Transport options, not session contract.
     syncer_epoch: int | None = None
@@ -247,7 +247,7 @@ class RoleStreamConfig:
     # may skip fragment versions. None = fixed roster. Not part of the
     # session contract (membership is a syncer option).
     island_lease_s: float | None = None
-    # Local init (S27): this island loaded the run's base checkpoint and keeps
+    # Local init: this island loaded the run's base checkpoint and keeps
     # it as version 0 once the syncer confirms every island's fragment digests
     # agree (MSG_INIT_CONFIRM); no initial broadcast is needed. False waits for
     # the broadcast of learner 0's INIT. Not part of the session contract: it
@@ -260,7 +260,7 @@ class RoleStreamConfig:
     # final parameters stay with the syncer (syncer --final-cut-payload
     # manifest). Must match the syncer, whose profile hash binds it.
     final_cut: str = "download"
-    # S27 G-CG verify-ahead: check each stored broadcast's chunks on a
+    # Verify-ahead: check each stored broadcast's chunks on a
     # background thread when it arrives, so the apply at the next boundary
     # names it and the trainer's prepare reads none of its chunks (the
     # engine's ``_stored_fragment_verifier``; Miles ``verified_apply``; the
@@ -548,10 +548,10 @@ class FullParameterRoleStream:
         self.group = None
         self.adapter: Any = None
         self.client = None
-        # S27 G-AG: summed push time split (_note_push_timing), read by the
+        # Summed push time split (_note_push_timing), read by the
         # session's round event.
         self.push_timing_totals: dict[str, float] = {}
-        # Verify-ahead (S27 G-CG): replaced fragments an apply named as checked
+        # Verify-ahead: replaced fragments an apply named as checked
         # off the trainer ("applied") or whose check was still running, so the
         # trainer checked them itself ("pending").
         self.verify_ahead_counters: dict[str, int] = {"applied": 0, "pending": 0}
@@ -611,7 +611,7 @@ class FullParameterRoleStream:
         self._round_base: Any = None
         self._rounds_at_base = 0
         self._tokens_at_base = 0
-        # S27 E-3 peer recovery: the donor service, and how this stream started.
+        # Peer recovery: the donor service, and how this stream started.
         self._donor = None
         self.recovery_outcome = None
         self.recovered_scheduler_samples = None
@@ -683,7 +683,7 @@ class FullParameterRoleStream:
         raise ValueError(f"{self.config.role}: peer recovery needs an engine recovery island")
 
     def _stored_fragment_verifier(self, group) -> Any:
-        """Verify-ahead (S27 G-CG): a verifier the fragment sink hands every
+        """Verify-ahead: a verifier the fragment sink hands every
         stored broadcast to (``sink.verifier``; it sets the stored fragment's
         ``verification`` future and has ``close()``), or None when the engine
         cannot check stored chunks off the trainer or its apply cannot skip
@@ -708,7 +708,7 @@ class FullParameterRoleStream:
         """The current cut as a trainer-resident policy handle (no tensors).
 
         The policy tensor hash is the chunked cut identity, the payload hash its
-        content identity; fragments never leave the trainer (P0-D1).
+        content identity; fragments never leave the trainer.
         """
 
         if self.current is None or self.adapter is None:
@@ -753,7 +753,7 @@ class FullParameterRoleStream:
         adapter, initial = await self._initialize_adapter(group)
         if self.config.expert_token_weights:
             await self._install_routed_token_counter(group, adapter)
-        # S27 G-EA: with spot subscribers, island 0 publishes the layout they
+        # With spot subscribers, island 0 publishes the layout they
         # decode with (a no-op unless the launcher set the publish variable).
         from yeto.rl.spot_rollout.layout_manifest import maybe_publish
 
@@ -814,7 +814,7 @@ class FullParameterRoleStream:
             # concurrently, and each role's initial cut needs every island's
             # INIT for that role. A blocking wait here would stop this
             # island's other role from connecting, and two islands blocked
-            # on different roles deadlock (s23-g3-sao-main-20261014a).
+            # on different roles deadlock.
             authoritative = await asyncio.to_thread(
                 self._wait_for_initial_fragments, client, adapter, init_parts, local
             )
@@ -903,7 +903,7 @@ class FullParameterRoleStream:
                                   **({} if wait is None else {"manifest_wait_s": float(wait)}))
 
     async def _initialize_recovering(self, group, adapter, initial, client, sink, heartbeat) -> None:
-        """S27 E-3: this trainer is fresh after the island lost its state.
+        """Peer recovery: this trainer is fresh after the island lost its state.
 
         No INIT is sent (the syncer holds the run's fragments). A donor's
         snapshot restores the inner optimizer state on every rank, then the
@@ -947,7 +947,7 @@ class FullParameterRoleStream:
             self.group = self.adapter = self.client = self.sink = self.current = None
             raise
         self.recovery_outcome = outcome
-        # S27 G-ED: the donor's scheduler position the restored trainer continues
+        # The donor's scheduler position the restored trainer continues
         # from (its round cuts count from there, FullParameterSync.start)
         self.recovered_scheduler_samples = getattr(island, "scheduler_samples", None)
         print(f"[yeto-peer-recovery] {self.config.role} learner {self.config.learner_id}: "
@@ -968,7 +968,7 @@ class FullParameterRoleStream:
             # A file island (rank shards with the FP32 main copy and moments, hundreds
             # of GB for a 30B model): the service hashes and commits in the background
             # and logs each refused or finished snapshot.
-            # S27 G-EL: an island that can copy its state at the safe point and write
+            # An island that can copy its state at the safe point and write
             # it while it trains on does so, unless --rl-peer-recovery-donor-write inline.
             inline = getattr(self.config.peer_recovery, "donor_write", "background") == "inline"
             self._donor = DonorService(self.client, island, self._snapshot_store(),
@@ -1028,7 +1028,7 @@ class FullParameterRoleStream:
                     "its final cut before this island caught up"
                 )
             if init_parts is not None and client.init_replay_due():
-                # S26 E3b (s26-e3b-p06-C32a): the group carrying INIT died
+                # The group carrying INIT died
                 # before the syncer applied it; send it again on this group.
                 self._report_initial_cut(client, observed, count, started, "replaying INIT")
                 client.send_initial_fragments(init_parts)
@@ -1053,7 +1053,7 @@ class FullParameterRoleStream:
                     if previous is not None:
                         previous.release()
                 elif update.version != 0 or previous is not None:
-                    # S29 spot run (defect D11): the usual cause is a restarted island
+                    # The usual cause is a restarted island
                     # joining a pool that already merged, without an island lease
                     # (only an island pool with a lease and asynchronous rounds may
                     # rejoin, ``may_rejoin``). Say so instead of a bare "changed".
@@ -1201,7 +1201,7 @@ class FullParameterRoleStream:
         )
 
     def _defers_capture(self) -> bool:
-        """S27 G-AA deferred capture: a local round's capture hashes every
+        """Deferred capture: a local round's capture hashes every
         fragment but stores none in Ray; :meth:`materialize_submission` stores
         the fragments a push needs.  Only for asynchronous rounds without
         overlap (every reader of the cut bytes is then a push of a
@@ -1724,7 +1724,7 @@ class FullParameterRoleStream:
     @property
     def encodes_ahead(self) -> bool:
         """Whether :meth:`prepare_push` may compute a push's wire bytes ahead
-        of it and off the event-loop thread (S27 G-AG): no int4 error
+        of it and off the event-loop thread: no int4 error
         feedback (its residual state is committed per push, in push order)
         and a deterministic codec (``SyncerClient.can_encode_ahead``)."""
         return (self.error_feedback is None and self.client is not None and self.adapter is not None
@@ -1768,7 +1768,7 @@ class FullParameterRoleStream:
         fragment_id = candidate.permit.fragment_id
         if prepared is not None:
             return self._push_prepared(candidate, prepared)
-        # S27 G-AG: split this push's time (the parts are yielded unchanged).
+        # Split this push's time (the parts are yielded unchanged).
         timings: dict[str, float] = {}
         started = time.monotonic()
         parts = timed_parts(self.adapter.delta_parts_from_authoritative(
@@ -1830,7 +1830,7 @@ class FullParameterRoleStream:
             return None
         return self._pushed(candidate, sent.link_generation)
 
-    # -- background pushes (S27 G-AP) ----------------------------------------
+    # -- background pushes -----------------------------------------------------
     # ``RolePairing`` runs prepare_push + send_prepared on a worker thread
     # while the island trains; pushable, note_pushed and note_push_timing run
     # on the coordinator's thread, which owns every stream table.

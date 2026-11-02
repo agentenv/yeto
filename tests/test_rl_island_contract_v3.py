@@ -1,4 +1,4 @@
-"""rl-identity-tiering L9.7 (with L9.5's syncer part): island contract v3. No Ray.
+"""Island contract v3 (with the syncer part of the code pack check). No Ray.
 
 The contract binds the backend identity, the LR schedule, the algorithm's
 semantic hash and the run code pack digest. The real Rust syncer (built with

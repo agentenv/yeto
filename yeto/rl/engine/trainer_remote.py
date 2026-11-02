@@ -1,4 +1,4 @@
-"""The trainer lifecycle across a process boundary (rl-trainer-start-stop L5.3c).
+"""The trainer lifecycle across a process boundary.
 
 The head runs the scheduler loop; the trainer runs on its own island (a Modal
 function, a sky cluster). Each incarnation is a fresh island. Two channels connect
@@ -16,13 +16,13 @@ them, both existing paths:
 Why not an elastic control frame: the elastic protocol has no head -> island
 command frame (the syncer sends JoinAck, Base, Finished, Verdict), the trainer of a
 start/stop run restores round cuts without a syncer, and a new frame changes the
-Rust syncer and the protocol version (the v3 boundary of L9.7).
+Rust syncer and the protocol version (the island contract v3 boundary).
 
 Island side: :class:`IslandTrainerAgent` runs the island's driver inside a
 :class:`~.trainer_lifecycle.DriverLifecycle` (JOIN through the sync session,
 restore of the newest cut, warm-up publication) and executes the commands at round
 boundaries: train N rounds, or drain with the cut trigger of the stop reason and
-LEAVE with the P5 code. It reports each step as an event.
+LEAVE with the departure reason code. It reports each step as an event.
 
 Head side: :class:`RemoteTrainerLifecycle` is the
 :class:`~.trainer_lifecycle.TrainerLifecycle` of the scheduler loop. It acquires an
@@ -578,7 +578,7 @@ def _first_reason(*reasons: LeaveReason | None) -> LeaveReason:
 
 def consumed_watermark(cuts: StoreCutLog, lifecycle: RemoteTrainerLifecycle | None) -> int:
     """Where the head counts the backlog from: the position the running trainer
-    reported, else the newest cut's (D4: a failed trainer's rounds after its last
+    reported, else the newest cut's (a failed trainer's rounds after its last
     cut are trained again)."""
     running = None if lifecycle is None else lifecycle.running_watermark()
     return max(cuts.watermark(), running or 0)

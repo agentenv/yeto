@@ -1,4 +1,4 @@
-"""CPU tests of the engine-neutral sampler (S25 N2.1-N2.5, rl-hetero-sampler-engines).
+"""CPU tests of the engine-neutral sampler (rl-hetero-sampler-engines).
 
 No engine, card or network: the island runs on :class:`FakeEngine`; the SGLang
 and vLLM adapters run on a fake process and a fake HTTP layer; the card tools
@@ -57,7 +57,7 @@ W4A8 = EngineIdentity(engine="fake", engine_version="0", device_family="npu", ca
                       precision="w4a8", quant_scheme="w4a8-int4-channel", topology="tp4")
 
 
-# ---------------------------------------------------------------------- N2.1 catalog
+# ---------------------------------------------------------------------- catalog
 def test_compat_group_carries_family_and_hbm():
     assert compat_group("H100") == "nvidia-h100"  # without HBM: unchanged
     assert compat_group("910B4", 61.9) == "ascend-910b4-64g"
@@ -73,7 +73,7 @@ def test_compat_group_carries_family_and_hbm():
 
 
 def _inventory(**node):
-    base = {"name": "npu1", "host": "u@h", "device_family": "npu", "cpu_arch": "aarch64", "card": "910B4",
+    base = {"name": "npu-a", "host": "u@h", "device_family": "npu", "cpu_arch": "aarch64", "card": "910B4",
             "cards_per_node": 8, "hbm_gib": 64, "host_memory_gib": 1024, "image": "img"}
     return parse_inventory({"nodes": [{**base, **node}]})
 
@@ -86,7 +86,7 @@ def test_inventory_node_records_its_compat_group_and_refuses_unknown_hbm():
         _inventory(hbm_gib=48)
 
 
-# ---------------------------------------------------------------------- N2.2 telemetry
+# ---------------------------------------------------------------------- telemetry
 NPU_SMI = """+---------------------------+---------------+----------------------------------+
 | NPU   Name                | Health        | Power(W)  Temp(C)  Hugepages      |
 | Chip                      | Bus-Id        | AICore(%) Memory-Usage(MB)        |
@@ -147,7 +147,7 @@ def test_missing_card_tool_writes_one_record_with_the_reason():
     assert events[0][1]["source"] == "npu-smi"
 
 
-# ---------------------------------------------------------------------- N2.3 port types
+# ---------------------------------------------------------------------- port types
 def test_sampling_refuses_repetition_penalties_unless_allowed():
     with pytest.raises(SamplingConfigError, match="repetition_penalty"):
         SamplingParams(max_tokens=8, repetition_penalty=1.1).check()
@@ -177,12 +177,12 @@ def test_loop_guard_cuts_a_repeating_completion_and_keeps_its_logprobs():
     assert guard.apply(plain) is plain
 
 
-# ---------------------------------------------------------------------- N2.4 provenance
+# ---------------------------------------------------------------------- provenance
 def test_index_lines_carry_provenance_and_old_lines_read_as_unknown(tmp_path):
     buffer = FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1)
     old = SampleIndexEntry("old", 0, buffer.write_payload("old", b"{}"), tokens=1)
     buffer.append(old)
-    record = Provenance.of(W4A8, sampler_id="npu1", sampling=SamplingParams(max_tokens=8)).to_record()
+    record = Provenance.of(W4A8, sampler_id="npu-a", sampling=SamplingParams(max_tokens=8)).to_record()
     buffer.append(SampleIndexEntry("new", 1, buffer.write_payload("new", b"{}"), tokens=1,
                                    provenance=record))
     lines = [json.loads(line) for line in
@@ -196,7 +196,7 @@ def test_index_lines_carry_provenance_and_old_lines_read_as_unknown(tmp_path):
     assert Provenance.from_record(second.provenance).key() == "npu/910B4/fake@0/w4a8/tp4"
 
 
-# ---------------------------------------------------------------------- N2.5 per-source metrics
+# ---------------------------------------------------------------------- per-source metrics
 def _npu_ppu(record_npu, record_ppu):
     small = SourceSample(record_npu, [-1.0, -2.0], [-1.0, -2.01], FINISH_STOP)
     shifted = SourceSample(record_ppu, [-1.0, -1.0, -1.0], [-2.0, -1.0, -1.0], FINISH_LENGTH)
@@ -393,7 +393,7 @@ def test_engine_sampler_island_writes_groups_with_version_and_provenance(tmp_pat
     buffer = FileSampleBuffer(store, batch_size=1)
     engine = FakeEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4, max_model_len=64)
     events = []
-    config = EngineSamplerConfig(sampler_id="npu1", num_rollouts=2, max_backlog_groups=100,
+    config = EngineSamplerConfig(sampler_id="npu-a", num_rollouts=2, max_backlog_groups=100,
                                  sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32)
 
     def prompts(rollout_id):
@@ -627,7 +627,7 @@ def test_stop_sends_sigterm(tmp_path):
 
 
 def test_sglang_topology_names_the_real_layout(tmp_path):
-    """S25 N2-fix: the source label is tp<N>/dp<N> with N = --tp, not tp8 for every layout."""
+    """The source label is tp<N>/dp<N> with N = --tp, not tp8 for every layout."""
     spawned = []
     http = _Http({("GET", "/health"): {}})
     one = SGLangServerEngine(_config(tmp_path, topology="tp1"), SGLangOptions(tp=1),
@@ -646,7 +646,7 @@ def test_sglang_topology_names_the_real_layout(tmp_path):
 
 
 def test_probe_without_pairs_passes_every_load():
-    """S25 N2-fix: no fixed prompts and no probe pairs: the second load divided by zero."""
+    """No fixed prompts and no probe pairs: the second load divided by zero."""
     checks = PostLoadChecks(expected_expert_matrices=None, fixed_prompts=())
     for _ in range(2):
         result = checks.logprob_probe(engine=None)
@@ -655,7 +655,7 @@ def test_probe_without_pairs_passes_every_load():
 
 
 def test_server_process_ignores_the_reclaim_sigint():
-    """T-E2V: a cloud reclaim sends SIGINT to every process of the container; the
+    """A cloud reclaim sends SIGINT to every process of the container; the
     engine server must survive it so the island can finish its round and leave."""
     import sys
 
@@ -664,3 +664,19 @@ def test_server_process_ignores_the_reclaim_sigint():
     probe = popen_spawn([sys.executable, "-c", "import signal, sys; "
                          "sys.exit(7 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 3)"], {})
     assert probe.wait(timeout=60) == 7
+
+
+def test_httpx_call_ignores_env_proxies(monkeypatch):
+    import socket
+
+    from yeto.rl.adapters.sampler_engines.server import httpx_call
+
+    for name in ("all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY"):
+        monkeypatch.setenv(name, "socks5://127.0.0.1:9")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    status, body = httpx_call("GET", f"http://127.0.0.1:{port}/health", None, 2.0)
+    assert status == 0 and "ConnectError" in body["error"]

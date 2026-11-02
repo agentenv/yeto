@@ -1,4 +1,4 @@
-"""Offline evaluation of a run's round cuts on a fixed held-out prompt set (S27 R-5).
+"""Offline evaluation of a run's round cuts on a fixed held-out prompt set.
 
 After (or during) a run, this evaluator walks the committed round cuts of a
 checkpoint store, serves each cut through an :class:`EvalEngine`, samples the

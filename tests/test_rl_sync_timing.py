@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L5.6: island-side sync timing. A fake island-pool syncer
+"""Island-side sync timing. A fake island-pool syncer
 delays its next base; the island must report that delay as
 ``sync/sync_wait_seconds``. CPU, no Ray."""
 

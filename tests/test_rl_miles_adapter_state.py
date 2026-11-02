@@ -307,7 +307,7 @@ def test_grad_norm_prefers_recorded_train_step_value(monkeypatch):
 
 
 def test_recorder_captures_the_lr_the_step_applies_not_the_advanced_one(monkeypatch):
-    """fix-decoupled-lr-schedule D4: read param_groups before the scheduler steps."""
+    """Read param_groups before the scheduler steps."""
 
     import sys
     import types

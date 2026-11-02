@@ -1,4 +1,4 @@
-"""D2 learner wiring: --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
+"""Learner wiring: --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
 from the launcher to the learner, ElasticHook built by the adapter, in-memory event
 mirror, eval excluded from rollout busy, and CPU end-to-end runs (no GPU)."""
 import sys
@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from rl_e2e_launch import island_run, learner_from_run  # noqa: E402
 from test_rl_elastic_wire import (BIG, PH, SMALL, W, Clock, _profile,  # noqa: E402
                                   cost_table, setup, synth)
-from test_rl_launch_e2e_b1 import BASE, _elastic  # noqa: E402
-from test_rl_reconfig_e1 import _events  # noqa: E402
+from test_rl_launch_island_wiring import BASE, _elastic  # noqa: E402
+from test_rl_reconfig_controller import _events  # noqa: E402
 from yeto.rl.engine.auto import AutoPolicy  # noqa: E402
 from yeto.rl.engine.controller import SUCCEEDED, read_journal  # noqa: E402
 from yeto.rl.adapters.miles.elastic_hook import (TUNING,  # noqa: E402

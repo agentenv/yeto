@@ -1,4 +1,4 @@
-"""Training-backend registry (yeto-framework-decoupling 5.4 + 4.11, design D11 方案 A).
+"""Training-backend registry.
 
 One table maps a backend name to the adapter modules the neutral code needs.
 The core, the launcher and the CLI look modules up here by *role* and load
@@ -10,10 +10,10 @@ Which backend is active:
 * the launcher / CLI pass ``--rl-backend`` (default ``miles``);
 * processes the adapter starts (rollout Ray actors, codex subprocesses) read
   the environment variable ``YETO_RL_BACKEND``; when it is unset the backend is
-  ``miles``, exactly today's behaviour (主 agent 代拍板 2026-10-08 第 2 条;
-  revisit once verl lands -- design D11 suggests requiring it then).
+  ``miles``, exactly today's behaviour (revisit once verl is complete:
+  requiring an explicit backend may be better then).
 
-A name that is not in the table raises :class:`UnknownBackend` ("未注册").
+A name that is not in the table raises :class:`UnknownBackend` ("not registered").
 ``verl`` is registered since rl-verl-backend group 1.
 """
 
@@ -27,7 +27,7 @@ from typing import Mapping
 
 BACKEND_ENV = "YETO_RL_BACKEND"
 DEFAULT_BACKEND = "miles"
-# Names the CLI accepts; a known-but-unregistered name fails with "未注册"
+# Names the CLI accepts; a known-but-unregistered name fails with "not registered"
 # at launch instead of argparse's generic "invalid choice".
 KNOWN_BACKENDS = ("miles", "verl")
 
@@ -84,9 +84,9 @@ _REGISTRY: dict[str, BackendEntry] = {
         "offpolicy_correction": f"{_MILES}.offpolicy_correction",
         "overlay": f"{_MILES}.overlay",
     }),
-    # rl-verl-backend: FSDP2 + vLLM islands, and (S27 G-DC) the Megatron engine
+    # rl-verl-backend: FSDP2 + vLLM islands, and the Megatron engine
     # island (EP/TP/PP); codex/elastic-pool roles are not provided yet and
-    # fail with "没有提供" when asked for.
+    # fail with "does not provide" when asked for.
     "verl": BackendEntry("verl", _VERL, {
         "rollout_meta": f"{_VERL}.rollout_meta_hook",
         "entry": f"{_VERL}.entry",
@@ -98,7 +98,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "image": f"{_VERL}.image",
         "policy_age": f"{_VERL}.policy_age",
         "offpolicy_correction": f"{_VERL}.offpolicy_correction",
-        # S27 G-DC (V10): the Megatron engine island's roles
+        # the Megatron engine island's roles
         "nemotron_h_recipe": f"{_VERL}.nemotron_h",
         "placement": f"{_VERL}.placement",
         "rollout": f"{_VERL}.rollout",
@@ -123,8 +123,8 @@ def get(name: str | None = None) -> BackendEntry:
         return _REGISTRY[resolved]
     except KeyError:
         raise UnknownBackend(
-            f"训练后端 {resolved!r} 未注册（已注册：{', '.join(registered())}）；"
-            f"见 yeto/rl/engine/backends.py") from None
+            f"training backend {resolved!r} is not registered (registered: "
+            f"{', '.join(registered())}); see yeto/rl/engine/backends.py") from None
 
 
 def module(role: str, name: str | None = None) -> ModuleType:
@@ -134,7 +134,7 @@ def module(role: str, name: str | None = None) -> ModuleType:
     try:
         path = entry.roles[role]
     except KeyError:
-        raise UnknownBackend(f"训练后端 {entry.name!r} 没有提供 {role!r}") from None
+        raise UnknownBackend(f"training backend {entry.name!r} does not provide {role!r}") from None
     return importlib.import_module(path)
 
 
