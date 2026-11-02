@@ -152,9 +152,11 @@ def test_digest_mismatch_stops_the_run_with_a_clear_error(make_local_rig, bad):
     errors = [client._err for client in rig.clients]
     assert any(isinstance(e, SessionRejectedError) and e.metric == "init_digest_mismatch"
                for e in errors), errors
+    # Only the refused island raises the strict error; the other one may just
+    # see the syncer close its connection first, so check the refused one.
+    refused = next(c for c in rig.clients if isinstance(c._err, SessionRejectedError))
     with pytest.raises(StrictRlInvariantError, match="init digest mismatch"):
-        for client in rig.clients:
-            client.check_health()
+        refused.check_health()
 
 
 def test_resumed_syncer_broadcasts_its_checkpoint_instead_of_confirming(make_local_rig, tmp_path):

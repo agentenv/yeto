@@ -2192,7 +2192,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(queued_error, error);
-        assert_eq!(pool.inner.queue.slots.available_permits(), 2);
+        // Permits are returned when the aborted job guards drop, which can land
+        // just after the callers observe their errors; poll briefly.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool.inner.queue.slots.available_permits() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queue permits were not returned after drain");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

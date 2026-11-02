@@ -937,21 +937,23 @@ class TaskSource:
                 if is_superseded(error):
                     # S27: a newer process of this island joined (on any channel
                     # of the head's member table); this one stops for good.
-                    with self._cv:
-                        self._fatal = error
-                        self._cv.notify_all()
+                    # emit before waking takers so the event is recorded by the
+                    # time take() raises the fence
                     logger.error("task dispenser: a newer incarnation superseded this island: %s", error)
                     self._emit("rl_dispense_superseded", incarnation=f"{self.incarnation:016x}",
                                error=str(error))
+                    with self._cv:
+                        self._fatal = error
+                        self._cv.notify_all()
                     return
                 self._reset_after_fence(error)
                 continue
             except DispenseError as error:
+                logger.error("task dispenser refused this island: %s", error)
+                self._emit("rl_dispense_refused", error=str(error))
                 with self._cv:
                     self._fatal = error
                     self._cv.notify_all()
-                logger.error("task dispenser refused this island: %s", error)
-                self._emit("rl_dispense_refused", error=str(error))
                 return
             except (OSError, ConnectionError, struct.error) as error:
                 if self._conn is not None:

@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_gpu:
+        description: "Also run the gpu job (needs a self-hosted GPU runner)"
+        type: boolean
+        default: false
 
 jobs:
   rust:
@@ -18,8 +24,12 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
+      # Full history: some tests compare against older commits via git show/archive.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -27,14 +37,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: syncer
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # Same install as docs/TESTING.md (CPU torch + the `test` extra).
       - name: Install CPU torch and deps
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install pytest pytest-timeout transformers==4.57.1 datasets peft cloudpickle "skypilot[aws]"
+          uv pip install --system --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.8.0+cpu" -r pyproject.toml --extra test
       - name: Tests (includes live syncer+learner integration loop)
-        run: python -m pytest tests/ -q
+        run: PYTHONPATH=. python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs --timeout=600 --durations=25
 
+  # No self-hosted GPU runner is registered; only run when explicitly requested
+  # via `gh workflow run ci -f run_gpu=true`.
   gpu:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_gpu
     runs-on: [self-hosted, gpu]
     steps:
       - uses: actions/checkout@v4

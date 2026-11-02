@@ -78,6 +78,19 @@ def base_tree(tmp_path_factory):
     root = tmp_path_factory.mktemp("base")
     with tarfile.open(fileobj=BytesIO(archive.stdout)) as tar:
         tar.extractall(root, filter="data")
+    # BASE's RlFlag uses a mappingproxy dataclass default, which Python 3.11
+    # rejects at import; apply the same default_factory fix the code got since.
+    flags = root / "yeto/rl/engine/run_flags.py"
+    if flags.exists():
+        text = flags.read_text()
+        text = text.replace("from dataclasses import dataclass\n",
+                            "from dataclasses import dataclass, field\n")
+        text = text.replace("island: Mapping[str, Any] = _EMPTY\n",
+                            "island: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)\n")
+        # Fail loudly if BASE's source no longer matches the patch above.
+        assert "from dataclasses import dataclass, field\n" in text, "run_flags.py import patch did not apply"
+        assert "default_factory=lambda: _EMPTY" in text, "run_flags.py default patch did not apply"
+        flags.write_text(text)
     return root
 
 
