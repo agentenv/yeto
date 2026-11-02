@@ -6,6 +6,7 @@ CPU only; Miles is never imported (math grading uses the test-only copy in
 
 from __future__ import annotations
 
+import os
 import asyncio
 import ast
 import importlib
@@ -200,7 +201,7 @@ def test_register_conflict_rejected():
 
 # -- 3.9 math graders: test-only copy -------------------------------------------------
 
-MILES_PIN_CHECKOUT = Path("/home/michael/work/miles-fr1")
+MILES_PIN_CHECKOUT = Path(os.path.expanduser("~/work/miles-fr1"))
 # The Miles commit tests/vendor/miles_math_utils.py was copied from (the pin of
 # the removed legacy engine); the copy stays byte-identical to that file.
 VENDOR_SOURCE_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"

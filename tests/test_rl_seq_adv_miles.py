@@ -2,8 +2,8 @@
 
 Runs where upstream Miles imports::
 
-    PYTHONPATH=<yeto>:/home/michael/work/miles-next \\
-      /home/michael/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_seq_adv_miles.py
+    PYTHONPATH=<yeto>:~/work/miles-next \\
+      ~/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_seq_adv_miles.py
 
 and is skipped otherwise (``/tmp/yeto-venv`` has no Miles). Comparison modes:
 ``torch.equal`` (bitwise) for the dispatcher vs Miles ``_post_process_rewards``

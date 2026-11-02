@@ -8,7 +8,7 @@
 # Records start/end, df before/after, log tail, output bytes, per-GPU peak -> <outdir>/fnconv.json.
 # usage: s11fnconv.sh <cluster> <outdir> <yeto snapshot dir>      DRY=1: run the remote body locally with --dry-run (no ssh/GPU),
 #        FS=<dir> (DRY only) stands in for /mnt/yeto-models.
-set -u; CL=$1; O=$2; Y=$3; export HOME=/home/michael; mkdir -p $O
+set -u; CL=$1; O=$2; Y=$3; export HOME=${YETO_HOME:-$HOME}; mkdir -p $O
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 REMOTE=$(cat <<'REMOTE'
 set -u

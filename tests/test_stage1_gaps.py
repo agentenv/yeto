@@ -35,7 +35,6 @@ from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_checks import GSM8K_FIXED_PROMPTS
 from yeto.rl import stage1
 
-PLAN = Path(__file__).resolve().parents[1] / "examples" / "stage1" / "glm53-flash-ppu.yaml"
 
 
 # ------------------------------------------------------------ gap 3: sampler entry
@@ -96,8 +95,8 @@ def test_miles_reward_wraps_an_async_score():
     assert reward(item, SimpleNamespace(text="it is 7")) == 1.0
 
 
-def test_stage1_sampler_spec_builds_the_same_sglang_command():
-    out = stage1.expand(stage1.load_plan(PLAN))
+def test_stage1_sampler_spec_builds_the_same_sglang_command(ppu_plan):
+    out = stage1.expand(stage1.load_plan(ppu_plan))
     run = out.sampler["engines"][0]
     engine = entry.build_engine(run["spec"])
     assert isinstance(engine, SGLangServerEngine)
@@ -128,10 +127,10 @@ def test_glm5_next_recipe_replaces_the_bridge_geometry():
     assert local.count("--no-gradient-accumulation-fusion") == 1
 
 
-def test_island_parser_takes_the_recipe_and_transformer_impl():
+def test_island_parser_takes_the_recipe_and_transformer_impl(ppu_plan):
     from yeto.rl.adapters.miles.island_entry import build_parser
 
-    argv = list(stage1.expand(stage1.load_plan(PLAN)).trainer["miles"]["island_argv"][3:])
+    argv = list(stage1.expand(stage1.load_plan(ppu_plan)).trainer["miles"]["island_argv"][3:])
     argv[argv.index("--rl-transformer-impl") + 1] = "local"
     args, unknown = build_parser().parse_known_args(argv)
     assert unknown == []
@@ -179,10 +178,10 @@ def _node(name="ppu1", **kw) -> Node:
 
 def test_inventory_reads_address_and_docker_args():
     raw = {"name": "n", "host": "ppu1", "device_family": "ppu", "cpu_arch": "x86_64", "card": "M890", "cards_per_node": 8,
-           "hbm_gib": 144, "host_memory_gib": 2266, "image": "i", "address": "10.0.0.74",
+           "hbm_gib": 144, "host_memory_gib": 2266, "image": "i", "address": "192.0.2.74",
            "docker_args": ["--device", "/dev/a"]}
     node = parse_inventory({"nodes": [raw]})[0]
-    assert (node.address, node.docker_args) == ("10.0.0.74", ("--device", "/dev/a"))
+    assert (node.address, node.docker_args) == ("192.0.2.74", ("--device", "/dev/a"))
     with pytest.raises(InventoryError, match="IP address"):
         parse_inventory({"nodes": [{**raw, "address": "ppu1"}]})
 
@@ -197,14 +196,14 @@ def test_docker_island_needs_device_args_and_alias_nodes_need_an_address():
 
 
 def test_docker_run_script_uses_inventory_addresses_and_the_container_is_removed():
-    nodes = (_node(address="10.0.0.74"), _node("ppu2", address="10.0.0.75"))
+    nodes = (_node(address="192.0.2.74"), _node("ppu2", address="192.0.2.75"))
     spec = SshTrainerSpec(nodes=nodes, run_id="r", workdir="/w", run_script='echo "$SKYPILOT_NODE_RANK"',
                           env={"SECRET": "s3cr3t"}, image="trainer:2")
     paths = remote_paths("r", "trainer", 1)
     name = container_name("r", "trainer", 1, 1)
     script = start_script(spec, 1, {}, paths, container=name)
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
-    assert "export SKYPILOT_NODE_IPS='10.0.0.74\n10.0.0.75'" in script and "SKYPILOT_NODE_RANK=1" in script
+    assert "export SKYPILOT_NODE_IPS='192.0.2.74\n192.0.2.75'" in script and "SKYPILOT_NODE_RANK=1" in script
     assert f"--name {name}" in script and "--device /dev/x" in script and "trainer:2" in script
     assert "-e SECRET" in script and "SECRET=s3cr3t -" not in script.split("setsid", 1)[1]
     assert "ppu1" not in script.split("setsid", 1)[1]  # no SSH alias as rendezvous
@@ -224,14 +223,14 @@ def test_run_script_mode_runs_locally_with_the_sky_variables(tmp_path):
 
 
 def test_launcher_builds_the_ssh_island_from_the_inventory():
-    nodes = [_node("ppu1", address="10.0.0.74", roles=("trainer",)), _node("ppu2", address="10.0.0.75",
+    nodes = [_node("ppu1", address="192.0.2.74", roles=("trainer",)), _node("ppu2", address="192.0.2.75",
              roles=("trainer",)), _node("ppu4", roles=("sampler",))]
     args = SimpleNamespace(rl_node_inventory_nodes=nodes, rl_ssh_trainer_workdir="/data/yeto/code",
                            cluster_prefix="run7")
     island = ClusterSpec(cloud="ssh", region=None, num_nodes=2, gpus_per_node=8, gpu="M890")
     task = SimpleNamespace(setup="pip check", run="echo run", envs={"A": "1"}, secrets={"B": "2"})
     spec = island_spec_from_inventory(args, island, task)
-    assert [n.name for n in spec.nodes] == ["ppu1", "ppu2"] and spec.addresses() == ["10.0.0.74", "10.0.0.75"]
+    assert [n.name for n in spec.nodes] == ["ppu1", "ppu2"] and spec.addresses() == ["192.0.2.74", "192.0.2.75"]
     assert spec.env == {"A": "1", "B": "2"} and spec.run_script.endswith("echo run")
     with pytest.raises(SshIslandError, match="3 node"):
         inventory_trainer_nodes(args, ClusterSpec(cloud="ssh", region=None, num_nodes=3, gpus_per_node=8, gpu="M890"))
@@ -293,8 +292,8 @@ def test_head_store_switches_between_relay_and_direct():
     assert isinstance(store, RelayOssObjectStore) and store.relay.host == "ppu1"
 
 
-def test_stage1_plan_has_no_code_gaps_left_and_runs_the_relay_check():
-    out = stage1.expand(stage1.load_plan(PLAN))
+def test_stage1_plan_has_no_code_gaps_left_and_runs_the_relay_check(ppu_plan):
+    out = stage1.expand(stage1.load_plan(ppu_plan))
     assert out.store["head_access"]["env"] == {RELAY_ENV: "ppu1"}
     assert not any("OSS" in g or "engine_sampler" in g or "recipe" in g or "yeto launch" in g for g in out.gaps)
     relay = next(s for s in out.steps if s.name == "head-store-relay")

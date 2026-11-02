@@ -358,5 +358,5 @@ separate experiments.
 ## Results
 
 Completed Qwen3.6 benchmark results, including aggregate and per-seed
-quality, execution, and synchronization tables, are archived in
-[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#qwen36-27b-lm).
+quality, execution, and synchronization tables, are archived outside the
+repository.

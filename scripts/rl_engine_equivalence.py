@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Legacy-vs-ports RL engine equivalence harness (openspec rl-engine-ports 6.1-6.3).
+"""Legacy-vs-ports RL engine equivalence harness (rl-engine-ports 6.1-6.3).
 
 Layered acceptance (spec ``rl-engine-selection`` / "等价性验收"). All thresholds
 are module constants, fixed before any ports experiment and written into the

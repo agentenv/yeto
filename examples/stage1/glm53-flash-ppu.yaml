@@ -1,3 +1,6 @@
+# REPLACE BEFORE USE: every <ppuN-eth0-ip> below is a placeholder for the
+# node's eth0 IP; `yeto-stage1 plan` rejects the file until it is filled in
+# (it must match the inventory addresses).
 # Stage 1 of the S25 goal: GLM5.3-Flash (glm5_next) bf16 full-parameter RL on
 # 4 PPU nodes; the trainer and the sampler both run on PPU, the head runs on
 # this server, the cross-site store is Alibaba OSS.
@@ -14,13 +17,13 @@ inventory: ppu-inventory.yaml          # relative to this file
 rounds: 3                              # the stage-1 closed loop: 3 RL rounds
 seed: 17
 
-# Rendezvous (eth0) address of each node. The order ppu1..ppu4 = 10.0.0.74..77
-# is assumed from the survey listing; runbook step 1 checks it.
+# Rendezvous (eth0) address of each node: replace each <ppuN-eth0-ip> with that
+# node's eth0 IP (the same value as in ppu-inventory.yaml); runbook step 1 checks it.
 rendezvous:
-  ppu1: 10.0.0.74
-  ppu2: 10.0.0.75
-  ppu3: 10.0.0.76
-  ppu4: 10.0.0.77
+  ppu1: <ppu1-eth0-ip>
+  ppu2: <ppu2-eth0-ip>
+  ppu3: <ppu3-eth0-ip>
+  ppu4: <ppu4-eth0-ip>
 
 roles:
   trainer: [ppu1, ppu2, ppu3]          # 24 cards, one pipeline stage per node

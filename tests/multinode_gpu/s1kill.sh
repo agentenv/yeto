@@ -2,7 +2,7 @@
 # G3 fault injection (runs on the local machine): wait for rl_driver_phase train of rollout_id>=1 on the head, then kill the worker's island raylet
 # (pkill -f "[m]iles-ray/" on <cluster>-worker1; the bracket keeps pkill from matching the ssh bash -c carrying this command line) = node loss; record the kill time (worker clock) and keep pulling journal/probe for >= 200 s (window >= 150 s).
 # KILL_RID (env, default 1): minimum rollout_id of the train phase that triggers the kill (m4a: 2).
-R=$1; K=${KILL_RID:-1}; RE="([$K-9]|[1-9][0-9])"; CL=$(cat $R/cluster.txt); W=$CL-worker1; export HOME=/home/michael
+R=$1; K=${KILL_RID:-1}; RE="([$K-9]|[1-9][0-9])"; CL=$(cat $R/cluster.txt); W=$CL-worker1; export HOME=${YETO_HOME:-$HOME}
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 log() { echo "[s1kill $(date -u +%FT%TZ)] $*"; }
 until [ -f $R/rc.txt ]; do

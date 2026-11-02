@@ -264,6 +264,5 @@ curves, and forced learner failures are separate experiments.
 ## Results
 
 Completed LTX-Video and Wan2.2 benchmark results, including aggregate and
-per-seed quality, execution, and synchronization tables, are archived in
-[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#ltx-video-diffusion) and
-[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#wan22-t2v-a14b-diffusion).
+per-seed quality, execution, and synchronization tables, are archived outside
+the repository.

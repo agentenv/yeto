@@ -60,7 +60,7 @@ def test_math_reward_success(monkeypatch, response, label, want):
 
 def _reference_gsm8k():
     # frozen GPU-run copy; not imported from yeto
-    path = REPO / "openspec/changes/rl-algo-seq-and-adv/evidence/g1/gsm8k_reward.py"
+    path = REPO / "tests/fixtures/openspec_evidence/gsm8k_reward.py"
     spec = importlib.util.spec_from_file_location("ref_gsm8k_reward", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

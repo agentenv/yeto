@@ -1,6 +1,6 @@
 #!/bin/bash
 # usage: s1reset.sh <cluster> <log>   between g12 and g3 on the kept 2-node cluster: stop leftovers on BOTH nodes, remove state, require empty GPUs (1 per node).
-CL=$1; LOG=$2; export HOME=/home/michael; ok=1; : > $LOG
+CL=$1; LOG=$2; export HOME=${YETO_HOME:-$HOME}; ok=1; : > $LOG
 HOSTS=$CL; [ "${NODES:-2}" -ge 2 ] && HOSTS="$CL $CL-worker1"   # NODES=1 (S11 single-node 8xH100/H200): head only
 for n in $HOSTS; do
   timeout 300 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 $n 'bash -s' >> $LOG 2>&1 <<'REMOTE'

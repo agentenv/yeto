@@ -1,4 +1,4 @@
-"""Read-only RL fleet dashboard (openspec change ``yeto-fleet-dashboard``).
+"""Read-only RL fleet dashboard (change ``yeto-fleet-dashboard``).
 
 One reducer (``reducer.Reducer``) folds learner tapes, the syncer tape, the
 controller journal and the head's ``fleet.jsonl`` into JSON views; ``serve``

@@ -27,7 +27,7 @@ from yeto.rl.engine.run_config import CriticRunConfig
 from test_rl_miles_adapter_config import make_config
 
 # Hashes computed on integ-decl de27c301 (before this change); see
-# openspec/changes/rl-algo-critic-family/evidence/hash-critic-base.txt.
+# hash-critic-base.txt (archived outside the repo).
 GRPO_DEFAULT_SHA = "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea"
 KL_LOSS_SHA = "174327cb90769207665c39aef391f4961db09cab9cc5fb794f778af89fc7f0e6"
 RPP_WHITEN_SHA = "8eececdaec7927387669e975eec0d84511a976675b6c2536e77e7d035891607d"

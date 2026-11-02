@@ -13,12 +13,17 @@ import yaml
 from yeto.rl import stage1
 
 REPO = Path(__file__).resolve().parents[1]
-PLAN = REPO / "examples" / "stage1" / "glm53-flash-ppu.yaml"
+PLAN: Path  # the shipped plan with test IPs filled in (conftest ppu_plan); set per test
+
+
+@pytest.fixture(autouse=True)
+def _plan(ppu_plan, monkeypatch):
+    monkeypatch.setitem(globals(), "PLAN", ppu_plan)
 
 
 @pytest.fixture(scope="module")
-def shipped():
-    return stage1.expand(stage1.load_plan(PLAN))
+def shipped(ppu_plan):
+    return stage1.expand(stage1.load_plan(ppu_plan))
 
 
 def _variant(tmp_path: Path, edit) -> stage1.Expanded:
@@ -61,7 +66,7 @@ def test_sampler_command_comes_from_the_adapter(shipped):
     assert "--speculative-algorithm" not in argv  # no NEXTN in stage 1
     assert argv[argv.index("--moe-runner-backend") + 1] == "triton"
     assert engine["env"]["MX_PATCH"] == "1"
-    assert engine["url"] == "http://10.0.0.77:30000"
+    assert engine["url"] == "http://192.0.2.77:30000"
     assert engine["argv"][-2:] == ["--spec", engine["spec_path"]]
 
 

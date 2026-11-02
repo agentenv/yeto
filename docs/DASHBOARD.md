@@ -98,8 +98,8 @@ head 侧 `fleet.jsonl` 由 `FleetController` 写入（`runs/<run>/fleet.jsonl`�
 ## 缺失数据
 
 磁带里没有的字段一律显示“无数据”，不画 0。目前 ports 路径的 learner 磁带还没有 `rl_heartbeat`、
-`rl_resource_sample`、`train_metrics{}`、reward 分位数、response length、截断比例等（见
-`openspec/changes/yeto-fleet-dashboard/tasks.md` 的接口请求）；对应曲线 tab 与卡片字段显示“无数据”，
+`rl_resource_sample`、`train_metrics{}`、reward 分位数、response length、截断比例等；
+对应曲线 tab 与卡片字段显示“无数据”，
 发射后无需改看板即可出现。tok/s 在没有 `tok_per_s` 时由 `action_tokens / (rollout_seconds + train_seconds)` 推导。
 cell 表在没有 `rl_cell_snapshot` 时由 journal 的 `gpu_pool` 记录派生（标注来源）。
 

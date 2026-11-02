@@ -607,6 +607,6 @@ def test_example_specs_are_current(name):
     from pathlib import Path
 
     path = (Path(__file__).resolve().parents[1]
-            / "openspec/changes/rl-algo-seq-and-adv/examples" / f"{name}.json")
+            / "tests/fixtures/seq_adv_examples" / f"{name}.json")
     spec = AlgorithmSpec.from_json_file(str(path))
     assert spec.rejections() == [], "regenerate with examples/make_examples.py"

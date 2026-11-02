@@ -1,4 +1,4 @@
-"""Launch preflight checks (openspec change launch-preflight-guards).
+"""Launch preflight checks (change launch-preflight-guards).
 
 Two checks run BEFORE the launcher creates any cloud resource:
 

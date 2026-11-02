@@ -6,6 +6,7 @@ Miles' example module and verl's agent-loop module are stubbed in ``sys.modules`
 
 from __future__ import annotations
 
+import os
 import asyncio
 import importlib
 import sys
@@ -321,7 +322,7 @@ def test_miles_reward_hook_marks_aborted_and_fails_closed(miles_stubs):
 
 
 def test_miles_train_args_match_the_example_except_the_yeto_hooks(monkeypatch):
-    path = Path("/home/michael/work/miles-next/examples/experimental/harbor/launch_common.py")
+    path = Path(os.path.expanduser("~/work/miles-next/examples/experimental/harbor/launch_common.py"))
     if not path.exists():
         pytest.skip("Miles source not on this machine")
     creds = types.ModuleType("miles.rollout.agentic.credentials")

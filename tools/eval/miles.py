@@ -14,8 +14,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-PY = "/home/michael/work/gpu-head/venv/bin/python"  # modal client + launcher deps (S25 C1/C3)
-SKY = "/home/michael/work/gpu-head/venv/bin/sky"
+PY = os.path.expanduser("~/work/gpu-head/venv/bin/python")  # modal client + launcher deps (S25 C1/C3)
+SKY = os.path.expanduser("~/work/gpu-head/venv/bin/sky")
 STORE_VOLUME = "yeto-eval-store"
 TAPE_VOLUME = "yeto-event-tapes"
 MODEL = "--model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca"
@@ -87,7 +87,7 @@ def run(cell, run_id: str, run_dir: Path, *, dry_run: bool = False) -> dict[str,
     raw = run_dir / "raw"
     cfg = cell.config
     env = dict(os.environ, P=run_id, R=str(raw), REPO=str(REPO), PY=PY, SKY=SKY, STOREVOL=STORE_VOLUME,
-               TAPEVOL=TAPE_VOLUME, HARD=str(cfg["hard_s"]), HOME="/home/michael")
+               TAPEVOL=TAPE_VOLUME, HARD=str(cfg["hard_s"]), HOME=os.path.expanduser("~"))
     if cell.harness == "miles_head":
         script = HERE / "miles_head.sh"
         env.update(GPU={"A10G": "a10g", "H100!": "h100"}[cfg["gpu"]], STEPS=str(cfg["rounds"]))

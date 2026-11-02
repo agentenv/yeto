@@ -6,7 +6,7 @@ module pulls torch.distributed / cp_utils): it takes the function *source*
 from a local Miles checkout at ``MILES_NEXT_COMMIT`` (``git show``), drops
 the ``@torch.compile`` decorators and executes the definitions with torch
 only. Without a checkout (``YETO_MILES_REPO``, default
-``/home/michael/work/miles-next``) those tests are skipped, not failed.
+``~/work/miles-next``) those tests are skipped, not failed.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from yeto.rl.algos import loss_reference as ref
 
 MATH = "miles/backends/training_utils/loss_hub/math_utils.py"
 CORR = "miles/backends/training_utils/loss_hub/corrections.py"
-REPO = Path(os.environ.get("YETO_MILES_REPO", "/home/michael/work/miles-next"))
+REPO = Path(os.environ.get("YETO_MILES_REPO", os.path.expanduser("~/work/miles-next")))
 
 
 def _fork(path: str, names: tuple[str, ...]) -> dict:

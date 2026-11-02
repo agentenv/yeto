@@ -218,7 +218,7 @@ class NavaAdapter(DiffusionAdapter):
             nava_root
             or _env("YETO_NAVA_ROOT")
             or _env("NAVA_ROOT")
-            or "/home/alexeisie/NAVA"
+            or "~/NAVA"
         )
         self.config_path = _expand(
             config_path

@@ -5,8 +5,8 @@
 Needs Miles (``MILES_NEXT_COMMIT`` checkout on ``sys.path``) and torch; skipped
 otherwise. Run in miles-next-venv:
 
-    PYTHONPATH=/home/michael/work/miles-next:$PWD \
-      /home/michael/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_mismatch_observe.py
+    PYTHONPATH=~/work/miles-next:$PWD \
+      ~/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_mismatch_observe.py
 """
 
 from __future__ import annotations

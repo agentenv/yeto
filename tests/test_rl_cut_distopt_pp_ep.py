@@ -29,13 +29,13 @@ DPS_PATH = "miles/backends/megatron_utils/lora/dp_invariant_state.py"
 # The fork-M5 helpers at the Miles image pin, and at the stage-1 fork branch that
 # carries the CPU-offload (HybridDeviceOptimizer) state (S25 N7.1d, not pushed).
 DPS_SOURCES = {
-    "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3"), "c35702e"),
-    "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"), "s25-distopt"),
+    "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", os.path.expanduser("~/work/miles-m3")), "c35702e"),
+    "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", os.path.expanduser("~/work/miles-next")), "s25-distopt"),
     # E1: + export_named_optimizer_state(device=None) on the image pin 44d41efd (not pushed)
-    "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"),
+    "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", os.path.expanduser("~/work/miles-next")),
                          "yeto/s26-e1-device-export"),
     # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
-    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", "/home/michael/work/miles-s26-e6-fp8"), "ed5f64fd7"),
+    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", os.path.expanduser("~/work/miles-s26-e6-fp8")), "ed5f64fd7"),
 }
 
 

@@ -5,7 +5,7 @@
 # Never deletes anything on the FS. df gate: free >= 2.1 x snapshot (snapshot + torch_dist of similar size) before (1),
 # free >= 1.1 x snapshot before (2); FS total >= FS_MIN_G (1000) GiB (grow attempt for ext4/xfs); otherwise FNPREP_FAIL (the chain then skips fnA). Timings + df -> <outdir>/fnprep.json.
 # usage: s11fnprep.sh <cluster> <outdir> <yeto snapshot dir (git archive of the chain's HEAD)>
-set -u; CL=$1; O=$2; Y=$3; export HOME=/home/michael; mkdir -p $O
+set -u; CL=$1; O=$2; Y=$3; export HOME=${YETO_HOME:-$HOME}; mkdir -p $O
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 tar -C $Y -cf - . | timeout 600 $S $CL 'rm -rf ~/yeto-fnprep && mkdir -p ~/yeto-fnprep && tar -C ~/yeto-fnprep -xf -' || { echo "FNPREP_FAIL copy"; exit 1; }
 timeout 5400 $S $CL 'bash -s' > $O/fnprep-remote.log 2>&1 <<'REMOTE'

@@ -2,7 +2,7 @@
 "运行日志不入库").
 
 Evidence logs live outside the repository under
-/home/michael/work/infra-drafts/evidence/<change>/ ; each old directory keeps
+~/work/infra-drafts/evidence/<change>/ ; each old directory keeps
 an EVIDENCE.md pointer. Test fixtures under tests/ and data/ are inputs, not
 run logs, and are out of scope.
 """
@@ -31,6 +31,11 @@ def test_no_tracked_run_logs():
     tracked = _git("ls-files").splitlines()
     hits = [f for f in tracked if LOG_PATTERN.search(f) and not f.startswith(FIXTURE_ROOTS)]
     assert hits == [], f"{len(hits)} tracked run-log files: {hits[:20]}"
+
+
+def test_no_tracked_local_run_dirs():
+    tracked = _git("ls-files", "s1-runs").splitlines()
+    assert tracked == [], f"local run directory s1-runs/ is tracked: {tracked[:20]}"
 
 
 @pytest.mark.parametrize("name", ["openspec/changes/x/run-logs/a.log",

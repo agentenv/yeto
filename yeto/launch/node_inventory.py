@@ -20,7 +20,7 @@ Example::
       x86_64: REGISTRY/yeto-ppu-train:TAG
     nodes:
       - name: ascend00
-        host: user@172.28.11.10
+        host: user@192.0.2.10
         proxy_jump: user@bastion.example
         device_family: npu
         cpu_arch: aarch64
@@ -30,7 +30,7 @@ Example::
         host_memory_gib: 1024
         fabric: roce
         interface: eth0
-        address: 172.28.11.10
+        address: 192.0.2.10
         mounts: {/mnt/shared: /mnt/shared}
         runtime: docker
         docker_args: [--device, /dev/davinci0, ...]

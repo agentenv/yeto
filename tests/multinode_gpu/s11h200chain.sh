@@ -19,8 +19,8 @@
 #        FNA_CASE (fn8s | fn8r: fnboot+fna case; fn8r = dense length reward, judge_fn_learning_signal.py), FNA_SKIP (0; 1 = fnboot -> fnprep -> fnconv
 #        only, no fna: H200 full-model conversion), FN_PLAN_ONLY (1 = print the resolved fn plan and exit 0 before any cloud call)
 set -u
-P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; export HOME=/home/michael
-SKY=/home/michael/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
+P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-${YETO_HOME:-$HOME}/work/s1-runs}; export HOME=${YETO_HOME:-$HOME}
+SKY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
 CLL=$P-l-l0-eu-north1; CLH=$P-h-l0-eu-north1; RATE_L=9.14
 G=${D1_GPU:-h200}; FG=${FN_GPU:-h200}
 for g in $G $FG; do case $g in h100|h200) ;; *) echo "abort: D1_GPU/FN_GPU must be h100|h200 (got $g)"; exit 64;; esac; done
@@ -45,14 +45,14 @@ down() {  # down <cluster> <L|H>
 finish() {
   for f in $B/$P-*/watchdog.pid; do [ -f "$f" ] && kill $(cat $f) 2>/dev/null; done
   down $CLL L; down $CLH H; down $P-f-l0-eu-north1 H
-  RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
-  RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
+  RUNS_BASE=$B ${YETO_HOME:-$HOME}/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
+  RUNS_BASE=$B ${YETO_HOME:-$HOME}/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
   timeout 120 $SKY status 2>/dev/null | grep -E "$CLL|$CLH|$P-f-l0" && log "WARNING: cluster still listed" || log "sky status: $CLL / $CLH gone"
   log "estimated spend \$$(spent) (cap \$$CAP)"
 }
 trap finish EXIT
 df_free=$(df -BG --output=avail / | tail -1 | tr -dc 0-9); [ "$df_free" -ge 50 ] || { log "abort: root disk ${df_free}G < 50G"; exit 9; }
-T=$(ps -u michael -L -o pid= | wc -l); [ "$T" -lt ${THREAD_MAX:-2850} ] || { log "abort: $T threads"; exit 9; }
+T=$(ps -u "$(id -un)" -L -o pid= | wc -l); [ "$T" -lt ${THREAD_MAX:-2850} ] || { log "abort: $T threads"; exit 9; }
 log "start $P code $(git -C $REPO rev-parse --short HEAD) prefer_l40s=${PREFER_L40S:-1} cap=\$$CAP d1_gpu=$G ($(sku $G) \$$RATE_H/h) fn_gpu=$FG ($(sku $FG) \$$(rate $FG)/h)"
 H=0; CL=$CLL; CP=$P-l; export NODES=2; [ "${PREFER_L40S:-1}" = 1 ] || { H=1; CL=$CLH; CP=$P-h; export NODES=1; }
 N=0

@@ -23,7 +23,7 @@ from yeto.rl.profiles import qwen3_8_next as q
 ROOT = Path(__file__).resolve().parents[1]
 CONVERT_SH = ROOT / "scripts" / "convert_qwen3_8_next.sh"
 LAUNCH_SH = ROOT / "scripts" / "run_qwen3_8_next_4layer_lora.sh"
-MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3"))
+MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", os.path.expanduser("~/work/miles-m3")))
 
 # Regenerate only when a command change is intended:
 #   YETO_Q38N_SNAPSHOT_PRINT=1 python -m pytest -q -s tests/test_rl_qwen3_8_next_profile.py

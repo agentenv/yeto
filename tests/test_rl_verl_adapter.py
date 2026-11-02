@@ -6,6 +6,7 @@ No verl / vLLM / Ray here: modules that need them (``trainer``, ``verl_main``,
 
 from __future__ import annotations
 
+import os
 import argparse
 import dataclasses
 import json
@@ -22,7 +23,7 @@ from yeto.rl.adapters.verl import publish as pub
 from yeto.rl.adapters.verl.pins import VERL_COMMIT, VERL_IMAGE
 from yeto.rl.engine import backends, mismatch_criteria as mc
 
-S16_DUMPS = Path("/home/michael/work/s1-runs/s16-verl-mismatch-20261008/s16-verl-mismatch-20261008")
+S16_DUMPS = Path(os.path.expanduser("~/work/s1-runs/s16-verl-mismatch-20261008/s16-verl-mismatch-20261008"))
 
 
 def _cfg(**kw):

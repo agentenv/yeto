@@ -1,4 +1,4 @@
-"""Resume a run from a checkpoint store across launches (openspec rl-resume-from-checkpoint).
+"""Resume a run from a checkpoint store across launches (rl-resume-from-checkpoint).
 
 Framework-neutral core (design §7): the store abstraction, hash manifests, the
 ``LATEST`` switch, retention, the run fingerprint and the resume checks. The

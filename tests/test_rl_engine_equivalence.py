@@ -19,7 +19,6 @@ _spec = importlib.util.spec_from_file_location("rl_engine_equivalence",
 eq = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(eq)
 
-EVIDENCE = ROOT / "openspec" / "changes" / "rl-engine-ports" / "evidence"
 
 
 def _row(reward=0.5, loss=0.1, gn=1.0, groups=4, tokens=100):
@@ -128,37 +127,6 @@ def test_round1_exact_counts_and_grad_norm_relative_bound():
     assert failed == {(0, "grad_norm"), (1, "action_tokens")}
     missing = eq.round1_check(legacy, {(0, 1): _row()})
     assert not missing["passed"]
-
-
-def _committed_arm_or_skip(run_dir: Path) -> Path:
-    """The committed evidence was trimmed in #77 (``evidence/README.md``): island
-    ``miles.log`` files over 64 KB / 400 lines keep only their head and tail with a
-    ``[truncated: ...]`` marker, and the parquet shards were removed.  round1_check
-    needs the full per-step metrics, so skip when the arm is missing or trimmed
-    rather than fail on evidence this tree does not carry."""
-    try:
-        arms = eq.discover_arms(run_dir) if run_dir.is_dir() else {}
-    except FileNotFoundError:  # events.jsonl moved out of the repo (no run logs in git)
-        arms = {}
-    if not arms:
-        pytest.skip(f"committed evidence missing under {run_dir} (trimmed by #77)")
-    arm = next(iter(arms.values()))
-    for log in sorted(arm.glob("island-*/miles.log")):
-        if "[truncated:" in log.read_text(errors="ignore"):
-            pytest.skip(f"{log.relative_to(ROOT)} is trimmed (#77 kept head/tail only); "
-                        "full evidence lives in rl-engine-ports-evidence-full.tar.gz")
-    return arm
-
-
-def test_round1_on_committed_evidence_matches_the_baseline_report():
-    legacy = eq.load_arm(_committed_arm_or_skip(
-        EVIDENCE / "2026-09-29-legacy-baseline-v2" / "legacy-0"))
-    ports = eq.load_arm(_committed_arm_or_skip(EVIDENCE / "2026-09-29-strict2-federated"))
-    r1 = eq.round1_check(legacy["rounds"], ports["rounds"])
-    assert r1["passed"]
-    rel = sorted(r["rel_diff"] for r in r1["rows"] if r["metric"] == "grad_norm")
-    assert 0.005 < rel[0] < 0.006 and 0.010 < rel[1] < 0.011  # 0.6% / 1.0%
-    assert eq.hash_check(legacy["hashes"])["passed"] and eq.hash_check(ports["hashes"])["passed"]
 
 
 # ---------------------------------------------------------------------------

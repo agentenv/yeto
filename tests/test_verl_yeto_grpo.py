@@ -8,6 +8,7 @@ checkout is absent).
 
 from __future__ import annotations
 
+import os
 import ast
 import importlib
 import sys
@@ -22,7 +23,7 @@ np = pytest.importorskip("numpy")
 
 from yeto.rl.agentic.groups import ISOLATED, isolate_rows  # noqa: E402
 
-VERL_CORE_ALGOS = Path("/home/michael/work/verl-fork-acad9875/verl/trainer/ppo/core_algos.py")
+VERL_CORE_ALGOS = Path(os.path.expanduser("~/work/verl-fork-acad9875/verl/trainer/ppo/core_algos.py"))
 
 
 def _verl_grpo():

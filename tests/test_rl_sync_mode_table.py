@@ -28,18 +28,6 @@ def test_bridges_docstring_has_the_sync_mode_table():
     assert [r.split("|")[1].split()[0] for r in rows[2:]] == ["strict", "decoupled", "island"]
 
 
-def test_spec_table_matches_the_docstring():
-    spec = REPO / "openspec/changes/rl-code-quality-cleanup/specs/rl-codebase-consistency/spec.md"
-    if not spec.exists():
-        archived = sorted(REPO.glob("openspec/specs/rl-codebase-consistency/spec.md"))
-        if not archived:
-            import pytest
-
-            pytest.skip("rl-codebase-consistency spec not present")
-        spec = archived[0]
-    assert _rows(spec.read_text()) == _rows(bridges.__doc__)
-
-
 def test_no_second_bridge_or_critic_sync_in_production_code():
     """2.1/2.7: the dead elastic bridge, its factory and the in-process
     two-role critic average are gone; PPO-family critic sync is

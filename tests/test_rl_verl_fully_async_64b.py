@@ -7,6 +7,7 @@ map, discard and publication read-back are the real ones.
 
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 
@@ -446,7 +447,7 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
 
     from yeto.rl.adapters.verl import patch_verl
 
-    fork = Path("/home/michael/work/verl-fork-acad9875")
+    fork = Path(os.path.expanduser("~/work/verl-fork-acad9875"))
     if not (fork / patch_verl.CALLS_TARGET).is_file():
         pytest.skip("verl fork checkout not present")
     for target, *_ in patch_verl.PROFILES["fsdp"]:
@@ -566,7 +567,7 @@ def test_startup_problems_flag_each_broken_key():
         assert far.fully_async_startup_problems(_composed([*good, bad])) == [name], bad
 
 
-_FORK = Path("/home/michael/work/verl-fork-acad9875/verl/experimental/fully_async_policy")
+_FORK = Path(os.path.expanduser("~/work/verl-fork-acad9875/verl/experimental/fully_async_policy"))
 
 
 @pytest.mark.skipif(not _FORK.is_dir(), reason="local verl fork checkout not present")

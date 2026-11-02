@@ -5,14 +5,14 @@
 # budget guard: no new run starts after BUDGET_S (default 3.5 h = $32) since chain start.
 # usage: s11d1chain.sh <prefix>   (cluster = <prefix>-l0-eu-north1)
 set -u
-P=$1; D=$(cd "$(dirname "$0")" && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; CL=$P-l0-eu-north1; export HOME=/home/michael
-SKY=/home/michael/work/gpu-head/venv/bin/sky; T0=$(date +%s); BUDGET_S=${BUDGET_S:-12600}
+P=$1; D=$(cd "$(dirname "$0")" && pwd); B=${RUN_ROOT:-${YETO_HOME:-$HOME}/work/s1-runs}; CL=$P-l0-eu-north1; export HOME=${YETO_HOME:-$HOME}
+SKY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/sky; T0=$(date +%s); BUDGET_S=${BUDGET_S:-12600}
 LOG=$B/$P.chain.log; log() { echo "[chain $(date -u +%FT%TZ)] $*" | tee -a $LOG; }
 finish() {
   for f in $B/$P-*/watchdog.pid; do [ -f "$f" ] && kill $(cat $f) 2>/dev/null; done
   log "sky down $CL"; timeout 900 $SKY down -y $CL >> $LOG 2>&1
-  log "cleanup_run.sh $P"; RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
-  RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
+  log "cleanup_run.sh $P"; RUNS_BASE=$B ${YETO_HOME:-$HOME}/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
+  RUNS_BASE=$B ${YETO_HOME:-$HOME}/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
   timeout 120 $SKY status 2>/dev/null | grep -q "$CL" && log "WARNING: $CL still listed" || log "sky status: $CL gone"
   log "elapsed $(( $(date +%s) - T0 )) s"
 }

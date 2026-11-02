@@ -2,7 +2,7 @@
 
 Numerically identical to the out-of-tree ``gsm8k_reward.py`` that GPU runs
 load as ``--reward-function gsm8k_reward:score`` from the working directory
-(copies under ``openspec/changes/*/evidence/**/gsm8k_reward.py``): the last
+(copy under ``tests/fixtures/openspec_evidence/gsm8k_reward.py``): the last
 ``\\boxed{...}`` number (else the last number in the final 200 characters)
 must equal the number after ``####`` in the label. Reward 1.0 / 0.0.
 

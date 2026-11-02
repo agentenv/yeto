@@ -1,6 +1,6 @@
 """The final SAO streaming contract bundle, as the launcher reads it.
 
-``tools/probes/build_tbench21_sao_streaming_contracts.py finalize`` writes one
+``tools/build_tbench21_sao_streaming_contracts.py finalize`` writes one
 runtime contract and one layout attestation per island plus a manifest that
 names them and the frozen syncer semantic profile.  The launcher reads the
 manifest to start one syncer per role with exactly that profile and to send

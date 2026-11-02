@@ -3,8 +3,8 @@
 Recomputes every sample in ``tests/golden/decoupling/`` with the current code
 (CPU only, see ``tests/decoupling_golden.py``) and compares the text byte for
 byte.  On a mismatch the failing fields are named.  A difference is only
-acceptable when it is intended and recorded in
-``openspec/changes/yeto-framework-decoupling/hash-migration.md``; then
+acceptable when it is intended and recorded (hash-migration log, archived
+outside the repo); then
 regenerate with ``python tests/decoupling_golden.py --write``.
 """
 

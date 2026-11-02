@@ -2,10 +2,10 @@
 
 The trainer nodes (n4) have no direct internet; npu1 does. Run this on npu1 on its
 intranet address (n4's sshd refuses remote forwards); the trainer then sets
-``YETO_BOAT_PROXY=http://192.168.17.3:18781`` so its boat orphan
+``YETO_BOAT_PROXY=http://<npu1-intranet-ip>:18781`` so its boat orphan
 watchdog (``boat_labels.OrphanWatchdog``) can list and delete sandboxes.
 
-    python3 boat_connect_proxy.py --host 192.168.17.3 [--port 18781]
+    python3 boat_connect_proxy.py --host <npu1-intranet-ip> [--port 18781]
 """
 from __future__ import annotations
 

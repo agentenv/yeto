@@ -247,7 +247,7 @@ def test_jsonl_prompts_carry_the_agent_task_and_the_spec_pairs_format_and_sectio
 
 # ---------------------------------------------------------------------- nemotron3 template
 NEMOTRON3_TOKENIZER = os.environ.get("YETO_NEMOTRON3_TOKENIZER",
-                                     "/home/michael/work/hf-meta/nemotron35-super-vl-120b")
+                                     os.path.expanduser("~/work/hf-meta/nemotron35-super-vl-120b"))
 
 
 @pytest.fixture(scope="module")

@@ -197,8 +197,7 @@ def _tis_spec():
     return AlgorithmSpec(correction={"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0})
 
 
-DRGRPO_EVIDENCE = ("openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/out/"
-                   "drgrpo/algorithm_spec.json")
+DRGRPO_EVIDENCE = "tests/fixtures/openspec_evidence/drgrpo_algorithm_spec.json"
 
 
 def _maxrl_spec():

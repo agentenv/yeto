@@ -212,7 +212,7 @@ def run_miles_launcher(plan: dict, run_dir: Path, *, dry_run: bool = False) -> d
     env = dict(os.environ, P=plan["run_id"], R=str(raw), REPO=str(miles.REPO), PY=miles.PY, SKY=miles.SKY,
                STALL_S=str(STALL_S), FIRST_STEP_S=str(FIRST_STEP_S),
                STOREVOL=miles.STORE_VOLUME, TAPEVOL=miles.TAPE_VOLUME, HARD=str(plan["spec"]["timeout_s"]),
-               HOME="/home/michael", ARGS=plan["launcher_args"], ISLANDS="1")
+               HOME=os.path.expanduser("~"), ARGS=plan["launcher_args"], ISLANDS="1")
     if dry_run:
         env["DRY"] = "1"
     sp = spec.EffSpec(**plan["spec"])

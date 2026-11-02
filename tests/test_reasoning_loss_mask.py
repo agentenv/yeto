@@ -193,8 +193,8 @@ def test_hook_installed_for_both_placements(colocated):
 
 
 def _miles_root() -> pathlib.Path | None:
-    for candidate in (os.environ.get("YETO_MILES_CHECKOUT"), "/home/michael/work/s16-raw-lora-disagg-miles",
-                      "/home/michael/work/miles-next"):
+    for candidate in (os.environ.get("YETO_MILES_CHECKOUT"), os.path.expanduser("~/work/s16-raw-lora-disagg-miles"),
+                      os.path.expanduser("~/work/miles-next")):
         if candidate and (pathlib.Path(candidate) / "miles/rollout/sglang_rollout.py").is_file():
             return pathlib.Path(candidate)
     return None

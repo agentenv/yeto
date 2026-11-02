@@ -1,6 +1,6 @@
 """Offline comparison of IS corrections (TIS / IcePop / M2PO) on saved logprobs.
 
-openspec change rl-inter-island-scheduling, tasks 0.10.
+rl-inter-island-scheduling, tasks 0.10.
 
 Input: dump files (torch .pt dicts) each holding, for one batch of samples,
 ``rollout_log_probs`` (behaviour policy) and ``old_log_probs`` (training-side

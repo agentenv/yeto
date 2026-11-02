@@ -19,8 +19,11 @@ must appear in ``gpu-spend.md``), checks the local thread count and Ray, writes
 
 from __future__ import annotations
 
+import os
 import argparse
+import getpass
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -29,15 +32,15 @@ from pathlib import Path
 from . import cells, judges, report
 from .verdict import Verdict
 
-DEFAULT_OUT = Path("/home/michael/work/infra-drafts/SESSION25/logs/T-EVAL")
-LEDGER = Path("/home/michael/work/infra-drafts/gpu-spend.md")
+DEFAULT_OUT = Path(os.path.expanduser("~/work/infra-drafts/SESSION25/logs/T-EVAL"))
+LEDGER = Path(os.path.expanduser("~/work/infra-drafts/gpu-spend.md"))
 THREAD_LIMIT = 3000
 
 
 def _preflight(run_id: str) -> None:
     if not LEDGER.is_file() or run_id not in LEDGER.read_text():
         raise SystemExit(f"run id {run_id} is not pre-registered in {LEDGER}")
-    threads = subprocess.run("ps -u michael -L --no-headers | wc -l", shell=True, capture_output=True,
+    threads = subprocess.run(f"ps -u {shlex.quote(getpass.getuser())} -L --no-headers | wc -l", shell=True, capture_output=True,
                              text=True).stdout.strip()
     if int(threads or 0) >= THREAD_LIMIT:
         raise SystemExit(f"{threads} local threads (>= {THREAD_LIMIT}): do not launch")
@@ -130,7 +133,7 @@ def cmd_report(args) -> int:
     return 0
 
 
-EFF_OUT = Path("/home/michael/work/infra-drafts/SESSION26/logs/E0")
+EFF_OUT = Path(os.path.expanduser("~/work/infra-drafts/SESSION26/logs/E0"))
 
 
 def cmd_eff_plan(args) -> int:

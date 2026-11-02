@@ -96,7 +96,7 @@
   "--gpu",
   "aws:2xa100@us-east-1",
   "--rl-algorithm-spec",
-  "<REPO>/openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/out/drgrpo/algorithm_spec.json"
+  "<REPO>/tests/fixtures/openspec_evidence/drgrpo_algorithm_spec.json"
  ],
  "miles_argv": [
   "train.py",

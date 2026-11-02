@@ -10,8 +10,8 @@ Use a dedicated venv. Do not install into a shared runtime venv.
 
 ```bash
 cd <repo root>
-uv venv -p 3.12 /home/michael/work/yeto-test-venv
-uv pip install -p /home/michael/work/yeto-test-venv/bin/python \
+uv venv -p 3.12 ~/work/yeto-test-venv
+uv pip install -p ~/work/yeto-test-venv/bin/python \
   --index-strategy unsafe-best-match \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   "torch==2.8.0+cpu" -r pyproject.toml --extra test
@@ -30,7 +30,7 @@ Make sure no GPU launch chain runs on this machine first (thread budget).
 
 ```bash
 cd <repo root> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. \
-  /home/michael/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
+  ~/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
 ```
 
 Last result (2026-10-09, fix-known-red-tests): see the table at the end.

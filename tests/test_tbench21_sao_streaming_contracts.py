@@ -13,7 +13,6 @@ from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
 TOOL = (
     Path(__file__).resolve().parents[1]
     / "tools"
-    / "probes"
     / "build_tbench21_sao_streaming_contracts.py"
 )
 SPEC = importlib.util.spec_from_file_location(

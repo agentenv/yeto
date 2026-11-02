@@ -26,7 +26,7 @@
 
 ## 标准样本
 
-去耦合各阶段合并前，`tests/test_decoupling_golden.py` 必须通过：典型配置下的 Miles 命令行、`AlgorithmSpec.sha256()`、`ExecutionProfile.contract_hash`、插件源码哈希、strict/decoupled 进度内容与假引擎 tape 片段与 `tests/golden/decoupling/` 逐字一致。哈希的有意变更记在 `openspec/changes/yeto-framework-decoupling/hash-migration.md`。
+去耦合各阶段合并前，`tests/test_decoupling_golden.py` 必须通过：典型配置下的 Miles 命令行、`AlgorithmSpec.sha256()`、`ExecutionProfile.contract_hash`、插件源码哈希、strict/decoupled 进度内容与假引擎 tape 片段与 `tests/golden/decoupling/` 逐字一致。哈希的有意变更记录已归档到仓库外。
 
 ## 阶段 4 之后（yeto-framework-decoupling，2026-10-08）
 

@@ -12,7 +12,7 @@ entry picks one and writes one summary:
 
   miles  tools/eval/health_gr.py: Miles' metric lines in RUN_DIR/launch.stream.log
          (rollout/raw_reward, train/*), the yeto events and the syncer log
-  verl   tools/probes/s27_verl_full/health_launch.py: the island mirrors under
+  verl   tools/eval/s27_verl_full/health_launch.py: the island mirrors under
          RUN_DIR/tape-direct/<app>/l<k>/rank0 (verl metrics, criteria, publications,
          the latest container's files after a relaunch), the head syncer log
 
@@ -42,7 +42,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 READERS = {
     "miles": HERE / "health_gr.py",
-    "verl": HERE.parent / "probes" / "s27_verl_full" / "health_launch.py",
+    "verl": HERE / "s27_verl_full" / "health_launch.py",
 }
 VERL_FILES = ("verl-plan-*.json", "verl-runtime-*.json")
 SYNCER_CHECKS = ("merges", "rejected", "final_ack", "ogn_spike")  # verl reader rows read from the syncer

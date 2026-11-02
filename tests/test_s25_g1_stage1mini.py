@@ -133,7 +133,7 @@ def test_fixed_answers_may_be_recorded_without_failing():
     assert loose["answers_required"] is False
 
 
-def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store():
+def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store(ppu_plan):
     from yeto.rl.stage1 import expand, load_plan
 
     out = expand(load_plan(REPO / "examples/stage1/glm5next-mini-modal.yaml"))
@@ -153,7 +153,7 @@ def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store():
     assert out.trainer["convert_argv"][out.trainer["convert_argv"].index("--save") + 1] == out.trainer["torch_dist"]
     assert "--qkv-format" not in out.trainer["convert_argv"] and "--spec" in out.trainer["convert_argv"]
     # the PPU plan keeps OSS and passes no --miles-commit for its short commit
-    ppu = expand(load_plan(REPO / "examples/stage1/glm53-flash-ppu.yaml"))
+    ppu = expand(load_plan(ppu_plan))
     assert ppu.errors == [] and "--miles-commit" not in ppu.trainer["miles"]["island_argv"]
     assert "--frozen-base" not in ppu.requant["argv"]
 

@@ -12,15 +12,15 @@
 #   n2,n3: /data/work/s27-ez/models/nemotron-120b-text   (G-EZ3, read-only)
 #
 # Usage on npu1:
-#   ROLE=head  bash ray_cluster.sh     # run on n1
-#   ROLE=worker NODE=n2 bash ray_cluster.sh
-#   ROLE=worker NODE=n3 bash ray_cluster.sh
-# or drive all three from n1 over ssh (see g120_up.sh, written after W1 reports).
+#   HEAD_IP=<n1 ip> ROLE=head bash ray_cluster.sh            # run on n1
+#   HEAD_IP=<n1 ip> MY_IP=<n2 ip> ROLE=worker NODE=n2 bash ray_cluster.sh
+#   HEAD_IP=<n1 ip> MY_IP=<n3 ip> ROLE=worker NODE=n3 bash ray_cluster.sh
+# or drive all three from n1 over ssh; every invocation needs HEAD_IP (no default).
 set -o pipefail
 # G-120C: YETOSRC picks the deployed yeto tree (default $MINE/yetosrc). Ray workers
 # import yeto from THIS path, so the driver and the cluster must use the same one.
 MINE=/data/work/s28-g120
-HEAD_IP=${HEAD_IP:-192.168.17.3}      # n1 (VERL-ASCEND-RL.md §2)
+HEAD_IP=${HEAD_IP:?HEAD_IP=<head node intranet IP>}  # n1 (VERL-ASCEND-RL.md §2)
 RAY_PORT=${RAY_PORT:-6394}  # S29: give each run its own port (and the ports below) when clusters share nodes
 ROLE=${ROLE:?ROLE=head|worker}
 RUN=${RUN:-g120-1}
@@ -55,7 +55,7 @@ if [ "$ROLE" = head ]; then
   grep -q "Ray runtime started" "$OUT/ray-head.log" || { echo "HEAD-ABORT"; tail -5 "$OUT/ray-head.log"; exit 97; }
   echo "head up $(date -u +%H:%M:%SZ)"
 else
-  MY_IP=${MY_IP:?MY_IP=192.168.17.N of this worker}
+  MY_IP=${MY_IP:?MY_IP=<intranet IP of this worker>}
   until ray start --address="$HEAD_IP:$RAY_PORT" --node-ip-address="$MY_IP" --num-cpus=64 --temp-dir="$OUT/ray" --dashboard-agent-listen-port=52465 --dashboard-agent-grpc-port=52466 --runtime-env-agent-port=52467 --metrics-export-port=52468 --min-worker-port=30000 --max-worker-port=31999 \
         --resources='{"NPU": 8}' >>"$OUT/ray-$NODE.log" 2>&1; do sleep 5; done
   echo "worker $NODE joined $(date -u +%H:%M:%SZ)"

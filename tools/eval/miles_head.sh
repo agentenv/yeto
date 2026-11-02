@@ -13,9 +13,9 @@ HARD=${HARD:-2700}; WD=$(( HARD + 300 )); STEPS=${STEPS:-4}; SROUNDS=$(( 2 * STE
 PREFLIGHT=${PREFLIGHT:-}
 SHA=${SHA:-HEAD}; MODAL="$PY -m modal"
 APP=yeto-$P; SP=$P-s; SAPP=yeto-$SP; TAPEVOL=yeto-event-tapes; STOREVOL=${STOREVOL:-yeto-eval-store}; HEAD_REGION=nebius/eu-north1
-export CARGO_HOME=/home/michael/work/gpu-default-modal/cargo RUSTUP_HOME=/home/michael/work/gpu-default-modal/rustup
+export CARGO_HOME=${YETO_HOME:-$HOME}/work/gpu-default-modal/cargo RUSTUP_HOME=${YETO_HOME:-$HOME}/work/gpu-default-modal/rustup
 export PATH=$CARGO_HOME/bin:$PATH
-T=$(ps -u michael -L --no-headers | wc -l)
+T=$(ps -u "$(id -un)" -L --no-headers | wc -l)
 [ "${PLAN_ONLY:-0}" = 1 ] || [ "$T" -lt 3000 ] || { echo "abort: $T user threads (>= 3000)"; exit 3; }
 pgrep -x raylet >/dev/null && { echo "abort: local Ray running"; exit 3; }
 HEAD_CL=$(cd $REPO && PYTHONPATH=$REPO /usr/bin/python3 -c "from yeto.launch.sky_ops import sky_cluster_name; print(sky_cluster_name('$P-head'))")
@@ -38,8 +38,8 @@ SARGS="launch $PREFLIGHT --controller local --cluster-prefix $SP --gpu modal:1x$
 git -C $REPO rev-parse $SHA > $R/yeto_sha.txt; echo "$TARGS" > $R/args.txt; echo "$SARGS" > $R/sargs.txt
 echo "$APP $SAPP $HEAD_CL" > $R/resources.txt
 eval "$(/usr/bin/python3 - <<'PYC'
-import shlex, tomllib
-t = tomllib.load(open("/home/michael/.modal.toml", "rb"))
+import os, shlex, tomllib
+t = tomllib.load(open(os.path.join(os.environ.get("YETO_HOME") or os.path.expanduser("~"), ".modal.toml"), "rb"))
 prof = next((v for v in t.values() if isinstance(v, dict) and v.get("active")), None) or next(v for v in t.values() if isinstance(v, dict))
 print(f"export MODAL_TOKEN_ID={shlex.quote(prof['token_id'])} MODAL_TOKEN_SECRET={shlex.quote(prof['token_secret'])}")
 PYC
@@ -55,7 +55,7 @@ if [ "${PLAN_ONLY:-0}" = 1 ]; then
 fi
 date -u +%FT%TZ > $R/start_utc.txt
 cat > $R/teardown.sh <<EOF
-cd /tmp; export HOME=/home/michael
+cd /tmp; export HOME=${YETO_HOME:-$HOME}
 S='ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20'
 JOB=\$(grep -oP 'head_job=\K\d+' $R/head_job.txt 2>/dev/null)
 if timeout 60 $SKY status $HEAD_CL 2>/dev/null | grep -q ' UP '; then
@@ -71,14 +71,14 @@ timeout 120 $SKY status $HEAD_CL > $R/\${1:-final}-skystatus.txt 2>&1
 EOF
 echo "ps_threads_at_start=$T" > $R/threads-ps.txt
 # container tape + NVML puller (both apps)
-( while sleep 20; do c=$(cd /tmp && HOME=/home/michael timeout 60 $MODAL container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x.get('app_name') in ('$APP','$SAPP')))" 2>/dev/null)
+( while sleep 20; do c=$(cd /tmp && HOME=${YETO_HOME:-$HOME} timeout 60 $MODAL container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x.get('app_name') in ('$APP','$SAPP')))" 2>/dev/null)
     echo "$(date -u +%FT%TZ) $c" >> $R/containers.log
     for x in $c; do
-      (cd /tmp && HOME=/home/michael timeout 60 $MODAL container exec $x -- sh -c "cat /root/yeto-output/rl-island-*.jsonl 2>/dev/null") > $R/tapes/.$x 2>/dev/null && [ -s $R/tapes/.$x ] && grep -q '"event"' $R/tapes/.$x && mv $R/tapes/.$x $R/tapes/$x.jsonl
-      (cd /tmp && HOME=/home/michael timeout 30 $MODAL container exec $x -- sh -c "nvidia-smi --query-gpu=timestamp,name,utilization.gpu,memory.used,power.draw --format=csv,noheader") 2>/dev/null | sed "s/^/$x,/" >> $R/nvml.csv; done; done ) 9>&- &
+      (cd /tmp && HOME=${YETO_HOME:-$HOME} timeout 60 $MODAL container exec $x -- sh -c "cat /root/yeto-output/rl-island-*.jsonl 2>/dev/null") > $R/tapes/.$x 2>/dev/null && [ -s $R/tapes/.$x ] && grep -q '"event"' $R/tapes/.$x && mv $R/tapes/.$x $R/tapes/$x.jsonl
+      (cd /tmp && HOME=${YETO_HOME:-$HOME} timeout 30 $MODAL container exec $x -- sh -c "nvidia-smi --query-gpu=timestamp,name,utilization.gpu,memory.used,power.draw --format=csv,noheader") 2>/dev/null | sed "s/^/$x,/" >> $R/nvml.csv; done; done ) 9>&- &
 PULLER=$!
 cd $R/yeto
-exec 9>/home/michael/work/infra-drafts/GPU-LAUNCH.lock; flock 9
+exec 9>${YETO_HOME:-$HOME}/work/infra-drafts/GPU-LAUNCH.lock; flock 9
 date -u +%FT%TZ > $R/lock_utc.txt
 systemd-run --user --unit=$P-wd --on-active=${WD}s /bin/bash -c "bash $R/teardown.sh watchdog; touch $R/WATCHDOG_FIRED" > $R/watchdog.out 2>&1
 ( eval "YETO_RUNS_DIR=$R/runs timeout $HARD $PY -m yeto.cli $TARGS" 2>&1 | tee $R/launch.stream.log | awk '{ print strftime("%FT%TZ", systime(), 1) " " $0; fflush() }' > $R/launch.ts.log; echo "rc=${PIPESTATUS[0]}" > $R/submit_rc.txt ) 9>&- &
@@ -94,18 +94,18 @@ for i in $(seq 1 90); do [ "$(grep -c 'modal-island [01]\] requested' $R/launch.
 ( eval "YETO_RUNS_DIR=$R/sruns timeout $HARD $PY -m yeto.cli $SARGS" 2>&1 | awk '{ print strftime("%FT%TZ", systime(), 1) " " $0; fflush() }' > $R/slaunch.ts.log; echo "rc=${PIPESTATUS[0]}" > $R/ssubmit_rc.txt ) 9>&- &
 SSUB=$!
 sleep 60; exec 9>&-
-( cd /tmp; HOME=/home/michael timeout $HARD $MODAL app logs --timestamps $APP > $R/modal-live-logs.txt 2>&1 ) 9>&- &
+( cd /tmp; HOME=${YETO_HOME:-$HOME} timeout $HARD $MODAL app logs --timestamps $APP > $R/modal-live-logs.txt 2>&1 ) 9>&- &
 wait $SUB
 if [ -n "$JOB" ]; then
   END=$(( $(date +%s) + HARD ))
   while [ $(date +%s) -lt $END ]; do
-    st=$(cd /tmp && HOME=/home/michael timeout 120 $SKY queue $HEAD_CL 2>/dev/null | awk -v j=$JOB '$1==j{print}')
+    st=$(cd /tmp && HOME=${YETO_HOME:-$HOME} timeout 120 $SKY queue $HEAD_CL 2>/dev/null | awk -v j=$JOB '$1==j{print}')
     echo "$st" | grep -qE "RUNNING|PENDING|SETTING_UP|INIT" || break; sleep 30
   done
 fi
 date -u +%FT%TZ > $R/end_utc.txt
 kill $PULLER 2>/dev/null
-export HOME=/home/michael
+export HOME=${YETO_HOME:-$HOME}
 bash $R/teardown.sh final
 kill $SSUB 2>/dev/null
 grep -E "^ *$JOB " $R/head/queue.txt 2>/dev/null | grep -q SUCCEEDED && echo "rc=0" > $R/rc.txt || echo "rc=1 ($(grep -E "^ *$JOB " $R/head/queue.txt 2>/dev/null | tr -s ' ' | cut -c1-120))" > $R/rc.txt

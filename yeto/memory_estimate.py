@@ -21,8 +21,7 @@ island) alternate two phases: training (engine released, offload) and
 rollout (trainer offloaded).  The peak is the larger of the two phases;
 the rollout phase is ``mem_fraction_static * GPU memory + R0``.
 
-Calibration (task 2.2; data in openspec/changes/launch-preflight-guards/
-evidence/memory-backtest.json): S17 M1 runs b, c, d (Qwen3.5-4B LoRA r16,
+Calibration (task 2.2; data archived outside the repo): S17 M1 runs b, c, d (Qwen3.5-4B LoRA r16,
 one GPU per island, colocated).
 
 * K_LOGIT: run c OOM message "Tried to allocate 7.58 GiB" = 16384 x 248320

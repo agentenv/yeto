@@ -2,10 +2,10 @@
 # the same generated commands as glm53-flash-ppu.yaml; only the nodes
 # (Modal containers) and the store (a Modal Volume through the yeto store
 # hook, not OSS) differ. Model: Miles' 4-layer GLM5.3-Flash CI checkpoint cut
-# to 32 routed experts per MoE layer (tools/probes/s25_g1/make_mini.py).
+# to 32 routed experts per MoE layer (tools/s25_g1/make_mini.py).
 #
 #   yeto-stage1 plan examples/stage1/glm5next-mini-modal.yaml
-#   modal run tools/probes/s25_g1/modal_app.py::...   (the driver reads this plan)
+#   modal run tools/s25_g1/modal_app.py::...   (the driver reads this plan)
 
 run_id: s25-g1-mini
 inventory: modal-mini-inventory.yaml

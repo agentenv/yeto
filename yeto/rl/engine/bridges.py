@@ -13,7 +13,7 @@ decoupled schema 4) through the core progress module
 optimizer state.
 
 Sync modes (rl-code-quality-cleanup 2.6; the one place these rules are written
-down, kept identical in openspec spec ``rl-codebase-consistency``).  The island
+down).  The island
 delta is ``local - base`` in ``StrictRlBridge.submit_local_state`` (strict) and
 the fragment bridges in ``yeto.rl.decoupled`` (decoupled); the merge is on the
 Rust syncer.

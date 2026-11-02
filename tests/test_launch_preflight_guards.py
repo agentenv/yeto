@@ -1,4 +1,4 @@
-"""openspec change launch-preflight-guards: thread preflight, GPU memory
+"""launch-preflight-guards: thread preflight, GPU memory
 estimate preflight, per-island override for negative-test runs."""
 
 from __future__ import annotations

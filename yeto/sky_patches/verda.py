@@ -1,7 +1,7 @@
 """Runtime fix for SkyPilot's Verda provisioner (sky/provision/verda/instance.py).
 
-What SkyPilot 0.13.0 gets wrong, and what this replaces (see
-openspec/changes/fix-verda-provider/design.md, D2):
+What SkyPilot 0.13.0 gets wrong, and what this replaces (fix-verda-provider design, D2;
+archived outside the repo):
 
 * ``query_instances`` has the pre-0.13 signature, so the dispatcher's
   ``(cluster_name, cluster_name_on_cloud, provider_config, ...)`` lands one

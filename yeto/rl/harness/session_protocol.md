@@ -26,7 +26,7 @@ harness 的约定：
 
 ## 核实情况
 
-以 Miles ports 路径 pin `MILES_NEXT_COMMIT = c35702eefcf2862cee155e46870e6ad30568d2c6`（`yeto/rl/__init__.py`）的源码核实（本地仓库 `/home/michael/work/miles-2b` 的 git 对象，2026-10-08）：
+以 Miles ports 路径 pin `MILES_NEXT_COMMIT = c35702eefcf2862cee155e46870e6ad30568d2c6`（`yeto/rl/__init__.py`）的源码核实（本地仓库 `~/work/miles-2b` 的 git 对象，2026-10-08）：
 
 | 项 | 文件:行（pin 提交） | 状态 |
 |---|---|---|

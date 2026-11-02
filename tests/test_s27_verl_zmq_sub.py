@@ -21,6 +21,7 @@ it needs pyzmq (in the verl image, not in every test venv) and skips without.
 """
 from __future__ import annotations
 
+import os
 import ast
 import shutil
 import time
@@ -31,7 +32,7 @@ import pytest
 
 from yeto.rl.adapters.verl import fully_async_round, patch_verl
 
-VERL_FORK = Path("/home/michael/work/verl-fork-acad9875")
+VERL_FORK = Path(os.path.expanduser("~/work/verl-fork-acad9875"))
 needs_fork = pytest.mark.skipif(not (VERL_FORK / patch_verl.ZMQ_TARGET).is_file(), reason="no verl fork checkout")
 TOPIC = "bucket_metadata"
 
