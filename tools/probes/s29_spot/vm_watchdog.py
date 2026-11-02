@@ -45,7 +45,6 @@ REPO = HERE.parents[2]
 SKY = os.path.expanduser("~/work/venvs/skypilot/bin/sky")
 NEBIUS = os.path.expanduser("~/.nebius/bin/nebius")
 SKY_CONFIG = os.path.expanduser("~/.sky/config.yaml")
-TENANT = "tenant-e00fey51fzn151mwsb"
 
 # 8-GPU hourly prices (USD) from `sky gpus list H100:8|H200:8 --infra nebius --all-regions`
 # on 2026-11-02. H200 is NOT the same price as H100 (spot H100 eu-north1 $6.32, cheapest

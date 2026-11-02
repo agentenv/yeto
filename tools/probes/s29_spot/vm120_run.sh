@@ -27,7 +27,7 @@ if [ ! -x /root/bin/rclone ]; then
     "$PY" -m zipfile -e /tmp/rclone.zip /tmp/rclone-x && cp /tmp/rclone-x/rclone-*/rclone /root/bin/ && chmod +x /root/bin/rclone
 fi
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ ! -f /root/.aws/credentials ]; then
-  (umask 077; mkdir -p /root/.aws; printf '[yeto-rl]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > /root/.aws/credentials)
+  (umask 077; mkdir -p /root/.aws; printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > /root/.aws/credentials)
 fi
 if [ ! -f /opt/yeto/image/versions.lock.json ]; then
   "$PY" - <<PYEOF > /tmp/harbor_layer.sh
@@ -83,7 +83,7 @@ export YETO_RECORDS_PROXY_SECRET_FILE=/root/.yeto-records-proxy-secret YETO_SPOT
 export YETO_RL_RELEASE_MIRROR=/root/release-mirror PYTHONPATH=$YETO PYTHONUNBUFFERED=1 HOME=/root
 if [ "${S3_DELIVERY:-0}" = 1 ]; then
   pkill -f "s3_delivery.py pull-loop" 2>/dev/null  # only ours: a restarted run_vm replaces its own loop
-  (cd "$YETO" && S3_PREFIX=${S3_PREFIX:-s29r120} S3_TRANSFERS=${S3_PULL_TRANSFERS:-16} RCLONE=/root/bin/rclone S3_METRICS=$OUT/s3-delivery.jsonl \
+  (cd "$YETO" && S3_PREFIX=${S3_PREFIX:?set S3_PREFIX} S3_REGION=${S3_REGION:?set S3_REGION} S3_TRANSFERS=${S3_PULL_TRANSFERS:-16} RCLONE=/root/bin/rclone S3_METRICS=$OUT/s3-delivery.jsonl \
     nohup "$PY" tools/probes/s29_spot/s3_delivery.py pull-loop --store "$STORE" >> "$OUT/s3_pull.log" 2>&1 &)
 fi
 echo "[s29-120] sampler start $(date -u +%FT%TZ)"

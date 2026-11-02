@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""S30 P0-b: policy releases npu1 -> AWS S3 -> GPU island, no dev machine in the data path.
+"""Policy releases trainer host -> AWS S3 -> GPU island, no dev machine in the data path.
 
-npu1 (trainer store) runs ``publish-loop``: every new release the trainer names in
+The trainer host (trainer store) runs ``publish-loop``: every new release the trainer names in
 ``policy-releases/LATEST.json`` gets a cut manifest (``yeto.rl.spot_rollout.cut_manifest``),
 its files go to ``s3://$S3_BUCKET/$S3_PREFIX/<release>/`` with rclone (many files in
-parallel through the npu1 HTTP proxy), then the manifest (``manifests/<release>.json``),
+parallel through the trainer host's HTTP proxy), then the manifest (``manifests/<release>.json``),
 the publish metrics (``pub/<release>.json``) and last the pointer ``LATEST.json``
 (release, manifest digest). A release whose delta base was never published (the loop
 fell behind) has its base published first, so a delta chain on S3 never has a hole.
@@ -19,14 +19,16 @@ staged download is reused on the next try.
 Every published/placed release appends one JSON line of metrics (bytes, seconds, MB/s,
 lag behind the trainer's ``released_at``) to ``$S3_METRICS`` for the patrol script.
 
-    # npu1
-    S3_BUCKET=<bucket> S3_PROXY=<proxy> python3 tools/probes/s29_spot/s3_delivery.py publish-loop --store <store>
-    # VM (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or ~/.aws profile yeto-rl)
-    S3_BUCKET=<bucket> python3 tools/probes/s29_spot/s3_delivery.py pull-loop --store <store>
+    # trainer host
+    S3_BUCKET=<bucket> S3_PREFIX=<run> S3_REGION=<region> S3_PROXY=<proxy> \
+        python3 tools/probes/s29_spot/s3_delivery.py publish-loop --store <store>
+    # VM (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or AWS_PROFILE)
+    S3_BUCKET=<bucket> S3_PREFIX=<run> S3_REGION=<region> \
+        python3 tools/probes/s29_spot/s3_delivery.py pull-loop --store <store>
 
-Environment: S3_BUCKET (required), S3_PREFIX (s29r120), S3_REGION
-(eu-north-1), S3_PROXY (empty: direct), S3_TRANSFERS (4), RCLONE (rclone), AWS_PROFILE
-(yeto-rl when ~/.aws/credentials has it), S3_METRICS (<store>/s3-delivery.jsonl),
+Environment: S3_BUCKET, S3_PREFIX and S3_REGION (required), S3_PROXY (empty: direct),
+S3_TRANSFERS (4), RCLONE (rclone), AWS_PROFILE (unset: the default credential chain),
+S3_METRICS (<store>/s3-delivery.jsonl),
 S3_ASSUME_PRESENT (r1-v0: full releases the island gets elsewhere, never uploaded).
 """
 from __future__ import annotations
@@ -53,6 +55,13 @@ def env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+def required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"{name} is required")
+    return value
+
+
 def log(message: str) -> None:
     print(f"[s3-delivery {time.strftime('%H:%M:%S')}] {message}", flush=True)
 
@@ -61,21 +70,16 @@ class S3:
     """rclone against one bucket/prefix (an env-only remote: no rclone.conf)."""
 
     def __init__(self) -> None:
-        self.bucket = os.environ.get("S3_BUCKET", "")
-        if not self.bucket:
-            raise SystemExit("S3_BUCKET is required")
-        self.prefix = env("S3_PREFIX", "s29r120").strip("/")
+        self.bucket = required("S3_BUCKET")
+        self.prefix = required("S3_PREFIX").strip("/")
+        region = required("S3_REGION")
         self.rclone = env("RCLONE", "rclone")
         self.transfers = int(env("S3_TRANSFERS", str(DEFAULT_TRANSFERS)))
         e = dict(os.environ)
         tag = f"RCLONE_CONFIG_{REMOTE.upper()}_"
         e.update({tag + "TYPE": "s3", tag + "PROVIDER": "AWS", tag + "ENV_AUTH": "true",
-                  tag + "REGION": env("S3_REGION", "eu-north-1"), tag + "NO_CHECK_BUCKET": "true",
+                  tag + "REGION": region, tag + "NO_CHECK_BUCKET": "true",
                   "RCLONE_CONFIG": os.devnull})
-        creds = Path.home() / ".aws" / "credentials"
-        if "AWS_ACCESS_KEY_ID" not in e and "AWS_PROFILE" not in e and creds.is_file() \
-                and "[yeto-rl]" in creds.read_text():
-            e["AWS_PROFILE"] = "yeto-rl"
         proxy = os.environ.get("S3_PROXY", "")
         for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
             if proxy:
@@ -136,7 +140,7 @@ def assume_present() -> set[str]:
     return {n for n in env("S3_ASSUME_PRESENT", "r1-v0").split(",") if n}
 
 
-# ---------------------------------------------------------------- npu1 side
+# ---------------------------------------------------------------- trainer side
 def release_record(store: Path, release: str) -> dict[str, Any]:
     root = store / cm.RELEASES
     latest = json.loads((root / cm.LATEST).read_text())

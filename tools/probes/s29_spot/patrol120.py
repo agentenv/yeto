@@ -33,6 +33,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import shlex
 import subprocess
 import sys
@@ -368,7 +369,7 @@ class StopPlan:
     """How to stop the run (``--act``)."""
 
     run: str | None = None  # the trainer run id (kill120.sh argument)
-    trainer_host: str = "npu1"
+    trainer_host: str | None = None  # ssh host of the trainer (--trainer-host / TRAINER_HOST)
     kill_script: str | None = None  # local path of kill120.sh, sent over ssh stdin
     nebius: str = "nebius"
     boat_run: str | None = None  # boat_labels sweep --run
@@ -383,7 +384,7 @@ def stop_actions(alerts: list[Alert], instances: list[dict[str, Any]],
     commands: list[tuple[list[str], str | None]] = []
     deleted: set[str] = set()
     if any(a.severity == "stop" for a in alerts):
-        if plan.run and plan.kill_script:
+        if plan.run and plan.kill_script and plan.trainer_host:
             commands.append((["ssh", plan.trainer_host, "bash", "-s", "--", plan.run], plan.kill_script))
         for vm in instances:
             if vm.get("id") and vm["id"] not in deleted:
@@ -474,7 +475,8 @@ def parser() -> argparse.ArgumentParser:
                    default=STOP_KEYS, help=f"alerts that stop the run (default {','.join(sorted(STOP_KEYS))})")
     p.add_argument("--act", action="store_true", help="run the stop-loss (default: report only)")
     p.add_argument("--run", help="trainer run id for the kill script")
-    p.add_argument("--trainer-host", default="npu1")
+    p.add_argument("--trainer-host", default=os.environ.get("TRAINER_HOST"),
+                   help="ssh host of the trainer (default: $TRAINER_HOST); no stop of the trainer without it")
     p.add_argument("--kill-script", help="local kill120.sh, run on the trainer host over ssh")
     p.add_argument("--nebius", default="nebius", help="the nebius CLI")
     p.add_argument("--boat-run", help="boat run label to sweep (boat_labels sweep --run)")

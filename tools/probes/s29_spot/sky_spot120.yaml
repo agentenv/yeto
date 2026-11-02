@@ -6,7 +6,8 @@
 #   by hand: sky launch -c s29r-120 tools/probes/s29_spot/sky_spot120.yaml --infra nebius/eu-north1 \
 #     --secret BOAT_API_KEY --secret MODAL_TOKEN_ID --secret MODAL_TOKEN_SECRET --env RUN_ID=... -d -y
 #   S30 P0-b (releases from S3, no dev machine in the path): add
-#     --env S3_DELIVERY=1 --secret AWS_ACCESS_KEY_ID --secret AWS_SECRET_ACCESS_KEY   (IAM user yeto-rl)
+#     --env S3_DELIVERY=1 --env S3_PREFIX=<run> --env S3_REGION=<region> --env S3_BUCKET=<bucket> \
+#     --secret AWS_ACCESS_KEY_ID --secret AWS_SECRET_ACCESS_KEY
 resources:
   use_spot: true
   accelerators: H100:8  # candidates: {H100,H200}:8 (vm_watchdog.candidates)
@@ -18,7 +19,8 @@ envs:
   ISLAND: spot-0  # sampler id / shard / boat label island
   WEIGHT_SWITCH: auto  # auto (live on this engine) | drain | live
   S3_DELIVERY: "0"
-  S3_PREFIX: s29r120
+  S3_PREFIX: ""  # required with S3_DELIVERY=1
+  S3_REGION: ""  # required with S3_DELIVERY=1
   CARD: H100  # GPU kind (nvidia-smi self-check); must match --gpus
   TP: "8"
   BOAT_STARTS_PER_HOUR: "60"  # D18-1: >= max_in_flight x 2 x groups/h

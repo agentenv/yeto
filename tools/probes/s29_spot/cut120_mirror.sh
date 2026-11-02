@@ -30,9 +30,10 @@ NPU1_PY="cd ${NPU1_YETO:-/data/work/s29r/yetosrc} && PYTHONPATH=. python3"
 DELIVERY=${DELIVERY:-s3}
 # a checkout with tools/probes/s29_spot/s3_delivery.py (deploy: git archive <sha> | ssh npu1 tar x -C ...)
 NPU1_SRC=${NPU1_SRC:?set NPU1_SRC}
-S3_PREFIX=${S3_PREFIX:-s29r120}
+S3_PREFIX=${S3_PREFIX:?set S3_PREFIX}
+S3_REGION=${S3_REGION:?set S3_REGION}
 S3_TRANSFERS=${S3_TRANSFERS:-4}
-NPU1_S3_ENV="S3_PREFIX=$S3_PREFIX S3_TRANSFERS=$S3_TRANSFERS S3_BUCKET=${S3_BUCKET:?set S3_BUCKET} S3_PROXY=${S3_PROXY:-} RCLONE=${NPU1_RCLONE:-rclone}"
+NPU1_S3_ENV="S3_PREFIX=$S3_PREFIX S3_REGION=$S3_REGION S3_TRANSFERS=$S3_TRANSFERS S3_BUCKET=${S3_BUCKET:?set S3_BUCKET} S3_PROXY=${S3_PROXY:-} RCLONE=${NPU1_RCLONE:-rclone}"
 ISLAND=${ISLAND:-spot-0}  # S30 AB: one mirror per island (its shard and temp names)
 mkdir -p "$LOCAL"
 
@@ -78,7 +79,7 @@ release_s3() {
 place_s3() {
   local rel=$1 t0
   t0=$(date +%s)
-  vmsh "cd /root/yeto-root && S3_PREFIX=$S3_PREFIX S3_TRANSFERS=${S3_PULL_TRANSFERS:-16} RCLONE=/root/bin/rclone \
+  vmsh "cd /root/yeto-root && S3_PREFIX=$S3_PREFIX S3_REGION=$S3_REGION S3_TRANSFERS=${S3_PULL_TRANSFERS:-16} RCLONE=/root/bin/rclone \
     /opt/sglang/bin/python3 tools/probes/s29_spot/s3_delivery.py pull $rel --store /root/store" || return 1
   echo "[mirror] $rel S3 -> VM placed $(( $(date +%s) - t0 )) s"
 }

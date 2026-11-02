@@ -111,17 +111,17 @@ def test_read_only_by_default_and_act_runs_the_planned_stop(tmp_path):
         return 0, "ok"
 
     common = dict(tape=tape, boat_json=str(boat), nebius_cmd="nebius compute instance list --format json",
-                  run="s29r120e", kill_script="/tmp/kill120.sh", boat_run="s29r120e")
+                  run="s29r120e", kill_script="/tmp/kill120.sh", boat_run="s29r120e", trainer_host="trainer-host")
     report = patrol120.patrol(_args(**common), now=NOW, runner=runner)
     assert patrol120.exit_code(report) == 2
     assert [c[0][3] for c in calls] == ["list"]  # read-only: only the listing ran
-    assert report["planned_actions"][0] == "ssh npu1 bash -s -- s29r120e < /tmp/kill120.sh"
+    assert report["planned_actions"][0] == "ssh trainer-host bash -s -- s29r120e < /tmp/kill120.sh"
     assert "nebius compute instance delete --id vm-9" in report["planned_actions"]
 
     calls.clear()
     report = patrol120.patrol(_args(act=True, **common), now=NOW, runner=runner)
     ran = [c[0] for c in calls[1:]]
-    assert ran[0] == ["ssh", "npu1", "bash", "-s", "--", "s29r120e"] and calls[1][1] == "/tmp/kill120.sh"
+    assert ran[0] == ["ssh", "trainer-host", "bash", "-s", "--", "s29r120e"] and calls[1][1] == "/tmp/kill120.sh"
     assert ran[1] == ["nebius", "compute", "instance", "delete", "--id", "vm-9"]
     assert ran[2][1:] == ["-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", "s29r120e"]
     assert all(a["exit"] == 0 for a in report["actions"])
@@ -136,3 +136,13 @@ def test_stop_on_narrows_the_stop_alerts(tmp_path):
 @pytest.mark.parametrize("spent, alerts", [(150.0, ["spend_budget"]), (100.0, [])])
 def test_spend(spent, alerts):
     assert [a.key for a in patrol120.spend_alerts(spent, 180.0, patrol120.Thresholds())] == alerts
+
+
+def test_without_a_trainer_host_the_trainer_is_not_stopped(tmp_path, monkeypatch):
+    tape = _write(tmp_path / "t.jsonl", [_round(1), _round(2, grad=0.0)])
+    monkeypatch.delenv("TRAINER_HOST", raising=False)
+    assert patrol120.parser().parse_args([]).trainer_host is None
+    report = patrol120.patrol(_args(tape=tape, run="r", kill_script="/tmp/kill.sh", trainer_host=None), now=NOW)
+    assert not any(a.startswith("ssh ") for a in report["planned_actions"])
+    monkeypatch.setenv("TRAINER_HOST", "from-env")
+    assert patrol120.parser().parse_args([]).trainer_host == "from-env"

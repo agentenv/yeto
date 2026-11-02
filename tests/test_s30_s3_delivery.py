@@ -54,8 +54,10 @@ def _release(store: Path, name: str, seq: int, base: str | None) -> dict:
 
 def test_publish_fills_chain_holes_and_pull_places_the_chain(tmp_path, monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "test-bucket")
+    monkeypatch.setenv("S3_PREFIX", "test-run")
+    monkeypatch.setenv("S3_REGION", "test-region")
     monkeypatch.setenv("S3_METRICS", str(tmp_path / "m.jsonl"))
-    trainer, island, bucket = tmp_path / "npu1", tmp_path / "vm", tmp_path / "bucket"
+    trainer, island, bucket = tmp_path / "trainer", tmp_path / "vm", tmp_path / "bucket"
     _release(trainer, "r1-v0", 1, None)
     (island / cm.RELEASES / "r1-v0").mkdir(parents=True)  # the island's base came from elsewhere
     s3 = FakeS3(bucket)
@@ -80,8 +82,10 @@ def test_publish_fills_chain_holes_and_pull_places_the_chain(tmp_path, monkeypat
 
 def test_pull_refuses_a_tampered_release(tmp_path, monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "test-bucket")
+    monkeypatch.setenv("S3_PREFIX", "test-run")
+    monkeypatch.setenv("S3_REGION", "test-region")
     monkeypatch.setenv("S3_METRICS", str(tmp_path / "m.jsonl"))
-    trainer, island, bucket = tmp_path / "npu1", tmp_path / "vm", tmp_path / "bucket"
+    trainer, island, bucket = tmp_path / "trainer", tmp_path / "vm", tmp_path / "bucket"
     (island / cm.RELEASES / "r1-v0").mkdir(parents=True)
     s3 = FakeS3(bucket)
     _release(trainer, "r2-v2", 2, "r1-v0")
@@ -96,9 +100,35 @@ def test_pull_refuses_a_tampered_release(tmp_path, monkeypatch):
 
 def test_rclone_environment_uses_the_proxy_only_when_set(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "test-bucket")
+    monkeypatch.setenv("S3_PREFIX", "test-run")
+    monkeypatch.setenv("S3_REGION", "test-region")
     monkeypatch.setenv("S3_PROXY", "http://proxy:1")
     assert sd.S3().environ["HTTPS_PROXY"] == "http://proxy:1"
     monkeypatch.setenv("S3_PROXY", "")
     monkeypatch.setenv("HTTPS_PROXY", "http://other:2")
     e = sd.S3().environ
     assert "HTTPS_PROXY" not in e and e["RCLONE_CONFIG_S3W_PROVIDER"] == "AWS"
+
+
+@pytest.mark.parametrize("missing", ["S3_BUCKET", "S3_PREFIX", "S3_REGION"])
+def test_bucket_prefix_and_region_are_required(monkeypatch, missing):
+    for name, value in (("S3_BUCKET", "b"), ("S3_PREFIX", "p"), ("S3_REGION", "r")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv(missing)
+    with pytest.raises(SystemExit, match=missing):
+        sd.S3()
+
+
+def test_no_aws_profile_unless_one_is_set(tmp_path, monkeypatch):
+    for name, value in (("S3_BUCKET", "b"), ("S3_PREFIX", "p"), ("S3_REGION", "r")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".aws").mkdir()
+    (tmp_path / ".aws" / "credentials").write_text("[some-profile]\naws_access_key_id = x\n")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    s3 = sd.S3()
+    assert "AWS_PROFILE" not in s3.environ and s3.environ["RCLONE_CONFIG_S3W_REGION"] == "r"
+    assert s3.url("x") == "s3w:b/p/x"
+    monkeypatch.setenv("AWS_PROFILE", "chosen")
+    assert sd.S3().environ["AWS_PROFILE"] == "chosen"
