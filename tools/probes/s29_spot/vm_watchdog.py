@@ -59,6 +59,9 @@ PRICES_8GPU: dict[tuple[str, str], tuple[float, float]] = {  # (gpu, region) -> 
 }
 OWN_NAME = re.compile(r"s29|s30")  # only ever touch our own clusters
 
+# Watchdog.try_launch results
+UP, FAILED, RECLAIMED, STOPPED = "up", "failed", "reclaimed", "stopped"
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -122,7 +125,11 @@ class Ops:
         return False, tail[-1][:300]
 
     def ip(self, cluster: str) -> str:
-        p = subprocess.run([SKY, "status", "--ip", cluster], capture_output=True, text=True, timeout=120)
+        """The head's IP, "" when sky does not answer (the IP is only logged)."""
+        try:
+            p = subprocess.run([SKY, "status", "--ip", cluster], capture_output=True, text=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
         return (p.stdout.strip().splitlines() or [""])[-1]
 
     def state(self, cluster: str, region: str) -> str | None:
@@ -139,9 +146,16 @@ class Ops:
         states = [i["status"].get("state") for i in items if cluster in i["metadata"].get("name", "")]
         return states[0] if states else None
 
-    def down(self, cluster: str) -> None:
+    def down(self, cluster: str) -> bool:
+        """True once sky reports the cluster deleted; False on an error or a timeout
+        (the VM may still be up and billing)."""
         assert OWN_NAME.search(cluster), cluster
-        subprocess.run([SKY, "down", "-y", "--purge", cluster], capture_output=True, text=True, timeout=900)
+        try:
+            p = subprocess.run([SKY, "down", "-y", "--purge", cluster], capture_output=True, text=True,
+                               timeout=900)
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        return p.returncode == 0
 
     def sweep(self, run: str, island: str) -> str:
         p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
@@ -152,7 +166,11 @@ class Ops:
     def ready(self, cluster: str, cmd: str) -> bool:
         if not cmd:
             return True
-        p = subprocess.run(["ssh", "-o", "ConnectTimeout=15", cluster, cmd], capture_output=True, timeout=120)
+        try:
+            p = subprocess.run(["ssh", "-o", "ConnectTimeout=15", cluster, cmd], capture_output=True,
+                               timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return False  # a hung ssh is "not ready yet", not a reason to stop watching
         return p.returncode == 0
 
 
@@ -199,6 +217,8 @@ class Watchdog:
     gone_since: float | None = None
     swept: bool = False
     starting_since: float | None = None
+    # clusters whose delete failed: retried every loop and billed until they are gone
+    doomed: dict[str, dict[str, Any]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -211,6 +231,8 @@ class Watchdog:
             if d.get("cluster") and d.get("cand"):
                 self.cluster, self.cand = d["cluster"], Candidate(**d["cand"])
                 self.billed_at = self.clock()
+            for name, cand in (d.get("doomed") or {}).items():
+                self.doomed[name] = {"cand": Candidate(**cand), "billed_at": self.clock()}
 
     # --- bookkeeping
     def event(self, kind: str, **kw: Any) -> None:
@@ -224,13 +246,17 @@ class Watchdog:
     def _save(self) -> None:
         Path(self.cfg.state).write_text(json.dumps({
             "spent_usd": self.spent, "seq": self.seq, "cluster": self.cluster,
-            "cand": asdict(self.cand) if self.cand else None}))
+            "cand": asdict(self.cand) if self.cand else None,
+            "doomed": {name: asdict(d["cand"]) for name, d in self.doomed.items()}}))
 
     def bill(self) -> None:
         now = self.clock()
         if self.cand is not None and self.billed_at:
             self.spent += self.cand.price_hr * max(0.0, now - self.billed_at) / 3600.0
         self.billed_at = now if self.cand is not None else 0.0
+        for d in self.doomed.values():
+            self.spent += d["cand"].price_hr * max(0.0, now - d["billed_at"]) / 3600.0
+            d["billed_at"] = now
 
     def stopped_by_hand(self) -> bool:
         return os.path.exists(self.cfg.stop_file)
@@ -238,19 +264,36 @@ class Watchdog:
     def over_budget(self, cand: Candidate | None = None) -> bool:
         nxt = (cand or self.cand)
         step = nxt.price_hr * self.cfg.poll_s / 3600.0 if nxt else 0.0
+        step += sum(d["cand"].price_hr for d in self.doomed.values()) * self.cfg.poll_s / 3600.0
         return self.spent + step >= self.cfg.budget_usd
 
     # --- actions
     def delete(self, reason: str) -> None:
         self.bill()
-        c = self.cluster
+        c, cand = self.cluster, self.cand
         self.event("delete", reason=reason)
-        if c:
-            self.ops.down(c)
+        if c and not self.ops.down(c):
+            # the VM may still run: keep billing it and retry the delete every loop
+            self.doomed[c] = {"cand": cand, "billed_at": self.clock()}
+            self.event("delete_failed", reason=reason, doomed=sorted(self.doomed))
         self.cluster, self.cand, self.billed_at, self.starting_since = None, None, 0.0, None
         self._save()
 
-    def try_launch(self, cand: Candidate) -> bool:
+    def retry_deletes(self) -> None:
+        """Delete again every cluster whose delete failed; billed until it succeeds."""
+        if not self.doomed:
+            return
+        self.bill()
+        for name in list(self.doomed):
+            if self.ops.down(name):
+                del self.doomed[name]
+                self.event("delete_retry_ok", deleted=name, doomed=sorted(self.doomed))
+        self._save()
+
+    def try_launch(self, cand: Candidate) -> str:
+        """One launch: :data:`UP` (the VM is up and ready), :data:`FAILED` (deleted),
+        :data:`RECLAIMED` (reclaimed during the ready wait and deleted: try the next
+        candidate at once) or :data:`STOPPED` (the stop marker appeared; the VM stays)."""
         self.seq += 1
         self.cluster, self.cand = f"{self.cfg.cluster_prefix}-{self.seq}", cand
         t0 = self.clock()
@@ -261,26 +304,26 @@ class Watchdog:
         if not ok or t1 - t0 > self.cfg.launch_timeout_s:
             self.event("launch_fail", cand=cand.key, launch_s=round(t1 - t0, 1), msg=msg)
             self.delete("launch failed")  # a half-made cluster must not linger
-            return False
+            return FAILED
         ip = self.ops.ip(self.cluster)
         self.event("launch_ok", cand=cand.key, launch_s=round(t1 - t0, 1), ip=ip)
         if self.cfg.ready_cmd:
             while not self.ops.ready(self.cluster, self.cfg.ready_cmd):
-                if self.stopped_by_hand():  # S30 D35: the marker also ends a ready wait
-                    return True  # the VM stays; the caller's next stop check exits
+                if self.stopped_by_hand():  # the marker also ends a ready wait
+                    return STOPPED  # the VM stays; the caller's next stop check exits
                 if self.reclaimed_while_waiting():  # reclaimed during cold start
-                    return True  # cluster is None: the caller relaunches at once
+                    return RECLAIMED
                 if self.clock() - t1 > self.cfg.ready_timeout_s:
                     self.event("ready_timeout", cand=cand.key)
                     self.delete("sampler not ready")
-                    return False
+                    return FAILED
                 self.sleep(self.cfg.poll_s)
                 self.bill()
             self.event("ready", cand=cand.key, ready_s=round(self.clock() - t1, 1),
                        cold_start_s=round(self.clock() - t0, 1),
                        outage_s=round(t0 - self.gone_since, 1) if self.gone_since else None)
         self.gone_since, self.swept = None, False
-        return True
+        return UP
 
     def reclaimed_while_waiting(self) -> bool:
         """True (and the VM deleted) when the instance left RUNNING/STARTING during the ready wait."""
@@ -310,11 +353,13 @@ class Watchdog:
         for cand in self.cands:
             if self.stopped_by_hand():
                 return "manual_stop"
+            self.retry_deletes()
             if self.over_budget(cand):
                 return "budget"
             self.maybe_sweep()
-            if self.try_launch(cand):
+            if self.try_launch(cand) in (UP, STOPPED):
                 return None
+            # FAILED or RECLAIMED: the next candidate at once (no round sleep)
         self.event("round_failed", n=len(self.cands))
         return None
 
@@ -350,19 +395,21 @@ class Watchdog:
         while True:
             if self.stopped_by_hand():
                 self.bill()
-                self.event("exit", reason="manual_stop", note="VM left as is")
+                self.event("exit", reason="manual_stop", note="VM left as is", doomed=sorted(self.doomed))
                 return "manual_stop"
+            self.retry_deletes()
             if self.cluster is None:
                 reason = self.acquire()
                 if reason:
                     if reason == "budget" and self.cluster:
                         self.delete("budget")
-                    self.event("exit", reason=reason)
+                    self.retry_deletes()
+                    self.event("exit", reason=reason, doomed=sorted(self.doomed))
                     return reason
                 if self.cluster is None:
                     rounds += 1
                     if self.cfg.max_rounds and rounds >= self.cfg.max_rounds:
-                        self.event("exit", reason="max_rounds")
+                        self.event("exit", reason="max_rounds", doomed=sorted(self.doomed))
                         return "max_rounds"
                     self.sleep(self.cfg.round_sleep_s)
                     self.maybe_sweep()
@@ -371,7 +418,8 @@ class Watchdog:
             self.watch_once()
             if self.cluster is not None and self.over_budget():
                 self.delete("budget")
-                self.event("exit", reason="budget")
+                self.retry_deletes()
+                self.event("exit", reason="budget", doomed=sorted(self.doomed))
                 return "budget"
 
 
@@ -397,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--round-sleep-s", type=float, default=300)
     p.add_argument("--orphan-sweep-min", type=float, default=15)
     p.add_argument("--max-rounds", type=int, default=0)
-    p.add_argument("--dir", default="/tmp/s30wd")
+    p.add_argument("--dir", default="/tmp/vm-watchdog")
     p.add_argument("--dry-run", action="store_true", help="print the candidate order and exit")
     a = p.parse_args(argv)
     cands = candidates(gpus=a.gpus.split(","), regions=[r for r in a.regions.split(",") if r] or None,

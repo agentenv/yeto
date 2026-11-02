@@ -1,4 +1,4 @@
-"""S29-next P0-c3 / P1-1 / P1-7: the VM watchdog against a fake cloud (no sky, no nebius, no boat)."""
+"""The VM watchdog against a fake cloud (no sky, no nebius, no boat)."""
 from __future__ import annotations
 
 import importlib.util
@@ -56,6 +56,7 @@ class FakeOps:
 
     def down(self, cluster):
         self.calls.append(("down", cluster))
+        return True
 
     def sweep(self, run, island):
         self.calls.append(("sweep", run, island))
@@ -182,9 +183,8 @@ def test_spot_plan_tp_and_starts_per_hour():
     assert int(sp.env(data="/d", public_ip="1.1.1.1")["YETO_BOAT_STARTS_PER_HOUR"]) >= 16
 
 
-def test_d35_the_stop_marker_ends_a_ready_wait(tmp_path):
-    """S30 D35: a ready command that never passes kept the watchdog in its ready
-    loop, so the stop marker went unread for an hour."""
+def test_the_stop_marker_ends_a_ready_wait(tmp_path):
+    """A ready command that never passes must not keep the stop marker unread."""
     clock = Clock()
     stop = tmp_path / "wd.stop"
 
@@ -200,7 +200,7 @@ def test_d35_the_stop_marker_ends_a_ready_wait(tmp_path):
     assert ("down", dog.cluster) not in ops.calls  # the VM is left as is
 
 
-def test_d39_a_vm_reclaimed_during_the_ready_wait_is_relaunched(tmp_path):
+def test_a_vm_reclaimed_during_the_ready_wait_is_deleted_before_the_ready_timeout(tmp_path):
     """A spot VM reclaimed before its sampler came up kept the watchdog
     probing ssh until the ready timeout; the ready wait now checks the instance state."""
     clock = Clock()
@@ -217,3 +217,105 @@ def test_d39_a_vm_reclaimed_during_the_ready_wait_is_relaunched(tmp_path):
     ev = [e for e in _events(tmp_path) if e["event"] == "preempted"]
     assert ev and ev[0]["state"] == "STOPPING" and ev[0]["during"] == "ready_wait"
     assert clock() - 1_000_000.0 < 1000  # well before the ready timeout
+
+
+def test_run_relaunches_at_once_after_a_reclaim_during_the_ready_wait(tmp_path):
+    """The VM reclaimed during its cold start is followed by the next candidate in
+    the same round: no round sleep and no round counted against ``max_rounds``."""
+    clock = Clock()
+    stop = tmp_path / "wd.stop"
+    slept: list[float] = []
+
+    class ReadyOnSecond(FakeOps):
+        def ready(self, cluster, cmd):
+            return cluster.endswith("-2")
+
+    cands = wd.candidates()[:2]
+    ops = ReadyOnSecond(clock, launch={cands[0].key: [True], cands[1].key: [True]},
+                        states=["STOPPING", "RUNNING"])
+    dog = wd.Watchdog(_cfg(tmp_path, ready_cmd="test -s x", max_rounds=1), cands, ops, clock=clock,
+                      sleep=lambda s: (slept.append(s), clock.sleep(s), dog.cluster == "s30t-h100-2"
+                                       and stop.write_text("")))
+    assert dog.run() == "manual_stop"
+    assert dog.cluster == "s30t-h100-2" and ("down", "s30t-h100-1") in ops.calls
+    assert 300.0 not in slept  # never waited a round
+    events = [e["event"] for e in _events(tmp_path)]
+    assert "round_failed" not in events and events.count("ready") == 1
+
+
+def test_a_failed_delete_keeps_the_cluster_billed_and_retries(tmp_path):
+    clock = Clock()
+    downs = {"s30t-h100-1": [False, False, True]}
+
+    class FlakyDown(FakeOps):
+        def down(self, cluster):
+            self.calls.append(("down", cluster))
+            res = downs.get(cluster, [True])
+            return res.pop(0) if len(res) > 1 else res[0]
+
+    cand = wd.candidates()[0]
+    ops = FlakyDown(clock, launch={cand.key: [True]}, states=["STOPPED"])
+    dog = wd.Watchdog(_cfg(tmp_path), [cand], ops, clock=clock, sleep=clock.sleep)
+    dog.acquire()
+    dog.watch_once()  # preempted: the delete fails
+    assert dog.cluster is None and "s30t-h100-1" in dog.doomed
+    saved = json.loads((tmp_path / "wd.state.json").read_text())
+    assert "s30t-h100-1" in saved["doomed"]
+    spent = dog.spent
+    clock.sleep(3600)
+    dog.retry_deletes()  # fails again: the hour is billed
+    assert dog.spent == pytest.approx(spent + cand.price_hr) and "s30t-h100-1" in dog.doomed
+    # a restarted watchdog keeps retrying it
+    again = wd.Watchdog(_cfg(tmp_path), [cand], ops, clock=clock, sleep=clock.sleep)
+    assert "s30t-h100-1" in again.doomed
+    again.retry_deletes()
+    assert not again.doomed and any(e["event"] == "delete_retry_ok" for e in _events(tmp_path))
+
+
+def test_the_doomed_cluster_counts_against_the_budget(tmp_path):
+    clock = Clock()
+
+    class NeverDown(FakeOps):
+        def down(self, cluster):
+            self.calls.append(("down", cluster))
+            return False
+
+    cand = wd.candidates()[0]
+    ops = NeverDown(clock, launch={cand.key: [True]}, states=["STOPPED"])
+    dog = wd.Watchdog(_cfg(tmp_path, budget_usd=50.0), [cand], ops, clock=clock, sleep=clock.sleep)
+    dog.acquire()
+    dog.watch_once()
+    assert dog.cluster is None and dog.doomed
+    assert dog.run() == "budget"  # the leaked VM alone uses up the budget
+    assert dog.spent >= 50.0 - cand.price_hr and dog.doomed
+
+
+def test_ops_survive_a_hung_subprocess(monkeypatch):
+    def hang(*a, **k):
+        raise wd.subprocess.TimeoutExpired(a[0], k.get("timeout", 0))
+
+    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
+    monkeypatch.setattr(wd.subprocess, "run", hang)
+    assert ops.ready("s30t-h100-1", "true") is False
+    assert ops.ip("s30t-h100-1") == ""
+    assert ops.down("s30t-h100-1") is False
+
+    def missing(*a, **k):
+        raise FileNotFoundError("ssh")
+
+    monkeypatch.setattr(wd.subprocess, "run", missing)
+    assert ops.ready("s30t-h100-1", "true") is False and ops.ip("s30t-h100-1") == ""
+    assert ops.down("s30t-h100-1") is False
+
+
+def test_ops_down_reports_a_failed_sky_down(monkeypatch):
+    class Done:
+        def __init__(self, rc):
+            self.returncode, self.stdout, self.stderr = rc, "", ""
+
+    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: Done(1))
+    assert ops.down("s30t-h100-1") is False
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: Done(0))
+    assert ops.down("s30t-h100-1") is True
+
