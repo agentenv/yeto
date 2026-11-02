@@ -1,4 +1,4 @@
-"""S29 spot elastic health test: regression tests for the fixes (docs/s29-elastic-defects.md)."""
+"""S29 spot elastic health test: regression tests for the fixes."""
 from __future__ import annotations
 
 import os
