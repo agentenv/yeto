@@ -35,60 +35,13 @@ docs/DECOUPLED_DILOCO_MILES_RL_DESIGN.md
 # 本地图页集中目录（不上传）
 diagrams/
 
-# Run evidence (raw logs, data, reports) stays outside the repository.
-openspec/changes/*/evidence/**/*.log
-openspec/changes/*/evidence/**/*.jsonl
-openspec/changes/*/evidence/**/*.parquet
-openspec/changes/*/evidence/**/*.gz
-openspec/changes/*/evidence/**/*.part
-openspec/changes/*/evidence/**/*.out
-openspec/changes/*/evidence/**/*.err
-openspec/changes/*/evidence/**/*.tar
-openspec/changes/*/evidence/**/*.zst
-openspec/changes/*/evidence/**/*.npy
-openspec/changes/*/evidence/**/*.pt
-openspec/changes/*/evidence/**/*.bin
-openspec/changes/*/evidence/**/*.pyc
-# 放行：摘要、清单、文档
-!openspec/changes/*/evidence/**/*summary*
-!openspec/changes/*/evidence/**/*manifest*
-!openspec/changes/*/evidence/**/*.md
-!openspec/changes/*/evidence/**/ARCHIVE-MANIFEST.tsv
-# 放行：仍在仓库中的现有 evidence 文件（被测试/代码读取，或被文档引用的小文件）
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/gpu_name.txt
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/icepop/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/image-manifest.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/observe/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/opsm-trainer/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/tis/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/g2-observe/report.md
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/gpu_name.txt
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/image-manifest.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/mis-mask/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/mis/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/mis/spec.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1b/runs/observe/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1c/runs/icepop/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1c/runs/opsm-trainer/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1c/runs/tis-attempt4-fleetcontroller/app_list_check.txt
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1c/runs/tis/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-trigger/runs/icepop/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-trigger/runs/mis-mask/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-trigger/runs/opsm-trainer/check.json
-!/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-trigger/runs/tis/check.json
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-eq62-v3/replay/legacy-s17/work/seed-17/yeto-federated-m2/rollouts/island-0/0.pt
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-legacy-baseline-v2/legacy-0/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_0.parquet
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-legacy-baseline-v2/legacy-0/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_1.parquet
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-legacy-baseline-v2/legacy-0/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_2.parquet
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-strict2-federated/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_0.parquet
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-strict2-federated/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_1.parquet
-!/openspec/changes/rl-engine-ports/evidence/2026-09-29-strict2-federated/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_2.parquet
+# Run evidence, run logs and reports stay outside the repository.
+openspec/changes/*/evidence/
+**/run-logs/
 
-# Run logs never enter the repository (rl-code-quality-cleanup). Keep evidence
-# logs outside the repo (~/work/infra-drafts/evidence/<change>/) and
-# leave an EVIDENCE.md pointer. These rules come last so no earlier `!` re-includes logs.
+# Run logs never enter the repository. These rules come last so no earlier
+# `!` re-includes logs.
 **/run-logs/**
-!**/run-logs/EVIDENCE.md
 *.log
 *.stderr
 *.stdout
