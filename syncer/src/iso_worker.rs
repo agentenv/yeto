@@ -2217,16 +2217,15 @@ mod tests {
             let pool = pool.clone();
             tokio::spawn(async move { pool.flatten_owned(vec![6.0], 1, 1).await })
         };
+        // Job 6 must be on its worker before job 7 fails: a failure that poisons
+        // the pool first would reject job 6 before it ever starts.
+        assert_eq!(recv_started(&started), 6);
         control.fail(7);
         let failure = {
             let pool = pool.clone();
             tokio::spawn(async move { pool.flatten_owned(vec![7.0], 1, 1).await })
         };
-        let ids = [recv_started(&started), recv_started(&started)];
-        assert_eq!(
-            ids.into_iter().collect::<HashSet<_>>(),
-            HashSet::from([6, 7])
-        );
+        assert_eq!(recv_started(&started), 7);
         let error = failure.await.unwrap().unwrap_err().to_string();
         assert!(error.contains("injected failure"), "{error}");
         let blocked_error = tokio::time::timeout(Duration::from_secs(2), blocked)
