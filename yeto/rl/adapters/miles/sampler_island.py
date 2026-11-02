@@ -379,6 +379,16 @@ class EngineReleaseLoader:
 LEAVE_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
 
 
+def end_leave(releases: Any) -> tuple[Any, dict[str, Any]]:
+    """(LeaveReason, detail) of a sampler whose loop ended normally: FINISHED,
+    or the store's fence reason when the syncer retired this member (a spot
+    store's ``stop_reason``), so a fenced sampler does not leave FINISHED."""
+    from yeto.rl.pool_client import LeaveReason
+
+    fence = getattr(releases, "stop_reason", lambda: None)()
+    return (LeaveReason.FINISHED, {}) if fence is None else (fence[0], dict(fence[1]))
+
+
 def run_sampler_island(miles_args: Any, *, environ: Any = None,
                        sleep: Callable[[float], None] = time.sleep) -> int:
     """Run the sampler island to its data end; returns the rounds generated.
@@ -566,7 +576,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         else:
             if trainers_ended():
                 emit(TRAINERS_ENDED_EVENT, trainers=until, rounds=rounds)
-            leave(LeaveReason.FINISHED)
+            reason, detail = end_leave(releases)
+            leave(reason, **detail)
         return rounds
     except BaseException as exc:
         error = exc

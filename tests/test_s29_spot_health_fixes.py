@@ -361,3 +361,25 @@ def test_d11_the_fixed_roster_switch_and_non_spot_runs_keep_the_roster(monkeypat
     assert not pool and flags == ""
     _, _, pool, _, flags = _spot(monkeypatch, [], relay=())
     assert not pool and flags == ""  # not a spot rollout run: unchanged
+
+
+def test_a_fenced_miles_spot_sampler_leaves_fenced_not_finished():
+    from yeto.rl.adapters.miles.sampler_island import end_leave
+    from yeto.rl.pool_client import LeaveReason
+    from yeto.rl.spot_rollout.release_store import SubscriberReleaseStore, _fence_reason
+
+    def client(*, fenced, finished=False):
+        return types.SimpleNamespace(fenced=lambda: fenced, run_finished=lambda: finished)
+
+    fence = _fence_reason(client(fenced=True))
+    assert fence == (LeaveReason.FENCED, {"fenced": "superseded"})
+    assert _fence_reason(client(fenced=False)) is None
+    assert _fence_reason(client(fenced=True, finished=True)) is None  # the run ended: FINISHED
+
+    store = SubscriberReleaseStore(None, lambda cut: None, stop_reason=lambda: fence)
+    reason, detail = end_leave(store)
+    assert reason is LeaveReason.FENCED and reason is not LeaveReason.FINISHED
+    assert detail == {"fenced": "superseded"}
+    # an unfenced spot store, or a store without a fence notion, still leaves FINISHED
+    assert end_leave(SubscriberReleaseStore(None, lambda cut: None)) == (LeaveReason.FINISHED, {})
+    assert end_leave(object()) == (LeaveReason.FINISHED, {})
