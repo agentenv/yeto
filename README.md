@@ -1,313 +1,178 @@
 # Yeto
 
-**Yeto** fine-tunes language and diffusion models across cheap, geographically
-scattered GPU capacity — spot instances, mixed regions, mixed clouds, even
-mixed hardware families.
+Yeto post-trains language and diffusion models (SFT and RL) on accelerators
+spread across spot instances, regions, clouds and hardware families. Each
+learner island trains on its own and exchanges weights with the others through
+an asynchronous syncer, so a slow link or a reclaimed spot VM does not stop
+the rest of the fleet.
+
+## What it does
+
+**Fine-tuning (SFT)**
+- Causal-LM LoRA, QLoRA (NF4 base) and full-parameter fine-tuning;
+  diffusion image/video LoRA through Diffusers.
+- Asynchronous multi-island training based on Decoupled DiLoCo: islands push
+  parameter fragments to a Rust syncer that merges them (quorum with an
+  adaptive grace window, token-weighted merge, Nesterov outer step).
+- Adapter lifecycle: strict resume (`--resume-from`), branching into a new run
+  with recorded lineage (`--branch-from`), and merging an adapter into its base
+  model with sharded SafeTensors output (`yeto merge`).
+
+**Reinforcement learning**
+- Two trainer backends behind one framework-neutral engine: Miles (default)
+  and verl (`--rl-backend`), with Megatron-Core or FSDP inside an island.
+- SGLang or vLLM rollout engines, optionally decoupled from the trainer
+  through a durable sample buffer (local disk, Modal Volume, S3 or OSS).
+- Streaming agentic rollouts that record exact token ids and log-probs.
+- Policy releases as full checkpoints or lossless bf16 deltas, checked against
+  their sha256.
+- Several rollout islands per run with disjoint prompt slots, round cuts and
+  checkpoint stores for resume, strict or async multi-island sync
+  (`--rl-sync-mode`), and opt-in elastic GPU moves between rollout and
+  training (`--rl-elastic`).
+
+**Fleets, clouds and hardware**
+- AWS, Nebius, Verda and RunPod through SkyPilot, Modal GPU containers, and
+  existing machines over SSH or as external learners.
+- A fleet planner (`yeto shape`) that maximizes effective TFLOPs under a $/hr
+  budget, or minimizes cost to reach a TFLOPs target.
+- NVIDIA GPUs, Huawei Ascend NPUs (910B family) and Apple-silicon Macs (MLX).
+- A read-only fleet dashboard and optional Weights & Biases telemetry.
+
+## Architecture
 
 ```
                  ┌──────────────────────────────┐
-                 │  syncer (hot path)           │
-                 │  fragment ingest · RDA merge │
-                 │  Nesterov outer step · bcast │
+                 │  syncer (Rust, hot path)     │
+                 │  fragment ingest · merge     │
+                 │  outer step · broadcast      │
                  └──────┬───────┬───────┬───────┘
                         │  TCP (binary framing, WAN)
         ┌───────────────┤               ├───────────────┐
  ┌──────┴──────┐  ┌─────┴───────┐  ┌────┴────────┐
- │ learner 0   │  │ learner 1   │  │ learner 2   │   … one island per --gpu entry
- │ us-east-2   │  │ us-east-1   │  │ nebius:eu…  │   (PyTorch, AdamW inner opt)
+ │ learner 0   │  │ learner 1   │  │ learner 2   │   one island per --gpu entry
+ │ cloud A     │  │ cloud B     │  │ Ascend/Mac  │   (PyTorch / Megatron / MLX)
  └─────────────┘  └─────────────┘  └─────────────┘
+
+ RL, decoupled rollout:
+ ┌───────────────┐  samples   ┌───────────────┐  batches  ┌──────────────┐
+ │ rollout island├───────────►│ sample buffer ├──────────►│ trainer      │
+ │ SGLang / vLLM │            │ (disk/object  │           │ (Miles/verl) │
+ │ + agent trials│◄───────────┤  store)       │◄──────────┤              │
+ └───────────────┘  weight    └───────────────┘  policy   └──────────────┘
+                    releases (full or delta)     releases
 ```
+
+- **Syncer** (`syncer/`, Rust): the hub of the fragment protocol. Every learner
+  backend speaks the same protocol and shares one DiLoCo step boundary
+  (`yeto/diloco_sync.py`).
+- **Learners**: PyTorch FSDP2/DDP (default), Diffusers (`--model-kind
+  diffusion`), Megatron-Core (`--island-backend megatron`) and MLX (joined
+  with `--external-learners`).
+- **RL engine** (`yeto/rl/engine/`): a framework-neutral core that reaches
+  backends only through role ports; the adapters live in `yeto/rl/adapters/`.
+- **Launch**: the SkyPilot SDK for VM clouds and the Modal SDK for containers.
+  By default a small on-demand head VM hosts the syncer and the fleet
+  controller (`--controller head`), so the submitting machine can disconnect.
+  Learners default to spot; checkpoint/resume absorbs preemptions.
+
+## Install
+
+Python 3.11+. A Rust toolchain (`cargo`) is needed only to run the syncer
+yourself or to launch from x86-64 Linux; otherwise the launcher builds it on
+the syncer VM.
+
+```bash
+git clone <repository-url> yeto && cd yeto
+pip install -e ".[launcher]"          # SkyPilot clouds: aws, nebius, verda, runpod
+pip install -e ".[launcher,modal]"    # plus Modal containers
+```
+
+Other extras: `qlora`, `diffusion`, `mlx`, `wandb`, `local-rl`,
+`a100-liger`, `a100-flash-attn`, `dev`, `test` (see `pyproject.toml`).
+
+Put each cloud's credentials where its own CLI keeps them, run `sky check`, and
+export `HF_TOKEN` for gated models, private data and `hf://` outputs (see
+[docs/CLOUDS.md](docs/CLOUDS.md)).
 
 ## Quick start
 
+Launches are detached; the run name is `--cluster-prefix` (default `yeto`).
+
+**SFT on a fleet you choose** (one island per `--gpu` entry,
+`cloud:[NODESx]COUNTxGPU[@region]`):
+
 ```bash
-pip install "yeto[launcher] @ ."
-
-# pick the fleet yourself…
 yeto launch --gpu aws:8xa100@us-east-2,nebius:8xh100@eu-north1 \
-  --model qwen35-9b --data org/chat-traces
-
-# …or let the planner pick it (budget $/hr and/or a TFLOPs target)
-yeto launch --model qwen35-9b --data org/chat-traces --budget 40 --confirm
-
-yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
+  --model qwen35-9b --data org/chat-traces \
+  --output s3://my-bucket/qwen35-9b-sft --cluster-prefix qwen-sft
+yeto logs qwen-sft
 ```
 
-- `--gpu` grammar: `cloud:[nodes x]<count>x<gpu>[@region]`, one entry per
-  learner island. Clouds: `aws`, `nebius`, `verda` (via SkyPilot)
-  and `modal` (a Modal GPU container, not a VM; `modal:8xh100` runs
-  unpinned, `modal:8xh100@us` pins a region at Modal's surcharge; multi-
-  container islands need whole nodes, e.g. `modal:2x8xh100`).
-- Omitting `--gpu` invokes `yeto shape`: an exact solver maximizes effective
-  TFLOPs under your budget (or minimizes cost to reach `--flops`), subject to
-  live spot quotas minus usage, spot placement scores, per-cloud capacity signals, and an
-  FSDP memory model of the model. Run `yeto shape` directly to see the plan,
-  rejected shapes with reasons, and the launch line without launching.
-- `yeto shape --clouds` picks the clouds to plan across (default: `aws` plus
-  every cloud whose credentials are on this machine — `nebius`, `verda`,
-  `modal`; AWS credentials are only required when `aws` is listed).
-  `--regions` takes `cloud:region` entries, e.g.
-  `--regions aws:us-east-1,nebius:eu-north1,verda:FIN-03`; a bare region
-  means `aws` (the old spelling), `cloud:all` lifts the limit for one cloud
-  and `all` for every cloud. Clouds you do not name are unrestricted, except
-  AWS, which stays on its default US regions. A `modal:<region>` entry pins
-  Modal containers to that area at Modal's region surcharge; leave it out to
-  run unpinned at the base price. Credentials go where each cloud's own CLI
-  puts them (`~/.aws`, `~/.nebius`, `~/.verda`, `~/.modal.toml`);
-  see docs/CLOUDS.md.
-- `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
-  dir), or any sky-supported object-store URI — non-HF sources ship to
-  learners via SkyPilot file mounts.
-- `--data-format`: normalize OpenAI `messages`, ShareGPT `conversations`, or
-  Alpaca `instruction`/`input`/`output` rows into the same chat representation
-  before tokenization. The default, `auto`, detects the schema per row and
-  reports ambiguous or malformed rows with their row number.
-- QLoRA uses `--tuning lora --base-quantization nf4 --shard ddp`. It stores the
-  frozen base in bitsandbytes NF4 with double quantization and bf16 compute;
-  pass `--gpu` explicitly while the fleet planner's QLoRA memory model is being
-  calibrated.
-- Existing causal LoRA SFT artifacts can be continued with `--resume-from`
-  when the recorded model, data, and recipe match, or used as a new lineage
-  with `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
-  adapter into its base and writes deployment-ready SafeTensors shards. See
-  [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
-- `--wandb`: stream the fleet to Weights & Biases — one W&B group per run,
-  one run per learner island plus one fed by the syncer's event tape, so
-  per-island staleness, contribution, and quorum/grace timings are curves
-  instead of a log grep. Off by default; see [docs/WANDB.md](docs/WANDB.md).
-- `--output`: any sky-supported store URI or `hf://org/repo` — the head
-  fetches the model from the winning learner, uploads it, and **terminates
-  itself** (fully self-cleaning run). Local path or omitted: the artifact
-  stays on the head and the head is kept up.
-- `--model`: any HF id (private repos work with `HF_TOKEN`), or an alias
-  below.
-- Learners default to spot; the head VM (syncer + fleet controller) is a
-  small on-demand box whose checkpoint/resume absorbs preemptions. The
-  submitting machine can disconnect after launch.
+**Let the planner pick the fleet** under a $/hr budget:
 
-## RL infrastructure (S8-S11)
+```bash
+yeto shape --model qwen35-9b --budget 40                              # print the plan
+yeto shape --model qwen35-9b --budget 40 --data org/chat-traces --apply   # and launch it
+```
 
-Everything below is for the Miles RL path (`--rl-engine ports`; see
-[docs/MILES_RL.md](docs/MILES_RL.md)). Verification level is stated per item:
-"CPU" means unit/simulation tests only, "GPU" means it ran on real hardware.
+**RL with the Miles backend** (add `--dry-run` to validate without creating
+resources):
 
-- **Verda and Nebius providers.** Verda is wired into the planner and launcher
-  (capacity selection, in-cloud docker); Nebius supports a baked VM image and a
-  shared model filesystem (`scripts/bake_nebius_image.sh`,
-  `scripts/populate_nebius_model_store.sh`) to cut cold start. What was
-  verified per cloud is tracked in [docs/CLOUDS.md](docs/CLOUDS.md); the baked
-  image path has CPU tests but is not confirmed on GPU.
-- **Multi-node islands.** EP/PP may cross nodes (TP stays in-node by default,
-  cross-node TP is an explicit opt-in), elastic scaling happens in whole
-  replicas, GPU UUIDs are reconciled at runtime, and `--rl-checkpoint-store`
-  lets a restarted island resume from a round cut. GPU cases m1-m5 (including
-  SGLang TP8 across nodes) were run on small 2-node setups; see
-  [docs/MILES_RL.md](docs/MILES_RL.md).
-- **Elastic E1 (add/remove cards).** `--rl-elastic` with
-  `--rl-elastic-resources/-initial-config/-cells` lets a controller move GPUs
-  between rollout and training at safe points. Off by default. Edge costs
-  measured on real H100 (n=3): scale-up blocks ~147-150 s, scale-down ~3-5 s.
-- **D1 recommend / D2 auto.** `--rl-observe-timeline` records a timeline and
-  `LoadSummary`; `--rl-recommend-mode {disabled,manual,recommend,auto}` (default
-  `disabled`) with the `--rl-recommend-*` / `--rl-auto-*` tuning flags and
-  `--rl-edge-costs-path`. `recommend` only emits suggestions. **`auto` is not
-  enabled**: the real-hardware sweep found no net-benefit edge (round-time
-  differences within +/-1.5% and seed-dependent), and the controller refuses
-  `auto` unless the attestation declares it. D2 is CPU-validated (trace
-  replay); no GPU four-scenario run exists. Details and runbook:
-  the elastic-ops design note (archived outside the repo).
-- **Fleet dashboard.** Read-only view over learner/syncer tapes, controller
-  journal and `fleet.jsonl`: `yeto dashboard serve` (loopback-only, GET-only),
-  `yeto dashboard export` (single self-contained HTML), and
-  `yeto dashboard mirror` (tail a remote tape over ssh). See
-  [docs/DASHBOARD.md](docs/DASHBOARD.md).
-- **Flash-Next (Qwen3.8-Flash-Next).** A `qwen3_8_next` ports recipe with
-  full-LoRA coverage of MoE/GDN/QSA layers, profile fingerprinting,
-  `--rl-megatron-ref-load` and `--rl-lora-expert-rank`. CPU-verified only: the
-  real Miles argument parser, full conversion and a formal 4x8 H200 training
-  run have not been done (blocked on capacity).
-- **Codex harness / Terminal-Bench.** Terminal-Bench 2.1 rollouts through the
-  Codex harness (`--codex-*` options, `yeto-codex-traces`); the validation
-  run report is archived outside the repository.
-  Moving the harness onto the ports engine is tracked outside the repo.
+```bash
+yeto launch --training-mode rl --gpu aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
+  --model org/model --data org/prompts \
+  --reward-function project.rewards:score \
+  --rollout-batch-size 16 --n-samples-per-prompt 4 --total-steps 8
+```
 
-## Architecture
+The `--gpu` grammar, data formats, `--output`, QLoRA, resume/branch and every
+flag are described in [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
-Fleets launch via the [SkyPilot](https://skypilot.co) SDK; asynchronous
-synchronization is based on **Decoupled DiLoCo**
-([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
-the syncer merges parameter fragments from independent learner islands
-(quorum + adaptive grace, token-weighted RDA, Nesterov outer step), so slow
-links and preempted islands never block training.
+## Commands
 
-One protocol, one syncer, four learner backends. Every backend speaks the
-same fragment protocol and runs the same DiLoCo step boundary — the
-pull/merge/α-blend/push loop lives in one shared module
-(`yeto/diloco_sync.py`), so protocol changes land once and apply everywhere.
+| Command | Purpose |
+|---|---|
+| `yeto launch` | submit a detached SFT or RL run |
+| `yeto shape` | plan a fleet for a model under a budget or TFLOPs target (`--apply` launches it) |
+| `yeto status` / `logs` / `down` / `stop-run` | list runs, follow a log, tear down, stop cleanly |
+| `yeto merge` | merge a PEFT adapter into its base and write SafeTensors shards |
+| `yeto sample-diffusion` | sample from a diffusion adapter on a cloud GPU |
+| `yeto dashboard serve` / `export` / `mirror` | read-only RL fleet dashboard |
+| `yeto rl` | experimental single-process CyberGym PPO |
+| `yeto-export`, `yeto-rl-export`, `yeto-diffusion-export` | export syncer or RL checkpoints as HF/PEFT/Diffusers artifacts |
+| `yeto-diffusion-sample` | sample from a diffusion adapter locally |
+| `yeto-rl-ssh`, `yeto-stage1` | RL on existing SSH hosts |
+| `yeto-codex-traces` | convert Codex traces to chat JSONL |
+| `yeto-wandb-tape` | upload a syncer event tape to W&B |
 
-| backend | selector | scope |
-|---|---|---|
-| PyTorch (FSDP2/DDP) | default | causal LM, LoRA/full |
-| Diffusers | `--model-kind diffusion` | image/video LoRA |
-| Megatron-Core | `--island-backend megatron` | EP islands for 1T-class MoE |
-| MLX | `--external-learners` | Apple-silicon islands |
+Without a cloud (on-prem Ascend, a Mac joining a fleet), run the syncer and
+learners directly; see
+[docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md#running-without-a-cloud).
 
-Hardware families are isolated behind `yeto/accel.py` (CUDA / Ascend NPU
-policy functions) rather than `device.type` branches in shared code. The
-terminal contract — budget cutoff, authoritative final cut, checkpoint
-marking — is shared by all backends (`finalization.py`,
-`budget_finalization.py`, `final_marker.py`).
+## Documentation
 
-## Supported models
-
-Aliases are sugar over `yeto/models.py` (this table is generated by
-`scripts/gen_model_table.py`; a test keeps them in sync). "Min island VRAM"
-is the frozen-base footprint an island's GPUs must jointly hold (bf16 base,
-LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
-"(Hub)" means the size is resolved from safetensors metadata at plan time.
-
-Tested — a completed Yeto fine-tuning run on real hardware:
-
-| alias | Hugging Face id | min island VRAM (GB) |
-|---|---|---|
-| `deepseek4flash` | `deepseek-ai/DeepSeek-V4-Flash` | 568 |
-| `qwen3-0.6b` | `Qwen/Qwen3-0.6B` | (Hub) |
-| `qwen36-27b` | `Qwen/Qwen3.6-27B` | 54 |
-| `kimi-k3` | `moonshotai/Kimi-K3` | (Hub) |
-| `glm52` | `zai-org/GLM-5.2` | 1488 |
-| `laguna-s-2.1` | `poolside/Laguna-S-2.1` | (Hub) |
-
-<details>
-<summary>All other supported aliases (untested)</summary>
-
-| alias | Hugging Face id | min island VRAM (GB) |
-|---|---|---|
-| `gemma4` | `google/gemma-4-12B-it` | 66 |
-| `qwen3-8b` | `Qwen/Qwen3-8B` | 17 |
-| `qwen3-30b-a3b` | `Qwen/Qwen3-30B-A3B` | 61 |
-| `qwen35-4b` | `Qwen/Qwen3.5-4B` | 8 |
-| `qwen35-9b` | `Qwen/Qwen3.5-9B` | 18 |
-| `qwen35-9b-base` | `Qwen/Qwen3.5-9B-Base` | 18 |
-| `qwen35-35b-a3b` | `Qwen/Qwen3.5-35B-A3B-Base` | 70 |
-| `qwen35-397b-a17b` | `Qwen/Qwen3.5-397B-A17B` | 794 |
-| `qwen36-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | 70 |
-| `llama32-1b` | `meta-llama/Llama-3.2-1B` | 3 |
-| `llama32-3b` | `meta-llama/Llama-3.2-3B` | 7 |
-| `llama31-8b` | `meta-llama/Llama-3.1-8B` | 16 |
-| `llama31-8b-it` | `meta-llama/Llama-3.1-8B-Instruct` | 16 |
-| `llama31-70b` | `meta-llama/Llama-3.1-70B` | 141 |
-| `llama33-70b-it` | `meta-llama/Llama-3.3-70B-Instruct` | 141 |
-| `gptoss-20b` | `openai/gpt-oss-20b` | 42 |
-| `gptoss-120b` | `openai/gpt-oss-120b` | 234 |
-| `kimi-k2-thinking` | `moonshotai/Kimi-K2-Thinking` | 2060 |
-| `kimi-k25` | `moonshotai/Kimi-K2.5` | 2060 |
-| `kimi-k26` | `moonshotai/Kimi-K2.6` | 2060 |
-| `deepseek31` | `deepseek-ai/DeepSeek-V3.1` | 1343 |
-| `deepseek-r1` | `deepseek-ai/DeepSeek-R1` | 1343 |
-| `deepseek4pro` | `deepseek-ai/DeepSeek-V4-Pro` | 3200 |
-| `nemotron3-nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 61 |
-| `nemotron3-super` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 240 |
-| `nemotron3-ultra` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` | 1100 |
-| `nemotron35-super-vl` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | 249 |
-| `glm45-air` | `zai-org/GLM-4.5-Air` | 212 |
-| `glm46` | `zai-org/GLM-4.6` | 714 |
-| `llama4-scout` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 218 |
-| `llama4-maverick` | `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | 800 |
-| `qwen3-coder-480b` | `Qwen/Qwen3-Coder-480B-A35B-Instruct` | 960 |
-| `minimax-m2` | `MiniMaxAI/MiniMax-M2` | 460 |
-| `minimax-m3` | `MiniMaxAI/MiniMax-M3` | (Hub) |
-| `kimi-k27-code` | `moonshotai/Kimi-K2.7-Code` | (Hub) |
-| `mistral-small3` | `mistralai/Mistral-Small-3.2-24B-Instruct-2506` | 48 |
-| `ornith-9b` | `deepreinforce-ai/Ornith-1.0-9B` | 19 |
-| `ornith-31b` | `deepreinforce-ai/Ornith-1.0-31B` | 62 |
-| `ornith-35b` | `deepreinforce-ai/Ornith-1.0-35B` | 70 |
-| `ornith-397b` | `deepreinforce-ai/Ornith-1.0-397B` | 794 |
-| `lfm25-230m` | `LiquidAI/LFM2.5-230M` | 0.5 |
-| `lfm25-1b` | `LiquidAI/LFM2.5-1.2B-Instruct` | 3 |
-| `lfm25-8b-a1b` | `LiquidAI/LFM2.5-8B-A1B` | 17 |
-| `vibethinker-15b` | `WeiboAI/VibeThinker-1.5B` | 3 |
-| `vibethinker-3b` | `WeiboAI/VibeThinker-3B` | 6 |
-| `deepseek4flash-bf16` | `RedHatAI/DeepSeek-V4-Flash-BF16` | 568 |
-| `deepseek31-bf16` | `unsloth/DeepSeek-V3.1-BF16` | 1343 |
-| `deepseek-r1-bf16` | `unsloth/DeepSeek-R1-BF16` | 1343 |
-| `gptoss-20b-bf16` | `axolotl-ai-co/gpt-oss-20b-dequantized` | 42 |
-| `gptoss-120b-bf16` | `axolotl-ai-co/gpt-oss-120b-dequantized` | 234 |
-| `kimi-k2-thinking-bf16` | `unsloth/Kimi-K2-Thinking-BF16` | 2060 |
-| `deepseek31-base-bf16` | `unsloth/DeepSeek-V3.1-Base-BF16` | 1343 |
-| `kimi-k2-base-bf16` | `unsloth/Kimi-K2-Base-BF16` | 2060 |
-
-</details>
-
-## Docs
-
-[docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
-delta correction, q4 wire format, snapshots, resilience.
-[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
-[docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
-artifact provenance.
-[docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict causal LoRA
-SFT resume, intentional branching, safe base-model merge, and export sharding.
-[docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
-backend, data and conditioning contracts, external adapters, export, sampling,
-validation, and current limitations.
-[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
-for 1T-class MoE; runs inside the NGC NeMo container).
-[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
-learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
-[docs/ASCEND.md](docs/ASCEND.md) — Ascend NPU islands: the accelerator
-abstraction, the refused CUDA-only paths, and running a pure-Ascend fleet.
-[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
-kernels, correctness gates, pinned dependencies, and the standalone 8xA100
-throughput and memory benchmark.
-[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
-causal-LM benchmark contract, workload controls, complete arm and metric
-tables, and reproducibility rules.
-[docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
-equal-hardware diffusion benchmark contract, media controls, complete arm and
-metric tables, and reproducibility rules.
-[docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
-LoRA islands: rollout/training boundaries, recovery, export, and limitations.
-[docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — experimental local PPO and the
-CyberGym reward integration used for real environment evaluation.
-[docs/RL_BENCHMARK.md](docs/RL_BENCHMARK.md) — equal-hardware native Miles,
-single-island Yeto, and federated Yeto RL benchmark contract and runner.
-[docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — direct existing-host
-deployment, failure injection, artifact collection, and f32 AVG verification.
-[docs/CLOUDS.md](docs/CLOUDS.md) — per-cloud credentials, regions, signals,
-and what has been verified on real machines.
-[docs/DASHBOARD.md](docs/DASHBOARD.md) — the RL fleet dashboard (serve, export,
-mirror).
-[docs/WANDB.md](docs/WANDB.md) — opt-in W&B telemetry: the group/run topology
-for a fleet, the metric tables, the debugging map, and the failure policy.
-
-## Testing and CI
-
-    # local safe suite: see docs/TESTING.md (venv, Ray tests off by default)
-    python3 -m pytest tests/          # includes a real syncer+learner loop
-    (cd syncer && cargo test)
-
-Commit messages must be English. Install the local check once per clone:
-`pre-commit install --hook-type commit-msg` (checks: `scripts/precommit_check.py`).
-
-CI runs three jobs on every PR and push to main: the Rust syncer suite, the
-Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
-(`[self-hosted, gpu]` labels) — the real syncer plus two real learners
-training SmolLM2-135M on CUDA, with event-tape assertions that every outer
-step merged pushed deltas from both learners.
-
-Four heavier harnesses (all support `--dry-run`):
-
-    # smoke every supported model with the auto fleet planner, tiered by
-    # size; sequential, self-cleaning, writes a pass/fail report
-    python scripts/smoke_models.py --tier small --dry-run
-
-    # causal-LM quality check against equal-hardware synchronous baselines
-    python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
-
-    # Miles RL quality check: one Yeto island, federated and decoupled Yeto
-    python scripts/benchmark_rl.py <model/data/reward arguments> --dry-run
-
-    # diffusion quality check with an explicit, fixed media shape
-    python scripts/benchmark_diffusion_diloco.py \
-        --model Lightricks/LTX-Video --data <media-dataset> \
-        --height 512 --width 512 --settings all --dry-run
+| Doc | Topic |
+|---|---|
+| [CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | every command and flag, with defaults and examples |
+| [MODELS.md](docs/MODELS.md) | model aliases and their memory footprint |
+| [DESIGN.md](docs/DESIGN.md) | merge math, blending, adaptive grace, wire formats, resilience |
+| [PROTOCOL.md](docs/PROTOCOL.md) | learner/syncer wire protocol, RL sync modes, island pool |
+| [MILES_RL.md](docs/MILES_RL.md) | Miles RL: rollout/training boundaries, recovery, export, all RL flags |
+| [RL_ALGORITHMS.md](docs/RL_ALGORITHMS.md) | RL algorithm specs |
+| [CLOUDS.md](docs/CLOUDS.md) | per-cloud credentials, regions, planner signals, Modal islands |
+| [ASCEND.md](docs/ASCEND.md) | Ascend NPU islands and a pure-Ascend fleet |
+| [MEGATRON.md](docs/MEGATRON.md) | Megatron-Core island backend for large MoE |
+| [MLX.md](docs/MLX.md) | Apple-silicon islands |
+| [DIFFUSION.md](docs/DIFFUSION.md) | Diffusers image/video backend |
+| [ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) | LoRA resume, branching, merge, export |
+| [PROVENANCE.md](docs/PROVENANCE.md) | source pinning, attestation, artifact provenance |
+| [DASHBOARD.md](docs/DASHBOARD.md) | RL fleet dashboard |
+| [WANDB.md](docs/WANDB.md) | W&B telemetry |
+| [RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) | RL on existing SSH hosts |
+| [CYBERGYM_RL.md](docs/CYBERGYM_RL.md) | experimental local PPO with CyberGym rewards |
+| [A100_KERNELS.md](docs/A100_KERNELS.md) | opt-in attention and loss kernels |
+| [LM_BENCHMARK.md](docs/LM_BENCHMARK.md), [DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md), [RL_BENCHMARK.md](docs/RL_BENCHMARK.md), [RL_ELASTIC_BENCHMARK.md](docs/RL_ELASTIC_BENCHMARK.md) | benchmark contracts and runners |
+| [docker/README.md](docker/README.md) | engine images and version locks |
+| [tutorial/hello-world](tutorial/hello-world/README.md) | end-to-end SFT tutorial on Codex traces |
+| [examples/README.md](examples/README.md) | reward and algorithm examples |
