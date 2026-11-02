@@ -467,3 +467,86 @@ def test_a_trial_whose_last_turn_hit_the_engine_length_limit_is_truncated(seg_tr
     out = agentic_sample(item, finished, version=1, provenance={}, group_index=0, index=0)
     assert out["status"] == status
     assert (out["metadata"]["finish_reason"] == "length") == (status == "truncated")
+
+
+# ---------------------------------------------------------------------- drain timeout vs retry
+def test_a_trial_that_ended_just_before_a_drain_gave_up_is_not_retried(tmp_path, monkeypatch):
+    """The trial finished (its done callback is queued) when the drain timed out:
+    ``cancel()`` returns False, the callback sees an infrastructure failure, and
+    the slot must not go back in the queue to start a fresh trial."""
+    from yeto.rl.engine import agentic_round as ar
+
+    monkeypatch.setattr(ar, "infra_failure", lambda result: "RuntimeError" if result == "INFRA" else None)
+    harness = Harness({})
+    rnd, engine, events = _round(tmp_path, harness, Prompts({}), infra_retries=2)
+    try:
+        def race():
+            async def finished():
+                return "INFRA"
+
+            group = ar._Group(rollout_id=7, position=0, item=PromptItem("z", "task z",
+                                                                       metadata={"agent_task": dict(TASK)}),
+                              sessions=["s-r7-z-0", "s-r7-z-1"])
+            group.started, group.started_at = 2, rnd.clock()
+            task = rnd.loop.loop.create_task(finished())
+            return group, task
+
+        group, task = rnd._on_loop(race)
+        _wait(task.done)
+
+        def abandon_then_callback():
+            rnd._running[task] = (group, 0)
+            task.add_done_callback(rnd._trial_done)  # already done: runs on the next loop pass
+            assert task.cancel() is False
+            return rnd._abandon()
+
+        assert rnd._on_loop(abandon_then_callback) == 1
+        _wait(lambda: task not in rnd._running)
+        assert group.abandoned and group not in rnd._queue and not group.retry_slots
+        assert group.results[0] == "INFRA" and group.retries == [0, 0] and harness.started == []
+    finally:
+        rnd.close()
+
+
+def test_no_slot_is_retried_while_a_drain_runs(tmp_path, monkeypatch):
+    from yeto.rl.engine import agentic_round as ar
+
+    monkeypatch.setattr(ar, "infra_failure", lambda result: "RuntimeError")
+    rnd, engine, events = _round(tmp_path, Harness({}), Prompts({}), infra_retries=2)
+    try:
+        group = ar._Group(rollout_id=1, position=0, item=PromptItem("z", "task z"), sessions=["a", "b"])
+        assert rnd._on_loop(rnd._retry, group, 0, object()) is True
+        rnd._paused = True
+        assert rnd._on_loop(rnd._retry, group, 1, object()) is False
+        rnd._paused = False
+        group.abandoned = True
+        assert rnd._on_loop(rnd._retry, group, 1, object()) is False
+    finally:
+        rnd._queue.clear()
+        rnd.close()
+
+
+def test_live_loses_a_trial_without_any_known_version(tmp_path):
+    """Live mode: a trial whose start and every turn carry no version is lost
+    (``LOST_VERSION``) instead of failing on ``min([])``."""
+    class Unversioned(Recorder):
+        async def close(self, trajectory_id):
+            turns = await super().close(trajectory_id)
+            return [TokenTurn(prompt_ids=t.prompt_ids, completion_ids=t.completion_ids,
+                              completion_logprobs=t.completion_logprobs, policy_version=None) for t in turns]
+
+    from yeto.rl.engine.agentic_round import LOST_VERSION
+
+    engine = FakeEngine()
+    engine.start(None, 0)
+    rnd, engine, events = _round(tmp_path, Harness({"a": 0.0}), Prompts({0: ["a"]}), live=True, engine=engine)
+    rnd.recorder = Unversioned(engine)
+    calls = iter([0])  # the round's own check sees a version; every trial start sees none
+    rnd.engine.served_version = lambda: next(calls, None)
+    try:
+        rnd(0)
+        rnd.flush()
+    finally:
+        rnd.close()
+    (group,) = [f for n, f in events if n == GROUP_EVENT]
+    assert group["lost"] == {LOST_VERSION: N} and not group["written"]

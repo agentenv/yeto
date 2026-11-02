@@ -230,6 +230,7 @@ class _Group:
     retry_slots: deque = dataclasses.field(default_factory=deque)  # slots to run again (P1-5)
     retries: list[int] = dataclasses.field(default_factory=list)  # infra retries per slot
     retry_reasons: list[str] = dataclasses.field(default_factory=list)
+    abandoned: bool = False  # a drain timed out on it: no slot of it runs again
 
     def __post_init__(self) -> None:
         n = len(self.sessions)
@@ -509,6 +510,10 @@ class AgenticRound(EngineRound):
         name = infra_failure(result)
         if name is None or self._error is not None or self.reclaimed():
             return False
+        # a trial that finished just before a drain gave up on it (its cancel came too
+        # late) or while draining must not start again: the drain waits for it to end
+        if group.abandoned or self._paused:
+            return False
         if group.retries[j] >= self.infra_retries:
             self.retries_exhausted += 1
             return False
@@ -549,9 +554,11 @@ class AgenticRound(EngineRound):
                 group.results[j] = _Lost(LOST_DRAIN)
             group.started = len(group.sessions)
             group.retry_slots.clear()
+            group.abandoned = True
             abandoned += rest
             self._ended(group, rest)
-        for task in list(self._running):
+        for task, (group, _j) in list(self._running.items()):
+            group.abandoned = True  # cancel() is a no-op on a task whose callback is pending
             task.cancel()
             abandoned += 1
         self._wake.set()
@@ -650,6 +657,9 @@ class AgenticRound(EngineRound):
             start = group.start_versions[j]
             if self.live:  # the oldest version of any turn: the trainer's age gate and TIS see it
                 seen = [v for v in (start, *turns) if v is not None]
+                if not seen:  # no version is known for any of its tokens
+                    lost[LOST_VERSION] += 1
+                    continue
                 kept.append((finished, min(seen), max(seen)))
             elif start != group.version or any(v != group.version for v in turns):
                 lost[LOST_VERSION] += 1
