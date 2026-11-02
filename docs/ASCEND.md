@@ -147,8 +147,10 @@ Suggested 910B flags for Qwen3-0.6B at 28k context:
 ```
 
 Lower `--loss-chunk-tokens` to 2048 if the card is still tight; the cost is
-more, smaller head matmuls. `--gradient-checkpointing` is a `yeto.learner` flag; through
-the launcher it stays at `auto`.
+more, smaller head matmuls. `--gradient-checkpointing` is accepted by both the launcher and
+`yeto.learner`. Its `auto` default enables recomputation only when the base
+occupies more than half of device memory, which a 0.6B model on a 64 GB card
+never does, so pass `on` explicitly for long contexts.
 
 The causal-LM NF4, Liger, and FlashAttention paths still reject every non-CUDA
 device. Diffusion quantization is a separate Diffusers load path: it is enabled

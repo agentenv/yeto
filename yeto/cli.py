@@ -274,6 +274,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(any device including Ascend, --shard ddp); model layers remain native",
     )
     tune.add_argument(
+        "--gradient-checkpointing",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="learner activation recomputation; 'auto' (default) enables it "
+        "when the loaded base occupies more than half of VRAM; long-context "
+        "runs on small models usually need 'on'",
+    )
+    tune.add_argument(
         "--loss-chunk-tokens",
         type=int,
         default=4096,

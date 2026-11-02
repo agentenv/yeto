@@ -211,6 +211,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                 f" --attention-backend {attention_backend}"
                 f" --kernel-backend {kernel_backend}"
             )
+            gradient_checkpointing = getattr(args, "gradient_checkpointing", "auto")
+            if gradient_checkpointing != "auto":
+                learner_flags += f" --gradient-checkpointing {gradient_checkpointing}"
             if kernel_backend == "chunked":
                 learner_flags += (
                     f" --loss-chunk-tokens {int(getattr(args, 'loss_chunk_tokens', 4096))}"

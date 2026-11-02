@@ -101,6 +101,17 @@ def test_chunked_backend_forwards_chunk_size_without_extra_dependencies():
     assert "liger-kernel" not in task.setup
 
 
+def test_gradient_checkpointing_forwarded_only_when_explicit():
+    default = make_learner_task(_args(island_backend="torch"), _SPEC, 0, 1, "1.2.3.4:29400")
+    assert "--gradient-checkpointing" not in default.run
+    for mode in ("on", "off"):
+        task = make_learner_task(
+            _args(island_backend="torch", gradient_checkpointing=mode),
+            _SPEC, 0, 1, "1.2.3.4:29400",
+        )
+        assert f"--gradient-checkpointing {mode}" in task.run
+
+
 def test_chunked_launcher_rejects_fsdp_and_custom_loss():
     with pytest.raises(ValueError, match="only --shard ddp"):
         make_learner_task(_args(kernel_backend="chunked", shard="fsdp"),
