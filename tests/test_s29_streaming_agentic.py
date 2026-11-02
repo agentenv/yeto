@@ -391,7 +391,16 @@ def test_the_island_holds_releases_while_groups_run_and_drains_before_loading(tm
             releases.release(1, "h1", lambda d: (d / "model.safetensors").write_text("w"))
 
     harness = Harness({"a": 0.2, "b": 0.0, "c": 0.0}, on_start=publish)
-    prompts = Prompts({0: ["a"], 1: ["b"], 2: ["c"]})
+
+    class AfterRelease(Prompts):
+        # Hand out later rounds only once "a" has published, so a slow runner
+        # cannot start "b" on version 0 before the release exists.
+        def __call__(self, rollout_id):
+            if rollout_id:
+                _wait(lambda: releases.latest() is not None)
+            return super().__call__(rollout_id)
+
+    prompts = AfterRelease({0: ["a"], 1: ["b"], 2: ["c"]})
     config = EngineSamplerConfig(sampler_id="s", num_rollouts=3, max_backlog_groups=100,
                                  sampling=SamplingParams(max_tokens=8, n=N), max_prompt_tokens=1024, poll_s=0.0)
 
