@@ -452,7 +452,8 @@ class SGLangServerEngine(ServerEngine):
                 raise SamplerEngineError(f"sparse probe failed: {failed[0].get('error')}")
             maps = [sparse_update.load_map(Path(c["out"])) for c in commands]
             record = {"mapped": min(r["mapped"] for r in results),
-                      "unmapped": max(r["unmapped"] for r in results), "probe_s": max(r["seconds"] for r in results)}
+                      "unmapped": max(r["unmapped"] for r in results), "probe_s": max(r["seconds"] for r in results),
+                      "exact_groups": max(len(r.get("exact_groups") or []) for r in results)}
             mapped = set.intersection(*(set(m["tensors"]) for m in maps))
             rng = np.random.default_rng(int(self._started_version))
             checks = sparse_update.pick_checks(rng, slots, mapped, {}, tensors=4 * self.options.sparse_check_tensors,
