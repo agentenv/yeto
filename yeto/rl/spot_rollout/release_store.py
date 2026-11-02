@@ -54,6 +54,7 @@ class SubscriberReleaseStore:
                  read_position: Callable[[], int | None] = lambda: None,
                  base_version: int = 0, reload_every: int = 1,
                  finished: Callable[[], bool] = lambda: False,
+                 stop_reason: Callable[[], tuple[Any, dict[str, Any]] | None] = lambda: None,
                  wall: Callable[[], float] = time.time,
                  layout_fingerprint: str = "", keep_served: int = 16,
                  base_dir: str | Path | None = None) -> None:
@@ -65,6 +66,8 @@ class SubscriberReleaseStore:
         self.reload_every = int(reload_every)
         self.wall = wall
         self._finished = finished
+        # (LeaveReason, detail) the island leaves with instead of FINISHED, or None
+        self.stop_reason = stop_reason
         self._offered = int(base_version)
         self._seq = 0
         self._current: PolicyRelease | None = None
@@ -172,6 +175,17 @@ def subscriber_id_for(sampler_id: str) -> int:
     return sampler_holder_id(sampler_id)
 
 
+def fence_reason(client: Any) -> tuple[Any, dict[str, Any]] | None:
+    """(FENCED, detail) once the syncer retired this subscriber, None otherwise:
+    a fenced sampler leaves FENCED, not FINISHED; a run that ended leaves FINISHED.
+    The detail names the syncer's retire reason (``subscriber.fence_cause``)."""
+    from yeto.rl.pool_client import LeaveReason
+
+    if client.fenced() and not client.run_finished():
+        return LeaveReason.FENCED, {"fenced": client.fence_cause()}
+    return None
+
+
 def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_model: str,
                        work_dir: Path, sampler_id: str, emit: Callable[..., None],
                        model_name: str | None = None, num_streams: int = 4,
@@ -215,4 +229,5 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
         read_position=getattr(buffer, "read_position", lambda: None),
         # fenced: a newer process of this sampler took its id on the head
         finished=lambda: client.run_finished() or client.fenced(),
+        stop_reason=lambda: fence_reason(client),
         layout_fingerprint=layout_fingerprint(layout).hex(), base_dir=base_model)
