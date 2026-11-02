@@ -9,7 +9,6 @@ then finish the run on the final cut.
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +16,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port as _port
 from yeto.rl.core import canonical_state
 from yeto.rl.decoupled import DecoupledBridgeConfig, DecoupledRlBridge
 
@@ -32,12 +32,6 @@ TOTAL_STEPS = 6  # three sweeps of two fragments
 def syncer_binary():
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
     return ROOT / "syncer/target/debug/yeto-syncer"
-
-
-def _port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _state(version, tensors):

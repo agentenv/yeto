@@ -9,7 +9,6 @@ HELLO with any other profile hash must be refused.
 
 from __future__ import annotations
 
-import shlex
 import shutil
 import socket
 import subprocess
@@ -20,6 +19,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
@@ -68,16 +69,14 @@ def _start_syncer(binary: Path, tmp_path: Path, *extra: str,
 
     args = _dense_args(*extra, total_steps=total_steps)
     command = launcher.role_syncer_commands(args, 1, binary=str(binary))["actor"]
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     command = (command
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
                .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
     assert "--policy-sweep-fragments 2" in command and "--require-profile-binding" in command
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True)
+    process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, 1).sha256
 
 
@@ -97,8 +96,7 @@ def _f32(values: list[float]) -> bytes:
 
 
 def _stop(process: subprocess.Popen) -> str:
-    if process.poll() is None:
-        process.terminate()
+    kill_group(process)
     out, _ = process.communicate(timeout=10)
     return out
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 # ruff: noqa: I001 -- install the optional bridge stub before Miles import.
 
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -32,6 +31,8 @@ bridge_stub = types.ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.bridge
 bridge_stub.ensure_deepseek_v4_bridge = lambda: None
 sys.modules.setdefault("yeto.rl.adapters.miles.models.deepseek_v4.bridge", bridge_stub)
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from miles.backends.megatron_utils.full_parameter_state import (
     FullParameterShardManifest,
     FullParameterShardSpec,
@@ -228,15 +229,13 @@ def _start_syncer(binary: Path, tmp_path: Path, fragments: int, *extra: str):
     args = _prepared_args(fragments, *extra)
     args.quorum = LEARNERS  # a strict sweep waits for both learners
     command = launcher.role_syncer_commands(args, LEARNERS, binary=str(binary))["actor"]
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     command = (command
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
                .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True)
+    process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, LEARNERS).sha256
 
 
@@ -326,8 +325,7 @@ def _sweep(binary, tmp_path, layout, *, dtype=DTYPE_F32, extra=(), push_i8_block
     finally:
         for client in clients:
             client.close()
-        if process.poll() is None:
-            process.terminate()
+        kill_group(process)
         log, _ = process.communicate(timeout=10)
     assert "syncer semantic profile" not in log, log
     return initial, deltas, merged

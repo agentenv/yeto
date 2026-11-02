@@ -133,6 +133,7 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
                          prefetch=False)
     spec = _spec(tmp_path, port)
     first = _start_sampler(spec, tmp_path / "sampler-1.log")
+    second = None
     taken: list[tuple[int, int, int]] = []  # (rollout id, behavior version, trainer merged version)
     cuts: dict[int, set[str]] = {}  # behavior version -> cut digests the samples name
     stale = 0
@@ -176,8 +177,8 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
         assert second.wait(timeout=30) == 0  # the end-of-run notice, not syncer_lost_s (600 s)
     finally:
         pump.stop()
-        for proc in (first,):
-            if proc.poll() is None:
+        for proc in (first, second):
+            if proc is not None and proc.poll() is None:
                 proc.kill()
         if process.poll() is None:
             process.kill()

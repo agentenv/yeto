@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
 ROOT = Path(__file__).resolve().parents[1]
 CARGO = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
 needs_cargo = pytest.mark.skipif(not Path(CARGO).exists(), reason="needs cargo to build the syncer")
@@ -41,14 +42,12 @@ def _hmac_key(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", KEY)
 
 
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 def start_syncer(binary: Path, tmp_path: Path, *, total_steps: int, learners: int = 1,
                  extra: tuple[str, ...] = ()) -> tuple[subprocess.Popen, int, Path]:
+    # Imported here: a spot sampler subprocess imports this module as
+    # tests.test_spot_rollout_syncer, without tests/ on its path.
+    from free_ports import free_port
+
     port = free_port()
     log = tmp_path / f"syncer-{port}.log"
     command = [str(binary), "--port", str(port), "--learners", str(learners), "--quorum", "1",

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import shlex
 import shutil
-import socket
 import subprocess
 import time
 from dataclasses import replace
@@ -28,6 +27,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
 
@@ -542,9 +543,7 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
     args, _ = _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
                                  "--total-steps", str(total_steps), *final_cut, *extra))
     command = launcher.role_syncer_commands(args, 2, binary=str(binary))["actor"]
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     command = (command
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
@@ -552,12 +551,12 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
     command = " ".join((command, *map(shlex.quote, syncer_args)))
     assert "--policy-sweep-fragments" not in command
     if log_file is None:
-        process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True)
+        process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
     else:
         with log_file.open("w") as out:
-            process = subprocess.Popen(["bash", "-c", command], stdout=out,
-                                       stderr=subprocess.STDOUT, text=True)
+            process = group_popen(["bash", "-c", command], stdout=out,
+                                  stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, 2).sha256
 
 
@@ -672,8 +671,7 @@ def _drive(binary, tmp_path, extra, *, total_steps, push, late=None, syncer_args
     finally:
         for client in clients:
             client.close()
-        if process.poll() is None:
-            process.terminate()
+        kill_group(process)
         process.wait(timeout=10)
     log = log_file.read_text()
     assert finals[0].keys() == finals[1].keys() == set(range(P))

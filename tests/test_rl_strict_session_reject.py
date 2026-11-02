@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from process_groups import group_popen
 from yeto.protocol import DTYPE_F32, SessionRejectedError, SyncerClient, layout_fingerprint
 from yeto.rl.core import StrictRlInvariantError
 from yeto.rl.engine.backend_identity import (
@@ -46,7 +47,7 @@ VERL_ALGO_B = island_contract_sha256(VERL_ID, LR_CONSTANT, "b" * 64)
 
 def _start(binary, port, checkpoint, rounds, *, learners, event_tape):
     """Strict syncer (``--max-base-lag 0``); fresh run, so no ``--resume``."""
-    return subprocess.Popen(
+    return group_popen(
         [str(binary), "--port", str(port), "--learners", str(learners), "--quorum", str(learners),
          "--grace-ms", "0", "--pipeline", "1", "--sync-interval-steps", "0",
          "--delta-correction", "none", "--total-steps", str(rounds), "--outer-lr", "1",

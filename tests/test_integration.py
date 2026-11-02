@@ -8,7 +8,6 @@ Nesterov outer step, broadcasts, and SHUTDOWN.
 """
 
 import json
-import socket
 import struct
 import subprocess
 import sys
@@ -19,6 +18,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port
+from process_groups import group_popen
 from yeto.export import ISO_BACKEND_SCALAR, parse_checkpoint
 from yeto.fragments import build_layout
 from yeto.final_marker import read_checkpoint_global_step, validate_final_checkpoint
@@ -48,12 +49,6 @@ def build_syncer() -> Path:
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
     assert binary.exists()
     return binary
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def read_final_state(path: Path) -> list[torch.Tensor]:
@@ -258,7 +253,7 @@ def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tm
     marker = Path(f"{checkpoint}.final")
     marker.write_text("YETO_FINAL_V1\nglobal_step=999\n", encoding="utf-8")
     tape = tmp_path / "tape.jsonl"
-    cutoff_proc = subprocess.Popen(
+    cutoff_proc = group_popen(
         [
             str(binary),
             "--port",
@@ -311,7 +306,7 @@ def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tm
         assert not marker.exists()
         cutoff_step = read_checkpoint_global_step(checkpoint)
 
-        final_proc = subprocess.Popen(
+        final_proc = group_popen(
             [
                 str(binary),
                 "--port",
@@ -394,7 +389,7 @@ def test_two_learners_converge_to_mean():
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 4)
 
-    proc = subprocess.Popen(
+    proc = group_popen(
         [
             str(binary),
             "--port", str(port),
@@ -460,7 +455,7 @@ def test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint(tmp_path):
     layout = build_layout(named, 2)
     final_state = tmp_path / "final.bin"
     checkpoint = tmp_path / "state.ckpt"
-    proc = subprocess.Popen(
+    proc = group_popen(
         [
             str(binary),
             "--port",
@@ -538,7 +533,7 @@ def test_final_ack_membership_excludes_previously_abandoned_learner():
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 2)
-    proc = subprocess.Popen(
+    proc = group_popen(
         [
             str(binary),
             "--port",
@@ -603,7 +598,7 @@ def test_single_learner_roundtrip_q4():
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
-    proc = subprocess.Popen(
+    proc = group_popen(
         [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "9"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -636,7 +631,7 @@ def test_min_round_interval_paces_rounds():
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
-    proc = subprocess.Popen(
+    proc = group_popen(
         [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "6", "--min-round-interval-ms", "250"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -701,7 +696,7 @@ def test_single_learner_roundtrip_iso(iso_backend):
                 "cpu",
             ]
         )
-    proc = subprocess.Popen(
+    proc = group_popen(
         command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
@@ -741,7 +736,7 @@ def test_single_learner_roundtrip():
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
-    proc = subprocess.Popen(
+    proc = group_popen(
         [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "9", "--pipeline", "1"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

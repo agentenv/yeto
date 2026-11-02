@@ -9,7 +9,6 @@ final cut.  A HELLO with any other profile hash must be refused.
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import threading
 from pathlib import Path
@@ -17,6 +16,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port
+from process_groups import group_popen
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from test_rl_dense_sweep_real_syncer import (  # noqa: F401
     CARGO,
@@ -60,16 +61,14 @@ def _start_role_syncers(binary, tmp_path):
     started = {}
     for role, command in commands.items():
         syncer = launcher.ROLE_SYNCERS[role]
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        port = free_port()
         command = (command
                    .replace(f"--port {syncer.port}", f"--port {port}")
                    .replace(syncer.checkpoint, str(tmp_path / f"{role}.ckpt"))
                    .replace(syncer.event_tape, str(tmp_path / f"{role}.jsonl")))
         assert "--mark-final-checkpoint" in command and "--require-profile-binding" in command
-        process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True)
+        process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
         started[role] = (process, port)
     return started, args.rl_sao_manifest.profile.sha256
 

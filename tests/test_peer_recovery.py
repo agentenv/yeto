@@ -11,7 +11,6 @@ and be back on the roster within the bound H (in syncer steps).
 from __future__ import annotations
 
 import json
-import socket
 import struct
 import subprocess
 import threading
@@ -21,6 +20,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from free_ports import free_port
+from process_groups import group_popen
 from yeto import recovery_protocol as rp
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, BcastFragment, SyncerClient, encode_hello, layout_fingerprint
@@ -45,12 +46,6 @@ def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
     return binary
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def make_layout() -> FragmentLayout:
@@ -204,7 +199,7 @@ class FakeIsland(threading.Thread):
 
 def start_syncer(binary: Path, port: int, learners: int, quorum: int, tape: Path, *extra: str,
                  total_steps: int = 80) -> subprocess.Popen:
-    return subprocess.Popen(
+    return group_popen(
         [str(binary), "--port", str(port), "--learners", str(learners), "--quorum", str(quorum),
          "--grace-ms", "50", "--total-steps", str(total_steps), "--outer-lr", "0.7", "--outer-momentum", "0.0",
          "--min-round-interval-ms", "40", "--quorum-timeout-s", "30", "--event-tape", str(tape),
@@ -566,7 +561,7 @@ def test_killed_island_without_peer_takes_the_degraded_path(tmp_path):
 def test_sharded_hello_syncer_epoch_fence(tmp_path):
     binary = build_syncer()
     port = free_port()
-    proc = subprocess.Popen(
+    proc = group_popen(
         [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1", "--total-steps", "1000000",
          "--syncer-epoch", "5", "--checkpoint-path", str(tmp_path / "syncer.ckpt")],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

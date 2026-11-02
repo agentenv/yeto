@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port
+from process_groups import group_popen
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
     _CHUNK_HEAD,
@@ -48,12 +50,6 @@ def syncer_binary() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
     assert binary.is_file()
     return binary
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def connect(port: int) -> socket.socket:
@@ -198,7 +194,7 @@ def launch_syncer(
 ) -> tuple[subprocess.Popen, Path]:
     port = free_port()
     final_state = tmp_path / f"state-{port}.bin"
-    proc = subprocess.Popen(
+    proc = group_popen(
         [
             str(binary),
             "--port",

@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 
+from free_ports import free_port as _free_port
 from test_rl_engine_driver import _driver, _engine, _strict_config
 from yeto.rl.engine.bridges import PoolAvgSync, RoundCutHooks
 from yeto.rl.pool_client import LeaveReason
@@ -40,12 +39,6 @@ def syncer_binary() -> Path:
 @pytest.fixture(autouse=True)
 def _island_key(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", KEY)
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class Syncer:

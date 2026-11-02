@@ -17,12 +17,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import socket
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from free_ports import free_port as _free_port
 from yeto.rl.adapters.verl import cut as vcut
 from yeto.rl.adapters.verl.resume_check import TrainHandles, handles_rank_state
 from yeto.rl.engine.cut import (
@@ -97,12 +97,6 @@ def _reset_steps(h: TrainHandles) -> None:
 
 
 # ---------------------------------------------------------------- FSDP2, 2 ranks
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _fsdp2_worker(rank: int, world: int, port: int, root: str) -> None:

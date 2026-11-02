@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 import pytest
+from process_groups import group_popen
 from test_rl_moe_full_parameter_layout import (  # noqa: F401 - fixture
     TINY,
     avg,
@@ -173,7 +174,7 @@ def expert_scale(tag: tuple[int, int, int]) -> float:
 
 
 def start_syncer(binary, port: int, steps: int, tmp_path, *extra: str) -> subprocess.Popen:
-    return subprocess.Popen(
+    return group_popen(
         [str(binary), "--port", str(port), "--learners", "2", "--quorum", "2",
          "--grace-ms", "20", "--quorum-timeout-s", "10", "--total-steps", str(steps),
          "--pipeline", "1", "--sync-interval-steps", "0", "--delta-correction", "none",
