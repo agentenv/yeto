@@ -87,6 +87,9 @@ def base_tree(tmp_path_factory):
                             "from dataclasses import dataclass, field\n")
         text = text.replace("island: Mapping[str, Any] = _EMPTY\n",
                             "island: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)\n")
+        # Fail loudly if BASE's source no longer matches the patch above.
+        assert "from dataclasses import dataclass, field\n" in text, "run_flags.py import patch did not apply"
+        assert "default_factory=lambda: _EMPTY" in text, "run_flags.py default patch did not apply"
         flags.write_text(text)
     return root
 
