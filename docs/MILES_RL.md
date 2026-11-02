@@ -1015,6 +1015,12 @@ invariants in the [Development Guide](#development-guide) must hold.
 These options apply to a buffer trainer (`--rl-sample-role trainer`) that
 publishes policy releases to separate rollout islands.
 
+- **Background releases** (`--rl-release-background`, island entry; needs
+  `--rl-release-delta-full-every N`): the trainer writes each staged release
+  on the training thread, then encodes, digests and uploads it on a worker
+  thread while the next rounds train. At most one release is in flight; the
+  next publication waits for it, and a failed background release raises
+  there. Single trainer only.
 - **Sparse weight updates** (sampler spec `engine.options.sparse_update`,
   `off` by default, or `auto`): when a release was rebuilt from the served
   one with change tracking (`YETO_RL_MIRROR_TRACK_CHANGES=1`), the SGLang
@@ -1024,6 +1030,10 @@ publishes policy releases to separate rollout islands.
   elements, or touches a tensor the startup probe could not map, and reloads
   in full after a failed write or check. bf16 weights only; quantized
   weights and models whose `load_weights` derives tensors are not supported.
+- **MFU of a hybrid model**: `python -m yeto.rl.hybrid_flops TAPE --config
+  config.json --gpus N --gpu CARD` prints one JSON line per trained round
+  (`step_mfu`, `wall_mfu`) from the trainer's event tape, for models whose
+  framework MFU counter does not cover them (Nemotron-H).
 
 Spot rollout islands on Nebius have four operator tools in
 `yeto/rl/spot/` (each with `--help`):

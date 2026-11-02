@@ -648,6 +648,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        self._account_phase(name)
         phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
@@ -678,6 +679,48 @@ class IslandDriver:
             "execution_mode": self.execution_mode,
             "weight_transport": self.weight_transport,
         }
+
+    # -- per-round time breakdown ------------------------------------------
+    #: emit ``rl_round_phases`` each round (off: the recorded reference tapes stay
+    #: byte-identical; the trainer islands turn it on)
+    round_phases: bool = False
+    _phase_mark: tuple[str, float] | None = None
+    _round_phase_seconds: dict[str, float] | None = None
+
+    def _account_phase(self, name: str | None) -> None:
+        """Charge the time since the previous phase change to that phase; ``name``
+        (None: stop the clock) starts the next one."""
+        if not self.round_phases:  # off: not even a clock read (the reference tapes)
+            return
+        now = self.clock()
+        if self._round_phase_seconds is None:
+            self._round_phase_seconds = {}
+        if self._phase_mark is not None:
+            previous, since = self._phase_mark
+            self._round_phase_seconds[previous] = (
+                self._round_phase_seconds.get(previous, 0.0) + max(0.0, now - since))
+        self._phase_mark = None if name is None else (name, now)
+
+    def _emit_round_phases(self, rollout_id: int, *, train_seconds: float | None = None,
+                           tokens: int | None = None) -> None:
+        """``rl_round_phases``: the wall seconds of every driver phase since the
+        previous round's publication (the wait for samples, train, sync, export,
+        publish, ...), so the share of a round the trainer computes is on the tape
+        without the observation spans. The clock keeps running into the next round."""
+        if not self.round_phases:
+            return
+        current = None if self._phase_mark is None else self._phase_mark[0]
+        self._account_phase(current)
+        seconds = dict(self._round_phase_seconds or {})
+        self._round_phase_seconds = {}
+        wall = sum(seconds.values())
+        self.emit("rl_round_phases", rollout_id=rollout_id,
+                  phase_seconds={k: round(v, 3) for k, v in sorted(seconds.items())},
+                  wall_seconds=round(wall, 3),
+                  train_seconds=None if train_seconds is None else round(float(train_seconds), 3),
+                  trained_tokens=tokens,
+                  train_fraction=(round(float(train_seconds) / wall, 4)
+                                  if train_seconds is not None and wall > 0 else None))
 
     def _close_span(self) -> None:
         if not self.observe or self._open_span is None:
@@ -2138,6 +2181,8 @@ class IslandDriver:
             self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
+        self._emit_round_phases(rollout_id, train_seconds=train_seconds,
+                                tokens=sum(int(g.token_count) for g in batch.groups))
         self.rounds_completed += 1
         return boundary
 

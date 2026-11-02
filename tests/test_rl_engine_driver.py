@@ -1013,3 +1013,20 @@ def test_rollout_offload_after_generate_runs_in_its_own_phase(tmp_path):
     phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
     i = phases.index("generate")
     assert phases[i + 1] == "rollout_offload"
+
+
+def test_phase_accounting_off_reads_no_clock():
+    """round_phases off (the default): phase changes do not read the clock, so a
+    driver's event stream (and a ticking test clock) is as before the breakdown."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.driver import IslandDriver
+
+    reads = []
+    stub = SimpleNamespace(round_phases=False, clock=lambda: reads.append(1) or 0.0,
+                           _phase_mark=None, _round_phase_seconds=None)
+    IslandDriver._account_phase(stub, "train")
+    assert reads == [] and stub._phase_mark is None
+    stub.round_phases = True
+    IslandDriver._account_phase(stub, "train")
+    assert reads == [1] and stub._phase_mark == ("train", 0.0)

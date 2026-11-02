@@ -469,6 +469,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile, ledger=None if resume is None else resume.ledger)
     driver.data_slot = plan.get("data_slot")  # task assignment
+    driver.round_phases = True  # per-round time breakdown (rl_round_phases) for MFU
     if full:  # Observation only (exports and data positions are refused, .fully_async_full)
         from .driver_extras import wire_full_parameter_extras
 
@@ -494,7 +495,19 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         if getattr(driver, "verify_every", None) != int(plan["verify_every"]) or not getattr(
                 policy_state, "supports_unverified_rounds", False):
             raise ValueError("--rl-verify-every was planned but the driver or policy state did not take it")
-    state = round_cuts.run_driver(driver, resume)
+    close = getattr(publisher, "close", None)
+    try:
+        state = round_cuts.run_driver(driver, resume)
+    except BaseException:
+        if callable(close):  # a finished background upload still gets its record; the run's error wins
+            try:
+                close()
+            except Exception as error:  # noqa: BLE001 - on the tape; the run's own error is raised
+                tape.append({"event": "rl_policy_release_close_failed",
+                             "error": f"{type(error).__name__}: {error}"[:500]})
+        raise
+    if callable(close):
+        close()  # a background release still in flight goes out before the island reports done
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,
               "final_policy_tensor_hash": state.policy_tensor_hash(),

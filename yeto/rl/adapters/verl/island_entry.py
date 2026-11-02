@@ -96,6 +96,9 @@ def parse_args(argv):
     # a memory / MFU measurement run on a buffer trainer writes no policy
     # release (one 120B release is about 225 GB and a dozen minutes per round)
     p.add_argument("--rl-measure-no-release", action="store_true")
+    # encode, digest and upload each staged (delta) release on a worker thread
+    # while the next rounds train; needs --rl-release-delta-full-every
+    p.add_argument("--rl-release-background", action="store_true")
     # a measurement run also skips the full policy hash of the first and the last
     # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
     # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
@@ -1361,6 +1364,7 @@ def sample_buffer_section(args) -> dict | None:
             # staged bf16 delta releases (0: the release goes into the store whole)
             "release_delta_full_every": int(config.release_delta_full_every or 0),
             **({"no_release": True} if getattr(args, "rl_measure_no_release", False) else {}),
+            **({"release_background": True} if getattr(args, "rl_release_background", False) else {}),
             **({"release_only": list(args.rl_release_only_versions)}
                if getattr(args, "rl_release_only_versions", None) is not None else {}),
             **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}

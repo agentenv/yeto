@@ -200,6 +200,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # A measurement run writes no release
                                         no_release=bool(section.get("no_release")),
                                         release_only=section.get("release_only"),
+                                        # encode and upload each staged release on a worker
+                                        # thread while the next rounds train
+                                        release_background=bool(section.get("release_background")),
                                         # This island counts its own
                                         # versions, so a new process of it continues the
                                         # account above the store's newest release
