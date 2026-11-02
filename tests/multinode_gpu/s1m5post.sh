@@ -6,7 +6,7 @@
 # usage: s1m5post.sh <run dir>   evidence: <run>/pulled/{m5nccl.json,m5gen.json,m5ranks-gen.jsonl,m5post-*.log}
 set -u
 R=$1; D=$(cd "$(dirname "$0")" && pwd); CL=$(cat $R/cluster.txt); W=$CL-worker1
-export HOME=/home/michael; SKY=/home/michael/work/gpu-head/venv/bin/sky
+export HOME=${YETO_HOME:-$HOME}; SKY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/sky
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 # island GPUs per node (s1run.sh writes "<physical> <use>" for M5_USE_GPUS runs): every post-step process sees GPUs 0..USE-1 only
 USE=$(awk '{print $2}' $R/gpus_per_node.txt 2>/dev/null); CVD=
@@ -56,5 +56,5 @@ timeout 60 $S $CL "tail -c 300000 ~/yeto-rl/m5srv-ref.log" > $R/pulled/m5post-sr
 stop_srv
 timeout 60 $S $CL 'cat ~/yeto-rl/m5gen.json' > $R/pulled/m5gen.json 2>/dev/null
 log "m5post done"
-if [ "${KEEP_M5:-0}" != 1 ]; then HOME=/home/michael $SKY down -y $CL > $R/m5post-down.out 2>&1; log "sky down rc=$?"; fi
+if [ "${KEEP_M5:-0}" != 1 ]; then HOME=${YETO_HOME:-$HOME} $SKY down -y $CL > $R/m5post-down.out 2>&1; log "sky down rc=$?"; fi
 touch $R/M5POST_DONE

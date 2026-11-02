@@ -10,7 +10,7 @@
 - `reconfigure`：原 D4 事务，提交点是 `config_epoch` 的 CAS（D4 `COMMITTED`），只能引用已提交 pool epoch 内的 GPU。
 - 扩池 = `pool_grow` 提交后，另起 `reconfigure` 使用新卡；缩池 = 先 `reconfigure` 迁出，再 `pool_shrink` 提交，最后释放。两事务之间的中间态都是合法的 RUNNING（§1.6），岛内同一时刻仍最多一个在途事务。
 
-接口引用约定：`[已实现 file:line]` 指 yeto 集成分支 `origin/integ-decl`（8c64a65）或 miles fork `yeto/ports`（0af62f4d）中已存在的代码；`[缺口 Gx]` 指尚未实现、列在 §6 的接口。fork 路径均相对 `/home/michael/work/miles-elastic`。
+接口引用约定：`[已实现 file:line]` 指 yeto 集成分支 `origin/integ-decl`（8c64a65）或 miles fork `yeto/ports`（0af62f4d）中已存在的代码；`[缺口 Gx]` 指尚未实现、列在 §6 的接口。fork 路径均相对 `~/work/miles-elastic`。
 
 ---
 

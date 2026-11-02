@@ -8,7 +8,7 @@ global pack. The patch used to return ``{}`` when ``cp_size != 1``, which left `
 unset and let one packed sample's Mamba state flow into the next.
 
 The numerical evidence sits outside pytest, because it needs torch and 2 to 4 gloo ranks:
-``/home/michael/work/s1-runs/s28-g120/cp_seqidx_check.py``, log ``/tmp/cp2-check.log``.
+``~/work/s1-runs/s28-g120/cp_seqidx_check.py``, log ``/tmp/cp2-check.log``.
 """
 
 from yeto.rl.adapters.verl import patch_verl

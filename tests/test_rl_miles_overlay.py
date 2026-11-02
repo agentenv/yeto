@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import hashlib
 import json
 import re
@@ -168,7 +169,7 @@ def test_result_tree_pin_matches_fork_commit():
 
     from yeto.rl.adapters.miles import overlay as O
 
-    fork = Path("/home/michael/work/miles-critic-c357")
+    fork = Path(os.path.expanduser("~/work/miles-critic-c357"))
     if not fork.is_dir():
         pytest.skip("fork checkout not present")
     tree = sp.run(["git", "-C", str(fork), "rev-parse", f"{O.CRITIC_C357_RESULT_COMMIT}^{{tree}}"],

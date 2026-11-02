@@ -69,7 +69,7 @@ INWATCH = Path(__file__).resolve().parent / "e2_inwatch.py"
 GPU_NAME = "NVIDIA H100 80GB HBM3"
 STALL_S = 20 * 60  # progress watchdog: no new tape event for 20 min (image pull + load included)
 ERROR_LINES = 40  # Traceback / RayTaskError / 5xx lines in the mirrored container log
-HEAD_PY = "/home/michael/work/gpu-head/venv/bin/python"
+HEAD_PY = os.path.expanduser("~/work/gpu-head/venv/bin/python")
 
 
 def common_args(model: str, *, gpu: str, prefix: str) -> list[str]:
@@ -212,7 +212,7 @@ R={rdir}; M={MODAL}
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
 cp ~/.modal.toml $R/home/
 git -C {source_repo} archive {yeto_sha} | tar x -C $R/yeto
-cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/
+cp ~/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/
 touch $R/yeto/yeto-rl-echo-events
 {harness_copy}# independent watchdog: stop the app after the hard timeout plus 5 min
 setsid nohup bash -c "sleep {run.hard_s + 300}; HOME=$R/home $M app stop -y {app} > $R/watchdog.out 2>&1" >/dev/null 2>&1 &
@@ -221,11 +221,12 @@ setsid nohup $R/puller.sh $R {app} {run.gpus} > $R/puller.log 2>&1 < /dev/null &
 echo $! > $R/puller.pid
 {trigger}
 (
+export YETO_DOCKER_CONFIG=${{YETO_DOCKER_CONFIG:-$HOME/.docker/config.json}}
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
 # private image pull credentials for the launcher (never printed)
 eval "$(/usr/bin/python3 - <<'PY'
-import base64, json, shlex
-a = json.load(open("/home/michael/.docker/config.json"))["auths"]["ghcr.io"]["auth"]
+import base64, json, os, shlex
+a = json.load(open(os.environ["YETO_DOCKER_CONFIG"]))["auths"]["ghcr.io"]["auth"]
 u, t = base64.b64decode(a).decode().split(":", 1)
 print(f"export SKYPILOT_DOCKER_USERNAME={{shlex.quote(u)}} SKYPILOT_DOCKER_PASSWORD={{shlex.quote(t)}} SKYPILOT_DOCKER_SERVER=ghcr.io")
 PY

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import argparse
 import dataclasses
 import json
@@ -566,7 +567,7 @@ def test_megatron_image_layers_and_pins():
         image.modal_image(object(), variant="sglang")
 
 
-VERL_FORK = Path("/home/michael/work/verl-fork-acad9875")
+VERL_FORK = Path(os.path.expanduser("~/work/verl-fork-acad9875"))
 
 
 @pytest.mark.skipif(not (VERL_FORK / "verl/models/mcore/util.py").is_file(), reason="no verl fork checkout")

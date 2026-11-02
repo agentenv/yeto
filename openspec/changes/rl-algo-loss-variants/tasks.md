@@ -1,7 +1,7 @@
 # Tasks
 
 执行约定：
-- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源），测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`，upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `~/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源），测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`，upstream 参数解析在 `~/work/miles-next-venv` 中运行。
 - 不改 legacy `build_miles_argv`，默认 GRPO 不变。
 - fork 改动只能提交到 `michaellchung/miles` 的 `yeto/ports` 分支，且必须先得到用户同意；绝不向 radixark/miles 或 sgl-project/sglang 提 PR。
 - commit 与 push 需要用户确认。
@@ -38,7 +38,7 @@
 
 ### 完成记录（4.1/4.2，LOSS-VAR，2026-10-06）
 - 4.1：fork `michaellchung/miles` 提交 540650723 → c45155776 → 5c1b49eb（已在 origin `yeto/ports` 上，本地 `yeto/ports` 03947150 是其祖先；本轮无新 fork 提交、无 push）。`git diff --stat 0af62f4d 5c1b49eb` 只涉及 `loss_hub/losses.py`、`loss_hub/math_utils.py`、`utils/arguments.py` 与 `tests/fast/backends/training_utils/loss/test_policy_loss_variants.py`（+677/−4）。
-- 4.2：在 5c1b49eb 的 detached worktree 中，`PYTHONPATH=<wt> /home/michael/work/miles-next-venv/bin/python -m pytest -q tests/fast/backends/training_utils/loss/test_policy_loss_variants.py` → 37 passed（覆盖正负优势、越界、全 mask、GMPO 模拟 CP 切分、TIS/IcePop 组合、缺省 variant 逐元素不变）。整个 `tests/fast/backends/training_utils/loss` 目录：88 passed / 13 failed，13 个失败在 0af62f4d 上完全相同（miles-next-venv 缺 `megatron.core`），新增失败 0。
+- 4.2：在 5c1b49eb 的 detached worktree 中，`PYTHONPATH=<wt> ~/work/miles-next-venv/bin/python -m pytest -q tests/fast/backends/training_utils/loss/test_policy_loss_variants.py` → 37 passed（覆盖正负优势、越界、全 mask、GMPO 模拟 CP 切分、TIS/IcePop 组合、缺省 variant 逐元素不变）。整个 `tests/fast/backends/training_utils/loss` 目录：88 passed / 13 failed，13 个失败在 0af62f4d 上完全相同（miles-next-venv 缺 `megatron.core`），新增失败 0。
 
 ## 5. 开放声明与文档（路线实现完成后执行）
 

@@ -2,7 +2,7 @@
 
 范围：`rl-infra-spec` 与五个算法 change（`rl-algorithm-capabilities`=P0、`rl-algo-mismatch-correction`=1a、`rl-algo-grpo-knobs`=1b、`rl-algo-seq-and-adv`=2a、`rl-algo-loss-variants`=2b）。本文件是派发、顺序与待批准事项的唯一来源；各 change 的 `progress.md` 链接到这里。
 
-基线：分支 `rl-infra-spec`（起点 7fffbfd）。五个算法 change 与 `docs/research/rl-algorithms/` 从 worktree `/home/michael/work/rl-algos`（分支 `rl-algorithms` HEAD 18695ae，含未跟踪文件）原样复制，提交 `5753e30`；此后的修订都在本分支上，用 `git diff 5753e30 -- openspec/changes/rl-algo*` 审阅。rl-algos worktree 未改动。
+基线：分支 `rl-infra-spec`（起点 7fffbfd）。五个算法 change 与 `docs/research/rl-algorithms/` 从 worktree `~/work/rl-algos`（分支 `rl-algorithms` HEAD 18695ae，含未跟踪文件）原样复制，提交 `5753e30`；此后的修订都在本分支上，用 `git diff 5753e30 -- openspec/changes/rl-algo*` 审阅。rl-algos worktree 未改动。
 
 本轮只改规划文档，没有改代码，没有使用 GPU 或云资源。
 
@@ -71,7 +71,7 @@
 | A5 | `4102b4c` | infra tasks 1.7/2.2；1a design G2 | 算法指标无标签，分区模式未写 policy token 校验 → 算法指标带 profile/epoch/传输标签；2.2 保留每组 policy token 校验；G2 报告注明执行模式与传输方式，不外推 | 1a 的前提（π_behav=π_old）在分区模式下必须仍然成立；LoRA 分区必须用 broadcast（出处：`protocol.py:73-89`、`protocols/broadcast.py:27`、`protocols/cuda_ipc.py:43`、`arguments.py:3581/:3595`，见 upstream-mechanisms.md E0；对训推 logprob 差异的影响属推断，待 GPU 核实） | 1.7、2.2 验收（更严格）；1a 7.4 报告内容 | `driver.py`、`timeline.py`、`miles_adapter/rollout.py` |
 | A6 | `aab5ea8` | P0 proposal 能力表；1a design D1 | “需要 rl-infra-spec 提供异步模式” → “需另立独立算法契约 change” | 与 infra 2.3、design D0 一致，避免误派 | 无验收变化 | 无 |
 | A7 | `12d01b5` | 2b design Migration | 路线 B 自行更新 pin → 与 M1–M6 串行合回 `yeto/ports`，只由 Agent IMG 更新 pin/digest | 同一个 fork 分支、同一个 pin，只能有一个写入者 | 2b 4.3 | `yeto/rl/__init__.py` pins |
-| A8 | `ffe1141` | 4 个算法 tasks.md 的执行约定 | 在 `/home/michael/work/rl-algos` 工作 → 以本分支副本为准、按工作包派发；P0 增加 `driver.py` 单写说明 | 规划来源唯一；避免与 lr-fix、infra 在同一文件冲突 | 无 | `driver.py` |
+| A8 | `ffe1141` | 4 个算法 tasks.md 的执行约定 | 在 `~/work/rl-algos` 工作 → 以本分支副本为准、按工作包派发；P0 增加 `driver.py` 单写说明 | 规划来源唯一；避免与 lr-fix、infra 在同一文件冲突 | 无 | `driver.py` |
 | A9 | `a7ac491` | infra tasks 依赖 | 2.1/3.3/3.4/3.5/4.2/4.6/4.7 的依赖中没有 fork 任务 → 加上 2.1a/3.3a/3.3b/3.4a/3.5a/4.2a（LoRA）/4.6a；3.4a 从“同步”改为“前置” | 让派发顺序可以机械推导 | 无验收变化 | — |
 | A10 | `95f4cd6` | infra tasks 第 5/6/7 组标题 | 未标注边界 → C 只做 5.1 选中的路径；D1=6.1–6.3，D2=6.4–6.7；F 本轮只交付 7.1/7.2 设计文档，7.3 只写占位 | 用户指示与派发需要 | 不放宽：未选中的 5.x 与 7.3 保持未勾选 | — |
 | F1 | `53b5bc4` | tasks 3.5a；alignment 矩阵 | 3.5a 只写读回校验 → 如实写明现实现在读回前已进 router，给出 cordoned 加入后 uncordon 或 M4b 延迟准入两种机制；矩阵新增 ✖ 行 | 审查 F1 | 3.5 验收不变 | fork M3/M4 |
@@ -91,7 +91,7 @@
 - **D1 = 6.1–6.3**：shadow 负载归因与收益预测（X8）、半自动建议（带有效期、expected_epoch、profile hash）、执行前重验。依赖 1.7、2.4、5.7。
 - **D2 = 6.4–6.7**：默认关闭的 auto 模式、disabled/manual/recommend/auto 切换、四场景对比、综合故障/学习/回退验收。依赖 D1 通过，以及至少一条实测净收益边（6.4 原文）。
 - 如果 2.4 或 5.7 给出“尚无净收益边”的合法否定结论，D2 不开工，系统保持 manual/recommend，该结论照原文交付。
-- 命名冲突已处理：GPU 计划原先用“D1”表示 E3 的 DistOpt gather 开发调试，已改名为 “DEV-GATHER”。计划已纳入版本管理，见 [`gpu-plan.md`](gpu-plan.md)（草稿源 `/home/michael/work/infra-drafts/gpu-plan.md` 同步修改）。
+- 命名冲突已处理：GPU 计划原先用“D1”表示 E3 的 DistOpt gather 开发调试，已改名为 “DEV-GATHER”。计划已纳入版本管理，见 [`gpu-plan.md`](gpu-plan.md)（草稿源 `~/work/infra-drafts/gpu-plan.md` 同步修改）。
 
 ## 5. C 与 F 的范围
 

@@ -2,7 +2,7 @@
 
 ## Context
 
-动机见 `proposal.md`。现状依据 `/home/michael/work/infra-drafts/codex-harness-ab.html`（2026-09-30 调研；yeto `integ-decl`、fork `yeto/ports`=`e3a11ab3`、上游 `radixark/miles` main=`874b3e275`）。以下标“源码已确认”的内容在调研中核对过源码；标“未核实”的是推断。
+动机见 `proposal.md`。现状依据 `~/work/infra-drafts/codex-harness-ab.html`（2026-09-30 调研；yeto `integ-decl`、fork `yeto/ports`=`e3a11ab3`、上游 `radixark/miles` main=`874b3e275`）。以下标“源码已确认”的内容在调研中核对过源码；标“未核实”的是推断。
 
 - **源码已确认**：上游 Miles 已有以下组件，fork 在 `miles/rollout/session`、`generate_hub`、`generate_utils` 三个目录与上游零差异。
   - `agentic_tool_call.generate`：通过 `load_function(args.custom_agent_function_path)` 调用 agent，注册 `--custom-agent-function-path` 与 `--max-seq-len`；agent 返回的 dict 合并进 sample metadata。
@@ -171,7 +171,7 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 
 ## 修订提案（阶段 1 检查点，2026-10-01；主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4；下文各段以 R-* 为准，覆盖对应 Decisions）
 
-依据与查找记录见 `/home/michael/work/infra-drafts/CODEX-PROGRESS.md`。以下每段均标"待批准"。
+依据与查找记录见 `~/work/infra-drafts/CODEX-PROGRESS.md`。以下每段均标"待批准"。
 
 ### R-CTX. 更正 Context 中的"未核实"（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 - legacy `yeto_miles_secrlenv` 源码**已找到**：yeto 仓库提交 `5bfc011`（亦即 merge `e7e3066` 的第一父 `95dd529`）中的 `yeto_miles_secrlenv/{__init__,agent,client,codex_harness_agent,generate,reward}.py`；三份文件的 sha256 与 `yeto/rl/__init__.py` 当前 pin 的 `SECRLENV_AGENT_SHA256` / `SECRLENV_GENERATE_SHA256` / `CODEX_HARNESS_AGENT_SHA256` 逐字节相同。该目录在 merge `e7e3066`（2026-08-27）被静默丢弃，现有 `tests/test_secrlenv_codex_harness.py` 与之配套（仅多一处 importorskip）。D3 与 Risks 中"找不到则重写"的分支作废，改为"搬运并标注出处"。

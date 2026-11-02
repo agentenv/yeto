@@ -39,7 +39,7 @@ No dependency: phase 1, delete legacy (legacy does not support `--rl-placement`;
 - **Q2 cross-island elastic**: cross-island elastic (`--rl-island-scheduling elastic`) is the main goal of this change and allows mixed placement. Under strict (`--rl-island-scheduling legacy`, the default), mixed placement is refused at startup with an error that states the reason. First step of the work: verify that the "capacity-weighted advance" of cross-island elastic is computed correctly on both colocated and fixed-partition islands (unverified). Note: intra-island elastic `--rl-elastic` (requires fixed-partition) and cross-island elastic are different things.
 - **Q3 strict**: strict is not tested. This change targets cross-island elastic only. No dedicated record of "fast islands wait for slow islands". Keep the generic record of per-island round time.
 - **Q4 algorithm hash**: placement-related capabilities do not enter the algorithm hash. Decide this together when P0 4.8 starts.
-- **GPU validation**: Modal 3×H100, 3 rounds. Island 0 colocated on 1 card; island 1 fixed-partition on 2 cards (1 for training, 1 for inference); run under cross-island elastic. The budget is included in the second tranche of the $500 the user approved. Before launching cards, write the review and pre-register in `/home/michael/work/infra-drafts/gpu-spend.md`.
+- **GPU validation**: Modal 3×H100, 3 rounds. Island 0 colocated on 1 card; island 1 fixed-partition on 2 cards (1 for training, 1 for inference); run under cross-island elastic. The budget is included in the second tranche of the $500 the user approved. Before launching cards, write the review and pre-register in `~/work/infra-drafts/gpu-spend.md`.
 
 ## Capabilities
 

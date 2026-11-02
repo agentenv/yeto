@@ -4,13 +4,13 @@
 
 Verified from code (2026-10-12):
 
-- verl fork `/home/michael/work/verl-fork-acad9875` (HEAD acad9875, 2026-10-08):
+- verl fork `~/work/verl-fork-acad9875` (HEAD acad9875, 2026-10-08):
   - The only sandbox capability is Sandbox Fusion. The client is `call_sandbox_api` at `verl/utils/reward_score/sandbox_fusion/utils.py:67`. It POSTs JSON to `reward.sandbox_fusion.url` (which must end with `/run_code`). Fields: compile_timeout, run_timeout, code, stdin, memory_limit_MB, language, files, fetch_files. A 504 is retried. The config items are at `verl/trainer/config/reward/reward.yaml:88` (url, max_concurrent, memory_limit_mb).
   - On the tool side, `verl/tools/` has only base_tool, function_tool, schemas and tool_registry. The in-tree `SandboxFusionTool` was deleted upstream. `docs/sglang_multiturn/sandbox_fusion.rst` keeps the integration method. The reference implementation is in upstream `f5e21df6` and earlier.
   - Agent loop: `verl/experimental/agent_loop/agent_loop.py:227 AgentLoopBase`, abstract `run` at :466; `register(agent_name)` at :487; the YAML tool config goes through `rollout_config.agent.agent_loop_config_path` (:551); a sample selects its loop by `non_tensor_batch["agent_name"]` (:627). `tool_agent_loop.py:101` registers `tool_agent`.
   - `AgentLoopOutput` (:88) fields: prompt_ids, response_ids, response_mask, response_logprobs, num_turns, metrics, extra_fields, and others.
   - No hit for agentenv or e2b.
-- yeto worktree `/home/michael/work/s22-agentic-sft`:
+- yeto worktree `~/work/s22-agentic-sft`:
   - `yeto/rl/adapters/verl/` already has a full backend (entry, verl_main, trainer, patch_verl, publish, reward_fn, rollout_events, pins, and others).
   - `yeto/rl/harness/codex/tb2_provider.py:349-361` has the `SandboxHandle` / `SandboxBackend` protocols and two implementations, LocalProcess and Modal. This is the sandbox abstraction of the Miles-side TB2, not of verl.
   - The spec `rl-harness-sandbox-broker` explicitly delivers only the interface and a fake implementation. `rl-tito-session-service` (`rl-verl-backend` task 1.9) describes the token session service of the verl backend, and it is not implemented.

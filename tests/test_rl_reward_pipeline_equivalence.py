@@ -1,7 +1,7 @@
 """Dispatcher == Miles built-in ``_post_process_rewards`` (rl-algo-grpo-knobs 5.2).
 
-Runs where upstream Miles imports (``/home/michael/work/miles-next-venv`` with
-``PYTHONPATH=<yeto>:/home/michael/work/miles-next``); skipped otherwise.
+Runs where upstream Miles imports (``~/work/miles-next-venv`` with
+``PYTHONPATH=<yeto>:~/work/miles-next``); skipped otherwise.
 Element-wise comparison with ``torch.equal`` (not approximate).
 """
 

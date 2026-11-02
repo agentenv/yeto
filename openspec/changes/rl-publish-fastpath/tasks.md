@@ -44,7 +44,7 @@
 建议：A 与 WP2 截断配置的上卡合并（同一次启动、同样只换 yeto 源码）；B 可省——S16 那次已有老路径同机型稳态数据（每轮约 660 s），只有在 A 的结果需要同批次对照时再跑。若合并到 WP2，A 的边际费用只是"每轮变短"带来的节省，不另计启动费用。上限建议按 A 单跑 $110 设硬停（HARD ≈ 4500 s）。
 
 ### 5.x 真机结果（S17 G4，`s17-fn2x8-fastpath-20261008a`，2026-10-08 16:21–17:21Z，Modal 2×8 H200，yeto main 80e944b6）
-复核 infra-drafts/S17-G4-PRELAUNCH-REVIEW.md；原始数据 /home/michael/work/s1-runs/s17-fn2x8-fastpath-20261008a/（launch.log、tape-direct/、metrics.json、metrics-table.md、judgment*.json、gate-wait.json、hostprobe-*、dashboard.html）。配置相对 S16 早门：回答 12288 / seq 16384、mem 0.6、TIS 2.0/0、lr 5e-6（线性视界 20000，近似固定）。
+复核 infra-drafts/S17-G4-PRELAUNCH-REVIEW.md；原始数据 ~/work/s1-runs/s17-fn2x8-fastpath-20261008a/（launch.log、tape-direct/、metrics.json、metrics-table.md、judgment*.json、gate-wait.json、hostprobe-*、dashboard.html）。配置相对 S16 早门：回答 12288 / seq 16384、mem 0.6、TIS 2.0/0、lr 5e-6（线性视界 20000，近似固定）。
 - 5.1 [实测] 参数探针 rc=0（s1-runs/s17-g4-prep/probe2.out）；PLAN_ONLY rc=0；5 轮跑满。
 - 5.2 [实测] 快路径日志 v0–v5 六次：total 46.7–48.2 s = trainer_export 38.7–40.1 s + hash 7.8–7.9 s。tape `outer_sync` span 46.7–48.2 s/轮（S16 215.7 s）；`publish` span 25.9–31.4 s（S16 242.6 s，含 Miles update_weights_implementation 6.3–7.2 s，等效 1.45–1.66 GiB/s）。训练结束→该版发布事件约 78–80 s（S16 448 s）。驱动进程发布期间只在等插件（py-spy，hostprobe-pub0-*）。
 - 5.3 [实测] v0→v5 每次 end_weight_update 200（6 次）、WeightChecker 校验和 48 行（6×8）、无 [LORA-CHECK]、无 "trainer weights differ"；适配器哈希每版都变（bfb3ea07→0c2adbd0→7a5ad1ac→f1ec445c→e895ff64→b2bcc0e2）；单发送方 miles-pp_0；NCCL IB。s16-rawlora-4l-judge 判 PASS。

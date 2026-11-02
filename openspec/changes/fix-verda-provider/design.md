@@ -2,7 +2,7 @@
 
 ## Context
 
-- 根因与证据见 `proposal.md` 与 `/home/michael/work/verda-rca/report.md`；跨云证据在 `/home/michael/work/gpu-xcloud/evidence/2026-09-29-xcloud/`（含 attempt3 的 head 诊断，确认了 `query_instances` 参数错位），默认参数 Verda 失败证据在 `/home/michael/work/gpu-default-verda/evidence/`。
+- 根因与证据见 `proposal.md` 与 `~/work/verda-rca/report.md`；跨云证据在 `~/work/gpu-xcloud/evidence/2026-09-29-xcloud/`（含 attempt3 的 head 诊断，确认了 `query_instances` 参数错位），默认参数 Verda 失败证据在 `~/work/gpu-default-verda/evidence/`。
 - SkyPilot 版本：本机 0.13.0。head 在 bootstrap 时执行 `pip install -q "skypilot[aws,gcp,runpod,nebius,verda]>=0.12"`（`yeto/cli.py:1244`），**没有固定版本**，每次起 head 都可能装到新版本。
 - 涉及的 sky 代码：`sky/provision/__init__.py:193`（`query_instances` 调用方）、`sky/provision/verda/instance.py`（`:42` 子串匹配、`:102-103` `'ACTIVE'`、`:197-222` 等待、`:252-295` terminate、`:389` 旧签名、`:400-411` 状态映射）、`sky/clouds/verda.py:38-49`（不支持 docker 镜像、存储挂载、开端口）、`sky/catalog/verda_catalog.py:18-20`（每 7 小时拉取的目录）、`sky/catalog/common.py:222`（本地目录被修改后不再覆盖）。
 - 涉及的 yeto 代码（main `e21a7ff`）：`yeto/shape/providers.py:846-1050`（`VerdaSignals`）、`yeto/shape/catalog.py:72-80`（白名单）、`yeto/shape/plan.py:343`、`:354`（拒绝逻辑）、`yeto/launcher.py:1854`（`image_id`）、`:2539`（`learner_cluster_names`）、`:2940-3290`（恢复监督器，`recover_timeout <= 0` 已可禁用恢复，`:3148`、`:3173`）、`terminate_and_verify`、`:394`、`:421` 与 `yeto/cli.py:1335`（syncer 的 `ports`）。

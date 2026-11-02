@@ -1,7 +1,7 @@
 ## Context
 
 Facts used (sources in `infra-drafts/SESSION25/GOAL.md` §2):
-- Local cluster: 4 nodes x 8 Ascend 910 cards; 64 GiB HBM version arrived 2026-10-16; sub-model and host memory not verified. Access: VPN (UniVPN on the submitting server) then a jump host. The user confirmed that the VPN routes only 172.28.11.0/24, and Modal and AWS stay reachable from the server.
+- Local cluster: 4 nodes x 8 Ascend 910 cards; 64 GiB HBM version arrived 2026-10-16; sub-model and host memory not verified. Access: VPN (UniVPN on the submitting server) then a jump host. The user confirmed that the VPN routes only <vpn-subnet>, and Modal and AWS stay reachable from the server.
 - PPU machines: reached by SSH; count, model, and host memory not known yet.
 - `yeto/gpu_spec.py` already parses `ssh:1x8x910b4`; `yeto/gpu_spec.py` has `assert_npu_cards` for `npu-smi info`.
 - `yeto/rl/ssh_harness.py` refuses any accelerator other than H200 (around line 1077).
@@ -29,5 +29,5 @@ The executor wraps `ssh_harness` operations and adds `ProxyJump` from the invent
 - Rejected: a Huawei Cloud API provider in this change; ModelArts notebooks stay manual.
 
 ## Risks
-- The VPN routes only 172.28.11.0/24 (user check, 2026-10-16). Preflight still checks that the nodes and the configured store (OSS) are reachable from the head, because the route can change when the VPN reconnects.
+- The VPN routes only <vpn-subnet> (user check, 2026-10-16). Preflight still checks that the nodes and the configured store (OSS) are reachable from the head, because the route can change when the VPN reconnects.
 - A jump host that closes long SSH sessions would stop log streaming; the executor polls instead of holding a session.

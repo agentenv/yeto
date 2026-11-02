@@ -39,7 +39,7 @@
 ## Impact
 
 - 代码：`yeto/rl/algos/`（新增只观测插件，可能新增 MIS vendor 插件）、`yeto/rl/engine/algorithm.py`（correction 组校验、OPSM logprob 来源字段、`expects_gradient` 各机制判定）、`miles_adapter/algorithm_flags.py`（翻译）、`miles_adapter/entry.py` 与 `engine/fake.py`（能力声明）、`miles_adapter` 的指标读取（mismatch 指标、`masked_fraction`）。
-- 测试：新增 CPU 数值对照测试（依赖 Miles 源码，在 `/home/michael/work/miles-next-venv` 运行，miles 不可用时 skip）；upstream parser 解析测试。
+- 测试：新增 CPU 数值对照测试（依赖 Miles 源码，在 `~/work/miles-next-venv` 运行，miles 不可用时 skip）；upstream parser 解析测试。
 - 文档：`docs/MILES_RL.md`。
 - GPU：G1（1 卡）、G2（1 卡）、G3（1+1 卡），需用户批准卡数与预算。decoupled 下的对比实验不在本 change 内，须等 `fix-decoupled-lr-schedule` 合入。
 - 不在本 change 范围：效果 A/B（G4，另行申请预算）；staleness>0 的异步模式（需另立独立算法契约 change，alignment A6）；是否默认开启某修正的决定（由 G2 报告交用户决定）。

@@ -28,11 +28,11 @@
 #         --total-steps 2, --keep; the puller snapshots sglang::scheduler_TP<r> -> GPU uuid per node (s1m5ranks.py -> pulled/m5ranks.jsonl);
 #         after the launcher returns, s1m5post.sh runs the cross-node NCCL all-reduce probe + generation-only TP8 (2 nodes) vs TP4 (head)
 #         greedy reference and tears the cluster down (KEEP_M5=1 keeps it). Judge: s1judge.py <run> m5 (correctness verdict; perf numbers only).
-# env: CLUSTER_PREFIX (cluster name prefix when several runs share one cluster; default = prefix), SHA (git rev of infra-multinode to archive, default HEAD), RUN_ROOT (/home/michael/work/s1-runs), IMAGE (digest-pinned --rl-image), DRY=1 prints args only.
+# env: CLUSTER_PREFIX (cluster name prefix when several runs share one cluster; default = prefix), SHA (git rev of infra-multinode to archive, default HEAD), RUN_ROOT (${YETO_HOME:-$HOME}/work/s1-runs), IMAGE (digest-pinned --rl-image), DRY=1 prints args only.
 set -u
 C=$1; P=$2; HARD=$3; WD=${4:-$(( $3 + 300 ))}; CP=${CLUSTER_PREFIX:-$P}
-D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$D/../.." && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; R=$B/$P
-SKY=/home/michael/work/gpu-head/venv/bin/sky; PY=/home/michael/work/gpu-head/venv/bin/python
+D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$D/../.." && pwd); B=${RUN_ROOT:-${YETO_HOME:-$HOME}/work/s1-runs}; R=$B/$P
+SKY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/sky; PY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/python
 # default --rl-image = the snapshot's own pin (yeto.rl.MILES_NEXT_IMAGE); a mismatch makes the sky setup take the slow clone+pip path (~8 min, s1-mn-20261004d)
 IMAGE=${IMAGE:-$(cd "$REPO" && PYTHONPATH=. /usr/bin/python3 -c "import yeto.rl as r; print(r.MILES_NEXT_IMAGE if r.MILES_NEXT_IMAGE.startswith('docker:') else 'docker:'+r.MILES_NEXT_IMAGE)" 2>/dev/null)}
 [ -n "$IMAGE" ] || { echo "abort: could not resolve MILES_NEXT_IMAGE from $REPO"; exit 65; }
@@ -100,11 +100,11 @@ case $C in fn8s|fn8r) ARGS="$(PREFIX=$CP STEPS=$STEPS IMAGE=$IMAGE BOOT_ONLY=${B
 CL=$CP-l0-eu-north1
 if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C hard=$HARD wd=$WD${USE:+ gpus_per_node physical=$PHYS use=$USE}"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
-for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
+for d in .sky .nebius .ssh; do ln -sfn ${YETO_HOME:-$HOME}/$d $R/home/$d; done
 # m4: the S3 checkpoint store is mounted on Nebius nodes with the static AWS keys sky uploads (~/.aws/credentials, SHARED_CREDENTIALS_FILE identity)
-case $C in m4*) ln -sfn /home/michael/.aws $R/home/.aws;; esac
+case $C in m4*) ln -sfn ${YETO_HOME:-$HOME}/.aws $R/home/.aws;; esac
 git -C $REPO archive ${SHA:-HEAD} | tar x -C $R/yeto
-cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/tests/multinode_gpu/length_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
+cp ${YETO_HOME:-$HOME}/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/tests/multinode_gpu/length_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
 # m3: the controller refuses every E1 request without a capability attestation ("no capability attestation: no transition is certified",
 # s8-m1m3-20261004a M3 FAIL: requests consumed but never journaled). Fingerprint = local reconstruction of the island Miles argv from the
 # snapshot (fp_local22.py; reproduced the real s8-m1m3-20261004a-m3 rl_driver_start value sha256:0d17e24b...), edges = resources-2x2.json.
@@ -116,12 +116,12 @@ if [ $C = m3 ] || [ $C = d1e1 ]; then
 fi
 git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "${USE:-}" ] && printf '%s %s\n' "$PHYS" "$USE" > $R/gpus_per_node.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
 # per-run watchdog: sky down by THIS cluster name only
-setsid nohup bash -c "sleep $WD; HOME=/home/michael $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 &
+setsid nohup bash -c "sleep $WD; HOME=${YETO_HOME:-$HOME} $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 &
 echo $! > $R/watchdog.pid
 B5=$(base64 -w0 $D/s1m5ranks.py)   # m5 rank probe, piped into python3 on each node by the puller
 # puller (every 10 s while the launcher runs): events, journal, in-container probe log, per-node GPU/process snapshots
 setsid nohup bash -c "
-export HOME=/home/michael; armed=0; inarmed=0
+export HOME=${YETO_HOME:-$HOME}; armed=0; inarmed=0
 while [ ! -f $R/rc.txt ]; do
   if timeout 60 $SKY status $CL 2>/dev/null | grep -q ' UP '; then
     S='ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20'
@@ -146,10 +146,11 @@ echo $! > $R/puller.pid
 case $C in m4a|m4a1) true;; *) false;; esac && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
 [ $C = g3 ] && { setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }
 (
+export YETO_DOCKER_CONFIG=${YETO_DOCKER_CONFIG:-$HOME/.docker/config.json}
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
 eval "$(/usr/bin/python3 - <<'PY'
-import base64, json, shlex
-a = json.load(open("/home/michael/.docker/config.json"))["auths"]["ghcr.io"]["auth"]
+import base64, json, os, shlex
+a = json.load(open(os.environ["YETO_DOCKER_CONFIG"]))["auths"]["ghcr.io"]["auth"]
 u, t = base64.b64decode(a).decode().split(":", 1)
 print(f"export SKYPILOT_DOCKER_USERNAME={shlex.quote(u)} SKYPILOT_DOCKER_PASSWORD={shlex.quote(t)} SKYPILOT_DOCKER_SERVER=ghcr.io")
 PY

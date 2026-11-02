@@ -4,7 +4,7 @@ Each section has one or more PRs. Commit and PR text use English only. Before ea
 
 ## 0. Repo hygiene and a smaller reference surface
 
-- [x] 0.1 List the 236 tracked files (about 3.8MB) by log pattern with `git ls-files` (the jsonl files under `tests/` and `data/` are test inputs. Do not move them). Move the evidence files to `/home/michael/work/infra-drafts/evidence/<change>/`. Leave an `EVIDENCE.md` in each original directory that points to the new path
+- [x] 0.1 List the 236 tracked files (about 3.8MB) by log pattern with `git ls-files` (the jsonl files under `tests/` and `data/` are test inputs. Do not move them). Move the evidence files to `~/work/infra-drafts/evidence/<change>/`. Leave an `EVIDENCE.md` in each original directory that points to the new path
 - [x] 0.2 Run `git rm --cached` on these files. In `.gitignore`, delete the `!` lines that let logs in, and add `run-logs/`, `*.stderr`, `*.stdout` and `*metrics*.json`
 - [x] 0.3 Add `tests/test_no_tracked_logs.py`: the number of `git ls-files` matches for log patterns is 0. Change the tests that depend on committed logs to skip, or to read a path outside the repo
 - [x] 0.4 (The user cancelled the "before #238" order on 10-13) The log removal is a separate PR, #240

@@ -2,7 +2,7 @@
 
 登记在途 PR 的语义，以及它们在 ports 路径上的落点。等价性验收（任务 6.x）按本清单逐条覆盖。
 
-状态于 2026-09-29 复核：以下 PR 已合入 `agentenv/yeto` main（R0 先基于 main `cb55aca` 整合，随后移到 main `e21a7ff`，工作树 `/home/michael/work/r0-integ`）。
+状态于 2026-09-29 复核：以下 PR 已合入 `agentenv/yeto` main（R0 先基于 main `cb55aca` 整合，随后移到 main `e21a7ff`，工作树 `~/work/r0-integ`）。
 
 | PR | 分支 | 状态 | 合入提交 |
 |---|---|---|---|

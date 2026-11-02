@@ -4,7 +4,7 @@
 - Watermark: kept in the cut record (`ConsistentCut.buffer_watermark`), restored with `reset_to`.
 - Releases: `r<seq>-v<version>/` with `RELEASE.json`, then `LATEST.json` as the commit point.
 - Store interface: `CheckpointStore(root)` with `commit()`, `reload()`, `describe()`, `list()`; `store_for(path)` builds the implementation named by `YETO_RL_STORE_IMPL` (`yeto/rl/engine/resume.py`). `ModalVolumeStore` is the model for a store that needs an explicit commit and reload.
-- Sites: local Ascend cluster behind a VPN that routes only 172.28.11.0/24; PPU machines at Alibaba Cloud; the head on the submitting server. Public reachability of OSS from the cluster nodes is not verified.
+- Sites: local Ascend cluster behind a VPN that routes only <vpn-subnet>; PPU machines at Alibaba Cloud; the head on the submitting server. Public reachability of OSS from the cluster nodes is not verified.
 
 ## Decisions
 

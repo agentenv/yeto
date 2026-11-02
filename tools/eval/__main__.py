@@ -19,6 +19,7 @@ must appear in ``gpu-spend.md``), checks the local thread count and Ray, writes
 
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import subprocess
@@ -29,8 +30,8 @@ from pathlib import Path
 from . import cells, judges, report
 from .verdict import Verdict
 
-DEFAULT_OUT = Path("/home/michael/work/infra-drafts/SESSION25/logs/T-EVAL")
-LEDGER = Path("/home/michael/work/infra-drafts/gpu-spend.md")
+DEFAULT_OUT = Path(os.path.expanduser("~/work/infra-drafts/SESSION25/logs/T-EVAL"))
+LEDGER = Path(os.path.expanduser("~/work/infra-drafts/gpu-spend.md"))
 THREAD_LIMIT = 3000
 
 
@@ -130,7 +131,7 @@ def cmd_report(args) -> int:
     return 0
 
 
-EFF_OUT = Path("/home/michael/work/infra-drafts/SESSION26/logs/E0")
+EFF_OUT = Path(os.path.expanduser("~/work/infra-drafts/SESSION26/logs/E0"))
 
 
 def cmd_eff_plan(args) -> int:

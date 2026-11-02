@@ -146,7 +146,7 @@
 - 1.1 的前置决策：卡型（A10G 优先，Q1）、范围（4.x/5.x 全做，Q2）、pin 合并（Q3）已由用户给出；但 1.1 本身（计划文件 + 用户确认）未做。
 
 **不需上卡、不需用户确认（CPU，可直接派子 agent）**
-- 1.3 测试基线：改用本机安全测试集（`/home/michael/work/yeto-test-venv`，docs/TESTING.md），排除会拉 Ray 的用例；原命令里的 `/tmp/yeto-venv` 全量不再适用。
+- 1.3 测试基线：改用本机安全测试集（`~/work/yeto-test-venv`，docs/TESTING.md），排除会拉 Ray 的用例；原命令里的 `/tmp/yeto-venv` 全量不再适用。
 - 2.1 clipfrac compile/eager 定性；2.2（只在 2.1 确认是 fork 缺陷时做）；2.3 dual_clipfrac；2.4 超采样计数；2.6 指标接入。
 - 3.1 不可声明名单；3.2 文档。
 - 1.1 计划文件的起草（确认要用户做，见下）。

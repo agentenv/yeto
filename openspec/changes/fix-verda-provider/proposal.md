@@ -11,7 +11,7 @@ yeto 在 `docs/CLOUDS.md` 里把 Verda 列为可用云，但到目前为止**还
 5. **Verda 当不了 head（open_ports）。** head 模式的 syncer 任务向 sky 声明 `ports`（`launcher.py:394`、`:421`，`cli.py:1335`），sky 的 Verda 适配器不支持 `OPEN_PORTS`，直接报 `NotSupportedError`。但 Verda 平台层没有防火墙，实例的端口本身是可达的，这只是 sky 的能力声明问题。
 6. **yeto provider 自身的 bug（R6）。** 凭据只读 JSON 格式的 `~/.verda/config.json`，不认 Verda 官方 CLI 写的 INI 格式 `~/.verda/credentials`；非 JSON 响应（创建返回纯文本 id、删除返回空）直接 `json.load` 报错；备用 location 列表里还有已下线的 ICL-01；型号表缺 RTX PRO 6000 与 A100 40GB（`providers.py:858-912`）。
 
-这些问题在 yeto 侧与 SkyPilot 侧各有一部分。完整根因报告见 `/home/michael/work/verda-rca/report.md`，修复思路的脑暴见本 change 的讨论记录。
+这些问题在 yeto 侧与 SkyPilot 侧各有一部分。完整根因报告见 `~/work/verda-rca/report.md`，修复思路的脑暴见本 change 的讨论记录。
 
 ## What Changes
 

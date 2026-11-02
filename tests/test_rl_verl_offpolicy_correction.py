@@ -187,8 +187,8 @@ def test_round_collection_drops_whole_groups_over_a_hard_and_feeds_the_gate():
 # ------------------------------------------------------------------ L6.6 CPU parity
 
 
-VERL_SRC = Path(os.environ.get("YETO_VERL_SRC", "/home/michael/work/verl-fork-acad9875"))
-MILES_SRC = Path(os.environ.get("YETO_MILES_SRC", "/home/michael/work/miles-next"))
+VERL_SRC = Path(os.environ.get("YETO_VERL_SRC", os.path.expanduser("~/work/verl-fork-acad9875")))
+MILES_SRC = Path(os.environ.get("YETO_MILES_SRC", os.path.expanduser("~/work/miles-next")))
 VERL_HELPER = VERL_SRC / "verl/trainer/ppo/rollout_corr_helper.py"
 MILES_CORRECTIONS = MILES_SRC / "miles/backends/training_utils/loss_hub/corrections.py"
 

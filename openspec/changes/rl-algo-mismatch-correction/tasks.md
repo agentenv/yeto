@@ -1,6 +1,6 @@
 约定：
 - 测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`；全量测试以"改动前后失败集合相同"为准。
-- 依赖 Miles 源码的 CPU 测试与 upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行，miles 不可用时 skip；任务说明中记录命令与结果。
+- 依赖 Miles 源码的 CPU 测试与 upstream 参数解析在 `~/work/miles-next-venv` 中运行，miles 不可用时 skip；任务说明中记录命令与结果。
 - 不修改 legacy `build_miles_argv`，不修改 Miles/SGLang fork，默认 GRPO argv 与哈希不变。
 - 状态严格区分"已实现""CPU 测试通过""GPU 验证通过"；fake 测试不能替代 GPU 验收。
 - commit 和 push 需要用户确认。
@@ -54,7 +54,7 @@
 - [x] 5.2 若不能 import：vendor 到 `yeto/rl/algos/vendor/miles_mis.py`，文件头记录来源仓库、commit `9e4260d`、原路径、许可证，只允许改 import。验证：CPU 测试比对副本与 Miles 原文件在相同输入上的输出一致；PluginRef 哈希取副本。能 import 时跳过本项并在 `progress.md` 说明。
   - S14 用户裁定（2026-10-07）：接受 vendor 副本（偏离 D6 获批），据此勾选。
   - 复审撤销勾选（历史记录，偏离原文）：原文写“能 import 时跳过本项”，而 5.1 已证实可以 import。仍保留 vendor 副本的原因是 P0 插件命名空间只允许 yeto./miles.；是否接受这一偏离需用户批准（见 progress 待批准）。
-  - 2026-10-06 核实（任务 C，worktree mis-corr）：vendor 副本 `# Do not edit below this line` 之后的正文与 `git -C /home/michael/work/miles-2b show 9e4260d:examples/infra_features/train_infer_mismatch_helper/mis.py` 逐字节一致（diff 无输出；连 import 都未改）；`tests/test_rl_mismatch_observe.py::test_vendored_mis_is_verbatim` / `test_vendored_mis_matches_original` 已覆盖。副本被 `yeto/rl/algos/mismatch_correction.py` 使用，不能按“不适用”删除；技术工作完成，仍只差用户对“偏离 D6（能 import 仍 vendor）”的批准，故保持未勾选。
+  - 2026-10-06 核实（任务 C，worktree mis-corr）：vendor 副本 `# Do not edit below this line` 之后的正文与 `git -C ~/work/miles-2b show 9e4260d:examples/infra_features/train_infer_mismatch_helper/mis.py` 逐字节一致（diff 无输出；连 import 都未改）；`tests/test_rl_mismatch_observe.py::test_vendored_mis_is_verbatim` / `test_vendored_mis_matches_original` 已覆盖。副本被 `yeto/rl/algos/mismatch_correction.py` 使用，不能按“不适用”删除；技术工作完成，仍只差用户对“偏离 D6（能 import 仍 vendor）”的批准，故保持未勾选。
   - 完成记录（CPU 通过，偏离 D6）：虽然原文件可以 import，但 P0 D7 只允许 `yeto.`/`miles.` 插件命名空间，所以仍用 vendor 副本（待批准，见 progress）。副本正文与原文件逐字相同，输出比对在 18 种组合上 `torch.equal`，PluginRef 取副本哈希。
 - [x] 5.3 MIS 字段与翻译：`mis_mode`（截断/屏蔽、几何平均变体，以 `mis.py` 实际提供为准）与显式阈值，翻译为 custom-tis 路径及其参数；屏蔽变体按屏蔽类判定零梯度。验证：单测覆盖翻译、缺阈值被拒、零梯度判定；upstream `parse_args` 解析通过。
   - 完成记录（CPU 通过）：`mis_level`（token/sequence/geometric）、`mis_mode`（truncate/clip/mask）、显式上下界与 `mis_batch_normalize` 已实现。参数通过 `register_runtime_attrs` 写入 Miles namespace；mask 变体按屏蔽类判定；upstream 解析通过。
@@ -63,7 +63,7 @@
 
 - [x] 6.1 fake engine 声明全部修正机制（OPSM 按来源），Miles adapter 声明保持空集。验证：fake 组合根测试中各机制能启动；同一描述在 Miles adapter 的 `check()` 下被拒，报错列出已支持项。
   - 复审后完成（CPU 通过）：fake.py 已由 ALGO-CAP 合入全部修正声明；fake 组合根测试通过，Miles adapter 拒绝未声明项的测试针对具体集合断言。
-  - 状态（未完成）：`fake.py` 由 ALGO-CAP 负责，声明补丁见 `/home/michael/work/infra-drafts/1a-declare.patch`。目前测试通过覆盖 `fake_capabilities(corrections=…)` 实现各机制启动；Miles adapter 拒绝未声明项的行为已测。
+  - 状态（未完成）：`fake.py` 由 ALGO-CAP 负责，声明补丁见 `~/work/infra-drafts/1a-declare.patch`。目前测试通过覆盖 `fake_capabilities(corrections=…)` 实现各机制启动；Miles adapter 拒绝未声明项的行为已测。
 - [x] 6.2 默认不变回归。验证：`tests/test_rl_argv_snapshot.py`、`tests/test_rl_miles_adapter_config.py`、`tests/test_rl_engine_algorithm.py` 不改即通过；legacy argv 快照逐字节一致。
   - 完成记录（CPU 通过）：三个文件本 change 未修改（只有合入 P0/rl-integ 带来的改动），49 passed、2 skipped。
 - [x] 6.3 更新 `docs/MILES_RL.md`：每个修正的用法与示例描述、阈值含义（论文取值标注来源与"未核实"）、OPSM 的 π_old 来源与 `--use-rollout-logprobs` 的影响范围、MIS 来源（原路径或 vendor）、每项当前验证层级，不写效果收益。验证：文档中的示例描述用 `--dry-run` 在 fake 下执行，结果与描述一致。

@@ -61,7 +61,7 @@ def test_sampler_command_comes_from_the_adapter(shipped):
     assert "--speculative-algorithm" not in argv  # no NEXTN in stage 1
     assert argv[argv.index("--moe-runner-backend") + 1] == "triton"
     assert engine["env"]["MX_PATCH"] == "1"
-    assert engine["url"] == "http://10.0.0.77:30000"
+    assert engine["url"] == "http://192.0.2.77:30000"
     assert engine["argv"][-2:] == ["--spec", engine["spec_path"]]
 
 

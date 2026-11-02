@@ -58,7 +58,7 @@ At execution, run `git check-ignore -v <path>` for each item to confirm the sour
 - After they enter the repo, `tests/test_rl_sync_mode_table.py` no longer skips. Run it once in the PR that adds them.
 
 ### D7 Evidence log location
-Keep evidence logs first on the local machine at `/home/michael/work/infra-drafts/evidence/`. Do not upload them to object storage. Do not add them to the repo.
+Keep evidence logs first on the local machine at `~/work/infra-drafts/evidence/`. Do not upload them to object storage. Do not add them to the repo.
 
 ## Risks / Trade-offs
 

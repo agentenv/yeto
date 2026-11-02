@@ -66,7 +66,7 @@ def build_launch(flags_text: str):
     return learner.build_ports_launch(args, config)
 
 
-FORK_REPO = Path("/home/michael/work/miles-elastic")
+FORK_REPO = Path(os.path.expanduser("~/work/miles-elastic"))
 
 
 def argv_callables(argv: list[str]) -> list[tuple[str, str]]:

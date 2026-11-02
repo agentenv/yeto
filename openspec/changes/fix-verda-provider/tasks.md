@@ -2,7 +2,7 @@
 
 ## 1. provider、凭据与候选（A 块）
 
-- [x] 1.1 `yeto/shape/providers.py`：凭据同时支持 JSON、INI（Verda CLI 格式）与环境变量；非 JSON 响应按文本处理，HTTP 错误保留响应内容且不输出凭据；地区列表去掉 ICL-01；型号表补 RTX PRO 6000、A100 40GB（参考 `/home/michael/work/gpu-verda/r0fix/verda.diff`）。验证：用 `/home/michael/work/verda-rca/*.json` 与新增的纯文本、空响应、503 夹具做单测，覆盖三种凭据来源。
+- [x] 1.1 `yeto/shape/providers.py`：凭据同时支持 JSON、INI（Verda CLI 格式）与环境变量；非 JSON 响应按文本处理，HTTP 错误保留响应内容且不输出凭据；地区列表去掉 ICL-01；型号表补 RTX PRO 6000、A100 40GB（参考 `~/work/gpu-verda/r0fix/verda.diff`）。验证：用 `~/work/verda-rca/*.json` 与新增的纯文本、空响应、503 夹具做单测，覆盖三种凭据来源。
 - [x] 1.2 生成本地 SkyPilot Verda 目录（全部型号 × 全部地区 × 价格），本机在启动前生成，head 在 bootstrap 时生成同一份。验证：单测用临时 `SKY_HOME` 让 SkyPilot 的 Verda 目录模块读取生成的 CSV，L40S、RTX PRO 6000 等型号可被识别。
 - [x] 1.3 候选按实时 `/instance-availability` 过滤与排序；下发 SkyPilot 时带 `instance_type` 与 `any_of` 多候选；容量失败后刷新可用性并有上限退避，全部失败时报告各候选的失败原因。验证：单测覆盖排序、`any_of` 生成、无货降权、退避上限与失败报告。
 

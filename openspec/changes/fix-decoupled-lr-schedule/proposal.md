@@ -29,7 +29,7 @@ legacy 路径（agentenv/miles fork）与 ports 路径（upstream Miles）的推
 ## Impact
 
 - **legacy 参数翻译**：`yeto/rl/learner.py` 的 `_legacy_miles_argv`（`--num-rollout` 在第 1000 行附近）；legacy 的 argv 快照 `tests/test_rl_argv_snapshot.py` 需要有意重新生成。
-- **ports 参数翻译**：`yeto/rl/engine/run_config.py`（算法配置中新增调度字段）与 `yeto/rl/engine/miles_adapter/config.py`（翻译为 Miles 参数）。已有实现草稿：`/home/michael/work/followups/decoupled-constant-lr-ports.patch`。
+- **ports 参数翻译**：`yeto/rl/engine/run_config.py`（算法配置中新增调度字段）与 `yeto/rl/engine/miles_adapter/config.py`（翻译为 Miles 参数）。已有实现草稿：`~/work/followups/decoupled-constant-lr-ports.patch`。
 - **不变量与事件**：`yeto/rl/engine/driver.py`（ports）与 legacy 的 policy-sync 桥接层（`yeto/rl/miles.py`），读取优化器步的有效学习率并写入 `rl_local_round`。
 - **依赖**：ports 部分的代码只存在于 `rl-engine-ports` 分支，本 change 需在该分支合入 agentenv/yeto main 之后实施，或基于该分支实施。
 - **不改动** Miles 或 SGLang 的 fork 代码；只通过 Miles 已有的命令行参数控制调度。

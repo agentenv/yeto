@@ -76,7 +76,7 @@
 
 - **E1（ports.py）**：把 `TrainerGroup` 的 E2 预留注释定稿为
   `save_cut(*, epoch: int, context: CutContext) -> str` 与
-  `restore_cut(cut_id: str, *, epoch: int, root: str, expect: RestoreExpectation, shared_filesystem: bool = True) -> CutManifest`（类型见 `yeto/rl/engine/cut.py`、`miles_adapter/trainer.py`）。补丁：`/home/michael/work/infra-drafts/patches/infra-e2-ports-v2.patch`。
+  `restore_cut(cut_id: str, *, epoch: int, root: str, expect: RestoreExpectation, shared_filesystem: bool = True) -> CutManifest`（类型见 `yeto/rl/engine/cut.py`、`miles_adapter/trainer.py`）。补丁：`~/work/infra-drafts/patches/infra-e2-ports-v2.patch`。
 - **E1（rollout.py / rollout_meta_hook.py）**：在 rollout 进程内读取 data source 游标 `{sample_offset, epoch_id, sample_group_index, sample_index}` 与 `get_buffer_length()`，经元数据汇报；`RolloutPool` 增加 `data_cursor() -> Mapping[str,int]`，供 `CutContext.data` 使用。buffer 长度不为 0 时 cut 应拒绝。
 - **E1（3.6 账本）**：按 §3 为超采样余量或在飞被 abort 的组设终态；并提供 `ready_unconsumed`/`carried_over` 计数给 `CutContext.ledger`。
 - **E1（driver.py，4.4）**：重建时 driver 不换端口对象，只换 `SwappableActor` 背后的 handle；重建后不重复 `initialize`/`after_local_train`，并用现有 `publish` 重发当前 policy（重发前后的 policy hash 必须等于 cut 中的 `progress.policy_hash`）。

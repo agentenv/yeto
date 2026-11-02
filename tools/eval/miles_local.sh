@@ -16,7 +16,7 @@
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${ARGS:?}" "${STOREVOL:?}" "${PY:?}"
 HARD=${HARD:-3000}; ISLANDS=${ISLANDS:-1}; TAPEVOL=${TAPEVOL:-yeto-event-tapes}
-MODAL="$PY -m modal"; APP=yeto-$P; SAPP=yeto-$P-s; LOCK=/home/michael/work/infra-drafts/GPU-LAUNCH.lock
+MODAL="$PY -m modal"; APP=yeto-$P; SAPP=yeto-$P-s; LOCK=${YETO_HOME:-$HOME}/work/infra-drafts/GPU-LAUNCH.lock
 CLONE=$R/yeto
 T=$(ps -u michael -L --no-headers | wc -l); [ -n "${DRY:-}" ] || [ "$T" -lt 3000 ] || { echo "abort: $T threads"; exit 3; }
 pgrep -x raylet >/dev/null && { echo "abort: local Ray"; exit 3; }
@@ -29,8 +29,8 @@ cp $REPO/yeto/rl/gsm8k_reward.py $CLONE/gsm8k_reward.py
 for f in ${EXTRA_FILES:-}; do cp "$f" $CLONE/; done
 (cd $CLONE && git add -f gsm8k_reward.py $(for f in ${EXTRA_FILES:-}; do basename "$f"; done) && git -c user.email=eval@yeto -c user.name=t-eval commit -qm 'run inputs')
 eval "$(/usr/bin/python3 - <<'PYC'
-import shlex, tomllib
-t = tomllib.load(open("/home/michael/.modal.toml", "rb"))
+import os, shlex, tomllib
+t = tomllib.load(open(os.path.join(os.environ.get("YETO_HOME") or os.path.expanduser("~"), ".modal.toml"), "rb"))
 prof = next((v for v in t.values() if isinstance(v, dict) and v.get("active")), None) or next(v for v in t.values() if isinstance(v, dict))
 print(f"export MODAL_TOKEN_ID={shlex.quote(prof['token_id'])} MODAL_TOKEN_SECRET={shlex.quote(prof['token_secret'])}")
 PYC

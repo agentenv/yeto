@@ -2,7 +2,7 @@
 
 ## Why
 
-`ports` 引擎路径（`rl-engine-ports`）目前不能跑 Codex harness rollout：`miles_adapter/config.py:332–337` 以“upstream Miles has no --custom-agent-function-path”为由拒绝 `agent.custom_agent_function_path` 与 `agent.agent_max_seq_len`。调研（`/home/michael/work/infra-drafts/codex-harness-ab.html`）表明这个理由不成立：上游 `radixark/miles` 主干已有 `agentic_tool_call`、Session Server 与 TITO，fork 在这几个目录与上游零差异，两个参数由 `agentic_tool_call.generate.add_arguments` 注册。legacy 路径的 Codex 链路（agent 包、`_ResponsesBridge`、preflight、`tbench_outcome` HMAC）分散在未入库的包和 `agentenv/miles` 副本里，legacy 删除前必须迁到 ports。
+`ports` 引擎路径（`rl-engine-ports`）目前不能跑 Codex harness rollout：`miles_adapter/config.py:332–337` 以“upstream Miles has no --custom-agent-function-path”为由拒绝 `agent.custom_agent_function_path` 与 `agent.agent_max_seq_len`。调研（`~/work/infra-drafts/codex-harness-ab.html`）表明这个理由不成立：上游 `radixark/miles` 主干已有 `agentic_tool_call`、Session Server 与 TITO，fork 在这几个目录与上游零差异，两个参数由 `agentic_tool_call.generate.add_arguments` 注册。legacy 路径的 Codex 链路（agent 包、`_ResponsesBridge`、preflight、`tbench_outcome` HMAC）分散在未入库的包和 `agentenv/miles` 副本里，legacy 删除前必须迁到 ports。
 
 同时，用户确定长期形态为方案 B：Codex 以原版黑盒 CLI 运行在沙箱中，yeto 提供协议网关，把 Responses / Chat / Anthropic Messages 请求统一转换成 TITO。这样也能接入其他 harness。本 change 先落方案 A 作为验证路径，再把网关抽出。沙箱只预留接口，不实现。
 
@@ -73,4 +73,4 @@
   - 上游 `arguments.py:3240` 规定 session server 与 partial rollout 互斥，所以本 change 不支持 partial rollout。
 - GPU：只有 A 路径冒烟与多轮 TITO 一致性两项，使用便宜卡，每项事先定好判据与费用上限（见 tasks）。
 
-> 待批准修订（2026-10-01）：legacy `yeto_miles_secrlenv` 源码已找到（yeto `5bfc011`），"重写"改为"搬运"；`codex_openenv_*` 三模块需重写；legacy 可训练 compaction 与 fork pin 的 session server 不兼容，首批关闭。详见 design.md"待批准修订提案"与 `/home/michael/work/infra-drafts/CODEX-PROGRESS.md`。
+> 待批准修订（2026-10-01）：legacy `yeto_miles_secrlenv` 源码已找到（yeto `5bfc011`），"重写"改为"搬运"；`codex_openenv_*` 三模块需重写；legacy 可训练 compaction 与 fork pin 的 session server 不兼容，首批关闭。详见 design.md"待批准修订提案"与 `~/work/infra-drafts/CODEX-PROGRESS.md`。

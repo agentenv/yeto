@@ -120,10 +120,10 @@ profile 由 `flash_next_execution_profile(AlgorithmSpec)` 给出（partitioned-s
 
 **启动（用户执行）**
 ```bash
-cd /home/michael/work/fn-train
+cd ~/work/fn-train
 export RUN=fnt-20261006a IMAGE=<digest-pinned image> WINDOW=1200 STEPS=200
-SKY=/home/michael/work/gpu-head/venv/bin/sky; PY=/home/michael/work/gpu-head/venv/bin/python
-R=/home/michael/work/s1-runs/$RUN; CL=fnt-l0-eu-north1; mkdir -p $R/pulled
+SKY=~/work/gpu-head/venv/bin/sky; PY=~/work/gpu-head/venv/bin/python
+R=~/work/s1-runs/$RUN; CL=fnt-l0-eu-north1; mkdir -p $R/pulled
 bash tests/multinode_gpu/fntrain.sh print b > $R/args.txt; git rev-parse HEAD > $R/yeto_sha.txt
 # watchdog: 3.5 h 后只按本集群名 down
 setsid nohup bash -c "sleep 12600; $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 & echo $! > $R/watchdog.pid
@@ -142,7 +142,7 @@ nohup bash -c "$PY -m yeto.cli $(cat $R/args.txt) > $R/launch.log 2>&1; echo rc=
 **收尾**
 1. 达到健康门或中止后，先 pull：tape、journal、`~/sky_logs/*/run.log` 末尾、`nvidia-smi` 快照，存到 `$R/pulled/`；`aws s3 sync s3://yeto-rl-ckpt-ddde6f79/fn-train/$RUN $R/ckpt-manifest --exclude '*' --include '*.json'`（只拉清单，不拉权重）。
 2. `$SKY down -y $CL`；`kill $(cat $R/watchdog.pid)`。
-3. 执行 cleanup×2：`RUNS_BASE=/home/michael/work/s1-runs /home/michael/work/gpu-b1-runs/cleanup_run.sh fnt` 两次，都要 RESULT clean。确认 Nebius 控制台没有残留 VM 或盘。**FS 不删**（torch_dist 留给后续使用）。
+3. 执行 cleanup×2：`RUNS_BASE=~/work/s1-runs ~/work/gpu-b1-runs/cleanup_run.sh fnt` 两次，都要 RESULT clean。确认 Nebius 控制台没有残留 VM 或盘。**FS 不删**（torch_dist 留给后续使用）。
 4. `yeto dashboard export --tapes $R/pulled -o $R/run.html --budget 300`；回填 gpu-spend.md（起止 UTC、时价、费用、PASS/FAIL、数据位置）。
 
 ## 6. 启用 auto 的前置条件（全部满足才可开）

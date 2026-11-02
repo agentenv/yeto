@@ -4,7 +4,7 @@
 # labels tp1_g0..tp1_g3 (each card the sweep configs use), tp2_g01, tp4_g0123. Output <outdir>/lp.json + lp-summary.json
 # (mean|d| / p99 / max vs tp1_g0). Info item: numerics of the cards/TP shapes, NOT the trained per-config policy.
 # usage: s11lp.sh <cluster> <outdir> [gpus on the head: 4 (H200 alloc 4) | 2 (L40S 2x2 head)]
-set -u; CL=$1; O=$2; NG=${3:-4}; D=$(cd "$(dirname "$0")" && pwd); export HOME=/home/michael; mkdir -p $O
+set -u; CL=$1; O=$2; NG=${3:-4}; D=$(cd "$(dirname "$0")" && pwd); export HOME=${YETO_HOME:-$HOME}; mkdir -p $O
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 timeout 120 scp -q -o StrictHostKeyChecking=no $D/s1lp.py $D/lp-ref.json $CL:~/ || { echo "LP scp failed"; exit 1; }
 timeout 1800 $S $CL "NG=$NG bash -s" > $O/lp-remote.log 2>&1 <<'REMOTE'

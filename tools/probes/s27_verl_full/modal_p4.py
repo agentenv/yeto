@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
-RUNS = Path("/home/michael/work/s1-runs")
+RUNS = Path(os.path.expanduser("~/work/s1-runs"))
 APP_PREFIX = "yeto-gdb-"
 RESULTS_VOLUME = "yeto-eval-results"
 CONTROL = "yeto-gdb-control"

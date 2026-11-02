@@ -5,9 +5,9 @@
 - Base: `sgl-project/sglang` branch `sglang-miles` @ `571212b636baca45e10fa3b4da11a289123f3235`.
 - Why this commit: `radixark/miles@9e4260d` does not pin an SGLang commit. `docker/Dockerfile` has `SGLANG_BRANCH=sglang-miles` and an empty `SGLANG_COMMIT`, so the image builds from the branch HEAD at build time. `571212b` was the branch HEAD when Miles 9e4260d was committed (2026-09-28T04:55Z). The next branch commit, `e5bba1f` (a LoRA buffer-sizing cherry-pick), landed about 5h later.
 - The cu12 variant in `docker/build.py` tracks a different branch, `sglang-miles-v0.5.19-final`. It is not used here.
-- Working tree: `/home/michael/work/sglang-next`. Committed and pushed to michaellchung/sglang yeto/ports (HEAD 9f29303).
-- Patches: `/home/michael/work/sglang-patches/NN-<srcsha>.patch`. Apply them in order with `git apply` on the base. The original source patches are kept next to them as `src-<sha>.patch`.
-- Tests: CPU venv `/home/michael/work/sglang-next-venv` (torch 2.14.0+cpu), run with `PYTHONPATH=python`. With the full series applied, all 34 ported/affected tests pass.
+- Working tree: `~/work/sglang-next`. Committed and pushed to michaellchung/sglang yeto/ports (HEAD 9f29303).
+- Patches: `~/work/sglang-patches/NN-<srcsha>.patch`. Apply them in order with `git apply` on the base. The original source patches are kept next to them as `src-<sha>.patch`.
+- Tests: CPU venv `~/work/sglang-next-venv` (torch 2.14.0+cpu), run with `PYTHONPATH=python`. With the full series applied, all 34 ported/affected tests pass.
 - None of the five source patches applied cleanly (`git apply --check` failed for all of them). Each one was re-ported by hand.
 
 ## Upstream LoRA sync format (Miles 9e4260d) — context for 95d4d69/8db3711/c2cb40a

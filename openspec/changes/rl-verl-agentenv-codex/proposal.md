@@ -2,7 +2,7 @@
 
 ## Why
 
-On 2026-10-12 the user decided: agentic RL uses verl with a self-hosted AgentENV sandbox on cherryservers bare metal, and the agent is Codex. The user also requires reuse of the sandbox capability that verl already has, with no reinvented wheel. Current state (verified by the main agent from code on 2026-10-12, verl fork `/home/michael/work/verl-fork-acad9875` HEAD acad9875):
+On 2026-10-12 the user decided: agentic RL uses verl with a self-hosted AgentENV sandbox on cherryservers bare metal, and the agent is Codex. The user also requires reuse of the sandbox capability that verl already has, with no reinvented wheel. Current state (verified by the main agent from code on 2026-10-12, verl fork `~/work/verl-fork-acad9875` HEAD acad9875):
 
 - The only sandbox capability built into verl uses one protocol: **Sandbox Fusion**. On the reward side, `reward.sandbox_fusion.url` points to a `/run_code` HTTP endpoint (`verl/utils/reward_score/sandbox_fusion/utils.py:67`). On the tool side, the same endpoint is used through the `BaseTool` create/execute/calc_reward/release lifecycle (the in-tree `SandboxFusionTool` was deleted upstream, and the docs keep the integration method, `docs/sglang_multiturn/sandbox_fusion.rst:9`).
 - verl has no AgentENV or E2B integration (grep: 0 hits). AgentENV only declares E2B compatibility to the outside.

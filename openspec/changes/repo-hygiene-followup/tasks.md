@@ -37,4 +37,4 @@ Commit and PR text use English only. Before each PR merges, run the local safe t
 
 ## 6. Evidence log location
 
-- [x] 6.1 Keep evidence logs at `/home/michael/work/infra-drafts/evidence/`; do not upload them to object storage; do not add them to the repo
+- [x] 6.1 Keep evidence logs at `~/work/infra-drafts/evidence/`; do not upload them to object storage; do not add them to the repo

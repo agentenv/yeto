@@ -7,7 +7,7 @@ P6 (repo rules and fork merge) is only half done. Log removal from the repo is d
 - Add an English check for commit messages. Use only a local `commit-msg` hook (it checks both subject and body). Do not add a CI check. Do not change past commits.
 - Fill gaps in `.gitignore`. Cover the evidence work directories and similar items that are now ignored only by scattered rules in the workspace. See design.md for details.
 - Decide how to track the two untracked openspec directories (`rl-code-quality-cleanup`, `rl-verl-agentenv-codex`). Draft and review in Chinese. Translate all of them to English before they enter the repo.
-- Keep evidence logs first on the local machine at `/home/michael/work/infra-drafts/evidence/`. Do not upload them to object storage.
+- Keep evidence logs first on the local machine at `~/work/infra-drafts/evidence/`. Do not upload them to object storage.
 - The ordering requirement of 0.4 is cancelled. Log removal goes through PR #240.
 - Fork sync (fast-forward of origin) is not done in this change. See the fork merge plan. Leave the `upstream` remote as is for now.
 
@@ -17,7 +17,7 @@ P6 (repo rules and fork merge) is only half done. Log removal from the repo is d
 - 0.4 no longer requires "log cleanup merges before #238" (see "Decided"). The check mark for 0.4 stays in `rl-code-quality-cleanup/tasks.md`. That change checks it. This change does not edit that directory.
 - `.gitignore` gets only rules that 0.2 did not cover. Do not touch the log rule section that 0.2 added (lines 82–91).
 
-## Key numbers (read on 2026-10-13 in worktree `/home/michael/work/s23-code-quality`)
+## Key numbers (read on 2026-10-13 in worktree `~/work/s23-code-quality`)
 
 - `agentenv/main` has 2085 commits. 15 have a Chinese subject. 77 have Chinese in the subject or body.
 - The first Chinese subject: 2026-10-05 `elastic-ops: Flash-Next <Chinese text> (5a)`. There are 620 commits since 2026-10-05.
@@ -35,7 +35,7 @@ P6 (repo rules and fork merge) is only half done. Log removal from the repo is d
 4. **Check scope.** Check both the commit subject and the body. Ban only Han characters and full-width punctuation (do not ban `→` or `é`). Implement it with a local git hook (`commit-msg`).
 5. **No CI English check.** Delete the CI job and the related requirement.
 6. **Leave the `upstream` remote as is for now.** The task to delete `upstream` is cancelled.
-7. **Evidence logs.** Keep them first on the local machine at `/home/michael/work/infra-drafts/evidence/`. Do not upload them to object storage.
+7. **Evidence logs.** Keep them first on the local machine at `~/work/infra-drafts/evidence/`. Do not upload them to object storage.
 8. **Fork sync.** The user decided on 2026-10-13: all development goes into agentenv from now on, and the personal fork content merges into agentenv. A merge plan will be written separately. Tasks in this change that relate to the fork fast-forward become "see the fork merge plan; not done in this change".
 
 ## Capabilities

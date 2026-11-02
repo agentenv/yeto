@@ -2,7 +2,7 @@
 
 ## 1. 显式学习率调度
 
-- [x] 1.1 在 `yeto/rl/engine/run_config.py` 的算法配置中新增学习率调度字段（衰减方式 linear/constant、衰减步数），由同步方式推导：strict-avg 为 linear、步数 `global_rounds × optimizer_steps`；decoupled 为 constant；仅评估的运行为空。对 strict-avg 断言 `rollout_batch_size × n_samples_per_prompt == global_batch_size × optimizer_steps`，不满足时启动前拒绝。可参考草稿 `/home/michael/work/followups/decoupled-constant-lr-ports.patch`。验证：单测覆盖三种同步方式的推导结果、非法值拒绝和断言失败。
+- [x] 1.1 在 `yeto/rl/engine/run_config.py` 的算法配置中新增学习率调度字段（衰减方式 linear/constant、衰减步数），由同步方式推导：strict-avg 为 linear、步数 `global_rounds × optimizer_steps`；decoupled 为 constant；仅评估的运行为空。对 strict-avg 断言 `rollout_batch_size × n_samples_per_prompt == global_batch_size × optimizer_steps`，不满足时启动前拒绝。可参考草稿 `~/work/followups/decoupled-constant-lr-ports.patch`。验证：单测覆盖三种同步方式的推导结果、非法值拒绝和断言失败。
 - [x] 1.2 ports 翻译（`yeto/rl/engine/miles_adapter/config.py`）输出 `--lr-decay-style`、`--lr-decay-iters`、`--lr-warmup-iters 0`、`--min-lr 0`，并加入未映射项检查表。验证：单测断言 argv 中的四个参数；upstream Miles `parse_args` 接受翻译结果（沿用现有 parse_args 测试）。
   - 完成记录（2026-09-29）：已实现 + CPU 单测通过；upstream 验收在公开镜像 `MILES_NEXT_IMAGE`（radixark/miles@sha256:9094…，miles-next 0394715）内运行 `tests/test_rl_miles_adapter_config.py`，`test_upstream_parse_args_accepts_translation[True/False]` 均通过且未跳过（56 passed, 1 skipped——跳过的是仅在无 Miles 时运行的 cell 计数测试）。证据：`evidence/2026-09-29-gpu/parse-args-p.log`。
 - [x] 1.3 legacy 翻译（`yeto/rl/learner.py` 的 `_legacy_miles_argv`）从同一字段输出相同的四个参数。验证：有意重新生成 `tests/test_rl_argv_snapshot.py` 的 golden，并新增断言：除这四个参数外，每个快照配置的 legacy argv 与修复前逐项一致；同一配置下 legacy 与 ports 的四个参数完全相同。

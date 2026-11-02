@@ -6,7 +6,7 @@
 nodes:
   - name: ppu1
     host: ppu1
-    address: 10.0.0.74                # eth0; order assumed, runbook S1 checks it
+    address: 192.0.2.74                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -21,7 +21,7 @@ nodes:
     roles: [trainer]
   - name: ppu2
     host: ppu2
-    address: 10.0.0.75                # eth0; order assumed, runbook S1 checks it
+    address: 192.0.2.75                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -36,7 +36,7 @@ nodes:
     roles: [trainer]
   - name: ppu3
     host: ppu3
-    address: 10.0.0.76                # eth0; order assumed, runbook S1 checks it
+    address: 192.0.2.76                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -51,7 +51,7 @@ nodes:
     roles: [trainer]
   - name: ppu4
     host: ppu4
-    address: 10.0.0.77                # eth0; order assumed, runbook S1 checks it
+    address: 192.0.2.77                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890

@@ -378,7 +378,7 @@ def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
         assert "--rl-rollout-quant-fp8-source" not in task.run
 
 
-MILES_NEXT = Path("/home/michael/work/miles-next")
+MILES_NEXT = Path(os.path.expanduser("~/work/miles-next"))
 
 
 @pytest.mark.skipif(not (MILES_NEXT / "miles/utils/workers/process_utils.py").is_file(), reason="no miles-next checkout")

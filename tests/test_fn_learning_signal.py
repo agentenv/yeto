@@ -16,7 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 MG = REPO / "tests" / "multinode_gpu"
 # Run logs are kept outside the repository (rl-code-quality-cleanup 0.3).
-EVIDENCE = Path(os.environ.get("YETO_EVIDENCE_DIR", "/home/michael/work/infra-drafts/evidence"))
+EVIDENCE = Path(os.environ.get("YETO_EVIDENCE_DIR", os.path.expanduser("~/work/infra-drafts/evidence")))
 TRY27 = (EVIDENCE / "rl-infra-spec/evidence/fn/try27-s12-h100-20261006a/fna/pulled"
          / "rl-island-0.jsonl")
 sys.path.insert(0, str(REPO / "scripts"))

@@ -2,7 +2,7 @@
 
 ## Context
 
-动机见 proposal.md。以下只列决定实现方式的现状（已对照 integ-decl e8d387ac 工作树与 `/home/michael/work/gpu-head/venv` 中 SkyPilot 0.13.0 源码核实；行号以该工作树为准）。
+动机见 proposal.md。以下只列决定实现方式的现状（已对照 integ-decl e8d387ac 工作树与 `~/work/gpu-head/venv` 中 SkyPilot 0.13.0 源码核实；行号以该工作树为准）。
 
 **yeto 侧现状**
 - `--gpu` 语法（`yeto/gpu_spec.py:41-48`）：`^(?P<cloud>[a-z]+):(?:(?P<nodes>\d+)x)?(?P<count>\d+)x(?P<gpu>…)(?:@(?P<region>…))?`，cloud 任意小写词，`region` 原样透传；`_GPU_CANONICAL` 已含 h100/h200/l40s/rtx-pro-6000 等。`ClusterSpec(cloud, region, num_nodes, gpus_per_node, gpu)`。所以 `local:1x8xh200@rack1` 今天就能解析为 cloud=local、region=rack1。
@@ -68,11 +68,11 @@ A′ 的已知代价（必须在验收结论里注明）："岛生命周期由 `
       image_cache: /srv/images          # 可选：离线 docker save 归档目录
       price_per_gpu_hour: 0             # 可选，默认 0
       nodes:
-        - host: 10.0.0.11
+        - host: 192.0.2.11
           gpus: 8
           gpu: H200
-          head_reach_ip: 10.0.0.11      # 岛访问 syncer 用的地址（可选，默认 host）
-        - host: 10.0.0.12
+          head_reach_ip: 192.0.2.11      # 岛访问 syncer 用的地址（可选，默认 host）
+        - host: 192.0.2.12
           gpus: 8
           gpu: H200
   ```

@@ -28,7 +28,7 @@
 
 - [x] 2.8 全量运行中新发现的失败与 SLIM 报告的 10 个失败：逐个查根因并处理（验证：附录 B 每项有根因与处理，本机安全测试集无失败）
   - 证据：design.md 附录 B。SLIM 的 10 个里 1 个是 2.4，另 9 个是 async 测试缺 pytest-asyncio，选择装依赖不改测试。
-- [x] 2.9 主 agent 代用户拍板选 B：新建 /home/michael/work/yeto-test-venv（uv，CPU torch 2.8.0），pyproject 加 test 组（skypilot 0.13.0、boto3 1.43.104、peft 0.21.0、accelerate 1.15.0、pylatexenc 2.10、pillow、pytest-asyncio）。不碰共享 venv（验证：venv 内可收集全部测试且无收集错误）
+- [x] 2.9 主 agent 代用户拍板选 B：新建 ~/work/yeto-test-venv（uv，CPU torch 2.8.0），pyproject 加 test 组（skypilot 0.13.0、boto3 1.43.104、peft 0.21.0、accelerate 1.15.0、pylatexenc 2.10、pillow、pytest-asyncio）。不碰共享 venv（验证：venv 内可收集全部测试且无收集错误）
   - 证据：--collect-only 5086/5109 collected，23 deselected，0 error。
 
 ## 3. CI 转绿（不做：PM 决定不管 CI（10-09 用户））

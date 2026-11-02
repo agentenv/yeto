@@ -95,7 +95,7 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 
 ## 附表：显存估算回测（任务 2.2）
 
-数据：evidence/memory-backtest.json（脚本 evidence/memory_backtest.py）。实测峰值取岛 tape 里 `rl_load_sample.peak_gpu_mem_bytes` 的最大值（NVML 整卡已用显存，每 10 s 采一次，是真实峰值的下界）。原始数据在 /home/michael/work/s1-runs/ 下（s17-m1-20261008b/c/d、s17-n17-*、s18-aru2-*）。
+数据：evidence/memory-backtest.json（脚本 evidence/memory_backtest.py）。实测峰值取岛 tape 里 `rl_load_sample.peak_gpu_mem_bytes` 的最大值（NVML 整卡已用显存，每 10 s 采一次，是真实峰值的下界）。原始数据在 ~/work/s1-runs/ 下（s17-m1-20261008b/c/d、s17-n17-*、s18-aru2-*）。
 
 校准常数：K_LOGIT=0.5（run c 申请 7.58 GiB＝16384×248320×2 字节，一份 bf16 logits），FRAG=0.1953、R0=4.97 GiB（run c OOM 信息），K_ACT（不重算）=45.62（由 run d 实测峰值 123.27 GiB 反解），K_ACT（全重算）=2.0（未验证）。
 

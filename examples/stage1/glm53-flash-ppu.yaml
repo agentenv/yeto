@@ -14,13 +14,13 @@ inventory: ppu-inventory.yaml          # relative to this file
 rounds: 3                              # the stage-1 closed loop: 3 RL rounds
 seed: 17
 
-# Rendezvous (eth0) address of each node. The order ppu1..ppu4 = 10.0.0.74..77
+# Rendezvous (eth0) address of each node. The order ppu1..ppu4 = 192.0.2.74..77
 # is assumed from the survey listing; runbook step 1 checks it.
 rendezvous:
-  ppu1: 10.0.0.74
-  ppu2: 10.0.0.75
-  ppu3: 10.0.0.76
-  ppu4: 10.0.0.77
+  ppu1: 192.0.2.74
+  ppu2: 192.0.2.75
+  ppu3: 192.0.2.76
+  ppu4: 192.0.2.77
 
 roles:
   trainer: [ppu1, ppu2, ppu3]          # 24 cards, one pipeline stage per node

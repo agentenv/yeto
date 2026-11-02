@@ -1,7 +1,7 @@
 # Tasks
 
 执行约定：
-- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源）。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `~/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源）。
 - 测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`。全量测试以"改动前后失败集合相同"为准，改动前的基线要先记录下来（见 0.1）。
 - 不修改 legacy 的 `build_miles_argv`，不修改 Miles/SGLang fork。
 - 本 change 不需要 GPU。
@@ -23,7 +23,7 @@
 ## 2. 参数映射、吸收与翻译（design D3/D5）
 
 - [x] 2.1 新建 `yeto/rl/engine/miles_adapter/algorithm_flags.py`，写入映射表（design D3 列出的参数）和"影响训练目标的参数"清单。验证：单测保证映射表是清单的子集，且每行都有解析器和翻译函数。
-- [x] 2.2 在 miles-next-venv 中核对清单和映射表里的每个参数都存在于 upstream parser。验证：新增测试 `tests/test_rl_algorithm_flags_upstream.py`，在 miles 不可用时 skip，并在 `/home/michael/work/miles-next-venv` 中实际运行通过。在任务说明里记录运行命令和结果。
+- [x] 2.2 在 miles-next-venv 中核对清单和映射表里的每个参数都存在于 upstream parser。验证：新增测试 `tests/test_rl_algorithm_flags_upstream.py`，在 miles 不可用时 skip，并在 `~/work/miles-next-venv` 中实际运行通过。在任务说明里记录运行命令和结果。
 - [x] 2.3 把映射表中的参数全部加入 `ADAPTER_OWNED_FLAGS`；让 `check_extra_argv` 改为吸收已映射参数、对冲突报错、拒绝清单内未映射的参数。验证：单测覆盖吸收、冲突、拒绝三种情况，报错内容包含参数名和取值。
 - [x] 2.4 让 `translate_run_config` 按映射表从 spec 生成算法参数，与 v1 默认值对应的参数不输出。验证：`tests/test_rl_argv_snapshot.py` 与 `tests/test_rl_miles_adapter_config.py` 不改就能通过（默认 GRPO 的 argv 逐字节不变）；新增用例覆盖每个映射字段的非默认值翻译。
 - [x] 2.5 实现 KL 放置规则（D5）：grpo/gspo 配 reward 中的 KL 且系数大于 0 时拒绝；`placement=loss` 翻译为 `--use-kl-loss` 系列参数；`placement=none` 时不输出 `--kl-coef`。验证：参数化单测覆盖上述情况，以及 v1 `kl_coef` 为 None、0.0、大于 0 这三种输入。
@@ -69,7 +69,7 @@
 - 2.1、2.3、2.4、2.5 CPU 通过：`tests/test_rl_algorithm_flags.py`。`tests/test_rl_argv_snapshot.py` 与 `tests/test_rl_miles_adapter_config.py` 没有改动，照样通过。
 - 2.2、2.6 CPU 通过（在 miles-next-venv 中运行）：`tests/test_rl_algorithm_flags_upstream.py`，20 passed。命令与输出见 `evidence/2026-09-29-upstream-parser/pytest.txt`，miles-next HEAD 为 0394715（等于 MILES_NEXT_COMMIT）。说明：该 venv 里没有 Megatron-LM（`megatron.training` 无法导入），因此 2.6 调用的 upstream `parse_args` 走的是 `--train-backend fsdp`，但仍然执行了 `miles_validate_args` 和 `sglang_validate_args`。所有算法参数都是与后端无关的 Miles 参数；Megatron 那一半的 argv 由已有测试 `test_upstream_parse_args_accepts_translation` 在装有 Megatron 的环境中覆盖。2.6 实测发现 upstream 断言 reinforce_plus_plus* 必须配 `--normalize-advantages`，已加入拒绝矩阵（`rpp_requires_whiten`）。
 - 3.1–3.4 CPU 通过：`tests/test_rl_algorithm_capabilities.py`。3.3 中“reward KL 与 loss KL 同时开”在 spec 结构上无法表达（只有一个 `kl.placement`），只可能通过 extra argv 同时出现，所以该项的验证是吸收阶段的拒绝（仍在 translate 阶段，早于任何 GPU 进程）；其余各项都在 fake 组合根的 handshake 中被拒绝，且 `engine.calls == []`。
-- 4.1、4.2 已实现，未合入本分支：`driver.py`、`miles_adapter/trainer.py` 不归 ALGO-CAP，改动写成补丁 `/home/michael/work/infra-drafts/p0-driver.patch`（基于 rl-integ，`git apply --check` 通过），附测试 `tests/test_rl_algorithm_gradient.py`。在 algo-cap HEAD 上打补丁后，相关测试 69 passed，全量失败集合与基线相同。补丁由主 agent 合入后才能勾选。
+- 4.1、4.2 已实现，未合入本分支：`driver.py`、`miles_adapter/trainer.py` 不归 ALGO-CAP，改动写成补丁 `~/work/infra-drafts/p0-driver.patch`（基于 rl-integ，`git apply --check` 通过），附测试 `tests/test_rl_algorithm_gradient.py`。在 algo-cap HEAD 上打补丁后，相关测试 69 passed，全量失败集合与基线相同。补丁由主 agent 合入后才能勾选。
 - 5.1–5.5 CPU 通过：`tests/test_rl_algorithm_provenance.py` 与 `tests/test_rl_algorithm_capabilities.py`（5.5）。说明：
   - 5.3 只改了 `export.py` 及其 CLI（`--rl-algorithm-spec`、`--rl-unverified-mechanism`）。`ssh_harness.py` 调用 `export_rl_checkpoint` 时还没有传入 spec，该文件不归 ALGO-CAP，见“待批准”。
   - 5.5 的“多岛或外层同步”按“岛数 > 1”实现：单岛运行即使带平凡的 1 成员 syncer 也允许放行，launcher 会同时下发 `--num-learners 1`。这是对 design D11 的解读，已列入待批准。
@@ -80,7 +80,7 @@
 ### 独立审查后的修订（2026-09-29，algo-cap 合并 infra-a 之后）
 
 - 2.6 **改回未勾选，状态为“CPU 部分通过（fsdp）”**。原记录中“Megatron 那一半由 `test_upstream_parse_args_accepts_translation` 覆盖”这句不成立：该测试在两个 venv 里都会 skip，而且只测默认 GRPO，因此撤回这句。补救办法：在私有镜像（含 Megatron）里，对 ports 实际生成的完整 argv 运行 upstream `parse_args`（含 Megatron 校验），计划见 `evidence/2.6-plan.md`。全部通过后才重新勾选。
-- 4.1、4.2 **CPU 通过，已勾选**：`p0-driver.patch` 已在 infra-a 378b7b1 生效，algo-cap 已合并 infra-a。`tests/test_rl_engine_driver.py` 与 rl-integ 相比 diff 为 0 行，全部通过；`tests/test_rl_algorithm_gradient.py` 通过；全量失败集合与基线相同。审查意见 F15/F16/F17（事件记录放宽来源、masked_fraction 只接受 [0,1] 内的非 bool 实数、缺少逐算法接口时退回 R0 判定）写成增量补丁 `/home/michael/work/infra-drafts/p0-driver-2.patch`（在 infra-a 上 `git apply --check` 通过；打上后全量失败集合不变），由 INFRA 合入。
+- 4.1、4.2 **CPU 通过，已勾选**：`p0-driver.patch` 已在 infra-a 378b7b1 生效，algo-cap 已合并 infra-a。`tests/test_rl_engine_driver.py` 与 rl-integ 相比 diff 为 0 行，全部通过；`tests/test_rl_algorithm_gradient.py` 通过；全量失败集合与基线相同。审查意见 F15/F16/F17（事件记录放宽来源、masked_fraction 只接受 [0,1] 内的非 bool 实数、缺少逐算法接口时退回 R0 判定）写成增量补丁 `~/work/infra-drafts/p0-driver-2.patch`（在 infra-a 上 `git apply --check` 通过；打上后全量失败集合不变），由 INFRA 合入。
 - 5.3 **改回未勾选**：真实的导出调用点 `ssh_harness.py` 还没有传入 algorithm_spec（IMG 正在补），接线合入后再勾选。
 - 5.5 **改回未勾选**：已按 spec 原文改为“存在任何外层同步就拒绝”（之前的实现只在“岛数 > 1”时拒绝），放行名称改用 `dimension:name` 形式。现在 learner 和 launcher 两个入口都会接 syncer，所以 G1 用不了放行开关，这一点记为“需另批”（见 progress 与 alignment 的待批准）。另外，导出接线尚未合入。
 - 2.6 **重新勾选：CPU 通过（完整 argv + Megatron parse_args）**。按事先提交的计划（`evidence/2.6-plan.md`、`evidence/2026-09-29-megatron-parse/attempt2-plan.md`），在私有 ports 镜像（Modal T4）中对 ports 完整 argv 跑 upstream `parse_miles_args`，20/20 通过，结果见 `evidence/2026-09-29-megatron-parse/result.md`。费用 < $0.2，资源已回收。

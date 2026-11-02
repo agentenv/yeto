@@ -4,7 +4,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 旧哈希：阶段 0（分支 `s16-decouple-p0`，基于 agentenv/main `62cec689`）用 `tests/decoupling_golden.py` 在 CPU 上算出，原值存于 `tests/golden/decoupling/<配置名>.json`。
 - 新哈希、CPU 逐位一致结果：阶段 3（任务 4.4、4.4a）/阶段 4（任务 5.x）填写。未列新哈希的配置表示到该阶段为止哈希未变（标准样本逐字节相同）。
-- 旧 GPU 证据：在 `/home/michael/work/s1-runs`、仓库 `openspec/changes/*/evidence`、`infra-drafts` 中按算法哈希全文检索（2026-10-08）。**只有算法哈希能对上**：标准样本的 `ExecutionProfile.contract_hash` 来自 CPU 小配置（批量、卡数与真机不同），检索结果为 0 条，因此本列不表示"同一契约的真机运行"，只表示"同一算法规格跑过 GPU"。
+- 旧 GPU 证据：在 `~/work/s1-runs`、仓库 `openspec/changes/*/evidence`、`infra-drafts` 中按算法哈希全文检索（2026-10-08）。**只有算法哈希能对上**：标准样本的 `ExecutionProfile.contract_hash` 来自 CPU 小配置（批量、卡数与真机不同），检索结果为 0 条，因此本列不表示"同一契约的真机运行"，只表示"同一算法规格跑过 GPU"。
 
 | 配置名 | 说明 | 旧 `AlgorithmSpec.sha256()` | 旧 `ExecutionProfile.contract_hash` | 新哈希 | CPU 逐位一致 | 旧 GPU 证据（算法哈希相同） |
 |---|---|---|---|---|---|---|

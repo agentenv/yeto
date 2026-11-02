@@ -2,7 +2,7 @@
 
 ## Context
 
-动机见 proposal.md 的 Why，证据见 `docs/research/rl-algorithms/research.md` 的 §3、§4.2、§6。Miles 的行号基于 `9e4260d`。本 design 起草时曾误读一个非 pin 的本地 checkout（`/home/michael/miles`，`3c5e19b9`）；以下事实已在 `9e4260d` 上复核（`git show 9e4260d:miles/backends/training_utils/loss_hub/losses.py`），实现前仍要在当时的 `MILES_NEXT_COMMIT` 上再核对一次（任务 1.1）。
+动机见 proposal.md 的 Why，证据见 `docs/research/rl-algorithms/research.md` 的 §3、§4.2、§6。Miles 的行号基于 `9e4260d`。本 design 起草时曾误读一个非 pin 的本地 checkout（`~/miles`，`3c5e19b9`）；以下事实已在 `9e4260d` 上复核（`git show 9e4260d:miles/backends/training_utils/loss_hub/losses.py`），实现前仍要在当时的 `MILES_NEXT_COMMIT` 上再核对一次（任务 1.1）。
 
 - `--loss-type` 没有 CISPO、SAPO、GMPO。`LH/tinker_losses.py:118` 的 cispo 只在 tinker 路径调用，分母、规约和配置来源都与 ports 不同，只能作为参考实现。
 - `--loss-type custom_loss` 配 `--custom-loss-function-path` 会替换**整个** `policy_loss_function`（`LH/losses.py:63` 起）。替换后，下列逻辑都要自己重写：

@@ -4,7 +4,7 @@
 
 见 proposal.md 的 Why。下面是现状与读码判断。
 
-- 约定环境：本机测试用 `/home/michael/work/miles-next-venv/bin/python`（系统 python 没有 pytest），从仓库根目录以 `PYTHONPATH=.` 运行。cargo 装在 `~/.cargo/bin`，但不在非交互 shell 的 PATH 上。
+- 约定环境：本机测试用 `~/work/miles-next-venv/bin/python`（系统 python 没有 pytest），从仓库根目录以 `PYTHONPATH=.` 运行。cargo 装在 `~/.cargo/bin`，但不在非交互 shell 的 PATH 上。
 - tests/conftest.py 已注册 `gpu` 标记，没有 Ray 隔离。
 - CI（.github/workflows/ci.yml）：python 作业跑 `pytest tests/ -q`，安装步骤在 32–33 行；checkout 默认浅克隆；gpu 作业（37 行起）跑在 `[self-hosted, gpu]` 上。
 
@@ -60,7 +60,7 @@ conftest 加一个自动生效的夹具：已导入 ray 时把 `ray.init` 换成
 
 ### 决定 4：本机安全测试集命令
 ```
-cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. /home/michael/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
+cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. ~/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
 ```
 默认已排除 `ray_local`。10-09 改用专用测试 venv（选项 B，主 agent 代用户拍板），创建命令见 docs/TESTING.md。命令写进 docs/TESTING.md（新建）并在 README 链接。运行前须确认没有上卡链在跑（线程预检同理）。
 
@@ -106,7 +106,7 @@ cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. /home/michael/work/
 | test_decoupling_golden::test_no_ray_and_no_miles_loaded | 本 change 第一版守卫在 conftest 导入了 ray | 改守卫：不导入 ray，用 import 钩子在 ray 被导入时再替换 |
 | test_rl_dense_full_parameter_sweep 两例（有 cargo 时） | syncer sweep 必须带 --resume 与 --resume 必须有文件两条规则冲突 | 改代码（主 agent 代用户拍板选 A），见 tasks 2.3 |
 | SLIM 报告的 10 个 evidence 测试失败 | 1 个是 m1_dense（即 2.4）。其余 9 个是 async 测试，SLIM 运行环境没装 pytest-asyncio（日志有 Unknown pytest.mark.asyncio 警告） | 装依赖，不改测试：pyproject dev/test 组加 pytest-asyncio；约定 venv 已含 |
-| 约 80 例缺 sky/peft/accelerate/boto3 | miles-next-venv 没装这些包 | 主 agent 代用户拍板选 B：新建 /home/michael/work/yeto-test-venv，pyproject 加 test 组 |
+| 约 80 例缺 sky/peft/accelerate/boto3 | miles-next-venv 没装这些包 | 主 agent 代用户拍板选 B：新建 ~/work/yeto-test-venv，pyproject 加 test 组 |
 
 ## 遗留问题
 
