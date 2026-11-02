@@ -36,7 +36,7 @@ SKY=${YETO_HOME:-$HOME}/work/gpu-head/venv/bin/sky; PY=${YETO_HOME:-$HOME}/work/
 # default --rl-image = the snapshot's own pin (yeto.rl.MILES_NEXT_IMAGE); a mismatch makes the sky setup take the slow clone+pip path (~8 min, s1-mn-20261004d)
 IMAGE=${IMAGE:-$(cd "$REPO" && PYTHONPATH=. /usr/bin/python3 -c "import yeto.rl as r; print(r.MILES_NEXT_IMAGE if r.MILES_NEXT_IMAGE.startswith('docker:') else 'docker:'+r.MILES_NEXT_IMAGE)" 2>/dev/null)}
 [ -n "$IMAGE" ] || { echo "abort: could not resolve MILES_NEXT_IMAGE from $REPO"; exit 65; }
-T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge ${THREAD_MAX:-2900} ]; then echo "abort: $T user threads (max ${THREAD_MAX:-2900})"; exit 3; fi
+T=$(ps -u "$(id -un)" -L -o pid= | wc -l); if [ "$T" -ge ${THREAD_MAX:-2900} ]; then echo "abort: $T user threads (max ${THREAD_MAX:-2900})"; exit 3; fi
 ELASTIC="--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-elastic --rl-elastic-resources $D/resources-2x1.json --rl-elastic-initial-config T1R1S0 --rl-observe-timeline"
 # 2x2 (M1/M2/M3): island totals rollout 1 + standby 1; the cfg placement T2R1S1 drives the trainer shape (--actor-num-nodes 2 --actor-num-gpus-per-node 1) and the bundle map
 ELASTIC22="--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 1 --rl-elastic --rl-elastic-resources $D/resources-2x2.json --rl-elastic-initial-config T2R1S1 --rl-observe-timeline"
@@ -146,7 +146,7 @@ echo $! > $R/puller.pid
 case $C in m4a|m4a1) true;; *) false;; esac && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
 [ $C = g3 ] && { setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }
 (
-export YETO_DOCKER_CONFIG=${YETO_DOCKER_CONFIG:-$HOME/.docker/config.json}
+export YETO_DOCKER_CONFIG=${YETO_DOCKER_CONFIG:-${YETO_HOME:-$HOME}/.docker/config.json}
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
 eval "$(/usr/bin/python3 - <<'PY'
 import base64, json, os, shlex

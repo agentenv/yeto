@@ -15,7 +15,7 @@
 #   HEAD_IP=<n1 ip> ROLE=head bash ray_cluster.sh            # run on n1
 #   HEAD_IP=<n1 ip> MY_IP=<n2 ip> ROLE=worker NODE=n2 bash ray_cluster.sh
 #   HEAD_IP=<n1 ip> MY_IP=<n3 ip> ROLE=worker NODE=n3 bash ray_cluster.sh
-# or drive all three from n1 over ssh (see g120_up.sh, written after W1 reports).
+# or drive all three from n1 over ssh; every invocation needs HEAD_IP (no default).
 set -o pipefail
 # G-120C: YETOSRC picks the deployed yeto tree (default $MINE/yetosrc). Ray workers
 # import yeto from THIS path, so the driver and the cluster must use the same one.

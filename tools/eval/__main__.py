@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import os
 import argparse
+import getpass
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -38,7 +40,7 @@ THREAD_LIMIT = 3000
 def _preflight(run_id: str) -> None:
     if not LEDGER.is_file() or run_id not in LEDGER.read_text():
         raise SystemExit(f"run id {run_id} is not pre-registered in {LEDGER}")
-    threads = subprocess.run("ps -u michael -L --no-headers | wc -l", shell=True, capture_output=True,
+    threads = subprocess.run(f"ps -u {shlex.quote(getpass.getuser())} -L --no-headers | wc -l", shell=True, capture_output=True,
                              text=True).stdout.strip()
     if int(threads or 0) >= THREAD_LIMIT:
         raise SystemExit(f"{threads} local threads (>= {THREAD_LIMIT}): do not launch")

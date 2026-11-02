@@ -35,7 +35,6 @@ from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_checks import GSM8K_FIXED_PROMPTS
 from yeto.rl import stage1
 
-PLAN = Path(__file__).resolve().parents[1] / "examples" / "stage1" / "glm53-flash-ppu.yaml"
 
 
 # ------------------------------------------------------------ gap 3: sampler entry
@@ -96,8 +95,8 @@ def test_miles_reward_wraps_an_async_score():
     assert reward(item, SimpleNamespace(text="it is 7")) == 1.0
 
 
-def test_stage1_sampler_spec_builds_the_same_sglang_command():
-    out = stage1.expand(stage1.load_plan(PLAN))
+def test_stage1_sampler_spec_builds_the_same_sglang_command(ppu_plan):
+    out = stage1.expand(stage1.load_plan(ppu_plan))
     run = out.sampler["engines"][0]
     engine = entry.build_engine(run["spec"])
     assert isinstance(engine, SGLangServerEngine)
@@ -128,10 +127,10 @@ def test_glm5_next_recipe_replaces_the_bridge_geometry():
     assert local.count("--no-gradient-accumulation-fusion") == 1
 
 
-def test_island_parser_takes_the_recipe_and_transformer_impl():
+def test_island_parser_takes_the_recipe_and_transformer_impl(ppu_plan):
     from yeto.rl.adapters.miles.island_entry import build_parser
 
-    argv = list(stage1.expand(stage1.load_plan(PLAN)).trainer["miles"]["island_argv"][3:])
+    argv = list(stage1.expand(stage1.load_plan(ppu_plan)).trainer["miles"]["island_argv"][3:])
     argv[argv.index("--rl-transformer-impl") + 1] = "local"
     args, unknown = build_parser().parse_known_args(argv)
     assert unknown == []
@@ -293,8 +292,8 @@ def test_head_store_switches_between_relay_and_direct():
     assert isinstance(store, RelayOssObjectStore) and store.relay.host == "ppu1"
 
 
-def test_stage1_plan_has_no_code_gaps_left_and_runs_the_relay_check():
-    out = stage1.expand(stage1.load_plan(PLAN))
+def test_stage1_plan_has_no_code_gaps_left_and_runs_the_relay_check(ppu_plan):
+    out = stage1.expand(stage1.load_plan(ppu_plan))
     assert out.store["head_access"]["env"] == {RELAY_ENV: "ppu1"}
     assert not any("OSS" in g or "engine_sampler" in g or "recipe" in g or "yeto launch" in g for g in out.gaps)
     relay = next(s for s in out.steps if s.name == "head-store-relay")

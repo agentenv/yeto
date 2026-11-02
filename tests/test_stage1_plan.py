@@ -13,12 +13,17 @@ import yaml
 from yeto.rl import stage1
 
 REPO = Path(__file__).resolve().parents[1]
-PLAN = REPO / "examples" / "stage1" / "glm53-flash-ppu.yaml"
+PLAN: Path  # the shipped plan with test IPs filled in (conftest ppu_plan); set per test
+
+
+@pytest.fixture(autouse=True)
+def _plan(ppu_plan, monkeypatch):
+    monkeypatch.setitem(globals(), "PLAN", ppu_plan)
 
 
 @pytest.fixture(scope="module")
-def shipped():
-    return stage1.expand(stage1.load_plan(PLAN))
+def shipped(ppu_plan):
+    return stage1.expand(stage1.load_plan(ppu_plan))
 
 
 def _variant(tmp_path: Path, edit) -> stage1.Expanded:

@@ -18,7 +18,7 @@ set -u
 HARD=${HARD:-3000}; ISLANDS=${ISLANDS:-1}; TAPEVOL=${TAPEVOL:-yeto-event-tapes}
 MODAL="$PY -m modal"; APP=yeto-$P; SAPP=yeto-$P-s; LOCK=${YETO_HOME:-$HOME}/work/infra-drafts/GPU-LAUNCH.lock
 CLONE=$R/yeto
-T=$(ps -u michael -L --no-headers | wc -l); [ -n "${DRY:-}" ] || [ "$T" -lt 3000 ] || { echo "abort: $T threads"; exit 3; }
+T=$(ps -u "$(id -un)" -L --no-headers | wc -l); [ -n "${DRY:-}" ] || [ "$T" -lt 3000 ] || { echo "abort: $T threads"; exit 3; }
 pgrep -x raylet >/dev/null && { echo "abort: local Ray"; exit 3; }
 [ -e $R/start_utc.txt ] && { echo "abort: $R used"; exit 67; }
 mkdir -p $R/tapes $R/store

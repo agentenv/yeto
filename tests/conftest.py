@@ -191,3 +191,21 @@ def _block_unmarked_ray_init(request):
             sys.meta_path.remove(finder)
         if finder.undo is not None:
             finder.undo()
+
+
+PPU_TEST_IPS = {f"<ppu{i}-eth0-ip>": f"192.0.2.{73 + i}" for i in range(1, 5)}  # TEST-NET-1
+
+
+@_pytest.fixture(scope="session")
+def ppu_plan(tmp_path_factory):
+    """examples/stage1/glm53-flash-ppu.yaml + ppu-inventory.yaml with the
+    <ppuN-eth0-ip> placeholders filled in with test IPs 192.0.2.74..77."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[1] / "examples" / "stage1"
+    dst = tmp_path_factory.mktemp("stage1-ppu")
+    for name in ("glm53-flash-ppu.yaml", "ppu-inventory.yaml"):
+        text = (src / name).read_text()
+        for placeholder, ip in PPU_TEST_IPS.items():
+            text = text.replace(placeholder, ip)
+        (dst / name).write_text(text)
+    return dst / "glm53-flash-ppu.yaml"

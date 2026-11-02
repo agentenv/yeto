@@ -50,18 +50,20 @@ SECRET_PATTERNS = {
 SECRET_RE = {k: re.compile(v) for k, v in SECRET_PATTERNS.items()}
 EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+-]+@(gmail|googlemail|outlook|hotmail|yahoo|qq|163|126|icloud|proton(mail)?)\.(com|me|cn)\b", re.I)
 PRIVATE_IP_RE = re.compile(
-    rb"(?<![\d.])(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}(?![\d.])")
+    rb"(?<![\d.])(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}(?!\.?\d)")
 IP_FAKE_DATA_GLOBS = ("tests/test_*.py", "tests/fixtures/*", "tests/golden/*")
-HOME_PATH_RE = re.compile(rb"/(?:home|Users)/([A-Za-z0-9_][A-Za-z0-9_.-]*)/")
+HOME_PATH_RE = re.compile(rb"/(?:home|Users)/([A-Za-z0-9_][A-Za-z0-9_.-]*)(?:/|\b)")
 # Generic account names that do not identify a person (cloud images, CI, containers).
-GENERIC_HOMES = {b"ubuntu", b"user", b"runner", b"ec2-user", b"admin", b"root", b"Shared"}
+# The project's own service accounts (yeto, sky) are listed exactly: a prefix match
+# would also let a personal name such as /home/skyler through.
+GENERIC_HOMES = {b"ubuntu", b"user", b"runner", b"ec2-user", b"admin", b"root", b"Shared", b"yeto", b"sky"}
 SELF = os.path.normpath("scripts/precommit_check.py")
 
 
 def _personal_home(data: bytes) -> bool:
     for m in HOME_PATH_RE.finditer(data):
         name = m.group(1)
-        if name not in GENERIC_HOMES and not name.startswith((b"yeto", b"sky")):
+        if name not in GENERIC_HOMES:
             return True
     return False
 

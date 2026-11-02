@@ -1,3 +1,6 @@
+# REPLACE BEFORE USE: every <ppuN-eth0-ip> below is a placeholder for the
+# node's eth0 IP; `yeto-stage1 plan` rejects the file until it is filled in
+# (it must match the plan's rendezvous section).
 # Stage-1 node inventory: 4 x PPU nodes, 8 x ZW-M890P 144 GiB each
 # (SESSION25/N0.1-ppu-survey.md, read-only survey 2026-10-16).
 # host = the SSH alias in ~/.ssh/config of the head (this server). The aliases
@@ -6,7 +9,7 @@
 nodes:
   - name: ppu1
     host: ppu1
-    address: 192.0.2.74                # eth0; order assumed, runbook S1 checks it
+    address: <ppu1-eth0-ip>                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -21,7 +24,7 @@ nodes:
     roles: [trainer]
   - name: ppu2
     host: ppu2
-    address: 192.0.2.75                # eth0; order assumed, runbook S1 checks it
+    address: <ppu2-eth0-ip>                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -36,7 +39,7 @@ nodes:
     roles: [trainer]
   - name: ppu3
     host: ppu3
-    address: 192.0.2.76                # eth0; order assumed, runbook S1 checks it
+    address: <ppu3-eth0-ip>                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
@@ -51,7 +54,7 @@ nodes:
     roles: [trainer]
   - name: ppu4
     host: ppu4
-    address: 192.0.2.77                # eth0; order assumed, runbook S1 checks it
+    address: <ppu4-eth0-ip>                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890

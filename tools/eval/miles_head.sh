@@ -15,7 +15,7 @@ SHA=${SHA:-HEAD}; MODAL="$PY -m modal"
 APP=yeto-$P; SP=$P-s; SAPP=yeto-$SP; TAPEVOL=yeto-event-tapes; STOREVOL=${STOREVOL:-yeto-eval-store}; HEAD_REGION=nebius/eu-north1
 export CARGO_HOME=${YETO_HOME:-$HOME}/work/gpu-default-modal/cargo RUSTUP_HOME=${YETO_HOME:-$HOME}/work/gpu-default-modal/rustup
 export PATH=$CARGO_HOME/bin:$PATH
-T=$(ps -u michael -L --no-headers | wc -l)
+T=$(ps -u "$(id -un)" -L --no-headers | wc -l)
 [ "${PLAN_ONLY:-0}" = 1 ] || [ "$T" -lt 3000 ] || { echo "abort: $T user threads (>= 3000)"; exit 3; }
 pgrep -x raylet >/dev/null && { echo "abort: local Ray running"; exit 3; }
 HEAD_CL=$(cd $REPO && PYTHONPATH=$REPO /usr/bin/python3 -c "from yeto.launch.sky_ops import sky_cluster_name; print(sky_cluster_name('$P-head'))")
