@@ -175,13 +175,14 @@ def subscriber_id_for(sampler_id: str) -> int:
     return sampler_holder_id(sampler_id)
 
 
-def _fence_reason(client: Any) -> tuple[Any, dict[str, Any]] | None:
+def fence_reason(client: Any) -> tuple[Any, dict[str, Any]] | None:
     """(FENCED, detail) once the syncer retired this subscriber, None otherwise:
-    a fenced sampler leaves FENCED, not FINISHED."""
+    a fenced sampler leaves FENCED, not FINISHED; a run that ended leaves FINISHED.
+    The detail names the syncer's retire reason (``subscriber.fence_cause``)."""
     from yeto.rl.pool_client import LeaveReason
 
     if client.fenced() and not client.run_finished():
-        return LeaveReason.FENCED, {"fenced": "superseded"}
+        return LeaveReason.FENCED, {"fenced": client.fence_cause()}
     return None
 
 
@@ -228,5 +229,5 @@ def spot_release_store(environ: Mapping[str, str] | None, *, buffer: Any, base_m
         read_position=getattr(buffer, "read_position", lambda: None),
         # fenced: a newer process of this sampler took its id on the head
         finished=lambda: client.run_finished() or client.fenced(),
-        stop_reason=lambda: _fence_reason(client),
+        stop_reason=lambda: fence_reason(client),
         layout_fingerprint=layout_fingerprint(layout).hex(), base_dir=base_model)

@@ -57,6 +57,19 @@ from yeto.rl.engine.full_parameter_sync import merged_version
 
 RUN_FINISHED = "subscriber: run finished"
 FENCED_PREFIX = "fenced: subscriber"  # syncer subscriber.rs FENCED_PREFIX
+# The syncer's retire reasons (members.rs Retired::name), the "(...)" ending a fence error
+FENCE_CAUSES = ("superseded", "lease expired", "from before a syncer restart")
+
+
+def fence_cause(text: str) -> str:
+    """The retire reason ending a syncer fence error (``... is retired (lease
+    expired)``): one of :data:`FENCE_CAUSES`, ``"unknown"`` otherwise."""
+    cause = text.rstrip()
+    if cause.endswith(")") and "(" in cause:
+        cause = cause[cause.rfind("(") + 1:-1]
+        if cause in FENCE_CAUSES:
+            return cause
+    return "unknown"
 DEFAULT_HEARTBEAT_S = 10.0  # well under the member lease (--dispense-lease-s, 300 s)
 
 
@@ -140,6 +153,10 @@ class SubscriberClient(SyncerClient):
         """True once the syncer retired this member (a newer incarnation of the
         sampler joined, or its lease expired; the client is closed)."""
         return FENCED_PREFIX in self._error_text()
+
+    def fence_cause(self) -> str:
+        """Why the syncer retired this member (:func:`fence_cause` of its error)."""
+        return fence_cause(self._error_text())
 
 
 @dataclass(frozen=True)

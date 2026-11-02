@@ -127,16 +127,20 @@ class SpotChannels:
 
     def stop_reason(self) -> tuple[Any, dict[str, Any]] | None:
         """(LeaveReason, detail) of a fence stop, None otherwise (the island
-        then leaves FINISHED as before). S29 D4: a sampler that left because a
-        fresh syncer replaced its run leaves FENCED, fenced="other run"."""
+        then leaves FINISHED as before). A sampler that left because a fresh
+        syncer replaced its run leaves FENCED, fenced="other run"; one the
+        syncer retired names the retire reason. A run that ended leaves
+        FINISHED even if a fence came with it."""
         from yeto.rl.pool_client import LeaveReason
 
+        from .release_store import fence_reason
+
+        if self.client.run_finished():
+            return None
         if self.version.regressed:
             return LeaveReason.FENCED, {"fenced": "other run", "run_merged_version": self.version.merged_version,
                                         "highest_merged_version": self.version.highest}
-        if self.client.fenced():
-            return LeaveReason.FENCED, {"fenced": "superseded"}
-        return None
+        return fence_reason(self.client)
 
     def close(self) -> None:
         try:

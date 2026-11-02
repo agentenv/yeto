@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import types
 
 import pytest
@@ -257,12 +258,13 @@ def test_d4_fenced_is_a_new_leave_reason_and_an_excused_departure():
     assert int(LeaveReason.FENCED) == 7 and "fenced" in EXCUSED_LEAVE_REASONS
 
 
-def _channels(*, regressed=False, fenced=False):
+def _channels(*, regressed=False, fenced=False, finished=False, cause="superseded"):
     from yeto.rl.spot_rollout.sampler import SpotChannels
 
     ch = SpotChannels.__new__(SpotChannels)
     ch.version = types.SimpleNamespace(regressed=regressed, merged_version=0, highest=42)
-    ch.client = types.SimpleNamespace(fenced=lambda: fenced, run_finished=lambda: False)
+    ch.client = types.SimpleNamespace(fenced=lambda: fenced, run_finished=lambda: finished,
+                                      fence_cause=lambda: cause)
     return ch
 
 
@@ -274,6 +276,11 @@ def test_d4_spot_channels_name_the_fence():
     assert reason is LeaveReason.FENCED and detail["fenced"] == "other run"
     assert (detail["run_merged_version"], detail["highest_merged_version"]) == (0, 42)
     assert _channels(fenced=True).stop_reason() == (LeaveReason.FENCED, {"fenced": "superseded"})
+    assert _channels(fenced=True, cause="lease expired").stop_reason() == (
+        LeaveReason.FENCED, {"fenced": "lease expired"})
+    # the run ended: FINISHED, as on the Miles path, even if a fence came with it
+    assert _channels(fenced=True, finished=True).stop_reason() is None
+    assert _channels(regressed=True, finished=True).stop_reason() is None
 
 
 def test_d4_a_fenced_sampler_leaves_fenced_on_its_tape(tmp_path, monkeypatch, capsys):
@@ -366,15 +373,16 @@ def test_d11_the_fixed_roster_switch_and_non_spot_runs_keep_the_roster(monkeypat
 def test_a_fenced_miles_spot_sampler_leaves_fenced_not_finished():
     from yeto.rl.adapters.miles.sampler_island import end_leave
     from yeto.rl.pool_client import LeaveReason
-    from yeto.rl.spot_rollout.release_store import SubscriberReleaseStore, _fence_reason
+    from yeto.rl.spot_rollout.release_store import SubscriberReleaseStore, fence_reason
 
     def client(*, fenced, finished=False):
-        return types.SimpleNamespace(fenced=lambda: fenced, run_finished=lambda: finished)
+        return types.SimpleNamespace(fenced=lambda: fenced, run_finished=lambda: finished,
+                                     fence_cause=lambda: "superseded")
 
-    fence = _fence_reason(client(fenced=True))
+    fence = fence_reason(client(fenced=True))
     assert fence == (LeaveReason.FENCED, {"fenced": "superseded"})
-    assert _fence_reason(client(fenced=False)) is None
-    assert _fence_reason(client(fenced=True, finished=True)) is None  # the run ended: FINISHED
+    assert fence_reason(client(fenced=False)) is None
+    assert fence_reason(client(fenced=True, finished=True)) is None  # the run ended: FINISHED
 
     store = SubscriberReleaseStore(None, lambda cut: None, stop_reason=lambda: fence)
     reason, detail = end_leave(store)
@@ -383,3 +391,26 @@ def test_a_fenced_miles_spot_sampler_leaves_fenced_not_finished():
     # an unfenced spot store, or a store without a fence notion, still leaves FINISHED
     assert end_leave(SubscriberReleaseStore(None, lambda cut: None)) == (LeaveReason.FINISHED, {})
     assert end_leave(object()) == (LeaveReason.FINISHED, {})
+
+
+@pytest.mark.parametrize("cause", ["superseded", "lease expired", "from before a syncer restart"])
+def test_a_fenced_sampler_names_the_syncer_retire_reason(cause):
+    from yeto.rl.pool_client import LeaveReason
+    from yeto.rl.spot_rollout.release_store import fence_reason
+    from yeto.rl.spot_rollout.subscriber import FENCED_PREFIX, SubscriberClient, fence_cause
+
+    text = f"{FENCED_PREFIX} incarnation 00000000000000aa of member 2147483649 is retired ({cause})"
+    assert fence_cause(text) == cause
+    client = SubscriberClient.__new__(SubscriberClient)
+    client._err = RuntimeError(text)
+    client._run_finished = threading.Event()
+    assert client.fenced() and client.fence_cause() == cause
+    assert fence_reason(client) == (LeaveReason.FENCED, {"fenced": cause})
+
+
+def test_an_unparsable_fence_error_names_an_unknown_reason():
+    from yeto.rl.spot_rollout.subscriber import FENCED_PREFIX, fence_cause
+
+    assert fence_cause(f"{FENCED_PREFIX} incarnation 1 of member 2 is retired (retired)") == "unknown"
+    assert fence_cause(f"{FENCED_PREFIX} gone") == "unknown"
+    assert fence_cause("") == "unknown"
