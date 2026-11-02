@@ -54,7 +54,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -62,6 +62,39 @@ from .policy_release import PolicyFollower, ReleaseNotLoaded
 from .sample_buffer import buffer_dir, read_read_position
 
 DEFAULT_POLL_S = 5.0
+
+
+def heartbeat_read(beat: Mapping[str, Any], seen: Any, shard: str | None, read: int) -> int:
+    """The read position to count the backlog from, given the trainer's heartbeat
+    ``beat`` (``sample_buffer.read_read_position``), the sampler's last seen release
+    ``seen`` and the release's position ``read``.
+
+    A heartbeat that names the trainer's newest release (``release``) is the
+    trainer's current position when it belongs to the lineage the sampler follows:
+    the same release (seq and policy hash) or a newer one written after ``seen``.
+    It then replaces the release's position, also when it is lower (a trainer
+    resumed from an earlier checkpoint reads again from there). One from another
+    run or from before ``seen`` is ignored. An old-format heartbeat (no
+    ``release``) can only move the position forward."""
+    if shard is not None:
+        if shard not in beat["buffer_shards"]:
+            return read
+        beat_read = int(beat["buffer_shards"][shard])
+    else:
+        beat_read = int(beat["buffer_selected"])
+    if "release" not in beat:
+        return max(read, beat_read)
+    release = beat["release"]
+    if seen is None:
+        return beat_read if release is None else max(read, beat_read)
+    if release is None:
+        return read
+    if int(release["seq"]) == int(seen.seq):
+        return beat_read if str(release["policy_hash"]) == str(seen.policy_hash) else read
+    released_at = float(getattr(seen, "released_at", 0.0) or 0.0)
+    if int(release["seq"]) > int(seen.seq) and float(beat.get("time_unix") or 0.0) >= released_at:
+        return beat_read
+    return read
 
 
 class SamplerLoop:
@@ -100,10 +133,10 @@ class SamplerLoop:
         """Groups in the buffer after the trainer's read position of its last release
         (0 before any release: no trainer has read anything yet). A sampler that
         writes its own shard (``buffer.shard``) counts its shard only, from the
-        trainer's read position in that shard (``buffer_shards``). The read position
-        is the larger of the release's and the trainer's heartbeat
-        (``sample-buffer/read-position.json``, S30 D29); a missing or broken
-        heartbeat leaves the release's."""
+        trainer's read position in that shard (``buffer_shards``). The trainer's read
+        heartbeat (``sample-buffer/read-position.json``) refines it: see
+        :func:`heartbeat_read`; a missing, broken or foreign heartbeat leaves the
+        release's position."""
         self.buffer.refresh()
         pending = getattr(self.buffer, "pending_groups", None)
         if pending is not None:  # the relay: groups sent and not yet taken by the trainer
@@ -118,10 +151,8 @@ class SamplerLoop:
             read = 0 if seen.buffer_selected is None else int(seen.buffer_selected)
         root = buffer_dir(self.buffer)
         beat = None if root is None else read_read_position(root)
-        if beat is not None:  # S30 D29: the trainer's heartbeat, ahead of a sparse/slow release
-            beat_read = (beat["buffer_shards"].get(shard, 0) if shard is not None
-                         else beat["buffer_selected"])
-            read = max(read, int(beat_read))
+        if beat is not None:
+            read = heartbeat_read(beat, seen, shard, read)
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self, *, in_flight: bool = False) -> None:

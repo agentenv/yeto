@@ -762,10 +762,11 @@ def test_a_run_releases_only_the_listed_versions(tmp_path):
     skipped = [e for e in events if e["event"] == "rl_policy_release_skipped"]
     assert {e["policy_version"] for e in skipped} == {1}
     assert all(e["reason"] == "not_a_release_version" for e in skipped)
-    # S30 D29: the read heartbeat follows every consumed group, released or not
+    # the read heartbeat follows every consumed group, released or not
     from yeto.rl.engine.sample_buffer import read_read_position
     beat = read_read_position(store_dir / "sample-buffer")
     assert beat is not None and beat["buffer_selected"] == 4 and beat["train_step"] == 1  # read during step 2
+    assert beat["release"] is None  # no release existed when it last read
 
 
 def test_release_only_versions_is_planned_from_the_flag():

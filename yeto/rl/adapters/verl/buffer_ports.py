@@ -428,6 +428,8 @@ class BufferReleasePublisher:
         isl.emit("rl_verl_version_map", param_version=param_version, outer_version=version)
         isl.published = (version, digest)
         isl.hashes[version] = digest
+        if release is not None:
+            isl.heartbeat_release = {"seq": int(release.seq), "policy_hash": str(release.policy_hash)}
         manifest = InferencePublicationManifest(
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
@@ -480,14 +482,25 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     log = CONSUMED_LOG.format(learner=island.learner_id)
 
     heartbeat_root = buffer_dir(buffer)
+    # the newest release this trainer knows: the store's at start, then each one it
+    # publishes (BufferReleasePublisher.publish); it ties the heartbeat to this run
+    island.heartbeat_release = None
+    if heartbeat_root is not None:
+        try:
+            newest = releases.latest()
+        except Exception:  # noqa: BLE001 - a heartbeat without a release is still valid
+            newest = None
+        if newest is not None:
+            island.heartbeat_release = {"seq": int(newest.seq), "policy_hash": str(newest.policy_hash)}
 
     def record(fields: dict[str, Any]) -> None:
         island.append_jsonl(log, fields)
-        if heartbeat_root is not None:  # S30 D29: the read position, released or not
+        if heartbeat_root is not None:  # the read position, released or not
             try:
                 write_read_position(heartbeat_root, buffer_selected=feed.read_cursor(),
                                     buffer_shards=feed.read_shards(),
-                                    train_step=int(island.published[0]) if island.published else None)
+                                    train_step=int(island.published[0]) if island.published else None,
+                                    release=getattr(island, "heartbeat_release", None))
             except Exception as error:  # noqa: BLE001 - a heartbeat never stops training
                 island.emit("rl_buffer_read_position_failed", error=str(error)[:300])
 
