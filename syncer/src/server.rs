@@ -1094,6 +1094,11 @@ struct RegistryState {
     /// S27 G-EL: learners whose catch-up or recovery replay a forwarder
     /// task sends; publications offer them each version instead of sending.
     resends: HashMap<Member, Arc<ResendConn>>,
+    /// Generations whose control connection closed but whose
+    /// `Event::Disconnected` the scheduler has not handled yet. Events it
+    /// sent before closing (a PUSH) may still be queued, so a round that
+    /// captured it must not be rebound to a replacement yet.
+    closing: HashSet<Member>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1151,6 +1156,7 @@ impl RegistryState {
     /// The control connection of `member` closed.
     fn unregister(&mut self, member: Member) {
         self.groups.remove(&member);
+        self.closing.insert(member);
         if self.current.get(&member.learner_id) == Some(&member) {
             self.current.remove(&member.learner_id);
         }
@@ -1159,6 +1165,12 @@ impl RegistryState {
         }
         self.membership.depart(member);
         self.persist_membership();
+    }
+
+    /// The scheduler handled the `Event::Disconnected` of `member`: every
+    /// event its connection sent before closing has been handled too.
+    fn disconnect_handled(&mut self, member: Member) {
+        self.closing.remove(&member);
     }
 
     fn is_recovering(&self, member: Member) -> bool {
@@ -3474,10 +3486,27 @@ async fn recv_init_event(
 async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
     let message = format!("{error:#}");
     append_strict_failure(cfg.event_tape.as_deref(), "init_digest_mismatch", &message);
-    for group in current_groups(registry) {
+    let groups = current_groups(registry);
+    for group in &groups {
         let _ = group.send_small(MSG_ERROR, message.clone().into()).await;
     }
+    // send_small only queues the frame for the writer task; the syncer exits
+    // right after, which would drop it and leave the islands with a bare
+    // closed connection instead of the reason.
+    flush_control_queues(&groups, Duration::from_secs(2)).await;
     bail!("RL strict failure init_digest_mismatch: {message}");
+}
+
+/// Wait (bounded) until the writer task of every group has taken all queued
+/// control frames, then briefly for the last write to reach the socket.
+async fn flush_control_queues(groups: &[Arc<Group>], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline
+        && groups.iter().any(|group| group.control.capacity() < group.control.max_capacity())
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 /// Connected learners the scheduler waits for before the first round: every
@@ -3677,11 +3706,14 @@ async fn scheduler(
                 }
                 record_budget_report(&mut budget_reports, target, member, local_steps)?;
             }
-            Event::Disconnected { member } => warn!(
-                learner_id = member.learner_id,
-                generation = member.generation,
-                "disconnected during init"
-            ),
+            Event::Disconnected { member } => {
+                registry.lock().unwrap().disconnect_handled(member);
+                warn!(
+                    learner_id = member.learner_id,
+                    generation = member.generation,
+                    "disconnected during init"
+                )
+            }
             Event::Recovery { member, .. } => ignore_recovery_message(member, "initialization"),
         }
     }
@@ -4684,6 +4716,10 @@ async fn scheduler(
                     break 'outer;
                 }
                 Event::Disconnected { member } => {
+                    // Every event this connection sent before closing has
+                    // been handled now; only from here may its unanswered
+                    // slots move to a replacement.
+                    registry.lock().unwrap().disconnect_handled(member);
                     // A disconnect never erases accepted work. An unanswered
                     // slot may move to the already-current replacement only
                     // after the captured generation is gone. This also covers
@@ -5353,7 +5389,9 @@ fn rebind_current_unanswered_rounds(
         };
 
         let expected = round.expected_members[expected_index];
-        if registry.groups.contains_key(&expected) {
+        // Still connected, or closed with its last events (a PUSH for this
+        // round) possibly still queued behind its Disconnected event.
+        if registry.groups.contains_key(&expected) || registry.closing.contains(&expected) {
             continue;
         }
 
@@ -12019,6 +12057,25 @@ mod tests {
 
         assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, superseded).is_empty());
         assert_eq!(rounds[0].expected_members, vec![current]);
+    }
+
+    #[test]
+    fn closed_generation_is_not_rebound_before_its_disconnect_is_handled() {
+        // The old connection sent its PUSH and closed: it left `groups`, but
+        // the PUSH may still be queued, so its slot must stay captured until
+        // the scheduler handles its Disconnected event.
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        registry.lock().unwrap().unregister(old);
+        let mut rounds = vec![test_round(vec![old])];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+
+        registry.lock().unwrap().disconnect_handled(old);
+        assert_eq!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(), 1);
+        assert_eq!(rounds[0].expected_members, vec![replacement]);
     }
 
     #[test]
