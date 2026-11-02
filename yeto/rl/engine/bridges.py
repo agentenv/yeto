@@ -785,14 +785,18 @@ class PoolAvgSync(RoundCutHooks):
         code = sendable(reason)
         driver = getattr(self, "_driver", None)
         try:
-            self.client.leave(code)
+            not_sent = self.client.leave(code)
         except Exception as error:  # noqa: BLE001 - the syncer may already be gone
             if driver is not None:
                 driver.emit("elastic_leave_failed", reason=int(code), reason_name=code.name,
                             error_type=type(error).__name__, error=str(error))
             return False
         if driver is not None:
-            driver.emit("elastic_leave", reason=int(code), reason_name=code.name)
+            # sent=False: no LEAVE reached the syncer (e.g. the run had already
+            # ended), so its tape has no pool_leave for this island.
+            extra = {} if not_sent is None else {"not_sent": not_sent}
+            driver.emit("elastic_leave", reason=int(code), reason_name=code.name,
+                        sent=not_sent is None, **extra)
         return True
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
