@@ -6,7 +6,12 @@ Checks staged files (or the paths given on the command line):
      .precommit-allow-large (one path or fnmatch glob per line, '#' comments);
   2. secrets: 15 simple regexes (AWS, GitHub, HF, W&B, Modal, OpenAI/Anthropic,
      private keys, island HMAC key, URL credentials, bearer, Nebius, Verda, ...);
-  3. personal e-mail addresses (noreply / example domains are allowed).
+  3. personal e-mail addresses (noreply / example domains are allowed);
+  4. private-network IPv4 addresses (10/8, 172.16/12, 192.168/16) outside test
+     fake data (tests/test_*.py, tests/fixtures/, tests/golden/); use a
+     placeholder or a documentation address (192.0.2.0/24) instead;
+  5. per-user home paths (/home/<user>/, /Users/<user>/); use ~, $HOME or an
+     environment variable instead.
 
 Usage:
   python scripts/precommit_check.py            # check staged files
@@ -34,16 +39,31 @@ SECRET_PATTERNS = {
     "modal_env": rb"MODAL_TOKEN_(ID|SECRET)[\"'\s:=]+([A-Za-z0-9-]{10,})",
     "sk": rb"\bsk-(ant-)?[A-Za-z0-9_-]{20,}",
     "privkey": rb"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    "hmac": rb"YETO_ISLAND_HMAC_KEY[\"'\s:=]+([^\s\"'$]{8,})",
+    # a call such as secrets.token_hex(16) or self._token() is code, not a literal secret
+    "hmac": rb"YETO_ISLAND_HMAC_KEY[\"'\s:=]+([^\s\"'$()]{8,})(?![^\s\"'$()]|\()",
     "urltok": rb"https?://[^/\s:@]+:[^/\s@]{8,}@",
     "bearer": rb"Authorization:\s*Bearer\s+([A-Za-z0-9._-]{16,})",
     "nebius": rb"(?i)nebius[^\n]{0,30}(token|secret|key)[\"'\s:=]+([A-Za-z0-9._-]{16,})",
-    "verda": rb"(?i)verda[^\n]{0,30}(secret|key|token)[\"'\s:=]+([A-Za-z0-9._-]{16,})",
+    "verda": rb"(?i)verda[^\n]{0,30}(secret|key|token)[\"'\s:=]+([A-Za-z0-9._-]{16,})(?![A-Za-z0-9._(-])",
     "hex40kv": rb"(?i)(api_?key|secret|token)[\"'\s:=]+([0-9a-f]{40})\b",
 }
 SECRET_RE = {k: re.compile(v) for k, v in SECRET_PATTERNS.items()}
 EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+-]+@(gmail|googlemail|outlook|hotmail|yahoo|qq|163|126|icloud|proton(mail)?)\.(com|me|cn)\b", re.I)
+PRIVATE_IP_RE = re.compile(
+    rb"(?<![\d.])(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}(?![\d.])")
+IP_FAKE_DATA_GLOBS = ("tests/test_*.py", "tests/fixtures/*", "tests/golden/*")
+HOME_PATH_RE = re.compile(rb"/(?:home|Users)/([A-Za-z0-9_][A-Za-z0-9_.-]*)/")
+# Generic account names that do not identify a person (cloud images, CI, containers).
+GENERIC_HOMES = {b"ubuntu", b"user", b"runner", b"ec2-user", b"admin", b"root", b"Shared"}
 SELF = os.path.normpath("scripts/precommit_check.py")
+
+
+def _personal_home(data: bytes) -> bool:
+    for m in HOME_PATH_RE.finditer(data):
+        name = m.group(1)
+        if name not in GENERIC_HOMES and not name.startswith((b"yeto", b"sky")):
+            return True
+    return False
 
 
 def staged_files() -> list[str]:
@@ -80,6 +100,11 @@ def check(paths: list[str]) -> list[str]:
                 problems.append(f"{path}: possible secret ({name})")
         if EMAIL_RE.search(data):
             problems.append(f"{path}: personal e-mail address (replace with <redacted-email>)")
+        norm = os.path.normpath(path).replace(os.sep, "/")
+        if PRIVATE_IP_RE.search(data) and not any(fnmatch.fnmatch(norm, g) for g in IP_FAKE_DATA_GLOBS):
+            problems.append(f"{path}: private-network IP address (use a placeholder or 192.0.2.x)")
+        if _personal_home(data):
+            problems.append(f"{path}: per-user home path (use ~, $HOME or an environment variable)")
     return problems
 
 
