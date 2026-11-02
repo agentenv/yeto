@@ -88,4 +88,7 @@ if [ "${S3_DELIVERY:-0}" = 1 ]; then
 fi
 echo "[s29-120] sampler start $(date -u +%FT%TZ)"
 cd "$YETO"; "$PY" -m yeto.rl.engine.engine_sampler --spec "$OUT/spec.json" >> "$OUT/sampler.log" 2>&1
-echo "[s29-120] sampler exited $? $(date -u +%FT%TZ)"
+rc=$?
+# 75 = reclaim exit (yeto.rl.engine.engine_sampler_entry.RECLAIM_EXIT_CODE): run the island again
+if [ "$rc" = 75 ]; then kind=reclaim; elif [ "$rc" = 0 ]; then kind=finished; else kind=failed; fi
+echo "[s29-120] sampler exited $rc kind=$kind $(date -u +%FT%TZ)"

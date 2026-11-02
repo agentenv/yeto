@@ -52,7 +52,9 @@ got to from the buffer (``sampler_resume.resume_point``), starts at the next
 round, and writes ``rl_sampler_join`` / ``rl_sampler_leave`` plus one member
 record per incarnation in the buffer store. With ``YETO_SPOT_RECLAIM_MARKER``
 set, SIGINT/SIGTERM write the reclaim marker; the island then starts no new
-round, writes no more groups and leaves as PREEMPTED.
+round, writes no more groups and leaves as PREEMPTED. The process exits with
+``RECLAIM_EXIT_CODE`` within ``RECLAIM_DEADLINE_S`` of the marker, also when a
+trial or a boat sandbox call still blocks (``ReclaimDeadline``).
 
 Nothing here was run on a PPU or NPU node.
 """
@@ -65,7 +67,9 @@ import contextlib
 import importlib
 import inspect
 import json
+import os
 import sys
+import threading
 import time
 import types
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -334,7 +338,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         incarnation: str | None = None, stop: Callable[[], bool] | None = None,
         on_event: Callable[..., None] | None = None,
         stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None = None,
-        stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None) -> int:
+        stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None,
+        reclaim_deadline: "ReclaimDeadline | None" = None) -> int:
     """Build every part of the island from ``spec``, run it from the resume
     point, stop the engine; returns the rounds this incarnation ran.
     ``resource_sampler(emit)`` returns a started telemetry thread (default:
@@ -344,6 +349,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     **fields)`` sees every tape record after it is written. ``stores(incarnation,
     emit)``: the (release store, sample buffer) pair instead of :func:`build_stores`
     (S27 G-EA: a spot sampler follows the syncer and writes to the relay).
+    ``reclaim_deadline``: armed when the reclaim marker appears; it ends the
+    process at its deadline even when a trial or a cleanup step still blocks.
     ``stop_reason()``: after the loop ends, (LeaveReason, detail) to leave with
     instead of FINISHED, or None (S29 D4: a fenced spot sampler leaves FENCED)."""
     import os  # noqa: PLC0415
@@ -364,7 +371,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         label_boat_sandboxes(spec, incarnation, environ=env)
     with _member_incarnation_env(env, incarnation):
         return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
-                    stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason)
+                    stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason,
+                    reclaim_deadline=reclaim_deadline)
 
 
 @contextlib.contextmanager
@@ -393,7 +401,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          environ: Mapping[str, str] | None, resource_sampler: Callable[[Callable[..., None]], Any] | None,
          stop: Callable[[], bool] | None, on_event: Callable[..., None] | None,
          stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None,
-         stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None) -> int:
+         stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None,
+         reclaim_deadline: "ReclaimDeadline | None" = None) -> int:
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .incarnation_lease import FENCED_EVENT, LEASE_EVENT  # noqa: PLC0415
@@ -445,7 +454,14 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             return ResourceSampler(lambda event, **fields: sink(event, **fields)).start()
 
     telemetry = resource_sampler(emit)
-    watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
+    def on_reclaim() -> None:
+        if reclaim_deadline is not None:  # first: a blocking LEAVE must not delay the deadline
+            reclaim_deadline.arm(reclaim_seen_at(env))
+        leave(LeaveReason.PREEMPTED)
+
+    if reclaim_deadline is not None:
+        reclaim_deadline.add_cleanup("engine", engine.stop)
+    watcher = ReclaimWatcher(reclaimed, on_reclaim).start()
     fence_watcher = None
     try:
         make_round = None
@@ -453,6 +469,10 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             from .agentic_round import round_factory  # noqa: PLC0415
 
             make_round = round_factory(spec, engine, env)
+            if reclaim_deadline is not None:
+                from yeto.rl.harness.harbor.boat_pool import close_pools_now  # noqa: PLC0415
+
+                reclaim_deadline.add_cleanup("boat_sandboxes", close_pools_now)
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
                                       should_stop=lambda: reclaimed() or fenced() or (stop is not None and stop()),
@@ -558,22 +578,138 @@ def load_spec(path: str | Path) -> dict[str, Any]:
 
 
 RECLAIM_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
+RECLAIM_DEADLINE_S = 300.0  # from the reclaim marker to the process exit, whatever still runs
+RECLAIM_EXIT_MARGIN_S = 15.0  # the deadline fires this long before the limit: cleanup + exit
+RECLAIM_CLEANUP_S = 10.0  # the longest one forced cleanup step may take at the deadline
+# A reclaimed process exits with this code (EX_TEMPFAIL): a watchdog or patrol tells a
+# reclaim exit (run the island again) from a finished run (0) and from a failure.
+RECLAIM_EXIT_CODE = 75
+RECLAIM_EXIT_LOG = "[engine-sampler] reclaim exit"
+
+
+def reclaim_seen_at(environ: Mapping[str, str], *, clock: Callable[[], float] = time.time) -> float:
+    """When the reclaim marker was written (its ``time`` field, else its mtime), never later than now."""
+    from .sampler_resume import reclaim_marker  # noqa: PLC0415
+
+    now = clock()
+    path = reclaim_marker(environ)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8") or "{}")
+        stamp = float(doc["time"]) if isinstance(doc, dict) and "time" in doc else path.stat().st_mtime
+    except (OSError, ValueError, TypeError, KeyError):
+        return now
+    return min(stamp, now)
+
+
+def _flush_std() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - exiting anyway
+            pass
+
+
+def reclaim_exit(reason: str, *, code: int = RECLAIM_EXIT_CODE,
+                 exit_now: Callable[[int], Any] | None = None) -> None:
+    """End a reclaimed process now with ``code``. ``os._exit``: the interpreter's
+    shutdown joins every executor worker thread, and a trial blocked in a boat
+    sandbox call (``asyncio.to_thread``) would hold the exit for as long as that
+    call blocks."""
+    print(f"{RECLAIM_EXIT_LOG} code={code} reason={reason}", flush=True)
+    _flush_std()
+    (os._exit if exit_now is None else exit_now)(code)
+
+
+class ReclaimDeadline:
+    """Once armed with the marker time, a daemon thread waits until ``deadline_s``
+    minus ``margin_s`` after it; if the process is still up then, it runs each
+    registered cleanup (bounded by ``cleanup_s``) and calls :func:`reclaim_exit`.
+    The normal path (the island leaves, closes, holds, exits) ends earlier."""
+
+    def __init__(self, *, deadline_s: float = RECLAIM_DEADLINE_S, margin_s: float = RECLAIM_EXIT_MARGIN_S,
+                 cleanup_s: float = RECLAIM_CLEANUP_S, clock: Callable[[], float] = time.time,
+                 exit_now: Callable[[int], Any] | None = None) -> None:
+        self.deadline_s, self.margin_s, self.cleanup_s = float(deadline_s), float(margin_s), float(cleanup_s)
+        self.clock, self.exit_now = clock, exit_now
+        self.cleanups: list[tuple[str, Callable[[], Any]]] = []
+        self.armed_at: float | None = None
+        self.fired = threading.Event()
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def add_cleanup(self, name: str, fn: Callable[[], Any]) -> None:
+        self.cleanups.append((name, fn))
+
+    def exit_at(self) -> float | None:
+        """The wall time the process must be gone by, minus the margin (None: not armed)."""
+        return None if self.armed_at is None else self.armed_at + self.deadline_s - self.margin_s
+
+    def remaining(self) -> float | None:
+        at = self.exit_at()
+        return None if at is None else max(0.0, at - self.clock())
+
+    def arm(self, seen_at: float | None = None) -> "ReclaimDeadline":
+        with self._lock:
+            if self._thread is not None:
+                return self
+            self.armed_at = self.clock() if seen_at is None else float(seen_at)
+            self._thread = threading.Thread(target=self._run, name="sampler-reclaim-deadline", daemon=True)
+            self._thread.start()
+        return self
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _run(self) -> None:
+        left = self.remaining() or 0.0
+        if self._cancel.wait(left):
+            return
+        self.fired.set()
+        print(f"[engine-sampler] reclaim deadline reached ({self.deadline_s:g} s after the marker); "
+              "forcing the cleanup and the exit", flush=True)
+        for name, fn in self.cleanups:
+            worker = threading.Thread(target=self._cleanup, args=(name, fn), daemon=True,
+                                      name=f"sampler-reclaim-cleanup-{name}")
+            worker.start()
+            worker.join(self.cleanup_s)
+            if worker.is_alive():
+                print(f"[engine-sampler] reclaim cleanup {name} still blocks after {self.cleanup_s:g} s",
+                      flush=True)
+        reclaim_exit("deadline", exit_now=self.exit_now)
+
+    @staticmethod
+    def _cleanup(name: str, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+        except Exception as error:  # noqa: BLE001 - exiting anyway
+            print(f"[engine-sampler] reclaim cleanup {name} failed: {type(error).__name__}: {error}",
+                  flush=True)
 
 
 def hold_after_reclaim(environ: Mapping[str, str] | None = None, *, hold_s: float = RECLAIM_HOLD_S,
-                       sleep: Callable[[float], None] = time.sleep) -> bool:
+                       sleep: Callable[[float], None] | None = None,
+                       deadline: ReclaimDeadline | None = None) -> bool:
     """After a reclaim the process stays up until the cloud stops the container:
     a clean early exit could end the cloud's input as finished instead of letting
-    the cloud run the island again (as the Miles sampler island does). Returns
-    whether a reclaim was requested (False: returns at once)."""
-    import os  # noqa: PLC0415
-
+    the cloud run the island again (as the Miles sampler island does). With
+    ``deadline`` the hold ends at its exit time (a reclaim no cloud follows, e.g.
+    a manual marker, still ends the process in time). Returns whether a reclaim
+    was requested (False: returns at once)."""
     from .sampler_resume import reclaim_requested  # noqa: PLC0415
 
-    if not reclaim_requested(os.environ if environ is None else environ):
+    env = os.environ if environ is None else environ
+    if not reclaim_requested(env):
         return False
+    if deadline is not None:
+        deadline.arm(reclaim_seen_at(env, clock=deadline.clock))
+        hold_s = min(hold_s, deadline.remaining() or 0.0)
     print(f"[engine-sampler] reclaimed: waiting up to {hold_s:g} s for the container to stop", flush=True)
-    sleep(hold_s)
+    (time.sleep if sleep is None else sleep)(hold_s)
     return True
 
 
@@ -582,12 +718,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                                      description="run an engine sampler island from a spec file")
     parser.add_argument("--spec", required=True, help="the sampler spec JSON (module doc)")
     args = parser.parse_args(argv)
+    deadline = ReclaimDeadline()
     try:
         spec = load_spec(args.spec)
-        rounds = run(spec)
+        rounds = run(spec, reclaim_deadline=deadline)
     except SamplerSpecError as error:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
+    except BaseException as error:
+        if deadline.armed_at is None:
+            raise
+        import traceback  # noqa: PLC0415
+
+        traceback.print_exc()
+        reclaim_exit(f"error after the reclaim: {type(error).__name__}")
+        raise
     print(f"[engine-sampler] done: {rounds} round(s)", flush=True)
-    hold_after_reclaim()
+    if hold_after_reclaim(deadline=deadline):
+        reclaim_exit("held")
     return 0
