@@ -1183,7 +1183,7 @@ _ROLLOUT_ENGINE = (
     # quantized rollout tiers (yeto.rl.quant.tiers)
     shared_flag("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0,
                 help="sampler precision: 0 BF16 (default); 1 the engine quantizes FFN linears "
-                "(dense) or routed experts (MoE) to FP8 itself, FP8 KV cache; 2 the trainer side "
+                "(dense) or routed experts (MoE) to FP8 (engine or trainer, see --rl-rollout-quant-fp8-source); 2 the trainer side "
                 "converts each release to FP8 W8A8 on the same linears and the sampler island "
                 "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
                 "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
