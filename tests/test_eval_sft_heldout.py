@@ -1,6 +1,6 @@
 """Self-checks for tools/eval_sft_heldout.py (no network, tiny fake model).
 
-Run: PYTHONPATH=. python -m pytest tools/test_eval_sft_heldout.py
+Run: python -m pytest tests/test_eval_sft_heldout.py
 Optional real check: set RECOVERED_ADAPTER=<dir> to verify a recovered PEFT
 adapter loads onto Qwen/Qwen3-0.6B with no missing/unexpected keys.
 """
@@ -10,7 +10,7 @@ import sys
 import pytest
 import torch
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 from eval_sft_heldout import weighted_ce  # noqa: E402
 
 
