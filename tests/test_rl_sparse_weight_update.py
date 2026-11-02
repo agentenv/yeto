@@ -109,6 +109,10 @@ class FakeSGLangRanks:
         self.version = "default"
         self.paused = False
         self.on_tensor_update = None  # test hook after the loader ran
+        # like the pinned fork: /update_weights_from_tensor only inside a
+        # begin/end_weight_update session (False: upstream, no session endpoints)
+        self.sessions = True
+        self.session_open = False
 
     def __call__(self, method: str, url: str, body: Any, timeout_s: float):
         path = url.split(":", 2)[-1].split("/", 1)[-1]
@@ -127,12 +131,23 @@ class FakeSGLangRanks:
                 model.load_from_disk(Path(body["model_path"]))
             self.version = body.get("weight_version") or self.version
             return 200, {"success": True, "message": "ok", "num_paused_requests": 0}
+        if self.sessions and path == "/begin_weight_update":
+            assert not self.session_open, "begin_weight_update while a session is open"
+            self.session_open = True
+            return 200, {"success": True, "message": "Success"}
+        if self.sessions and path == "/end_weight_update":
+            assert self.session_open, "end_weight_update without begin_weight_update"
+            self.session_open = False
+            return 200, {"success": True, "message": "Success"}
         if path == "/update_weights_from_tensor":
+            assert not self.sessions or self.session_open, "update_weights_from_tensor outside a session"
             assert body["load_format"] == sglang_sparse_loader.LOADER
             assert body["flush_cache"] is False
             for rank, payload in enumerate(body["serialized_named_tensors"]):
                 named = pickle.loads(base64.b64decode(payload))
-                assert json.loads(named[0][0][len(sglang_sparse_loader.PREFIX):])["rank"] == rank
+                # the fork sends a name with ":" to the LoRA stash, never to the loader
+                assert ":" not in named[0][0], named[0][0]
+                assert sglang_sparse_loader.parse_command(named[0][0])["rank"] == rank
                 sglang_sparse_loader.load(self.ranks[rank], named)
             if self.on_tensor_update:
                 self.on_tensor_update(self)
@@ -145,14 +160,15 @@ class FakeSGLangRanks:
         out = []
         for path, body in self.calls:
             if path == "/update_weights_from_tensor":
-                cmds = [json.loads(pickle.loads(base64.b64decode(p))[0][0][len(sglang_sparse_loader.PREFIX):])
+                cmds = [sglang_sparse_loader.parse_command(pickle.loads(base64.b64decode(p))[0][0])
                         for p in body["serialized_named_tensors"]]
                 if cmds[0]["op"] == op:
                     out.append(cmds)
         return out
 
     def paths(self) -> list[str]:
-        return [p for p, _ in self.calls if p != "/health"]
+        """The calls, without health checks and the session brackets (tested on their own)."""
+        return [p for p, _ in self.calls if p not in ("/health", "/begin_weight_update", "/end_weight_update")]
 
 
 class _Process:
@@ -566,3 +582,47 @@ def test_kill_removes_the_sparse_directory(started):
     assert root.is_dir()
     engine._kill()
     assert not root.exists()
+
+
+# ---------------------------------------------------------------- weight-update sessions (pinned fork)
+def test_every_loader_call_is_bracketed_by_a_weight_update_session(started, tmp_path, monkeypatch):
+    tp, fake, engine, base, report = started
+    assert report.detail["sparse_prepare"]["enabled"]
+    old = _base_tensors()
+    name = L + "self_attn.k_proj.weight"
+    new = _rebuild(tmp_path, base, {n: _bump(t, [0, 9]) if n == name else t for n, t in old.items()},
+                   "v1", monkeypatch)
+    fake.calls.clear()
+
+    assert engine.load(new, 1).detail["sparse"] is True
+
+    paths = [p for p, _ in fake.calls if p != "/health"]
+    assert paths == ["/pause_generation", "/begin_weight_update", "/update_weights_from_tensor",
+                     "/end_weight_update", "/continue_generation"]
+    assert not fake.session_open
+
+
+def test_a_server_without_sessions_is_asked_once(tmp_path, monkeypatch):
+    fake = FakeSGLangRanks(2)
+    fake.sessions = False  # upstream SGLang: /begin_weight_update is a 404
+    base = _write_release(tmp_path / "v0", _base_tensors())
+    engine = _engine(tmp_path, fake, tp=2)
+    assert engine.start(base, 0).detail["sparse_prepare"]["enabled"]
+    old = _base_tensors()
+    name = L + "self_attn.k_proj.weight"
+    new = _rebuild(tmp_path, base, {n: _bump(t, [3]) if n == name else t for n, t in old.items()},
+                   "v1", monkeypatch)
+
+    assert engine.load(new, 1).detail["sparse"] is True
+
+    assert [p for p, _ in fake.calls].count("/begin_weight_update") == 1
+    assert "/end_weight_update" not in [p for p, _ in fake.calls]
+    assert _same_weights(fake.ranks, _reference(2, new))
+
+
+def test_command_names_carry_no_colon():
+    command = {"op": "apply", "rank": 3, "patch": "/dev/shm/x:y", "result": "/tmp/r.json"}
+    name = sglang_sparse_loader.command_name(command)
+    assert ":" not in name and name.startswith(sglang_sparse_loader.PREFIX)
+    assert sglang_sparse_loader.parse_command(name) == command
+    assert sglang_sparse_loader.parse_command("model.layers.0.mlp.weight") is None

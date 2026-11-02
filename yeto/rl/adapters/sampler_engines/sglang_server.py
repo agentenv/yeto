@@ -96,6 +96,7 @@ NEXTN (a draft model would not be updated). Not supported: quantized weights
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -245,6 +246,7 @@ class SGLangServerEngine(ServerEngine):
         self._sparse_maps: list[dict[str, Any]] | None = None
         self._sparse_shapes: dict[str, list[int]] | None = None
         self.sparse_prepare: dict[str, Any] | None = None  # the last probe's record
+        self._weight_sessions: bool | None = None  # /begin_weight_update exists (None: not asked yet)
 
     def _sparse_unsupported(self) -> str | None:
         c, o = self.config, self.options
@@ -295,6 +297,7 @@ class SGLangServerEngine(ServerEngine):
             sglang_load_report.clear_reports(self.options.load_report_dir)
         self._served_dir = Path(release_dir) if release_dir is not None else Path(self.config.base_dir)
         self._sparse_maps = None  # a new server: probe again
+        self._weight_sessions = None  # whether it has weight-update sessions: asked at the first call
         return super().start(release_dir, version)
 
     def loaded_expert_matrices(self) -> int | None:
@@ -384,7 +387,12 @@ class SGLangServerEngine(ServerEngine):
                                 "load_format": SPARSE_LOADER, "flush_cache": False}
         if version is not None:
             body["weight_version"] = str(int(version))
-        reply = self.call("POST", "/update_weights_from_tensor", body, timeout_s=timeout_s)
+        session = self._begin_weight_update()
+        try:
+            reply = self.call("POST", "/update_weights_from_tensor", body, timeout_s=timeout_s)
+        finally:
+            if session:
+                self.call("POST", "/end_weight_update", {})
         if isinstance(reply, dict) and reply.get("success") is False:
             raise SamplerEngineError(f"sglang update_weights_from_tensor: {reply.get('message')}")
         results = []
@@ -395,6 +403,23 @@ class SGLangServerEngine(ServerEngine):
                 results.append({"ok": False, "error": f"no result from rank {command['rank']} "
                                 f"(is yeto importable by the server's python?)"})
         return results
+
+    def _begin_weight_update(self) -> bool:
+        """Open a weight-update session where the server has them (the pinned
+        fork: ``/update_weights_from_tensor`` outside a ``/begin_weight_update``
+        session fails an assertion that ends the scheduler). False: the server has
+        no sessions (upstream SGLang; remembered until the next start)."""
+        if self._weight_sessions is False:
+            return False
+        try:
+            self.call("POST", "/begin_weight_update", {})
+        except SamplerEngineError as error:
+            if self._weight_sessions is None and "HTTP 404" in str(error):
+                self._weight_sessions = False
+                return False
+            raise
+        self._weight_sessions = True
+        return True
 
     def _sparse_prepare(self) -> dict[str, Any]:
         """Probe the element maps of the started server (module doc). On any
@@ -412,7 +437,8 @@ class SGLangServerEngine(ServerEngine):
             maps_dir.mkdir(parents=True, exist_ok=True)
             commands = [{"op": "prepare", "rank": r, "tensors": shapes, "out": str(maps_dir / f"rank{r}.pkl"),
                          "result": str(maps_dir / f"prepare-rank{r}.json"),
-                         "probe_device": self.options.sparse_probe_device} for r in range(tp)]
+                         "probe_device": self.options.sparse_probe_device,
+                         "threads": max(1, (os.cpu_count() or 1) // tp)} for r in range(tp)]
             try:
                 results = self._sparse_call(commands, timeout_s=self.options.sparse_prepare_timeout_s)
             finally:  # the probe may have touched real tensors: serve the release as loaded from disk

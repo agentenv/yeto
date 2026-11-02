@@ -6,8 +6,8 @@ SGLang calls ``load(model, named_tensors)`` for ``POST
 the server was started with ``--custom-weight-loader`` naming it
 (``ModelRunner.update_weights_from_tensor``; SGLang deserializes each rank's
 payload with its restricted unpickler, so the payload is plain tensors). The
-island sends one command per rank in the tensor *name*, ``yeto-sparse:<json>``
-(the tensor itself is a placeholder), so no weight data passes over HTTP:
+island sends one command per rank in the tensor *name*, ``yeto-sparse.<base64 json>``
+(urlsafe base64, as SGLang treats a name with ``:`` as a LoRA tensor; the tensor itself is a placeholder), so no weight data passes over HTTP:
 
 * ``prepare``: the probe. For each group of checkpoint tensors (one decoder
   layer, or everything outside the layers) the group's parameters are swapped
@@ -34,6 +34,7 @@ Imports torch only (and numpy); SGLang is not imported.
 
 from __future__ import annotations
 
+import base64
 import json
 import pickle
 import re
@@ -45,14 +46,24 @@ from typing import Any
 
 import numpy as np
 
-PREFIX = "yeto-sparse:"
+# no ":" in the name: the pinned SGLang fork routes a streamed tensor whose name
+# holds ":" (``{lora_name}:...``) to the LoRA stash, not to the loader
+PREFIX = "yeto-sparse."
 LOADER = f"{__name__}.load"  # the --custom-weight-loader / load_format value
 _LAYER = re.compile(r"^(.*?\blayers\.\d+\.)")
 _SIGNED = {1: "u1", 2: "<i2", 4: "<i4", 8: "<i8"}
 
 
 def command_name(command: dict[str, Any]) -> str:
-    return PREFIX + json.dumps(command, separators=(",", ":"))
+    """The tensor name carrying ``command``: :data:`PREFIX` + urlsafe base64 of its JSON."""
+    return PREFIX + base64.urlsafe_b64encode(json.dumps(command, separators=(",", ":")).encode()).decode("ascii")
+
+
+def parse_command(name: str) -> dict[str, Any] | None:
+    """The command of a :func:`command_name` tensor name, or None for any other name."""
+    if not str(name).startswith(PREFIX):
+        return None
+    return json.loads(base64.urlsafe_b64decode(str(name)[len(PREFIX):]))
 
 
 def group_of(name: str) -> str:
@@ -63,9 +74,9 @@ def group_of(name: str) -> str:
 
 def load(model: Any, named_tensors: Iterable[tuple[str, Any]]) -> None:
     for name, _tensor in named_tensors:
-        if not str(name).startswith(PREFIX):
+        command = parse_command(name)
+        if command is None:
             continue
-        command = json.loads(str(name)[len(PREFIX):])
         began = time.monotonic()
         try:
             result = _OPS[command["op"]](model, command)
@@ -148,16 +159,23 @@ def _prepare(model: Any, command: dict[str, Any]) -> dict[str, Any]:
     groups: dict[str, list[str]] = {}
     for name in shapes:
         groups.setdefault(group_of(name), []).append(name)
-    for key, names in sorted(groups.items()):
-        swapped = [n for n in params if group_of(n) == key]
-        found = _probe_group(model, [params[n] for n in swapped], swapped, names, shapes, device,
-                             batch_elements) if swapped else {}
-        for name in names:
-            targets = found.get(name)
-            if targets is not None:
-                mapping["tensors"][name] = targets
-            else:
-                mapping["unmapped"].append(name)
+    # The analysis runs on the CPU over every element of a group, and the SGLang
+    # scheduler runs torch with one CPU thread: use the cores this rank may claim.
+    threads = torch.get_num_threads()
+    torch.set_num_threads(max(threads, int(command.get("threads") or 1)))
+    try:
+        for key, names in sorted(groups.items()):
+            swapped = [n for n in params if group_of(n) == key]
+            found = _probe_group(model, [params[n] for n in swapped], swapped, names, shapes, device,
+                                 batch_elements) if swapped else {}
+            for name in names:
+                targets = found.get(name)
+                if targets is not None:
+                    mapping["tensors"][name] = targets
+                else:
+                    mapping["unmapped"].append(name)
+    finally:
+        torch.set_num_threads(threads)
     out = Path(command["out"])
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("wb") as handle:
@@ -232,12 +250,18 @@ def _probe_group(model: Any, tensors: list[Any], param_names: list[str], names: 
         if not bool(valid.all()):  # values not copied: their source cannot be told
             any_tainted = True
             break
-        for i in torch.unique(which).tolist():
-            sel = which == i
-            name = names[i]
-            if not bool(valid[sel].all()):
-                bad.add(name)
+        # one pass per parameter, not one per tensor: a stacked-expert parameter
+        # holds hundreds of checkpoint tensors and a boolean mask per tensor over
+        # all its elements made the probe quadratic in the expert count
+        order = torch.argsort(which, stable=True)
+        which, pos, h = which[order], pos[order], h[order]
+        counts = torch.bincount(which, minlength=len(names)).tolist()
+        ends = np.cumsum(counts).tolist()
+        for i, count in enumerate(counts):
+            if not count:
                 continue
+            name = names[i]
+            sel = slice(int(ends[i]) - int(count), int(ends[i]))
             target = _infer(pos[sel], h[sel].to(torch.int64), shapes[name], list(t.shape))
             if target is None:
                 bad.add(name)
