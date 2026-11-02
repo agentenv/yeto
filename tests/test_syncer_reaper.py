@@ -125,7 +125,8 @@ def test_no_orphaned_checkout_syncer_after_reap_orphans(tmp_path):
     # orphan it on purpose: the intermediate shell exits at once
     subprocess.run(["sh", "-c", f"{binary} 300 >/dev/null 2>&1 &"], check=True)
     deadline = time.monotonic() + 10
-    while not [row for row in syncer_reaper.checkout_syncers(tmp_path) if row[1] == 1]:
+    while not [row for row in syncer_reaper.checkout_syncers(tmp_path)
+               if row[1] in syncer_reaper.orphan_parents()]:
         assert time.monotonic() < deadline, "the orphaned fake syncer did not show up"
         time.sleep(0.05)
     killed = syncer_reaper.reap_orphans(tmp_path)

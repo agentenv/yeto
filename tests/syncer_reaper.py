@@ -15,7 +15,7 @@ process:
 * one started by a module- or session-scoped fixture is killed when the last
   test of that module, or the session, is torn down;
 * at session end, orphaned ``yeto-syncer`` processes of this checkout
-  (parent pid 1) that did not exist when the session started are killed too
+  (reparented to init or a subreaper) that did not exist when the session started are killed too
   and named in a warning: a syncer started by a grandchild process is not
   seen by the ``Popen`` hook.
 """
@@ -134,11 +134,25 @@ def checkout_syncers(root: Path = REPO_ROOT) -> list[tuple[int, int, str]]:
             and os.path.basename(args.split(" ", 1)[0]) == SYNCER_NAME]
 
 
+def orphan_parents() -> set[int]:
+    """Parents an orphan of this process tree is reparented to: init (pid 1) or a
+    child subreaper, which is always an ancestor of the process that left it
+    (CI runners and container inits are subreapers)."""
+    parent_of = {pid: ppid for pid, ppid, _ in _ps()}
+    parents, pid = {1}, parent_of.get(os.getpid())
+    while pid and pid not in parents:
+        parents.add(pid)
+        pid = parent_of.get(pid)
+    return parents
+
+
 def reap_orphans(root: Path = REPO_ROOT, *, keep: set[int] = frozenset()) -> list[int]:
-    """Kill orphaned (ppid 1) syncers of ``root`` not in ``keep``; their pids."""
+    """Kill orphaned syncers of ``root`` (parent: init or a subreaper above this
+    process) not in ``keep``; their pids."""
     killed = []
+    parents = orphan_parents()
     for pid, ppid, _ in checkout_syncers(root):
-        if ppid == 1 and pid not in keep:
+        if ppid in parents and pid not in keep:
             try:
                 os.kill(pid, signal.SIGKILL)
                 killed.append(pid)
