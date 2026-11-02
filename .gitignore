@@ -23,6 +23,8 @@ compare-work/
 compare-report/
 smoke-report/
 lm-benchmark-probes/
+# Local run directories (Modal app/call ids, pulled tapes) stay outside the repo.
+/s1-runs/
 .claude/
 /docs/superpowers/
 docs/MILES_RL_ZH.md
@@ -33,8 +35,7 @@ docs/DECOUPLED_DILOCO_MILES_RL_DESIGN.md
 # 本地图页集中目录（不上传）
 diagrams/
 
-# evidence 原始日志/数据不进仓库：上传 Modal Volume yeto-evidence-archive，
-# 并在该 change 的 evidence/ARCHIVE-MANIFEST.tsv 登记（见 docs/EVIDENCE_STORAGE.md）。
+# Run evidence (raw logs, data, reports) stays outside the repository.
 openspec/changes/*/evidence/**/*.log
 openspec/changes/*/evidence/**/*.jsonl
 openspec/changes/*/evidence/**/*.parquet
@@ -84,7 +85,7 @@ openspec/changes/*/evidence/**/*.pyc
 !/openspec/changes/rl-engine-ports/evidence/2026-09-29-strict2-federated/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_2.parquet
 
 # Run logs never enter the repository (rl-code-quality-cleanup). Keep evidence
-# logs outside the repo (/home/michael/work/infra-drafts/evidence/<change>/) and
+# logs outside the repo (~/work/infra-drafts/evidence/<change>/) and
 # leave an EVIDENCE.md pointer. These rules come last so no earlier `!` re-includes logs.
 **/run-logs/**
 !**/run-logs/EVIDENCE.md

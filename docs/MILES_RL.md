@@ -1215,8 +1215,7 @@ $M --dry-run --extra "--kl-coef 0.1"   # rejected: ... use kl.placement='loss'
 $M --dry-run --extra "--gamma 0.9"     # rejected: --gamma ... not part of the algorithm spec yet
 ```
 
-The recorded outputs are in
-`openspec/changes/rl-algorithm-capabilities/evidence/2026-09-29-dry-run/`.
+The recorded outputs are archived outside the repository.
 
 **Extending (follow-up algorithm changes).** Add a module under
 `yeto/rl/algos/` and one line to `yeto.rl.algos.EXTENSION_MODULES`. The module
@@ -1371,7 +1370,7 @@ $M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json \
    --rl-allow-unverified-mechanism no_grpo_std_normalization   # accepted, hash 725e4216...
 ```
 
-Recorded outputs: `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-dry-run/`.
+Recorded outputs are archived outside the repository.
 
 ### Sequence-level ratio and advantage variants (`rl-algo-seq-and-adv`)
 
@@ -1571,7 +1570,7 @@ and the image digest (this makes the single-island
 > (`gae-la-20261007b`, `gae-cs-20261007b`, the latter on synthetic two-segment
 > data), full VAPO (`vapo-20261007e`), SAO on Qwen3.5-0.8B for 12 rounds
 > (`s14-forkg1-sao-20261007a`, after the `[value_num_bins, hidden]` value-head
-> receipt fix `fb9a366f`); see `openspec/changes/rl-algo-critic-family/progress.md`.
+> receipt fix `fb9a366f`); the run log is archived outside the repository.
 > Still **unverified**: all G3 tasks (4.5, 7.3, 8.4 G3, 9.5), CompactionRL on any
 > GPU (9.4/9.5), a real Codex/Terminal-Bench compaction rollout, and the effect
 > (EV, reward, pass@k) of any of these. Status labels: **CPU-verified** =
@@ -2044,8 +2043,8 @@ it is rejected as undeclared without the allowances and accepted with them.
 `MILES_DECLARED`) accepts the mechanism without
 `--rl-allow-unverified-mechanism`, which requires GPU evidence that it takes
 effect. Declarations say nothing about training gains. G1 = single island on
-GPU, G3 = two-island strict-avg on GPU. Evidence directories are under
-`openspec/changes/<change>/evidence/`.
+GPU, G3 = two-island strict-avg on GPU. Run evidence is archived outside the
+repository.
 
 | family (change) | mechanisms | declared | GPU status |
 | --- | --- | --- | --- |
@@ -2070,7 +2069,7 @@ far (evidence names; numbers are in the files, not repeated here):
 
 - 4-layer variant, LoRA GRPO learning signal on GPU: Nebius 8xH100
   (`s13-h100-20261007b`, `FN-A-RESULT.md`) and the Modal H100 M4 runs
-  (`rl-infra-spec/progress.md` section M4).
+  (run log archived outside the repository).
 - Full model HF to `torch_dist` conversion on Modal 4xH200
   (`s13-fnconv-modal-20261007c`): output `yeto-fn-models:/torch_dist/qwen3.8-flash-next_torch_dist`
   (TP1 PP4, 234.4 GiB, re-sliced at load); HF weights in the same Modal Volume
@@ -2120,8 +2119,8 @@ Calibration constants (S17 M1 runs b, c, d; Qwen3.5-4B LoRA r16, 1 GPU per islan
 | K_ACT (no recompute) | 45.62 | solved from run d tape peak 123.27 GiB |
 | K_ACT (full recompute) | 2.0 | 未验证 (no measured run) |
 
-Back-test (margin 0.9; `openspec/changes/launch-preflight-guards/evidence/memory-backtest.json`,
-script `memory_backtest.py` next to it). Measured peaks are the island tape
+Back-test (margin 0.9; data and script `memory_backtest.py` archived outside the
+repository). Measured peaks are the island tape
 `rl_load_sample.peak_gpu_mem_bytes` maxima (NVML, sampled every 10 s, so a lower
 bound of the true peak):
 
@@ -2169,7 +2168,7 @@ controller of `rl-infra-spec`. What exists today:
 - **E1, manual rollout add/remove/drain** with journalled transactions, expected
   epoch, deadlines and a watchdog; the controller restarts the learner in place
   with `--rl-elastic-restart-attempts`. GPU chains (Nebius, 4xL40S and 8xH100)
-  passed the L1-L8 criteria incl. kill and restart (`rl-infra-spec/progress.md`,
+  passed the L1-L8 criteria incl. kill and restart (run log archived outside the repository,
   `gpu-plan-v2.md` section 9.24); two-island X6 (task 3.8) and the full fault
   matrix (4.5) are **not done**, and some E2 criteria (C2/C3') rest on CPU
   evidence by user ruling (2026-10-04).
@@ -2249,7 +2248,7 @@ Miles stop-after-publication ordering.
 Existing strict-avg evidence includes real dense and MoE LoRA GRPO runs,
 multi-island f32 parity, process and retained-disk syncer recovery, session/tool
 rollouts, standard PEFT load/generation, and the Qwen3.6-27B equal-hardware H200
-benchmark summarized in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
+benchmark (results archived outside the repository).
 
 The decoupled preset must not be described as release-usable until the required
 real causal-LM GPU matrix, including a cross-machine run, a failure run and the

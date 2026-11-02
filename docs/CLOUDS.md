@@ -214,14 +214,14 @@ all three clouds afterwards: `sky status` has no `yeto-mix87b-*` cluster,
 `modal app list` shows `yeto-yeto-mix87b` as `stopped` with 0 tasks
 (stopped 14:34:19Z), the Nebius eu-north1 project lists no `yeto-mix87b`
 instance, and no EC2 instance is running in us-east-1. Full logs, the
-syncer tape and the verification output are in the change's
-`run-logs/` directory.
+syncer tape and the verification output are archived outside the
+repository.
 
 Metrics captured: this is an SFT run, so there is no reward or advantage
 to record; the syncer tape carries the merged gradient norm per step and
 the learners log `loss/token` and `target_tokens`. Only the Modal
 island's per-step metrics survive in the saved log (2.56 down to 1.56
-over 135 records, in `run-logs/task-8.7-modal-island-metrics.txt`): a sky
+over 135 records, archived outside the repository): a sky
 island's training log stays on its own cluster and is lost at teardown,
 so run `yeto logs <prefix>` before `yeto down` if you need to compare two
 islands step by step.
@@ -325,7 +325,7 @@ tensor to a bf16 `Parameter.data` and PyTorch resets the grad accumulator
 on a dtype change, destroying the DDP hook registered on it. That file is
 Yeto's policy-sync integration layer, so Miles' own LoRA tests never
 exercise it. Tracked as the `fix-rl-lora-grad-hook` change; full evidence
-in that change and in this change's `live-run-failures.md` (items 33 and 35). Note the
+in that change and in this change's live-run failure log (items 33 and 35; archived outside the repository). Note the
 rollouts and advantages were healthy - this is not GRPO degeneracy.
 
 This entry records the cross-cloud result the task asks for: an 8xH100

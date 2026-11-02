@@ -127,8 +127,8 @@ Everything below is for the Miles RL path (`--rl-engine ports`; see
   real Miles argument parser, full conversion and a formal 4x8 H200 training
   run have not been done (blocked on capacity).
 - **Codex harness / Terminal-Bench.** Terminal-Bench 2.1 rollouts through the
-  Codex harness (`--codex-*` options, `yeto-codex-traces`); see
-  [docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md](docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md).
+  Codex harness (`--codex-*` options, `yeto-codex-traces`); the validation
+  run report is archived outside the repository.
   Moving the harness onto the ports engine is tracked in
   `openspec/changes/rl-codex-harness-rollout`.
 
@@ -266,8 +266,6 @@ tables, and reproducibility rules.
 [docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
 equal-hardware diffusion benchmark contract, media controls, complete arm and
 metric tables, and reproducibility rules.
-[docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
-per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 [docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
 LoRA islands: rollout/training boundaries, recovery, export, and limitations.
 [docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — experimental local PPO and the
@@ -290,7 +288,7 @@ for a fleet, the metric tables, the debugging map, and the failure policy.
     (cd syncer && cargo test)
 
 Commit messages must be English. Install the local check once per clone:
-`pre-commit install --hook-type commit-msg` (details: `docs/EVIDENCE_STORAGE.md`).
+`pre-commit install --hook-type commit-msg` (checks: `scripts/precommit_check.py`).
 
 CI runs three jobs on every PR and push to main: the Rust syncer suite, the
 Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
