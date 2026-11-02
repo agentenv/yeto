@@ -595,7 +595,7 @@ _SYNC = (
         default=None,
         metavar="MANIFEST",
         help="sao-streaming-full only: the final manifest written by "
-        "tools/probes/build_tbench21_sao_streaming_contracts.py finalize (frozen "
+        "tools/build_tbench21_sao_streaming_contracts.py finalize (frozen "
         "syncer profile, one runtime contract and layout attestation per island)",
     ),
     cli_flag(

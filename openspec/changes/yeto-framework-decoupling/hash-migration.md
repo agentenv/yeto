@@ -36,7 +36,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - CPU 逐位一致：`PYTHONPATH=/tmp/s15-noray python tests/decoupling_bitwise_check.py s16-decouple-p2` 从阶段 2 分支取出旧函数体，与新代码在同一批固定输入上比较（`grpo_default` 4 组输入 × 4 种估计器/标准差组合、`gdpo` 白化开/关、`maxrl` 2 组），20 例全部 `torch.equal`，0 处差异（本机 2026-10-08 运行）。
 - 未在本机验证：`tests/test_rl_reward_pipeline_equivalence.py`、`tests/test_rl_seq_adv_miles.py`（需 import Miles，本机按规则屏蔽 Miles/Ray，收集阶段即报错，未运行）。
-- 同步更新的样本：`tests/golden/decoupling/seq_adv_maxrl.json`、`examples/rl_algorithms/dapo-like.json`（插件源码哈希）、`openspec/changes/rl-algo-seq-and-adv/examples/{maxrl,mapo,gdpo}.json`（由该 change 的 `make_examples.py` 重新生成）。`openspec/changes/rl-algo-seq-and-adv/evidence/g3/` 下的历史证据保留旧哈希不改。
+- 同步更新的样本：`tests/golden/decoupling/seq_adv_maxrl.json`、`examples/rl_algorithms/dapo-like.json`（插件源码哈希）、`tests/fixtures/seq_adv_examples/{maxrl,mapo,gdpo}.json`（由该 change 的 `make_examples.py` 重新生成）。`openspec/changes/rl-algo-seq-and-adv/evidence/g3/` 下的历史证据保留旧哈希不改。
 - 旧 GPU 证据：算法规格（除插件源码哈希外）不变，按 D6 以"CPU 逐位一致 + 本表"引用 `rl-algo-seq-and-adv/evidence/g3/rerun/`；新哈希的真机证据未取得，由下一次本来要开的卡顺带取得。
 - 预告：任务 4.11（原 3.4）若按 design D11 实施，`seq_adv.py` 还会再改一次（`rollout_meta_hook` 调用改走核心接口），seq_adv_maxrl 与 codex_harness（`codex_openenv_subprocess_agent_function.run` 是插件）的哈希届时再变，并在本表追加。
 
@@ -91,7 +91,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 预告里说 codex_harness 的哈希会变：实际只有 `plugins` 字段（命令行插件，不进 `AlgorithmSpec.sha256()`）与命令行摘要变，`algorithm_sha256`、契约哈希不变。
 - CPU 逐位一致：`PYTHONPATH=/tmp/s15-noray python tests/decoupling_bitwise_check.py agentenv/main`：20 例全部 `torch.equal`，0 处差异（本机 2026-10-08 夜）。
 - 旧版引擎命令行快照（`tests/test_rl_argv_snapshot.py`）：把阶段 4 搬家后的新模块路径映射回旧路径后，全部摘要与原快照相同（证明旧版命令行除路径外逐字节不变）。
-- 同步更新：`examples/rl_algorithms/dapo-like.json`（seq_adv 源码哈希、过滤器改中立名）、`openspec/changes/rl-algo-seq-and-adv/examples/{maxrl,mapo,gdpo}.json`（`make_examples.py` 重新生成）。
+- 同步更新：`examples/rl_algorithms/dapo-like.json`（seq_adv 源码哈希、过滤器改中立名）、`tests/fixtures/seq_adv_examples/{maxrl,mapo,gdpo}.json`（`make_examples.py` 重新生成）。
 
 ### 4.4 过滤器中立名
 

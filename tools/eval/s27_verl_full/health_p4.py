@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only health check of a P4 run (two verl full-parameter islands + the syncer).
 
-Usage:  python -I tools/probes/s27_verl_full/health_p4.py RUN_DIR [--json OUT.json]
+Usage:  python -I tools/eval/s27_verl_full/health_p4.py RUN_DIR [--json OUT.json]
 
 Reads RUN_DIR/raw/<run>/{island0,island1,syncer}/ as pulled by ``modal_p4.py``
 (standard library only).  Each check is PASS / WARN / FAIL / N/A; the run is

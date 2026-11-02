@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only health check of a `yeto launch` run of verl full-parameter islands (S27 G-DN).
 
-Usage:  python -I tools/probes/s27_verl_full/health_launch.py RUN_DIR [--json OUT.json]
+Usage:  python -I tools/eval/s27_verl_full/health_launch.py RUN_DIR [--json OUT.json]
                   [--learners 2] [--total-steps 32]
 
 Reads what s1-runs/s27-dn/run-dn.sh pulls (standard library only):

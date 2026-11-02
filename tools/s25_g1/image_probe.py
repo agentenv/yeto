@@ -1,6 +1,6 @@
 """CPU-only probe of the Miles ports image for the S25 G1 stage-1 mini rehearsal.
 
-modal run tools/probes/s25_g1/image_probe.py   (no GPU; prints one JSON report)
+modal run tools/s25_g1/image_probe.py   (no GPU; prints one JSON report)
 """
 import modal
 

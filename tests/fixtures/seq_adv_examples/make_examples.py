@@ -1,6 +1,6 @@
 """Regenerate the example specs (PluginRef SHA256s follow the current sources).
 
-    PYTHONPATH=. /tmp/yeto-venv/bin/python openspec/changes/rl-algo-seq-and-adv/examples/make_examples.py
+    PYTHONPATH=. /tmp/yeto-venv/bin/python tests/fixtures/seq_adv_examples/make_examples.py
 """
 
 import json

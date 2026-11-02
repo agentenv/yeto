@@ -3,7 +3,7 @@ from pathlib import Path
 
 from yeto.rl.engine.recommend import edge_costs_from_table
 
-TABLE = Path(__file__).resolve().parents[1] / "openspec/changes/rl-infra-spec/evidence/edge-costs.json"
+TABLE = Path(__file__).resolve().parents[1] / "tests/fixtures/openspec_evidence/edge-costs.json"
 PH = "sha256:6039d75ff8514328f4edc2e2d341f2e20f230b299b905a69c6a463ea499e12f3"
 
 

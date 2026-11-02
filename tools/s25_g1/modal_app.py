@@ -7,9 +7,9 @@ and the engine sampler island. Only the nodes (Modal containers instead of SSH
 hosts) and the store (Modal Volume through the yeto store hook instead of OSS)
 differ from the PPU plan.
 
-    modal run tools/probes/s25_g1/modal_app.py::prep            # CPU: checkpoints + data
-    modal run --detach tools/probes/s25_g1/modal_app.py::smoke  # 1 x H100: SGLang + post-load checks
-    modal run --detach tools/probes/s25_g1/modal_app.py::launch # 3 rounds, cut after 2, resume
+    modal run tools/s25_g1/modal_app.py::prep            # CPU: checkpoints + data
+    modal run --detach tools/s25_g1/modal_app.py::smoke  # 1 x H100: SGLang + post-load checks
+    modal run --detach tools/s25_g1/modal_app.py::launch # 3 rounds, cut after 2, resume
 
 ``smoke`` and ``launch`` spawn and return; the local client may exit
 (never kill a ``.remote()`` caller: memory modal-detach-kill-cancels).
@@ -30,11 +30,11 @@ import modal
 
 
 HERE = Path(__file__).resolve()
-REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")  # in the container the module sits at /root
+REPO = HERE.parents[2] if len(HERE.parents) > 2 else Path("/")  # in the container the module sits at /root
 WORKDIR = "/root/sky_workdir"
 # run_limits.py sits next to this file locally and under the mounted tree in a container
 sys.path.insert(0, str(HERE.parent) if (HERE.parent / "run_limits.py").is_file()
-                else f"{WORKDIR}/tools/probes/s25_g1")
+                else f"{WORKDIR}/tools/s25_g1")
 from run_limits import Deadline, wait_until  # noqa: E402
 # T-G1B: YETO_G1_PLAN=examples/stage1/glm5next-mini-modal-dense.yaml (set at deploy time;
 # the image env carries it into every container, so all of them plan the same file)
@@ -181,7 +181,7 @@ def _env(extra: dict) -> dict:
 @app.function(image=image, volumes={"/data/models": models}, cpu=8, memory=65536, timeout=7200,
               secrets=[_hf_secret()])
 def prep() -> str:
-    out = subprocess.run(["python3", f"{WORKDIR}/tools/probes/s25_g1/make_mini.py", "/data/models"],
+    out = subprocess.run(["python3", f"{WORKDIR}/tools/s25_g1/make_mini.py", "/data/models"],
                          capture_output=True, text=True, cwd=WORKDIR, env=_env({}))
     text = out.stdout[-6000:] + "\nSTDERR:\n" + out.stderr[-4000:]
     Path("/data/models/prep.log").write_text(text)

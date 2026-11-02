@@ -1,10 +1,10 @@
 """S27 P4 (G-DB): two verl full-parameter islands + the unified Rust syncer on Modal.
 
 Usage (local, yeto-test-venv):
-  python tools/probes/s27_verl_full/modal_p4.py plan  RUN_ID  # PLAN_ONLY (yeto-test-venv): no Modal call
+  python tools/eval/s27_verl_full/modal_p4.py plan  RUN_ID  # PLAN_ONLY (yeto-test-venv): no Modal call
   ( flock 9; python .../modal_p4.py spawn RUN_ID 9>&- ) 9>/tmp/GPU-LAUNCH-2.lock   # modal venv: deploy + spawn
-  python tools/probes/s27_verl_full/modal_p4.py watch RUN_ID  # wait, hard stop, stop the app, pull
-  python tools/probes/s27_verl_full/modal_p4.py pull  RUN_ID  # results Volume -> run dir (files < 50 MB)
+  python tools/eval/s27_verl_full/modal_p4.py watch RUN_ID  # wait, hard stop, stop the app, pull
+  python tools/eval/s27_verl_full/modal_p4.py pull  RUN_ID  # results Volume -> run dir (files < 50 MB)
 
 What runs (one detached app ``yeto-gdb-<RUN_ID>``):
 

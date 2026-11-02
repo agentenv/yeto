@@ -1,7 +1,7 @@
 ## 1. Prerequisites
 
 - [x] 1.1 User decides D1-D4 in proposal.md (2026-10-13: all as recommended)
-- [x] 1.2 Use grep on `scripts/` and `tools/` for places that compare evidence by mac, and record the result in design.md (result: none. Only `tools/probes/build_tbench21_sao_diloco_plan.py` had one gate name, and it is removed)
+- [x] 1.2 Use grep on `scripts/` and `tools/` for places that compare evidence by mac, and record the result in design.md (result: none. Only `tools/build_tbench21_sao_diloco_plan.py` had one gate name, and it is removed)
 
 ## 2. Remove the reward signature (first PR)
 

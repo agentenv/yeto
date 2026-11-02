@@ -10,7 +10,7 @@ import pytest
 from yeto.rl import token_diversity_reward as tdr
 from yeto.rl.engine import engine_sampler_entry as entry
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "probes" / "s25_g1"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "s25_g1"))
 from run_limits import Deadline, wait_until  # noqa: E402
 
 

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 _MODULE_PATH = (
     Path(__file__).resolve().parents[1]
     / "tools"
-    / "probes"
     / "qwen35_conversion_manifest.py"
 )
 _SPEC = importlib.util.spec_from_file_location(
