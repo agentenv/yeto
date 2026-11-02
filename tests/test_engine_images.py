@@ -139,6 +139,12 @@ def test_start_check_passes_on_a_matching_image():
     assert not report.failed and _rows(report)["import pytest"] == "ok"
 
 
+def test_start_check_accepts_either_arch_spelling_on_both_sides():
+    for lock_arch, machine in (("arm64", "aarch64"), ("aarch64", "arm64"), ("amd64", "x86_64")):
+        report = checker.run({**BASE_LOCK, "cpu_arch": lock_arch}, machine=machine)
+        assert "cpu_arch" not in [row["check"] for row in report.failed]
+
+
 def test_start_check_fails_on_the_wrong_arch_version_or_import():
     report = checker.run({**BASE_LOCK, "cpu_arch": "aarch64"}, machine="x86_64")
     assert [row["check"] for row in report.failed] == ["cpu_arch"]

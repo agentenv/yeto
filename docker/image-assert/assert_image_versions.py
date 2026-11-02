@@ -148,8 +148,10 @@ def run(lock: dict, *, commits_file: Path = COMMITS_FILE, machine: str | None = 
     report = Report()
     machine = machine or platform.machine()
     # the lock uses the uname -m spelling (yeto.launch.engine_images); macOS and Docker say arm64/amd64
-    machine = {"arm64": "aarch64", "amd64": "x86_64"}.get(machine.lower(), machine)
-    report.add("cpu_arch", machine == lock["cpu_arch"], f"{machine} (lock {lock['cpu_arch']})")
+    aliases = {"arm64": "aarch64", "amd64": "x86_64"}
+    machine = aliases.get(machine.lower(), machine)
+    want_arch = aliases.get(str(lock["cpu_arch"]).lower(), lock["cpu_arch"])
+    report.add("cpu_arch", machine == want_arch, f"{machine} (lock {lock['cpu_arch']})")
     want_py = lock.get("python")
     have_py = platform.python_version()
     report.add("python", want_py is None or have_py.startswith(want_py + ".") or have_py == want_py,

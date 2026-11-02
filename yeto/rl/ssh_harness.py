@@ -1732,13 +1732,15 @@ def _syncer_runtime_identity_functions() -> str:
     return r"""# A syncer launched before its checkpoint existed runs without --resume;
 # both argv variants are the same process identity.
 syncer_argv_matches() {
-  local -n MATCH_ACTUAL=$1
-  local MATCH_START=$2
-  local -n MATCH_EXPECTED=$3
-  local MATCH_INDEX
-  [ "$((${#MATCH_ACTUAL[@]} - MATCH_START))" -eq "${#MATCH_EXPECTED[@]}" ] || return 1
-  for MATCH_INDEX in "${!MATCH_EXPECTED[@]}"; do
-    [ "${MATCH_ACTUAL[$((MATCH_START + MATCH_INDEX))]}" = "${MATCH_EXPECTED[$MATCH_INDEX]}" ] || return 1
+  # $1 and $3 name arrays; indirect expansion instead of local -n (bash 4.3+),
+  # which an older bash rejects and would leave both arrays empty (a match)
+  local MATCH_START=$2 MATCH_INDEX=0 MATCH_ACTUAL_N MATCH_EXPECTED_N MATCH_A MATCH_E
+  eval "MATCH_ACTUAL_N=\${#$1[@]}; MATCH_EXPECTED_N=\${#$3[@]}"
+  [ "$((MATCH_ACTUAL_N - MATCH_START))" -eq "$MATCH_EXPECTED_N" ] || return 1
+  while [ "$MATCH_INDEX" -lt "$MATCH_EXPECTED_N" ]; do
+    eval "MATCH_A=\${$1[$((MATCH_START + MATCH_INDEX))]}; MATCH_E=\${$3[$MATCH_INDEX]}"
+    [ "$MATCH_A" = "$MATCH_E" ] || return 1
+    MATCH_INDEX=$((MATCH_INDEX + 1))
   done
 }
 
