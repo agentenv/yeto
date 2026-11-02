@@ -602,6 +602,41 @@ def resolve_lora_targets(choice: str, config) -> str:
     return "all-linear"
 
 
+def enter_training_mode(model, args, device) -> bool:
+    """Put ``model`` in training mode and apply ``--gradient-checkpointing``.
+
+    The order matters. ``from_pretrained`` returns an eval-mode module, and
+    Transformers' ``GradientCheckpointingLayer`` skips recomputation whenever
+    ``self.training`` is False, so enabling checkpointing on an eval-mode
+    model is a silent no-op: the flag is accepted, the log line is printed,
+    and every activation is still kept for backward (Qwen3-0.6B, one 16k-token
+    sequence: 59 GB of activations in eval mode against 10 GB in train mode,
+    which is the difference between OOM and training at long context).
+    Dropout -- LoRA's included -- is inert in eval mode for the same reason.
+
+    Returns whether checkpointing ended up enabled.
+    """
+    model.train()
+
+    grad_ckpt = args.gradient_checkpointing == "on"
+    if args.gradient_checkpointing == "auto":
+        # The base is fully on-device here (load ends with model.to(device)),
+        # so free memory directly reflects what activations must fit into.
+        memory = accel.mem_get_info(device)
+        grad_ckpt = memory is not None and memory[0] < memory[1] / 2
+    if grad_ckpt:
+        # Non-reentrant checkpointing composes with FSDP and peft; the input
+        # grad hook keeps the graph alive from the embeddings down to the
+        # first adapter when the base is frozen.
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        if args.tuning == "lora":
+            model.enable_input_require_grads()
+        log.info("gradient checkpointing enabled")
+    return grad_ckpt
+
+
 def trainable_params(model) -> dict[str, torch.Tensor]:
     return {n: p for n, p in model.named_parameters() if p.requires_grad}
 
@@ -827,22 +862,7 @@ def main(argv=None) -> None:
     torch.manual_seed(training_seed)
     accel.manual_seed_all(device, training_seed)
 
-    grad_ckpt = args.gradient_checkpointing == "on"
-    if args.gradient_checkpointing == "auto":
-        # The base is fully on-device here (load ends with model.to(device)),
-        # so free memory directly reflects what activations must fit into.
-        memory = accel.mem_get_info(device)
-        grad_ckpt = memory is not None and memory[0] < memory[1] / 2
-    if grad_ckpt:
-        # Non-reentrant checkpointing composes with FSDP and peft; the input
-        # grad hook keeps the graph alive from the embeddings down to the
-        # first adapter when the base is frozen.
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
-        if args.tuning == "lora":
-            model.enable_input_require_grads()
-        log.info("gradient checkpointing enabled")
+    grad_ckpt = enter_training_mode(model, args, device)
 
     params = trainable_params(model)
     layout = build_layout(

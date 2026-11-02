@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import yeto.learner as learner_module
 from yeto.learner import (
     _loss_metric_dtype,
     allreduce_trainable_grads,
@@ -1172,3 +1173,84 @@ def test_throughput_is_measured_per_window_not_cumulatively():
     assert first["train/raw_tokens_total"] == counters.raw_tokens // 2
     window_tokens = second["train/tokens_per_sec"] * second["train/sec_per_step"] * 10
     assert window_tokens == pytest.approx(counters.raw_tokens / 2, rel=1e-6)
+
+
+def _checkpointing_args(mode, tuning="lora"):
+    return SimpleNamespace(gradient_checkpointing=mode, tuning=tuning)
+
+
+class _RecordingModel(torch.nn.Module):
+    """Mimics the Transformers/peft surface enter_training_mode touches."""
+
+    def __init__(self):
+        super().__init__()
+        self.checkpointing_kwargs = None
+        self.input_grads_enabled = False
+        self.eval()
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        # Transformers only recomputes when the module is in training mode, so
+        # a checkpointing setup done in eval mode is silently ineffective.
+        assert self.training, "checkpointing enabled on an eval-mode model"
+        self.checkpointing_kwargs = gradient_checkpointing_kwargs
+
+    def enable_input_require_grads(self):
+        self.input_grads_enabled = True
+
+
+def test_entering_training_mode_precedes_checkpointing_setup():
+    model = _RecordingModel()
+    assert not model.training
+
+    enabled = learner_module.enter_training_mode(
+        model, _checkpointing_args("on"), torch.device("cpu")
+    )
+
+    assert enabled
+    assert model.training
+    assert model.checkpointing_kwargs == {"use_reentrant": False}
+    assert model.input_grads_enabled
+
+
+def test_training_mode_is_entered_even_without_checkpointing():
+    model = _RecordingModel()
+
+    enabled = learner_module.enter_training_mode(
+        model, _checkpointing_args("off"), torch.device("cpu")
+    )
+
+    assert not enabled
+    assert model.training
+    assert model.checkpointing_kwargs is None
+    assert not model.input_grads_enabled
+
+
+def test_full_tuning_skips_the_input_grad_hook():
+    model = _RecordingModel()
+
+    assert learner_module.enter_training_mode(
+        model, _checkpointing_args("on", tuning="full"), torch.device("cpu")
+    )
+    assert model.checkpointing_kwargs == {"use_reentrant": False}
+    assert not model.input_grads_enabled
+
+
+@pytest.mark.parametrize(
+    "free,total,expected",
+    [(10, 100, True), (90, 100, False), (None, None, False)],
+)
+def test_auto_checkpointing_follows_free_memory(monkeypatch, free, total, expected):
+    monkeypatch.setattr(
+        learner_module.accel,
+        "mem_get_info",
+        lambda _device: None if free is None else (free, total),
+    )
+    model = _RecordingModel()
+
+    assert (
+        learner_module.enter_training_mode(
+            model, _checkpointing_args("auto"), torch.device("cpu")
+        )
+        is expected
+    )
+    assert model.training
