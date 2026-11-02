@@ -57,7 +57,8 @@ HOME_PATH_RE = re.compile(rb"/(?:home|Users)/([A-Za-z0-9_][A-Za-z0-9_.-]*)(?:/|\
 # The project's own service accounts (yeto, sky) are listed exactly: a prefix match
 # would also let a personal name such as /home/skyler through.
 GENERIC_HOMES = {b"ubuntu", b"user", b"runner", b"ec2-user", b"admin", b"root", b"Shared", b"yeto", b"sky"}
-SELF = os.path.normpath("scripts/precommit_check.py")
+# The checker and its tests necessarily contain samples of every pattern.
+SELF = {os.path.normpath("scripts/precommit_check.py"), os.path.normpath("tests/test_precommit_check.py")}
 
 
 def _personal_home(data: bytes) -> bool:
@@ -93,7 +94,7 @@ def check(paths: list[str]) -> list[str]:
         size = os.path.getsize(path)
         if size > MAX_BYTES and not any(fnmatch.fnmatch(path, g) for g in allow):
             problems.append(f"{path}: {size} bytes > {MAX_BYTES} (upload raw data to the Modal Volume, or add to {ALLOW_FILE})")
-        if os.path.normpath(path) == SELF:
+        if os.path.normpath(path) in SELF:
             continue
         with open(path, "rb") as fh:
             data = fh.read(8 * 1024 * 1024)
