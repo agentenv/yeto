@@ -88,6 +88,28 @@ def test_torch_backend_installs_only_explicit_kernel_dependencies():
     assert "--no-build-isolation" in task.setup
 
 
+def test_chunked_backend_forwards_chunk_size_without_extra_dependencies():
+    task = make_learner_task(
+        _args(island_backend="torch", kernel_backend="chunked", shard="ddp",
+              loss_chunk_tokens=2048),
+        _SPEC,
+        0,
+        1,
+        "1.2.3.4:29400",
+    )
+    assert "--kernel-backend chunked --loss-chunk-tokens 2048" in task.run
+    assert "liger-kernel" not in task.setup
+
+
+def test_chunked_launcher_rejects_fsdp_and_custom_loss():
+    with pytest.raises(ValueError, match="only --shard ddp"):
+        make_learner_task(_args(kernel_backend="chunked", shard="fsdp"),
+                          _SPEC, 0, 1, "1.2.3.4:29400")
+    with pytest.raises(ValueError, match="only the built-in cross_entropy"):
+        make_learner_task(_args(kernel_backend="chunked", loss_function="pickle:loss.pkl"),
+                          _SPEC, 0, 1, "1.2.3.4:29400")
+
+
 def test_liger_launcher_rejects_non_builtin_loss():
     with pytest.raises(ValueError, match="only the built-in cross_entropy"):
         make_learner_task(

@@ -8,7 +8,8 @@ The supported controls are:
 | control | values | default | meaning |
 |---|---|---|---|
 | `--attention-backend` | `auto`, `sdpa`, `flash-attn-2` | `auto` | Hugging Face attention implementation |
-| `--kernel-backend` | `native`, `liger` | `native` | SFT loss implementation; model layers remain native; fused requires LoRA/DDP |
+| `--kernel-backend` | `native`, `liger`, `chunked` | `native` | SFT loss implementation; model layers remain native; fused requires LoRA/DDP; `chunked` is device-agnostic (see [ASCEND.md](ASCEND.md#long-context-sft-loss)) |
+| `--loss-chunk-tokens` | integer | `4096` | logits rows per chunk for `--kernel-backend chunked` |
 
 An explicit request is fail-closed. A missing or differently-versioned
 dependency, an unsupported model implementation, FlashAttention with FP32,

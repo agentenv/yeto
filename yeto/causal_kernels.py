@@ -27,7 +27,7 @@ from .kernel_deps import (
 )
 
 ATTENTION_BACKENDS = ("auto", "sdpa", "flash-attn-2")
-KERNEL_BACKENDS = ("native", "liger")
+KERNEL_BACKENDS = ("native", "liger", "chunked")
 
 NATIVE_LAYER_BACKEND = "transformers-native"
 NATIVE_LOSS_IMPLEMENTATION = "torch-cross-entropy"
@@ -839,6 +839,25 @@ def validate_kernel_request(
     if kernel_backend not in KERNEL_BACKENDS:
         raise ValueError(f"unknown kernel backend {kernel_backend!r}; choose from {KERNEL_BACKENDS}")
     if kernel_backend == "native":
+        return
+    if kernel_backend == "chunked":
+        # Plain PyTorch ops: valid on every device family.
+        if loss_function != "cross_entropy":
+            raise ValueError(
+                "--kernel-backend chunked supports only the built-in "
+                "cross_entropy loss; use --kernel-backend native for custom, "
+                "pickled, or RL losses"
+            )
+        if base_quantization != "none":
+            raise ValueError(
+                "--kernel-backend chunked does not support a quantized base; "
+                "use --base-quantization none or --kernel-backend native"
+            )
+        if shard is not None and shard != "ddp":
+            raise ValueError(
+                "--kernel-backend chunked supports only --shard ddp; FSDP "
+                "shards lm_head outside the wrapped forward"
+            )
         return
     if device.type != "cuda":
         raise RuntimeError("--kernel-backend liger fused-linear-CE requires CUDA")

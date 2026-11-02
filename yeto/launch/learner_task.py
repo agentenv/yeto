@@ -113,6 +113,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             raise ValueError(
                 "--base-quantization nf4 requires --kernel-backend native"
             )
+    if kernel_backend == "chunked" and loss_function != "cross_entropy":
+        raise ValueError(
+            "--kernel-backend chunked supports only the built-in cross_entropy loss"
+        )
+    if kernel_backend == "chunked" and args.shard != "ddp":
+        raise ValueError("--kernel-backend chunked supports only --shard ddp")
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
             "--kernel-backend liger fused-linear-CE supports only the built-in "
@@ -205,6 +211,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                 f" --attention-backend {attention_backend}"
                 f" --kernel-backend {kernel_backend}"
             )
+            if kernel_backend == "chunked":
+                learner_flags += (
+                    f" --loss-chunk-tokens {int(getattr(args, 'loss_chunk_tokens', 4096))}"
+                )
     else:
         if getattr(args, "island_backend", "torch") != "torch":
             raise ValueError("diffusion model-kind uses the torch island backend, not megatron")

@@ -108,9 +108,47 @@ actually been executed on a 910x.
 | diffusion `--shard fsdp` | ✅ (FSDP2/hccl) | `maybe_wrap_for_distributed` |
 | diffusion adapter reload and image/video sampling | ✅ | `yeto.diffusion.sample` |
 | causal-LM `--base-quantization nf4` | ❌ refused | `validate_base_quantization` |
+| `--kernel-backend chunked` (long-context SFT loss) | ✅ | `yeto/chunked_ce.py` |
 | `--kernel-backend liger` | ❌ refused | Triton; `validate_kernel_request` |
 | `--attention-backend flash-attn-2` | ❌ refused | `attention_load_kwargs` |
 | causal-LM `--shard fsdp` | ❌ refused | no validated sharding evidence |
+
+## Long-context SFT loss
+
+With the native loss the model returns full `[seq, vocab]` logits, and the
+cross-entropy adds an FP32 copy plus softmax intermediates. For Qwen3 (vocab
+~151k) at a 28k-token sequence that is tens of GB per sample, which exceeds a
+64 GB 910B card even with LoRA, gradient checkpointing, and micro-batch 1.
+
+`--kernel-backend chunked` avoids this on every device family (NPU, CUDA,
+MPS, CPU) using plain PyTorch ops. The model runs to its final hidden states
+(`logits_to_keep` is an empty index, so the head emits nothing), then the loss
+computes `hidden_chunk @ lm_head.weight^T` and CE over `--loss-chunk-tokens`
+target tokens at a time. Each chunk runs under non-reentrant activation
+checkpointing, so backward recomputes one chunk's logits at a time; only
+positions with non-zero loss weight are fed to the head. Peak loss memory is
+roughly `chunk * vocab * 12` bytes (bf16 logits, FP32 logits, FP32 grad):
+about 7 GB at 4096 tokens and 3.7 GB at 2048 for a 151k vocabulary.
+
+The loss is identical to the native `cross_entropy` SFT loss: same label
+shift, assistant mask and fractional token weights, FP32 CE, local token-sum
+reduction, and target-token count. Tied input/output embeddings are
+supported (gradients reach the shared weight). Requirements: the built-in
+`cross_entropy` loss, `--shard ddp`, no quantized base, a plain `nn.Linear`
+head (models that soft-cap or scale logits, or LoRA targeting `lm_head`, are
+refused), and a Transformers model whose forward accepts `logits_to_keep`.
+
+Suggested 910B flags for Qwen3-0.6B at 28k context:
+
+```
+--kernel-backend chunked --loss-chunk-tokens 4096 \
+--tuning lora --shard ddp --micro-batch-size 1 --gradient-checkpointing on \
+--attention-backend sdpa --seq-len 28000
+```
+
+Lower `--loss-chunk-tokens` to 2048 if the card is still tight; the cost is
+more, smaller head matmuls. `--gradient-checkpointing` is a `yeto.learner` flag; through
+the launcher it stays at `auto`.
 
 The causal-LM NF4, Liger, and FlashAttention paths still reject every non-CUDA
 device. Diffusion quantization is a separate Diffusers load path: it is enabled
