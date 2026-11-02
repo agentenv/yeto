@@ -196,3 +196,18 @@ def test_a_launcher_island_tape_is_recovered_complete(tmp_path):
     collector = TapeCollector(tmp_path / "events" / "l0.jsonl", fresh=False)
     assert collector.recover_from_file(tape) is True
     assert collector.discarded == 0 and collector.count == len(_tape(tape))
+
+
+def test_a_marker_left_by_the_previous_incarnation_does_not_arm_the_deadline(tmp_path):
+    """A restarted machine keeps its /tmp: the previous incarnation's reclaim marker
+    is removed at startup, so the new one neither stops nor exits at once."""
+    marker = tmp_path / "reclaim-marker"
+    marker.write_text(json.dumps({"signal": 15, "time": 1.0}))  # long before this process
+    exits: list[int] = []
+    deadline = entry.ReclaimDeadline(exit_now=exits.append)
+    try:
+        assert entry.run(_spec(tmp_path, rounds=2), resource_sampler=lambda emit: None,
+                         incarnation="cccc0003", reclaim_deadline=deadline) == 2
+        assert deadline.armed_at is None and exits == [] and not marker.exists()
+    finally:
+        deadline.cancel()

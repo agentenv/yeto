@@ -725,13 +725,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SamplerSpecError as error:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
-    except BaseException as error:
+    except Exception as error:
+        # after a reclaim, an ordinary error is most likely the teardown under way;
+        # KeyboardInterrupt and SystemExit are not converted, and the original type
+        # stays in the log line so a real failure can still be told apart
         if deadline.armed_at is None:
             raise
         import traceback  # noqa: PLC0415
 
         traceback.print_exc()
-        reclaim_exit(f"error after the reclaim: {type(error).__name__}")
+        reclaim_exit(f"error after the reclaim: {type(error).__module__}.{type(error).__qualname__}: "
+                     f"{str(error)[:200]}")
         raise
     print(f"[engine-sampler] done: {rounds} round(s)", flush=True)
     if hold_after_reclaim(deadline=deadline):

@@ -141,3 +141,48 @@ def test_main_without_a_reclaim_returns_zero(tmp_path, monkeypatch):
     spec.write_text("{}")
     monkeypatch.setattr(entry, "run", lambda spec_doc, *, reclaim_deadline: 2)
     assert entry.main(["--spec", str(spec)]) == 0
+
+
+def _armed_run(error):
+    armed = []
+
+    def fake_run(spec_doc, *, reclaim_deadline):
+        armed.append(reclaim_deadline.arm())
+        raise error
+
+    return armed, fake_run
+
+
+def test_an_error_after_the_reclaim_exits_with_the_reclaim_code_and_names_the_error(tmp_path, monkeypatch,
+                                                                                     capsys):
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}")
+    armed, fake_run = _armed_run(ConnectionResetError("engine gone"))
+    exits: list[int] = []
+    monkeypatch.setattr(entry, "run", fake_run)
+    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    try:
+        with pytest.raises(ConnectionResetError):
+            entry.main(["--spec", str(spec)])
+    finally:
+        for deadline in armed:
+            deadline.cancel()
+    assert exits == [entry.RECLAIM_EXIT_CODE]
+    assert "builtins.ConnectionResetError: engine gone" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(3)])
+def test_an_interrupt_after_the_reclaim_is_not_turned_into_a_reclaim_exit(tmp_path, monkeypatch, error):
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}")
+    armed, fake_run = _armed_run(error)
+    exits: list[int] = []
+    monkeypatch.setattr(entry, "run", fake_run)
+    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    try:
+        with pytest.raises(type(error)):
+            entry.main(["--spec", str(spec)])
+    finally:
+        for deadline in armed:
+            deadline.cancel()
+    assert exits == []
