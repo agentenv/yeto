@@ -762,6 +762,10 @@ def test_a_run_releases_only_the_listed_versions(tmp_path):
     skipped = [e for e in events if e["event"] == "rl_policy_release_skipped"]
     assert {e["policy_version"] for e in skipped} == {1}
     assert all(e["reason"] == "not_a_release_version" for e in skipped)
+    # S30 D29: the read heartbeat follows every consumed group, released or not
+    from yeto.rl.engine.sample_buffer import read_read_position
+    beat = read_read_position(store_dir / "sample-buffer")
+    assert beat is not None and beat["buffer_selected"] == 4 and beat["train_step"] == 1  # read during step 2
 
 
 def test_release_only_versions_is_planned_from_the_flag():
@@ -822,6 +826,22 @@ def test_d3_relay_ports_forward_group_size():
     from yeto.rl.adapters.verl.relay_trainer import install_relay_ports
 
     assert "group_size" in inspect.signature(install_relay_ports).parameters
+def test_d31_both_buffer_trainer_paths_pass_group_size_to_the_feed():
+    """S30 D31: only the relay path forwarded group_size, so a 120B store trainer
+    (install_buffer_ports) trained a 3-sample group and verl asserted 15 % 16."""
+    import ast
+
+    import yeto.rl.adapters.verl as verl_adapters
+
+    source = Path(verl_adapters.__file__).with_name("buffer_trainer_runner.py").read_text()
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and getattr(node.func, "id", None)
+             in ("install_buffer_ports", "install_relay_ports")]
+    assert {c.func.id for c in calls} == {"install_buffer_ports", "install_relay_ports"}
+    for call in calls:
+        assert "group_size" in {k.arg for k in call.keywords}, call.func.id
+
+
 def test_dropped_groups_are_counted_and_a_high_drop_rate_warns(tmp_path, capsys):
     """Dropped groups emit rl_buffer_group_dropped with running counts; a drop rate
     above the threshold over a window warns once per window."""

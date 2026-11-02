@@ -427,6 +427,20 @@ def _batch_token(batch: RolloutBatchHandle) -> str:
     return policy_token(batch.policy_version, batch.policy_hash)
 
 
+def _nonzero_advantage_count(batch) -> int | None:
+    """``batch.nonzero_advantages`` as ``LocalRoundStats.nonzero_advantage_count`` (an
+    int within the trained samples, else None)."""
+    value = getattr(batch, "nonzero_advantages", None)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    total = sum(len(g.sample_ids) for g in batch.groups)
+    return count if 0 <= count <= total else None
+
+
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
     import hashlib
 
@@ -1436,6 +1450,8 @@ class IslandDriver:
             lr=metrics.lr,
             applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
             applied_lrs=metrics.applied_lrs or None,
+            # S29-next c2: was never set, so every rl_local_round carried null
+            nonzero_advantage_count=_nonzero_advantage_count(batch),
             **_dynamic_filter_counts(batch),
         )
 

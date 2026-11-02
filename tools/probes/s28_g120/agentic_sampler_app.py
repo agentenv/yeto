@@ -59,7 +59,7 @@ SHARD = "modal-0"
 # "H200", "B200" or "H100"; the nvidia-smi self-check and the engine spec follow it.
 GPU_KIND = os.environ.get("YETO_G120_GPU", "H200").upper()
 GPU_NAME = f"NVIDIA {GPU_KIND}"
-TP = 8
+TP = int(os.environ.get("YETO_G120_TP", "8"))  # S29-next P1-1: configurable tensor parallel
 PROXY_PORT = 31600
 SECRET_PATH = "/root/.yeto-records-proxy-secret"
 MIRROR_DIR = "/dev/shm/yeto-release-mirror"
@@ -68,7 +68,7 @@ TIMEOUT_S = int(os.environ.get("YETO_G120_TIMEOUT_S", "14400"))
 DEFAULTS = {
     "store": f"{STORE_MOUNT}/xc120", "base_dir": f"{STORE_MOUNT}/xc120/base/nemotron-120b-text",
     "groups_per_round": 8, "samples_per_group": 4, "max_backlog_groups": 16, "num_rollouts": 64,
-    "turn_max_tokens": 4096, "max_model_len": 65536, "max_response_len": 61440, "max_prompt_len": 16384,
+    "turn_max_tokens": 16384, "max_model_len": 65536, "max_response_len": 61440, "max_prompt_len": 16384,
     "max_in_flight": 32, "min_samples": 2, "agent_timeout": 900, "trial_timeout": 1500, "boat_ttl": 2700,
     "idle_s": 600.0, "stop_version": -1, "stop_groups": 0, "max_s": 10800.0, "poll_s": 20.0,
     "mem_fraction": 0.8, "temperature": 1.0, "top_p": 1.0, "model_name": "nemotron-3.5-super",
@@ -87,7 +87,7 @@ def spec(store: str, out: str, *, engine_version: str, cfg: dict) -> dict:
     return {
         "sampler_id": SHARD,
         "engine": {"factory": "yeto.rl.adapters.sampler_engines.from_spec:build", "adapter": "sglang-server",
-                   "server": server, "options": {"tp": TP}},
+                   "server": server, "options": {"tp": TP, "live_update": True}},
         # n = trials per task; max_tokens is the per-call cap (the proxy signs the same)
         "sampling": {"max_tokens": int(cfg["turn_max_tokens"]), "temperature": float(cfg["temperature"]),
                      "top_p": float(cfg["top_p"]), "n": int(cfg["samples_per_group"])},

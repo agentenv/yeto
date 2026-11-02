@@ -41,7 +41,7 @@ from yeto.rl.engine.ports import PlacementDescription, PublicationResult, Rollou
 from . import publish as pub
 from .cut import CutPorts
 from .fully_async_cut import FullyAsyncDataCursor
-from .fully_async_round import (DISCARD_MECHANISM, FULLY_ASYNC_PLACEMENT, RoundCollector,
+from .fully_async_round import (DISCARD_MECHANISM, advantage_stats, FULLY_ASYNC_PLACEMENT, RoundCollector,
                                 SampleMeta, group_metadata)
 from .fully_async_translate import VersionMap
 from .ports_impl import sent_checksum
@@ -182,6 +182,7 @@ class FullyAsyncRolloutPool:
         queue = isl.call("yeto_assemble")
         version, digest = isl.published
         groups = self._group_metadata(collector, rollout_id)
+        advantage = advantage_stats(collector)
         carry = {**collector.carry_over_fields(), "queue_size_after": queue.get("queue_size"),
                  "pulled_samples": pulled}
         discard = cutoff_fields(collector.discard_tally())
@@ -189,19 +190,26 @@ class FullyAsyncRolloutPool:
                   "gen_seconds": time.monotonic() - started, "carry_over": carry,
                   "versions": {g.group_id: list(g.policy_versions or (rollout_id,)) for g in groups},
                   "rewards": [g.reward_mean for g in groups], "queue": queue,
+                  "uniform_reward_groups": advantage["uniform_reward_groups"],
+                  "group_reward_uniform": advantage["group_reward_uniform"],
+                  "nonzero_advantages": advantage["nonzero_advantages"],
                   "version_map": isl.vmap.to_dict(),
                   # a buffer trainer judges behavior versions with its own map (S27 G-EQ5)
                   **({} if isl.consume_map is isl.vmap
                      else {"behavior_map": isl.consume_map.to_dict()})}
         isl.append_jsonl(f"verl-fa-rollout-{isl.learner_id}.jsonl", record)
         isl.emit("rl_verl_fa_round", rollout_id=rollout_id, pulled=pulled, kept=len(groups),
-                 discarded=len(collector.discarded), queue_size_after=queue.get("queue_size"))
+                 discarded=len(collector.discarded), queue_size_after=queue.get("queue_size"),
+                 nonzero_advantages=advantage["nonzero_advantages"],
+                 uniform_reward_groups=advantage["uniform_reward_groups"],
+                 group_reward_uniform=advantage["group_reward_uniform"])
         return RolloutBatchHandle(
             rollout_id=rollout_id, policy_version=version, policy_hash=digest, groups=groups,
             completed=len(groups), aborted=0, payload=None,
             submitted_groups=pulled, abort_mechanism=DISCARD_MECHANISM if collector.discarded else None,
             carry_over=carry,
             backend="verl",
+            nonzero_advantages=advantage["nonzero_advantages"],
             # Same field and meaning as Miles: groups aborted in flight and NOT
             # trained.  verl's partial rollout continues interrupted requests
             # (counted as resumed_trajectories in carry_over, like Miles'

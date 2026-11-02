@@ -38,6 +38,10 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   (optional; e.g. ``expected_expert_matrices``);
 * ``rollout_quant``: optional ``{"tier", "apply"}`` (S26 E6), applied first
   (:func:`apply_rollout_quant`);
+* ``incarnation_lease``: optional (default on, in the buffer store): ``false``, or
+  ``{"store", "poll_s", "write_check_s"}`` (S29-next c1, :mod:`.incarnation_lease`):
+  the incarnation claims the island's lease at join and leaves FENCED, writing no
+  more groups, once another incarnation holds it;
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -392,6 +396,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None) -> int:
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
+    from .incarnation_lease import FENCED_EVENT, LEASE_EVENT  # noqa: PLC0415
+
     from .sampler_resume import (  # noqa: PLC0415
         RECLAIM_MARKER_ENV,
         ReclaimWatcher,
@@ -423,6 +429,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
     member_store = store_for(str(spec.get("buffer_root") or spec["store"]), environ=environ)
     membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
+    lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ)
+    fenced = lambda: lease is not None and lease.fenced  # noqa: E731
     island = None
 
     def leave(reason: LeaveReason, **detail: Any) -> None:
@@ -438,6 +446,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
 
     telemetry = resource_sampler(emit)
     watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
+    fence_watcher = None
     try:
         make_round = None
         if spec.get("agentic"):  # S28 G-120: Harbor trials through the records proxy
@@ -446,15 +455,30 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             make_round = round_factory(spec, engine, env)
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
-                                      should_stop=lambda: reclaimed() or (stop is not None and stop()),
-                                      reclaimed=reclaimed, incarnation=incarnation, resume=resume,
+                                      should_stop=lambda: reclaimed() or fenced() or (stop is not None and stop()),
+                                      reclaimed=lambda: reclaimed() or fenced(), incarnation=incarnation,
+                                      resume=resume,
                                       data_cursor=getattr(prompts, "cursor", None), make_round=make_round)
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
+        if lease is not None:  # S29-next c1: this incarnation now owns the island's shard
+            claimed = lease.claim(buffer.entries(), earlier=resume.incarnations)
+            emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
+                 superseded=claimed["superseded"], sealed=claimed["sealed"])
+            island.round.write_fenced = lease.check_before_write
+
+            def on_fenced() -> None:
+                print(f"[engine-sampler] fenced: incarnation {lease.fenced_by} holds the lease of "
+                      f"{config.sampler_id}; no group is written from now on", flush=True)
+                emit(FENCED_EVENT, incarnation=incarnation, superseded_by=lease.fenced_by)
+
+            fence_watcher = ReclaimWatcher(lease.poll, on_fenced, poll_s=lease_poll_s,
+                                           name="sampler-lease-watcher").start()
         rounds = 0 if buffer.data_ended else island.run()
         preempted = reclaimed()
-        fence = None if preempted or stop_reason is None else stop_reason()
+        fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
+            else None if stop_reason is None else stop_reason()
         if fence is not None:  # S29 D4: e.g. FENCED, fenced="other run"
             reason, detail = fence
             print(f"[engine-sampler] leaving {reason.name}: {dict(detail)}", flush=True)
@@ -471,13 +495,16 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         return rounds
     except BaseException as error:
         try:
-            leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.INFRA_FAILED,
+            leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.FENCED if fenced()
+                  else LeaveReason.INFRA_FAILED,
                   error=f"{type(error).__name__}: {error}"[:300])
         except Exception:  # noqa: BLE001 - the original error is the one to report
             pass
         raise
     finally:
         watcher.stop()
+        if fence_watcher is not None:
+            fence_watcher.stop()
         closer = getattr(getattr(island, "round", None), "close", None)
         if callable(closer):  # S28 G-120: an agentic round deletes its boat sandboxes
             try:
@@ -495,6 +522,29 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         finally:
             if telemetry is not None:
                 telemetry.stop()
+
+
+def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str, default_store: Any,
+                      environ: Mapping[str, str] | None = None) -> tuple[Any, float]:
+    """S29-next c1: ``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
+    absent or ``true`` = on, in the buffer store; ``false`` = off; a mapping may name
+    ``store`` (another store path every incarnation reads, e.g. a shared bucket mount),
+    ``poll_s`` (watcher period, default 30) and ``write_check_s`` (the longest a group
+    write trusts the last read, default 1)."""
+    from .incarnation_lease import DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S, IncarnationLease  # noqa: PLC0415
+
+    section = spec.get("incarnation_lease", True)
+    if section is False or section is None:
+        return None, DEFAULT_POLL_S
+    section = {} if section is True else dict(section)
+    store = default_store
+    if section.get("store"):
+        from .resume import store_for  # noqa: PLC0415
+
+        store = store_for(str(section["store"]), environ=environ)
+    lease = IncarnationLease(store, sampler_id, incarnation,
+                             write_check_s=float(section.get("write_check_s", DEFAULT_WRITE_CHECK_S)))
+    return lease, float(section.get("poll_s", DEFAULT_POLL_S))
 
 
 def load_spec(path: str | Path) -> dict[str, Any]:

@@ -25,6 +25,18 @@ length as uint64 and :data:`MAGIC`. Writing and reading are sequential, chunk by
 chunk; the sha256 of the target is computed while it is read (trainer) or
 written (sampler), so no file is read twice.
 
+Format v2 (:data:`MAGIC_V2`, S30 P0-b; ``YETO_RL_DELTA_FORMAT=v2``): every chunk
+that changed is one ``zstd`` frame of the changed word indexes as gaps (uint32,
+first gap from 0), then the changed words XOR the base word (uint16), each array
+byte-plane shuffled (all low bytes, then the next byte plane, ...), so the many
+small gaps and the near-identical high bytes compress; the footer's chunk
+records are [kind, changed words, frame bytes] (kind ``z`` or ``same``) and it
+carries ``"format": 2``. A v2 chunk applies to the chunk as rebuilt so far (the
+XOR base is the delta's base), so :func:`apply_chain` mixes v1 and v2 deltas
+freely; the target's sha256 is the same for both formats. ``zstd`` is the
+standard library's ``compression.zstd`` (Python >= 3.14) or the ``zstandard``
+package; only v2 files need it.
+
 A directory delta (:func:`encode_directory`) covers every file of the target
 release: a ``*.safetensors`` file with a same-size file of the same name in the
 base gets a delta; every other file is copied whole. Its entries
@@ -36,7 +48,7 @@ directory and checks every digest.
 rebuilt releases, so the next delta applies to a local copy; a delta whose base
 is not there is rebuilt from the newest full release along its chain.
 
-This module is engine-neutral and imports only numpy.
+This module is engine-neutral and imports only numpy (plus zstd for v2).
 """
 
 from __future__ import annotations
@@ -58,12 +70,15 @@ import numpy as np
 
 MIRROR_ENV = "YETO_RL_RELEASE_MIRROR"  # sampler: local directory of rebuilt delta releases
 MAGIC = b"YDELTA1\n"
+MAGIC_V2 = b"YDELTA2\n"
+FORMAT_ENV = "YETO_RL_DELTA_FORMAT"  # trainer: "v1" (default) or "v2" for new delta files
+ZSTD_LEVEL = 3
 DELTA_SUFFIX = ".ydelta"
 CHUNK_WORDS = 1 << 24  # 32 MiB of 16-bit words per chunk
 MIN_DELTA_BYTES = 1 << 20  # smaller files are copied whole
 DEFAULT_WORKERS = 8
 DELTA, FULL_COPY = "delta", "full"
-_IDX, _BITS, _SAME = "idx", "bits", "same"
+_IDX, _BITS, _SAME, _ZST = "idx", "bits", "same", "z"
 _FOOTER = struct.Struct("<Q")
 
 
@@ -107,6 +122,57 @@ class DirectoryDelta:
         return self.delta_bytes / self.target_bytes if self.target_bytes else 1.0
 
 
+# ---------------------------------------------------------------- zstd (v2)
+def _zstd() -> tuple[Callable[[bytes, int], bytes], Callable[[bytes], bytes]]:
+    """(compress(data, level), decompress(data)): ``compression.zstd`` or ``zstandard``."""
+    try:
+        from compression import zstd  # type: ignore[import-not-found]  # Python >= 3.14
+
+        return (lambda data, level: zstd.compress(data, level=level)), zstd.decompress
+    except ImportError:
+        pass
+    try:
+        import zstandard
+    except ImportError as error:
+        raise ReleaseDeltaError("delta format v2 needs zstd: Python >= 3.14 or `pip install zstandard`") from error
+    return ((lambda data, level: zstandard.ZstdCompressor(level=level).compress(data)),
+            (lambda data: zstandard.ZstdDecompressor().decompress(data)))
+
+
+def zstd_available() -> bool:
+    try:
+        _zstd()
+    except ReleaseDeltaError:
+        return False
+    return True
+
+
+def delta_format(environ: Mapping[str, str] | None = None) -> int:
+    """The delta format new delta files get: :data:`FORMAT_ENV` (``v1``/``v2``), default 1."""
+    value = (os.environ if environ is None else environ).get(FORMAT_ENV, "v1").strip().lower().lstrip("v")
+    if value not in ("1", "2"):
+        raise ValueError(f"{FORMAT_ENV}={value!r}: expected v1 or v2")
+    return int(value)
+
+
+def _shuffle(values: np.ndarray) -> bytes:
+    """Byte planes of ``values`` (little-endian): every byte 0, then every byte 1, ..."""
+    return values.view(np.uint8).reshape(-1, values.itemsize).T.tobytes()
+
+
+def _unshuffle(raw: bytes, dtype: str, count: int) -> np.ndarray:
+    size = np.dtype(dtype).itemsize
+    planes = np.frombuffer(raw, dtype=np.uint8, count=size * count).reshape(size, count)
+    return np.ascontiguousarray(planes.T).view(dtype).reshape(count)
+
+
+def _v2_frame(a: np.ndarray, b: np.ndarray, index: np.ndarray, compress: Callable[[bytes, int], bytes],
+              level: int) -> bytes:
+    gaps = np.diff(index, prepend=np.uint32(0)).astype("<u4")
+    values = (a[index] ^ b[index]).astype("<u2")
+    return compress(_shuffle(gaps) + _shuffle(values), level)
+
+
 # ---------------------------------------------------------------- one file
 def _read_words(handle: Any, count: int) -> np.ndarray:
     """``count`` little-endian 16-bit words from ``handle`` into a new writable array."""
@@ -117,9 +183,14 @@ def _read_words(handle: Any, count: int) -> np.ndarray:
     return words
 
 
-def encode_file(base: Path, target: Path, out: Path, *, chunk_words: int = CHUNK_WORDS) -> tuple[int, str]:
-    """Write the delta ``base`` -> ``target`` into ``out``; the two files must have
-    the same size. Returns (changed words, sha256 of ``target``)."""
+def encode_file(base: Path, target: Path, out: Path, *, chunk_words: int = CHUNK_WORDS,
+                fmt: int = 1, level: int = ZSTD_LEVEL) -> tuple[int, str]:
+    """Write the delta ``base`` -> ``target`` into ``out`` in format ``fmt`` (1 or
+    2, module doc); the two files must have the same size. Returns (changed
+    words, sha256 of ``target``)."""
+    if fmt not in (1, 2):
+        raise ValueError(f"unknown delta format {fmt}")
+    compress = _zstd()[0] if fmt == 2 else None
     size = os.path.getsize(target)
     if os.path.getsize(base) != size:
         raise ReleaseDeltaError(f"{target.name}: base and target sizes differ")
@@ -136,7 +207,12 @@ def encode_file(base: Path, target: Path, out: Path, *, chunk_words: int = CHUNK
             changed = int(np.count_nonzero(mask))
             changed_total += changed
             if changed == 0:
-                chunks.append([_SAME, 0])
+                chunks.append([_SAME, 0] if fmt == 1 else [_SAME, 0, 0])
+                continue
+            if compress is not None:
+                frame = _v2_frame(a, b, np.flatnonzero(mask).astype("<u4"), compress, level)
+                sink.write(frame)
+                chunks.append([_ZST, changed, len(frame)])
                 continue
             bitmap_bytes = (count + 7) // 8
             if 4 * changed < bitmap_bytes:
@@ -154,9 +230,12 @@ def encode_file(base: Path, target: Path, out: Path, *, chunk_words: int = CHUNK
             last = new.read(1)
             digest.update(last)
             tail_byte = last[0]
-        footer = json.dumps({"target_size": size, "base_size": size, "chunk_words": chunk_words,
-                             "tail": tail_byte, "chunks": chunks}, separators=(",", ":")).encode()
-        sink.write(footer + _FOOTER.pack(len(footer)) + MAGIC)
+        fields: dict[str, Any] = {"target_size": size, "base_size": size, "chunk_words": chunk_words,
+                                  "tail": tail_byte, "chunks": chunks}
+        if fmt == 2:
+            fields.update({"format": 2, "codec": "zstd", "xor": True})
+        footer = json.dumps(fields, separators=(",", ":")).encode()
+        sink.write(footer + _FOOTER.pack(len(footer)) + (MAGIC_V2 if fmt == 2 else MAGIC))
     return changed_total, digest.hexdigest()
 
 
@@ -167,18 +246,36 @@ def _footer(handle: Any, path: Path) -> dict[str, Any]:
         raise ReleaseDeltaError(f"{path.name}: not a delta file")
     handle.seek(end - trailer)
     raw = handle.read(trailer)
-    if raw[_FOOTER.size:] != MAGIC:
+    magic = raw[_FOOTER.size:]
+    if magic not in (MAGIC, MAGIC_V2):
         raise ReleaseDeltaError(f"{path.name}: not a delta file (magic)")
     (length,) = _FOOTER.unpack(raw[:_FOOTER.size])
     handle.seek(end - trailer - length)
     footer = json.loads(handle.read(length))
+    if int(footer.get("format", 1)) != (2 if magic == MAGIC_V2 else 1):
+        raise ReleaseDeltaError(f"{path.name}: footer format does not match the magic")
     handle.seek(0)
     return footer
 
 
-def _apply_chunk(words: np.ndarray, kind: str, changed: int, patch: Any, name: str) -> None:
+def _apply_chunk(words: np.ndarray, record: Sequence[Any], patch: Any, name: str) -> None:
     """Apply one chunk record of a delta file (read from ``patch``) to ``words``."""
-    if kind == _IDX:
+    kind, changed = record[0], int(record[1])
+    if kind == _ZST:
+        frame = patch.read(int(record[2]))
+        try:
+            raw = _zstd()[1](frame)
+        except ReleaseDeltaError:
+            raise
+        except Exception as error:  # a corrupt frame: the codec's own error type
+            raise ReleaseDeltaError(f"{name}: bad zstd frame: {error}") from error
+        if len(raw) != 6 * changed:
+            raise ReleaseDeltaError(f"{name}: zstd frame holds {len(raw)} bytes, expected {6 * changed}")
+        index = np.cumsum(_unshuffle(raw[:4 * changed], "<u4", changed), dtype=np.int64)
+        if changed and (index[-1] >= words.size or np.any(np.diff(index) <= 0)):
+            raise ReleaseDeltaError(f"{name}: word index out of the chunk")
+        words[index] ^= _unshuffle(raw[4 * changed:], "<u2", changed)
+    elif kind == _IDX:
         index = np.frombuffer(patch.read(4 * changed), dtype="<u4")
         words[index] = np.frombuffer(patch.read(2 * changed), dtype="<u2")
     elif kind == _BITS:
@@ -209,8 +306,7 @@ def apply_chain(base: Path, deltas: Sequence[Path], out: Path) -> str:
         for number in range(len(footers[0]["chunks"])):
             chunk = _read_words(old, min(chunk_words, words - number * chunk_words))
             for footer, patch, delta in zip(footers, patches, deltas):
-                kind, changed = footer["chunks"][number]
-                _apply_chunk(chunk, kind, int(changed), patch, Path(delta).name)
+                _apply_chunk(chunk, footer["chunks"][number], patch, Path(delta).name)
             digest.update(chunk.data)
             sink.write(chunk.data)
         tail = footers[-1]["tail"]
@@ -248,11 +344,13 @@ def _delta_mode(name: str, target: Path, base: Path | None) -> str:
 
 
 def encode_directory(base: Path, target: Path, out: Path, *, skip: Callable[[str], bool] = lambda n: False,
-                     workers: int = DEFAULT_WORKERS) -> DirectoryDelta:
+                     workers: int = DEFAULT_WORKERS, fmt: int | None = None) -> DirectoryDelta:
     """Write the delta of every file of ``target`` against ``base`` into ``out``
     (created; module doc). ``skip(name)``: files left out of the release (its
-    record). Files run in parallel threads (numpy and hashlib release the GIL)."""
+    record). ``fmt``: the delta file format (default :func:`delta_format`). Files
+    run in parallel threads (numpy, hashlib and zstd release the GIL)."""
     base, target, out = Path(base), Path(target), Path(out)
+    fmt = delta_format() if fmt is None else int(fmt)
     out.mkdir(parents=True, exist_ok=True)
     bases = _files(base, skip)
 
@@ -262,7 +360,7 @@ def encode_directory(base: Path, target: Path, out: Path, *, skip: Callable[[str
         destination = out / (name + DELTA_SUFFIX if mode == DELTA else name)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if mode == DELTA:
-            _changed, sha256 = encode_file(bases[name], path, destination)
+            _changed, sha256 = encode_file(bases[name], path, destination, fmt=fmt)
         else:
             shutil.copyfile(path, destination)
             sha256 = file_sha256(path)
@@ -321,6 +419,19 @@ def entries_of(record: Mapping[str, Any]) -> dict[str, FileEntry]:
 
 
 # ---------------------------------------------------------------- sampler side
+MIRROR_STAMP = ".yeto-mirror.json"  # in a rebuilt release's directory: which release it is
+
+
+def mirror_stamp(release: Any) -> dict[str, Any]:
+    """What identifies a release in a mirror (S30 D34): its name alone does not
+    (every run's store has an ``r7-v12``); its sequence, version, policy hash and
+    release time together do."""
+    return {"path": str(release.path), "seq": int(release.seq), "version": int(release.version),
+            "policy_hash": str(release.policy_hash),
+            "released_at": None if getattr(release, "released_at", None) is None
+            else float(release.released_at)}
+
+
 class DeltaMirror:
     """Rebuilt releases on the sampler's local disk (module doc).
 
@@ -340,28 +451,52 @@ class DeltaMirror:
         self.keep = max(1, int(keep))
         self.workers = int(workers)
 
-    def holds(self, path: str) -> bool:
-        return (self.root / path).is_dir()
+    def holds(self, path: str, release: Any = None) -> bool:
+        """The mirror holds ``path``; with ``release``: a copy rebuilt for that very
+        release (its stamp, :data:`MIRROR_STAMP`, names the same record). S30 D34:
+        the mirror root is shared by every run on a host (default under the
+        system temp directory) and keyed by release name only, so ``r7-v12`` of
+        another store or an earlier run is not this store's ``r7-v12``; a
+        directory without a matching stamp is not used as a base."""
+        directory = self.root / path
+        if not directory.is_dir():
+            return False
+        if release is None:
+            return True
+        try:
+            stamp = json.loads((directory / MIRROR_STAMP).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return stamp == mirror_stamp(release)
 
     def materialize(self, release: Any, *, record_of: Callable[[str], Any],
                     weights_dir: Callable[[Any], Path], from_store: bool = False) -> Path:
-        def held(path: str) -> bool:
-            return not from_store and self.holds(path)
+        def held(link: Any) -> bool:
+            return not from_store and self.holds(link.path, link)
 
         chain = []
         link = release
-        while link.delta is not None and not held(link.path):
+        while link.delta is not None and not held(link):
             chain.append(link)
             link = record_of(str(link.delta["base_path"]))
-        base = self.root / link.path if held(link.path) else weights_dir(link)
+        base = self.root / link.path if held(link) else weights_dir(link)
         if not chain:
             return base
         self.root.mkdir(parents=True, exist_ok=True)
         partial = self.root / f".{release.path}.partial"
         shutil.rmtree(partial, ignore_errors=True)
-        apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
-                        partial, workers=self.workers)
-        partial.replace(self.root / release.path)
+        try:
+            apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
+                            partial, workers=self.workers)
+            (partial / MIRROR_STAMP).write_text(json.dumps(mirror_stamp(release), sort_keys=True),
+                                                encoding="utf-8")
+        except BaseException:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        target = self.root / release.path
+        if target.exists():  # a stale copy of another release with this name (D34)
+            shutil.rmtree(target, ignore_errors=True)
+        partial.replace(target)
         self._prune(newest=release.path)
         return self.root / release.path
 

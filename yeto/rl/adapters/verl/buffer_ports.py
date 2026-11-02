@@ -78,6 +78,7 @@ from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.merged_release import (BufferLane, MergedReleaseGuard, ResumedReleases, is_publisher,
                                            merged_version, resumed_releases)
 from yeto.rl.engine.policy_release import FULL, PolicyReleaseStore
+from yeto.rl.engine.sample_buffer import buffer_dir, write_read_position
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 
 from .buffer_feed import BufferCall, BufferFeed, MergedVersions, RowShape
@@ -136,6 +137,7 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
     that is itself a delta is rebuilt first when the store has a mirror
     (S27 G-EQ3, gap 20), so a restarted island's next release stays a delta."""
     from yeto.rl.engine.policy_release import DeltaChain
+    from yeto.rl.engine.release_delta import ReleaseDeltaError
 
     if int(full_every) < 1:
         return None
@@ -151,18 +153,29 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
     # mirror rebuilds it on local disk (Nemotron Nano: about 1 min) -- far cheaper than
     # the whole-checkpoint upload the alternative costs (63 GB, about 2.3 h on this link).
     rebuilt = latest.delta is not None
+    retried = None
     try:
-        directory = releases.resolve(latest)
+        try:
+            directory = releases.resolve(latest)
+        except ReleaseDeltaError as first:
+            # S30 D34: a rebuild that fails its digest check may have started from a
+            # stale copy in the mirror (shared by every run on the host); rebuild once
+            # more from the full release in the store, as a sampler does, before the
+            # next release falls back to a whole-checkpoint upload.
+            retried = f"{type(first).__name__}: {first}"[:200]
+            directory = releases.resolve(latest, from_store=True)
     except Exception as error:  # noqa: BLE001 -- no usable base: the next release goes out whole
         directory = None
         if emit is not None:
             emit("rl_policy_release_delta_base", adopted=False, rebuilt=rebuilt,
-                 reason=f"{type(error).__name__}: {error}"[:200])
+                 reason=f"{type(error).__name__}: {error}"[:200],
+                 **({} if retried is None else {"first_error": retried}))
     if directory is not None and Path(directory).is_dir():
         chain.adopt(latest, directory)
         if emit is not None:
             emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
-                 base_version=latest.version, base_path=str(directory), rebuilt=rebuilt)
+                 base_version=latest.version, base_path=str(directory), rebuilt=rebuilt,
+                 **({} if retried is None else {"retried_from_store": True, "first_error": retried}))
     return chain
 
 
@@ -466,8 +479,17 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     actor_call = island.call
     log = CONSUMED_LOG.format(learner=island.learner_id)
 
+    heartbeat_root = buffer_dir(buffer)
+
     def record(fields: dict[str, Any]) -> None:
         island.append_jsonl(log, fields)
+        if heartbeat_root is not None:  # S30 D29: the read position, released or not
+            try:
+                write_read_position(heartbeat_root, buffer_selected=feed.read_cursor(),
+                                    buffer_shards=feed.read_shards(),
+                                    train_step=int(island.published[0]) if island.published else None)
+            except Exception as error:  # noqa: BLE001 - a heartbeat never stops training
+                island.emit("rl_buffer_read_position_failed", error=str(error)[:300])
 
     # A buffered group's behavior version is a store release version (an outer
     # version), not a verl param version, so the round judges it with its own map.

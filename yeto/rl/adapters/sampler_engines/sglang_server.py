@@ -44,9 +44,14 @@ every running request, so a release waits behind the whole round. With
    the paused server takes the update at once;
 3. ``POST /continue_generation`` (also after a failed update).
 
-The retracted requests then recompute their KV cache with the new weights.
-The adapter starts the server with ``--disable-radix-cache`` so no prefix KV
-computed with older weights is reused. Each completion's ``weight_version``
+The retracted requests then go on from the KV cache SGLang still holds: the
+radix (prefix) cache is kept across the update (``live_prefix_cache``, default
+on), so prefix KV computed with older weights may be reused, as PipelineRL,
+prime-rl and SkyRL do (PipelineRL measured the extra divergence as small). The
+generation log-probabilities are recorded as sampled, so TIS corrects against
+the real behaviour. ``live_prefix_cache=False`` starts the server with
+``--disable-radix-cache`` instead (no stale prefix, but every agentic turn
+re-prefills its whole history). Each completion's ``weight_version``
 is the version of its first output token and ``final_weight_version`` the
 version of its last, from ``meta_info.weight_versions`` (per-token version
 spans of the pinned SGLang fork 2fa88018). An SGLang without spans gives
@@ -105,6 +110,8 @@ class SGLangOptions:
     load_report_dir: str | None = None
     # update the weights while a generation runs (module doc); needs ServerConfig.in_place_reload
     live_update: bool = False
+    # keep the radix prefix cache under live_update (stale prefix KV is reused; module doc)
+    live_prefix_cache: bool = True
 
 
 def _finish(meta: dict[str, Any]) -> str:
@@ -182,7 +189,7 @@ class SGLangServerEngine(ServerEngine):
             argv += ["--dp", str(o.tp), "--enable-dp-attention", "--moe-a2a-backend", "deepep"]
         if o.nextn:
             argv += ["--speculative-algorithm", "NEXTN"]
-        if o.live_update and "--disable-radix-cache" not in c.extra_args:
+        if o.live_update and not o.live_prefix_cache and "--disable-radix-cache" not in c.extra_args:
             argv += ["--disable-radix-cache"]  # no prefix KV of older weights after an update
         return argv + list(c.extra_args)
 

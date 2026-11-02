@@ -1091,19 +1091,22 @@ class DispensedRows:
                 "lost": len(positions) - len(trained)}
 
     def written(self, rollout_id: int, positions: Iterable[int], *,
-                timeout_s: float = COMMIT_ACK_TIMEOUT_S, unwritten: str = "drop") -> dict[str, Any]:
+                timeout_s: float = COMMIT_ACK_TIMEOUT_S, unwritten: str = "drop",
+                keep: Iterable[int] = ()) -> dict[str, Any]:
         """Sampler island (S27 P4): the groups of ``positions`` are in the sample
         buffer, so their rows are done: report them trained (the sampler's
         "trained" is "written for the trainers") and wait (``timeout_s``) for
         the dispenser's answer. Every other position of the round that is still
         taken becomes a drop candidate (dropped at the next draw unless Miles put
-        its group back into its buffer, as for a training island)."""
+        its group back into its buffer, as for a training island). ``keep``:
+        taken positions whose groups are still generating (a streaming sampler,
+        S29): neither released nor drop candidates."""
         with self._lock:
             done = {int(p) for p in positions} & self.tasks.taken()
             self._pending = {r: kept - done for r, kept in self._pending.items()
                              if r > int(rollout_id) and kept - done}
             self.tasks.report(trained=sorted(done))
-            rest = self.tasks.taken() - done - self.pending_positions()
+            rest = self.tasks.taken() - done - self.pending_positions() - {int(p) for p in keep}
             released = 0
             if unwritten == "release":  # never in the buffer: give them out again now
                 rest -= self.held_back()

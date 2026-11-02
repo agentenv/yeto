@@ -234,6 +234,21 @@ def updates_during_generation(engine: Any) -> bool:
     return getattr(engine, "updates_during_generation", False) is True
 
 
+def completion_version(completion: Completion, served: int, *, live: bool) -> int:
+    """The behavior version of one completion: the round's served version, or the
+    completion's own on an engine that updates during a generation (it must give
+    one)."""
+    if not live:
+        if completion.weight_version not in (None, served):
+            raise SamplerEngineError(f"completion of v{completion.weight_version} in a round served "
+                                     f"at v{served}; the engine does not update during a generation")
+        return served
+    if completion.weight_version is None:
+        raise SamplerEngineError("an engine that updates during a generation must give each "
+                                 "completion its weight_version")
+    return int(completion.weight_version)
+
+
 @runtime_checkable
 class TokenSamplerEngine(SamplerEngine, Protocol):
     """Optional capability: generate from prompt token ids (S25 N10.5).

@@ -52,6 +52,7 @@ from .sampler_engine import (
     SamplerEngine,
     SamplerEngineError,
     SamplingParams,
+    completion_version,
     updates_during_generation,
 )
 from .sampler_loop import SamplerLoop
@@ -73,6 +74,12 @@ class PromptItem:
 
 
 Reward = Callable[[PromptItem, Completion], float]
+
+
+def dispense_position(item: PromptItem) -> int | None:
+    """The task-dispenser position of a prompt's row (S27 P4), None without one."""
+    spot = item.metadata.get(DISPENSE_POSITION_KEY)
+    return spot if isinstance(spot, int) and not isinstance(spot, bool) else None
 
 
 def sample_record(item: PromptItem, completion: Completion, *, reward: float, version: int,
@@ -97,19 +104,7 @@ def sample_record(item: PromptItem, completion: Completion, *, reward: float, ve
     }
 
 
-def _completion_version(completion: Completion, served: int, *, live: bool) -> int:
-    """The behavior version of one completion: the round's served version, or the
-    completion's own on an engine that updates during a generation (it must give
-    one)."""
-    if not live:
-        if completion.weight_version not in (None, served):
-            raise SamplerEngineError(f"completion of v{completion.weight_version} in a round served "
-                                     f"at v{served}; the engine does not update during a generation")
-        return served
-    if completion.weight_version is None:
-        raise SamplerEngineError("an engine that updates during a generation must give each "
-                                 "completion its weight_version")
-    return int(completion.weight_version)
+_completion_version = completion_version  # moved to sampler_engine (S29: the records proxy uses it)
 
 
 class EngineRound:
@@ -145,20 +140,28 @@ class EngineRound:
         self.reclaimed = reclaimed
         self.unchecked_in_flight = unchecked_in_flight
         self.dropped_groups = 0  # groups not written because the island is leaving
+        # S29-next c1: read right before every group write; True = another incarnation
+        # holds the island's lease (incarnation_lease), so nothing more is written
+        self.write_fenced: Callable[[], bool] = lambda: False
 
-    def _round_record(self, rollout_id: int, last: bool,
-                      position: int | None = None) -> dict[str, Any] | None:
+    def _round_record(self, rollout_id: int, last: bool, position: int | None = None,
+                      cursor: Mapping[str, int] | None = None) -> dict[str, Any] | None:
+        """``cursor``: the data cursor taken when the round drew its prompts
+        (default: read now; a streaming round reads it at the draw)."""
         if self.incarnation is None:
             return None
-        cursor = None if self.data_cursor is None else self.data_cursor(rollout_id)
+        if cursor is None and self.data_cursor is not None:
+            cursor = self.data_cursor(rollout_id)
         return SamplerRound(self.writer.sampler_id, self.incarnation, rollout_id,
                             data_cursor=cursor, last=last, dispense_position=position).record()
 
-    def _written(self, rollout_id: int, positions: list[int]) -> None:
-        """S27 P4: prompts from the task dispenser learn which groups are in the buffer."""
+    def _written(self, rollout_id: int, positions: list[int], keep: Sequence[int] = ()) -> None:
+        """S27 P4: prompts from the task dispenser learn which groups are in the buffer.
+        ``keep``: positions still generating (a streaming round), not released."""
         written = getattr(self.prompts, "written", None)
         if callable(written):
-            result = dict(written(rollout_id, positions, unwritten="release") or {})
+            extra = {"keep": sorted(keep)} if keep else {}
+            result = dict(written(rollout_id, positions, unwritten="release", **extra) or {})
             result.pop("rollout_id", None)
             self.emit("rl_dispense_written", rollout_id=rollout_id, **result)
 
@@ -205,6 +208,19 @@ class EngineRound:
             scored.append((item, samples))
         self._write_scored(rollout_id, version, scored, finish=finish, tokens=tokens, record=record)
 
+    def _write_group(self, rollout_id: int, item: PromptItem, group: Sequence[Mapping[str, Any]], *,
+                     record: Mapping[str, str], last: bool,
+                     cursor: Mapping[str, int] | None = None) -> int | None:
+        """Write one scored group (key ``<incarnation>-r<round>-<prompt id>``, its
+        round record) and mark its round written; returns its dispenser position."""
+        prefix = "" if self.incarnation is None else f"{self.incarnation}-"
+        spot = dispense_position(item)
+        self.writer.write(group, group_key=f"{prefix}r{int(rollout_id)}-{item.prompt_id}", provenance=record,
+                          sampler_round=self._round_record(int(rollout_id), last, spot, cursor))
+        if self.guard is not None:
+            self.guard.written(int(rollout_id))
+        return spot
+
     def _write_scored(self, rollout_id: int, version: int, scored: Sequence[tuple[PromptItem, list[dict]]], *,
                       finish: Mapping[str, int], tokens: int, record: Mapping[str, str],
                       samples: int | None = None, extra: Mapping[str, Any] | None = None) -> int:
@@ -212,25 +228,17 @@ class EngineRound:
         round event; returns the groups written. ``samples``: the round's sample
         count (default: the finish counts); ``extra``: more round-event fields."""
         rollout_id = int(rollout_id)
-        prefix = "" if self.incarnation is None else f"{self.incarnation}-"
         written = 0
         dispensed: list[int] = []
         for position, (item, group) in enumerate(scored):
-            if self.reclaimed():  # leaving: the replacement owns the shard from now on
+            if self.reclaimed() or self.write_fenced():  # leaving: the replacement owns the shard
                 self.dropped_groups += len(scored) - position
                 break
-            spot = item.metadata.get(DISPENSE_POSITION_KEY)
-            spot = spot if isinstance(spot, int) and not isinstance(spot, bool) else None
-            self.writer.write(group, group_key=f"{prefix}r{rollout_id}-{item.prompt_id}",
-                              provenance=record,
-                              sampler_round=self._round_record(rollout_id, position == len(scored) - 1,
-                                                               spot))
+            spot = self._write_group(rollout_id, item, group, record=record, last=position == len(scored) - 1)
             written += 1
             if spot is not None:
                 dispensed.append(spot)
         self._written(rollout_id, dispensed)
-        if written and self.guard is not None:
-            self.guard.written(rollout_id)
         self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version,
                   groups=written, samples=sum(finish.values()) if samples is None else int(samples),
                   response_tokens=tokens, finish=dict(sorted(finish.items())), source=self.provenance.key(),
@@ -288,7 +296,10 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     ``should_stop``: the loop starts no new round. ``reclaimed``: also stop
     writing the current round's groups (default: ``should_stop``). ``make_round``:
     builds the round instead of :class:`EngineRound` with the same arguments
-    (S28 G-120: :class:`~.agentic_round.AgenticRound`, bound to its own settings)."""
+    (S28 G-120: :class:`~.agentic_round.AgenticRound`, bound to its own settings).
+    A round with ``streams`` True (S29: trials run across the loop's rounds)
+    sets the follower's ``live_update`` (its ``live``), holds loads while its
+    trials run (``holds_weights``) and reads pending releases (``release_pending``)."""
     sampling = config.sampling.check()
     check_sampling_fits(sampling, engine, max_prompt_tokens=config.max_prompt_tokens)
     provenance = Provenance.of(engine.identity, sampler_id=config.sampler_id, sampling=sampling)
@@ -310,6 +321,10 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                                loop_guard=config.loop_guard, incarnation=incarnation,
                                resume=resume, data_cursor=data_cursor,
                                reclaimed=should_stop if reclaimed is None else reclaimed)
+    if getattr(engine_round, "streams", False):  # S29: a streaming agentic round
+        follower.live_update = engine_round.live
+        follower.hold = engine_round.holds_weights
+        engine_round.release_pending = follower.pending_seq
     extra = {} if sleep is None else {"sleep": sleep}
     loop: SamplerLoop
     engine_round.unchecked_in_flight = lambda: loop.unchecked_in_flight

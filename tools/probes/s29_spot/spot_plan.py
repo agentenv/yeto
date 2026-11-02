@@ -11,7 +11,10 @@ proxy on the VM's public IP.
 Boat budget (S29: 22 creations left for the UTC day): VM reuse is on
 (``YETO_BOAT_POOL``), so a sandbox VM serves the next trial instead of a new
 create; each island keeps at most ``max_in_flight`` (4) active sandboxes and
-starts at most ``starts_per_hour`` per hour.
+starts at most ``starts_per_hour`` per hour (default 24, S29 D18-1).
+
+The VM itself (GPU kind x Nebius region x on-demand/spot) is chosen and kept alive by
+``vm_watchdog.py`` (``candidates()``); ``--card-model`` and ``--tp`` follow that VM.
 
     python tools/probes/s29_spot/spot_plan.py --island 0 --public-ip 1.2.3.4 \\
         --engine-version 0.5.x --python /usr/bin/python3 --out /root/spot > spec+env.json
@@ -32,15 +35,15 @@ PROBE_PAIRS = [["The capital of France is", " Paris. It is known for the Eiffel 
 
 
 def spec(*, island: int, islands: int, base: str, data: str, out: str, engine_version: str, python: str,
-         card_model: str, samples_per_group: int = 4, max_in_flight: int = 4) -> dict[str, Any]:
+         card_model: str, samples_per_group: int = 4, max_in_flight: int = 4, tp: int = 1) -> dict[str, Any]:
     server = {"base_dir": base, "card_model": card_model, "device_family": "cuda", "engine_version": engine_version,
-              "precision": "bf16", "quant_scheme": "bf16", "topology": "tp1", "max_model_len": MAX_MODEL_LEN,
+              "precision": "bf16", "quant_scheme": "bf16", "topology": f"tp{tp}", "max_model_len": MAX_MODEL_LEN,
               "python": python, "in_place_reload": True, "start_timeout_s": 1200.0, "request_timeout_s": 1800.0,
               "extra_args": ["--mem-fraction-static", "0.7"]}
     return {
         "sampler_id": f"s29-spot-{island}",
         "engine": {"factory": "yeto.rl.adapters.sampler_engines.from_spec:build", "adapter": "sglang-server",
-                   "server": server, "options": {"tp": 1}},
+                   "server": server, "options": {"tp": tp}},
         "sampling": {"max_tokens": TURN_MAX_TOKENS, "temperature": 1.0, "top_p": 1.0, "n": samples_per_group},
         "max_backlog_groups": 1,
         "max_prompt_tokens": MAX_MODEL_LEN - TURN_MAX_TOKENS,
@@ -90,7 +93,7 @@ def fake_spec(gsm: dict[str, Any], *, reload_every: int = 1, version_board: bool
     return out
 
 
-def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 8,
+def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: int = 24,
         run_id: str = "", island: int | None = None, idle_vm_ttl_s: int = 600) -> dict[str, str]:
     # S29 D15: an idle VM's boat TTL (a preempted VM's idle sandboxes stop by then);
     # the pool deletes an idle VM a little earlier itself.
@@ -129,7 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=("tb21", "gsm8k", "fake"), default="tb21")
     p.add_argument("--syncer", default="127.0.0.1:29400")
     p.add_argument("--max-in-flight", type=int, default=4)
-    p.add_argument("--starts-per-hour", type=int, default=8)
+    # D18-1: 8/h starved the trials; at least max_in_flight x 2 (one retry) x groups per hour
+    p.add_argument("--starts-per-hour", type=int, default=24)
+    p.add_argument("--tp", type=int, default=1)
     p.add_argument("--reload-every", type=int, default=1)
     p.add_argument("--no-version-board", action="store_true")
     p.add_argument("--groups-per-round", type=int, default=1)
@@ -138,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     sp = spec(island=a.island, islands=a.islands, base=a.base, data=a.data, out=a.out,
               engine_version=a.engine_version, python=a.python, card_model=a.card_model,
-              max_in_flight=a.max_in_flight)
+              max_in_flight=a.max_in_flight, tp=a.tp)
     if a.mode in ("gsm8k", "fake"):
         sp = gsm8k_spec(sp, data=a.data, groups_per_round=a.groups_per_round)
     if a.mode == "fake":

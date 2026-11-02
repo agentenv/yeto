@@ -39,14 +39,15 @@ class _Process:
         return 0
 
 
-def _engine(tmp_path: Path, fake: FakeSGLang, *, live: bool, spawned: list | None = None) -> SGLangServerEngine:
+def _engine(tmp_path: Path, fake: FakeSGLang, *, live: bool, spawned: list | None = None,
+            prefix_cache: bool = True) -> SGLangServerEngine:
     base = tmp_path / "base"
     base.mkdir(exist_ok=True)
     config = ServerConfig(base_dir=base, card_model="H100", device_family="cuda", engine_version="0.5.20",
                           precision="bf16", quant_scheme="bf16", topology="tp1", max_model_len=4096,
                           port=fake.port, in_place_reload=True, request_timeout_s=30.0)
     spawn = (lambda a, e: spawned.append(a) or _Process()) if spawned is not None else (lambda a, e: _Process())
-    return SGLangServerEngine(config, SGLangOptions(tp=1, live_update=live), spawn=spawn,
+    return SGLangServerEngine(config, SGLangOptions(tp=1, live_update=live, live_prefix_cache=prefix_cache), spawn=spawn,
                               sleep=lambda s: None)
 
 
@@ -79,7 +80,7 @@ def test_live_update_pauses_loads_and_continues_the_running_round(tmp_path):
         engine = _engine(tmp_path, fake, live=True, spawned=spawned)
         assert updates_during_generation(engine)
         engine.start(None, 0)
-        assert "--disable-radix-cache" in spawned[0]
+        assert "--disable-radix-cache" not in spawned[0]  # the prefix cache is kept by default
         out: list = []
         thread = _round(engine, out)
         _wait_tokens(fake, 20)
@@ -303,3 +304,11 @@ def test_live_update_without_spans_uses_the_sent_version(tmp_path):
         engine.load(_release_dir(tmp_path, "v1"), 1)
         thread.join(10)
     assert all((c.weight_version, c.final_weight_version) == (0, 1) for g in out for c in g)
+
+
+def test_live_update_without_prefix_cache_disables_radix(tmp_path):
+    spawned: list = []
+    with FakeSGLang() as fake:
+        engine = _engine(tmp_path, fake, live=True, spawned=spawned, prefix_cache=False)
+        engine.start(None, 0)
+    assert "--disable-radix-cache" in spawned[0]

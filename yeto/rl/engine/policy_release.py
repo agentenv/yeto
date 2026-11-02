@@ -915,7 +915,10 @@ class PolicyFollower:
     (:meth:`generating`), :meth:`refresh` loads nothing unless ``live_update``
     (the engines take new weights during a generation and stamp each sample with
     the version that produced it). A refused refresh is counted and the release
-    is loaded at the next refresh outside the round.
+    is loaded at the next refresh outside the round. ``hold()`` extends the rule
+    past the round (S29: a streaming agentic round keeps trials running between
+    the loop's rounds; while it returns True and ``live_update`` is off, a
+    refresh loads nothing either).
 
     Rebuild failures: a delta release whose rebuilt files fail their digest
     check (``ReleaseDeltaError``), or a full release whose files fail their
@@ -951,6 +954,7 @@ class PolicyFollower:
         self.incomplete: str | None = None  # why the newest release is not loaded yet
         self.counters = FollowerCounters()
         self._in_flight = False
+        self.hold: Callable[[], bool] = lambda: False  # generation in flight outside a round
         self.timer = timer
         self.wall = wall
         self.seen_at: float | None = None
@@ -974,6 +978,14 @@ class PolicyFollower:
             return 0
         return max(0, int(self.last_seen.version) - int(self.version))
 
+    def pending_seq(self) -> int | None:
+        """The seq of a release newer than the served one in the store (one read
+        of ``LATEST``; nothing is loaded), else None."""
+        latest = self.releases.latest()
+        if latest is None or (self.release is not None and latest.seq <= self.release.seq):
+            return None
+        return int(latest.seq)
+
     def refresh(self) -> PolicyRelease | None:
         """The release loaded by this call, or None when there is no new one, when
         the newest one is not complete yet (``incomplete`` says why; the engines
@@ -991,7 +1003,7 @@ class PolicyFollower:
         self.last_seen = latest
         if self.release is not None and latest.seq <= self.release.seq:
             return None
-        if self._in_flight and not self.live_update:
+        if (self._in_flight or self.hold()) and not self.live_update:
             self.counters.deferred_in_flight += 1
             return None
         if self.scheme is not None:

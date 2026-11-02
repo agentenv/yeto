@@ -829,3 +829,51 @@ class CommittedBacklog:
 
     def on_arrival(self, callback: Callable[[], None]) -> None:
         self.buffer.on_arrival(callback)
+
+
+READ_POSITION = "read-position.json"  # under sample-buffer/: the trainer's read heartbeat (S30 D29)
+
+
+def buffer_dir(buffer: Any) -> Path | None:
+    """The local ``sample-buffer/`` directory of a buffer (its store's), or None
+    for a buffer without a local store (a relay, an object store)."""
+    root = getattr(getattr(buffer, "store", None), "root", None)
+    if root is None:
+        return None
+    try:
+        return Path(root) / BUFFER_DIR
+    except TypeError:
+        return None
+
+
+def write_read_position(buffer_root: str | Path, *, buffer_selected: int,
+                        buffer_shards: dict[str, int] | None, train_step: int | None,
+                        clock: Callable[[], float] = time.time) -> Path:
+    """Write the trainer's read position to ``<buffer_root>/read-position.json``
+    (tmp + rename), after every group it consumes, released or not.
+    ``train_step``: the trainer's last published policy version when it read.
+    A sampler counts its backlog from the larger of this and its last release's position
+    (``SamplerLoop.backlog``): sparse or slow releases no longer hold the cap shut."""
+    root = Path(buffer_root)
+    path = root / READ_POSITION
+    payload = {"buffer_selected": int(buffer_selected),
+               "buffer_shards": {str(k): int(v) for k, v in (buffer_shards or {}).items()},
+               "train_step": None if train_step is None else int(train_step),
+               "time_unix": round(float(clock()), 3)}
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def read_read_position(buffer_root: str | Path) -> dict[str, Any] | None:
+    """The trainer's read heartbeat (:func:`write_read_position`), or None when it
+    is missing or unreadable (the caller keeps the release position)."""
+    try:
+        data = json.loads((Path(buffer_root) / READ_POSITION).read_text(encoding="utf-8"))
+        shards = data.get("buffer_shards") or {}
+        return {"buffer_selected": int(data.get("buffer_selected") or 0),
+                "buffer_shards": {str(k): int(v) for k, v in dict(shards).items()},
+                "train_step": data.get("train_step"), "time_unix": data.get("time_unix")}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None

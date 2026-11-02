@@ -60,15 +60,15 @@ def digest(manifest: Mapping[str, Any]) -> str:
     return hashlib.sha256(encode(manifest)).hexdigest()
 
 
-def make(store: Path, release: str) -> dict[str, Any]:
+def make(store: Path, release: str, *, record: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The manifest of ``store/policy-releases/<release>``. The release record
-    is the store's LATEST.json, which must name this release (the mirror runs
-    after the trainer published it)."""
+    is ``record`` or else the store's LATEST.json, which must name this release
+    (the mirror runs after the trainer published it)."""
     root = Path(store) / RELEASES
     directory = root / release
     if not directory.is_dir():
         raise ManifestError(f"no release directory {directory}")
-    record = json.loads((root / LATEST).read_text())
+    record = dict(record) if record is not None else json.loads((root / LATEST).read_text())
     if record.get("path") != release:
         raise ManifestError(f"{root / LATEST} names {record.get('path')!r}, not {release!r}")
     files = {}

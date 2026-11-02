@@ -41,7 +41,8 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 ``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
 
-After the last round it marks the data end, so the trainer stops after reading
+After the last round it calls ``generate.flush()`` when the round has one (a
+streaming agentic round writes the groups still in flight) and marks the data end, so the trainer stops after reading
 the rest. ``num_rollouts`` None: no last round; the loop generates until
 ``should_stop`` (a full-parameter synced group's sampler stops when its trainers
 ended, ``sample_roles`` module doc) and marks no data end. The loop is
@@ -58,6 +59,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from .policy_release import PolicyFollower, ReleaseNotLoaded
+from .sample_buffer import buffer_dir, read_read_position
 
 DEFAULT_POLL_S = 5.0
 
@@ -98,7 +100,10 @@ class SamplerLoop:
         """Groups in the buffer after the trainer's read position of its last release
         (0 before any release: no trainer has read anything yet). A sampler that
         writes its own shard (``buffer.shard``) counts its shard only, from the
-        trainer's read position in that shard (``buffer_shards``)."""
+        trainer's read position in that shard (``buffer_shards``). The read position
+        is the larger of the release's and the trainer's heartbeat
+        (``sample-buffer/read-position.json``, S30 D29); a missing or broken
+        heartbeat leaves the release's."""
         self.buffer.refresh()
         pending = getattr(self.buffer, "pending_groups", None)
         if pending is not None:  # the relay: groups sent and not yet taken by the trainer
@@ -111,6 +116,12 @@ class SamplerLoop:
             read = int((seen.buffer_shards or {}).get(shard, 0))
         else:
             read = 0 if seen.buffer_selected is None else int(seen.buffer_selected)
+        root = buffer_dir(self.buffer)
+        beat = None if root is None else read_read_position(root)
+        if beat is not None:  # S30 D29: the trainer's heartbeat, ahead of a sparse/slow release
+            beat_read = (beat["buffer_shards"].get(shard, 0) if shard is not None
+                         else beat["buffer_selected"])
+            read = max(read, int(beat_read))
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self, *, in_flight: bool = False) -> None:
@@ -233,6 +244,11 @@ class SamplerLoop:
                       generate_s=round(generate_s, 3))
             done += 1
             self._throttle(started, last=rollout_id == (self.num_rollouts or 0) - 1)
+        flush = getattr(self.generate, "flush", None)
+        if callable(flush):  # S29: groups of a streaming round still in flight
+            with self.follower.generating(), self._live_refresh():
+                flush()
+            self.buffer.refresh()
         self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done

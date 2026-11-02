@@ -94,6 +94,8 @@ from yeto.rl.engine.buffer_payload import (
     group_entry_fields,
 )
 
+from yeto.rl.engine.incarnation_lease import STALE_REASON
+
 from .fully_async_translate import VerlTranslationError, VersionMap
 
 TRAINER_CONSUMER = "trainer"  # the buffer's single consumer name (as the Miles reader)
@@ -265,6 +267,30 @@ def print_feed_event(event: str, **fields: Any) -> None:
                          "event": str(event), **fields}), flush=True)
 
 
+INCARNATION_FENCE_ENV = "YETO_BUFFER_INCARNATION_FENCE"  # "0": no stale-incarnation gate
+LEASE_ROOT_ENV = "YETO_INCARNATION_LEASE_ROOT"  # the store holding the sampler leases (default: the buffer's)
+
+
+def default_incarnation_gate(buffer: Any, environ: Mapping[str, str] | None = None) -> Any:
+    """The feed's stale-incarnation gate over the buffer's store (or
+    :data:`LEASE_ROOT_ENV`); None when off (:data:`INCARNATION_FENCE_ENV` ``0``) or
+    the buffer has no store / entries (test doubles)."""
+    from yeto.rl.engine.incarnation_lease import IncarnationGate
+
+    env = os.environ if environ is None else environ
+    if str(env.get(INCARNATION_FENCE_ENV, "1")).strip() == "0":
+        return None
+    entries = getattr(buffer, "entries", None)
+    store = getattr(buffer, "store", None)
+    if env.get(LEASE_ROOT_ENV):
+        from yeto.rl.engine.resume import store_for
+
+        store = store_for(str(env[LEASE_ROOT_ENV]), environ=env)
+    if store is None or not callable(entries):
+        return None
+    return IncarnationGate(store, entries)
+
+
 class BufferFeed:
     """The rollout port's queue calls over the sample buffer (module doc).
 
@@ -282,7 +308,7 @@ class BufferFeed:
                  cursor_log: Any = None, merged: MergedVersions | None = None,
                  group_size: int | None = None, emit: Callable[..., None] | None = None,
                  drop_window: int | None = None, drop_warn_ratio: float | None = None,
-                 drop_stall_warn_s: float | None = None) -> None:
+                 drop_stall_warn_s: float | None = None, incarnation_gate: Any = "auto") -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
         merged version pairing (module doc). ``emit(event, **fields)`` reports a
@@ -291,8 +317,13 @@ class BufferFeed:
         (``rl_buffer_drop_rate_high``) and ``drop_stall_warn_s`` seconds of drops
         without a trainable group (``rl_buffer_feed_starved``); the thresholds
         default to :data:`DROP_WINDOW_ENV` / :data:`DROP_WARN_RATIO_ENV` /
-        :data:`DROP_STALL_WARN_ENV`."""
+        :data:`DROP_STALL_WARN_ENV`. ``incarnation_gate`` (S29-next c1): an
+        ``incarnation_lease.IncarnationGate``; a group of a superseded sampler
+        incarnation written after the new one claimed the lease is dropped as
+        ``stale_incarnation``; ``"auto"`` builds it over the buffer's store
+        (:func:`default_incarnation_gate`), None turns it off."""
         self.buffer = buffer
+        self.gate = default_incarnation_gate(buffer) if incarnation_gate == "auto" else incarnation_gate
         self.emit = print_feed_event if emit is None else emit
         self.drop_window = max(1, int(drop_window if drop_window is not None
                                       else _env_number(DROP_WINDOW_ENV, 20)))
@@ -370,6 +401,14 @@ class BufferFeed:
             item = self._next()
             if item is None:
                 return None
+            stale = None if self.gate is None else self.gate.verdict(item.entry, int(item.position))
+            if stale is not None:  # S29-next c1: never trained, never read
+                self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
+                             "kept": False, "dropped": STALE_REASON, "detail": stale,
+                             "source": (item.entry.provenance or {}).get("sampler_id")})
+                self.pulled_positions.append(int(item.position))
+                self._dropped(STALE_REASON, int(item.position), stale)
+                continue
             samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
             if not samples:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
