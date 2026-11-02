@@ -1,5 +1,0 @@
-[36m(YetoBufferTaskRunner pid=3133653)[0m YETO_RL_EVENT {"base_seq":1,"base_version":0,"bytes":10621406790,"event":"rl_policy_release_delta","island_id":0,"policy_version":2,"ratio":0.044003,"time_unix":1793474729.456267,"timings":{"delta_s":85.369,"digest_s":0.009,"latest_s":0.002,"prune_s":0.0,"
-[36m(YetoBufferTaskRunner pid=3133653)[0m YETO_RL_EVENT {"error":"\u001b[36mray::YetoBufferTrainer.yeto_train_step()\u001b[39m (pid=3134208, ip=192.168.17.3, actor_id=d639b30ecea758c02c03888502000000, repr=<yeto.rl.adapters.verl.buffer_trainer_runner.YetoBufferTrainer object at 0xffcdb4cf5250>)\n 
-[36m(YetoBufferTrainer pid=3134208)[0m AssertionError: 15 % 16 != 0
-AssertionError: 15 % 16 != 0
-ISLAND-RC=1
