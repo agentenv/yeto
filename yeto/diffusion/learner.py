@@ -3020,7 +3020,9 @@ def _probe_max_micro_batch(
         ok = True
         try:
             _probe_diffusion_once(pipe, params, opt, probe_rows, args, device, size, adapter)
-        except accel.oom_error(device):
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is an OOM
+            if not accel.is_oom(exc, device):
+                raise
             ok = False
         opt.zero_grad(set_to_none=True)
         accel.empty_cache(device)

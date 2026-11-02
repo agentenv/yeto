@@ -359,3 +359,24 @@ def test_npu_without_torch_npu_is_a_clear_error(monkeypatch):
 def test_cpu_family_binds_nothing(fake_cuda):
     assert accel.bind_family_device("cpu", local_rank=5) == torch.device("cpu")
     assert fake_cuda.bound == []
+
+
+def test_is_oom_matches_the_vendor_exception(npu):
+    assert accel.is_oom(FakeOutOfMemory("npu"), device("npu", 0))
+    assert accel.is_oom(torch.cuda.OutOfMemoryError("cuda"), device("cuda", 0))
+
+
+def test_is_oom_matches_a_message_only_allocator_refusal(monkeypatch):
+    # torch_npu exports no OutOfMemoryError: its allocator raises a bare
+    # RuntimeError, which an `except oom_error(device)` would let escape.
+    monkeypatch.setattr(accel, "backend", lambda _device: SimpleNamespace())
+    refusal = RuntimeError(
+        "NPU out of memory. Tried to allocate 37.09 GiB (NPU 0; 60.96 GiB total capacity)"
+    )
+    assert accel.is_oom(refusal, device("npu", 0))
+
+
+def test_is_oom_does_not_swallow_an_unrelated_runtime_error(monkeypatch):
+    monkeypatch.setattr(accel, "backend", lambda _device: SimpleNamespace())
+    assert not accel.is_oom(RuntimeError("HCCL communicator was aborted"), device("npu", 0))
+    assert not accel.is_oom(ValueError("not an allocator problem"), device("npu", 0))

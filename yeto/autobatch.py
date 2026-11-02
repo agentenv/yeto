@@ -219,7 +219,9 @@ def resolve_micro_batch_size(
                 size,
                 loss_forward=loss_forward,
             )
-        except accel.oom_error(device):
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is an OOM
+            if not accel.is_oom(exc, device):
+                raise
             ok = False
         accel.empty_cache(device)
         if world > 1:
