@@ -32,7 +32,7 @@ import torch
 from megatron_bridge_roundtrip import _DistributedLeaf
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from test_verl_full_parameter_sync import (  # noqa: F401 - syncer_binary is a fixture
-    COMPONENT, TOKENS, _Driver, _start_syncer, needs_cargo, syncer_binary,
+    COMPONENT, TOKENS, _Driver, _start_syncer, local_rounds, needs_cargo, syncer_binary,
 )
 from yeto.rl import megatron_hf_boundary as boundary
 from yeto.rl import megatron_masters
@@ -603,14 +603,14 @@ def _plan(learner_id: int, port: int, profile: str, *, rounds: int, fragments: i
                 "local_init": async_rounds, "matrix_merge": matrix_merge, "island_pool": None}}
 
 
-def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict, harness_cls=None) -> None:
+def _run_island(learner_id: int, plan: dict, max_rounds: int | None, results: dict, harness_cls=None) -> None:
     harness = (harness_cls or _MegatronHarness)()
     island = harness.island
     sync, _policy_state, _stream = vfs.build_full_parameter_sync(island, plan, backend_identity_sha256="c" * 64)
     driver = _Driver()
     try:
         state = sync.start(driver).state
-        for round_id in range(max_rounds):
+        for round_id in local_rounds(max_rounds):
             harness.train(learner_id, round_id)
             ids = (f"l{learner_id}-r{round_id}",)
             batch_hash = hashlib.sha256(ids[0].encode()).hexdigest()
@@ -649,7 +649,7 @@ def _two_islands(binary, tmp_path, monkeypatch, *, rounds, fragments, async_roun
         for plan in plans:
             plan[vfs.PLAN_KEY].update(plan_extra or {})
         threads = [threading.Thread(target=_run_island, args=(i, plans[i], rounds if not async_rounds
-                                                               else 20 * rounds, results, harnesses[i]))
+                                                               else None, results, harnesses[i]))
                    for i in range(2)]
         for thread in threads:
             thread.start()

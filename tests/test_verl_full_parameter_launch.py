@@ -239,7 +239,7 @@ def test_two_launcher_built_verl_islands_run_async_rounds_through_the_real_synce
     process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     results: dict = {}
     try:
-        threads = [threading.Thread(target=_run_island, args=(i, plans[i], 20 * rounds, results))
+        threads = [threading.Thread(target=_run_island, args=(i, plans[i], None, results))
                    for i in range(2)]
         for thread in threads:
             thread.start()

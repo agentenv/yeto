@@ -238,7 +238,7 @@ def test_asynchronous_rounds_push_the_whole_capture_bytes(syncer_binary, tmp_pat
     try:
         threads = [threading.Thread(target=_run_island, args=(
             i, _plan(i, port, profile, rounds=rounds, fragments=fragments, async_rounds=True,
-                     matrix_merge="rda", pipeline=2, final_cut="download"), 20 * rounds, results))
+                     matrix_merge="rda", pipeline=2, final_cut="download"), None, results))
             for i in range(2)]
         for thread in threads:
             thread.start()
