@@ -33,10 +33,12 @@ after the update; sampled from changed and unchanged elements).
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import shutil
 import struct
 from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -126,28 +128,72 @@ def changed_elements(release_dir: Path, files: Mapping[str, Path | None]) -> dic
     for name, words_path in sorted(files.items()):
         if words_path is None:
             raise SparseUnavailable("unknown_changes", name)
-        words = np.fromfile(words_path, dtype="<u8").astype(np.int64)
+        words = np.fromfile(words_path, dtype="<u8").view(np.int64)
         if not words.size:
             continue
         if not name.endswith(".safetensors") or "/" in name:
             raise SparseUnavailable("non_weight_file_changed", name)
         begin, slots = file_slots(release_dir / name)
-        byte = words * 2
-        if byte[0] < begin:
-            raise SparseUnavailable("header_changed", name)
-        starts = np.array([s.start for s in slots], dtype=np.int64)
-        ends = np.array([s.end for s in slots], dtype=np.int64)
-        which = np.searchsorted(starts, byte, side="right") - 1
-        if np.any(which < 0) or np.any(byte + 1 >= ends[which]):
-            raise SparseUnavailable("padding_changed", name)
-        cut = np.flatnonzero(np.diff(which)) + 1
-        for group in np.split(np.arange(which.size), cut):
-            slot = slots[int(which[group[0]])]
-            # a word spans two elements of a 1-byte tensor (or of an odd-aligned one)
-            element = np.union1d((byte[group] - slot.start) // slot.itemsize,
-                                 (byte[group] + 1 - slot.start) // slot.itemsize)
+        if words.size > 1 and not bool(np.all(words[1:] > words[:-1])):
+            groups = _unsorted_groups(name, words, begin, slots)
+        else:
+            groups = _sorted_groups(name, words, begin, slots)
+        for slot, element in groups:
             out[slot.name] = element if slot.name not in out else np.union1d(out[slot.name], element)
     return out
+
+
+def _sorted_groups(name: str, words: np.ndarray, begin: int,
+                   slots: Sequence[Slot]) -> Iterable[tuple[Slot, np.ndarray]]:
+    """The changed elements per tensor of strictly ascending changed ``words``,
+    in O(words) without sorting (same result as :func:`_unsorted_groups`)."""
+    if 2 * int(words[0]) < begin or int(words[0]) < 0:
+        raise SparseUnavailable("header_changed", name)
+    # a byte belongs to the last tensor (by data offset) that starts at or before it
+    keep = [s for i, s in enumerate(slots) if i + 1 == len(slots) or slots[i + 1].start != s.start]
+    # word w (bytes 2w, 2w + 1) is in a tensor's data when start <= 2w and 2w + 1 < end
+    lo = np.searchsorted(words, np.array([-(-s.start // 2) for s in keep], dtype=np.int64), side="left")
+    hi = np.searchsorted(words, np.array([s.end // 2 for s in keep], dtype=np.int64), side="left")
+    hi = np.maximum(hi, lo)
+    if int((hi - lo).sum()) != words.size:
+        raise SparseUnavailable("padding_changed", name)
+    groups = []
+    for slot, a, b in zip(keep, lo.tolist(), hi.tolist()):
+        if a == b:
+            continue
+        group = words[a:b]
+        if slot.itemsize == 2 and slot.start % 2 == 0:  # one word = one element
+            element = group - slot.start // 2
+        else:  # a word spans parts of one or two elements: both, in order, once
+            byte = 2 * group - slot.start
+            both = np.empty(2 * group.size, dtype=np.int64)
+            both[0::2] = byte // slot.itemsize
+            both[1::2] = (byte + 1) // slot.itemsize
+            first = np.ones(both.size, dtype=bool)
+            first[1:] = both[1:] != both[:-1]
+            element = both[first]
+        groups.append((slot, element))
+    return groups
+
+
+def _unsorted_groups(name: str, words: np.ndarray, begin: int,
+                     slots: Sequence[Slot]) -> Iterable[tuple[Slot, np.ndarray]]:
+    byte = words * 2
+    if byte[0] < begin:
+        raise SparseUnavailable("header_changed", name)
+    starts = np.array([s.start for s in slots], dtype=np.int64)
+    ends = np.array([s.end for s in slots], dtype=np.int64)
+    which = np.searchsorted(starts, byte, side="right") - 1
+    if np.any(which < 0) or np.any(byte + 1 >= ends[which]):
+        raise SparseUnavailable("padding_changed", name)
+    cut = np.flatnonzero(np.diff(which)) + 1
+    groups = []
+    for group in np.split(np.arange(which.size), cut):
+        slot = slots[int(which[group[0]])]
+        # a word spans two elements of a 1-byte tensor (or of an odd-aligned one)
+        groups.append((slot, np.union1d((byte[group] - slot.start) // slot.itemsize,
+                                        (byte[group] + 1 - slot.start) // slot.itemsize)))
+    return groups
 
 
 # ---------------------------------------------------------------- element maps
@@ -192,19 +238,6 @@ def _add(table: dict[str, _Writes], param: str, itemsize: int, pos: np.ndarray, 
     entry.val.append(val)
 
 
-def _tensor_writes(table: dict[str, _Writes], mapping: Mapping[str, Any], slot: Slot, index: np.ndarray,
-                   values: np.ndarray) -> None:
-    targets = mapping["tensors"].get(slot.name)
-    if targets is None:
-        raise SparseUnavailable("unmapped", slot.name)
-    for target in targets:
-        param = mapping["params"][target["param"]]
-        if int(param["itemsize"]) != slot.itemsize:
-            raise SparseUnavailable("dtype", f"{slot.name} -> {target['param']}")
-        pos, valid = target_positions(target, slot.shape, param["shape"], index)
-        _add(table, target["param"], slot.itemsize, pos, values[valid])
-
-
 def _write(directory: Path, prefix: str, table: Mapping[str, _Writes]) -> tuple[list[list[Any]], int]:
     records, first, offset, count = [], 0, 0, 0
     with (directory / f"{prefix}pos.bin").open("wb") as pos_file, \
@@ -221,32 +254,174 @@ def _write(directory: Path, prefix: str, table: Mapping[str, _Writes]) -> tuple[
     return records, count
 
 
+def _check_targets(maps: Sequence[Mapping[str, Any]], slots: Mapping[str, Slot],
+                   names: Sequence[Iterable[str]]) -> None:
+    """Raise the mapping errors rank by rank (changes, then checks), before any work."""
+    for mapping in maps:
+        for group in names:
+            for name in group:
+                targets = mapping["tensors"].get(name)
+                if targets is None:
+                    raise SparseUnavailable("unmapped", name)
+                for target in targets:
+                    if int(mapping["params"][target["param"]]["itemsize"]) != slots[name].itemsize:
+                        raise SparseUnavailable("dtype", f"{name} -> {target['param']}")
+
+
+def _fast_positions(target: Mapping[str, Any], shape: Sequence[int], param_shape: Sequence[int],
+                    index: np.ndarray, coords: Sequence[np.ndarray]) -> tuple[np.ndarray, np.ndarray] | None:
+    """:func:`target_positions` with the checkpoint coordinates of ``index``
+    given; positions are summed with strides (no bounds check), so None when a
+    map or constant could leave the parameter (the caller then takes the slow path)."""
+    dims = target["dims"]
+    if len(dims) != len(param_shape) or not dims or not len(shape):
+        return None
+    strides = [1] * len(param_shape)
+    for k in range(len(param_shape) - 2, -1, -1):
+        strides[k] = strides[k + 1] * int(param_shape[k + 1])
+    const, tables = 0, []
+    for k, (kind, value) in enumerate(dims):
+        size = int(param_shape[k])
+        if kind == "const":
+            if not 0 <= int(value) < size:
+                return None
+            const += int(value) * strides[k]
+        else:
+            table = np.asarray(target["maps"][int(value)], dtype=np.int64)
+            if table.size != int(shape[int(value)]) or (table.size and int(table.max()) >= size):
+                return None
+            tables.append((int(value), table, strides[k]))
+    valid = None
+    for dim, coordinate in (target.get("select") or {}).items():
+        hit = coords[int(dim)] == int(coordinate)
+        valid = hit if valid is None else valid & hit
+    pos = None
+    for dim, table, stride in tables:
+        mapped = table[coords[dim]]
+        if int(table.min(initial=0)) < 0:
+            hit = mapped >= 0
+            valid = hit if valid is None else valid & hit
+        if stride != 1:
+            mapped *= stride
+        if pos is None:
+            pos = mapped
+        else:
+            pos += mapped
+    if pos is None:
+        pos = np.zeros(index.size, dtype=np.int64)
+    if const:
+        pos += const
+    if valid is None:
+        return pos, np.ones(index.size, dtype=bool)
+    return pos[valid], valid
+
+
+def _leading_range(target: Mapping[str, Any], shape: Sequence[int]) -> tuple[int, int] | None:
+    """[a, b): the checkpoint coordinates of dimension 0 that can be on this rank
+    when they are one run (a TP slice of rows, one selected expert), else None."""
+    select = target.get("select") or {}
+    if 0 in select or "0" in select:
+        c = int(select[0] if 0 in select else select["0"])
+        return c, c + 1
+    for kind, value in target["dims"]:
+        if kind == "hf" and int(value) == 0:
+            on = np.flatnonzero(np.asarray(target["maps"][0]) >= 0)
+            if not on.size:
+                return 0, 0
+            if int(on[-1]) - int(on[0]) + 1 == on.size:
+                return int(on[0]), int(on[-1]) + 1
+    return None
+
+
+def _tensor_job(maps: Sequence[Mapping[str, Any]], slot: Slot, index: np.ndarray,
+                values: np.ndarray) -> list[list[tuple[str, np.ndarray, np.ndarray]]]:
+    """Per rank, per target in order: (param, positions, values) of one tensor."""
+    shape = tuple(slot.shape)
+    coords = np.unravel_index(index, shape) if len(shape) else ()
+    inner = int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
+    out = []
+    for mapping in maps:
+        rank = []
+        for target in mapping["tensors"][slot.name]:
+            param_shape = mapping["params"][target["param"]]["shape"]
+            span = _leading_range(target, shape) if len(shape) else None
+            if span is not None:
+                a, b = np.searchsorted(index, [span[0] * inner, span[1] * inner], side="left").tolist()
+                sub, subvals, subcoords = index[a:b], values[a:b], tuple(c[a:b] for c in coords)
+            else:
+                sub, subvals, subcoords = index, values, coords
+            fast = _fast_positions(target, shape, param_shape, sub, subcoords)
+            if fast is None:
+                pos, valid = target_positions(target, shape, param_shape, index)
+                rank.append((target["param"], pos, values[valid]))
+            else:
+                pos, valid = fast
+                rank.append((target["param"], pos, subvals[valid]))
+        out.append(rank)
+    return out
+
+
 def rank_patches(out: Path, maps: Sequence[Mapping[str, Any]], slots: Mapping[str, Slot],
                  changes: Mapping[str, np.ndarray], checks: Mapping[str, np.ndarray],
-                 meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+                 meta: Mapping[str, Any], *, threads: int | None = None) -> list[dict[str, Any]]:
     """Write one patch directory per rank under ``out`` (module doc): the new bits
     of every changed element, and the check samples ``checks`` ({tensor: element
-    indexes}). Returns per rank {"dir", "elements", "params", "checks"}."""
+    indexes}). Returns per rank {"dir", "elements", "params", "checks"}.
+
+    Element indexes are ascending (as :func:`changed_elements` and
+    :func:`pick_checks` give them); tensors are planned in ``threads`` threads
+    (numpy releases the GIL), all ranks of a tensor at once."""
     out = Path(out)
     shutil.rmtree(out, ignore_errors=True)
-    values = {name: slots[name].values(index) for name, index in changes.items()}
-    expected = {name: slots[name].values(index) for name, index in checks.items()}
+    _check_targets(maps, slots, (list(changes), list(checks)))
+    jobs = [(slots[name], index) for name in changes for index in (changes[name],)]
+    jobs += [(slots[name], index) for name in checks for index in (checks[name],)]
+    sorted_ok = all(i.size < 2 or bool(np.all(i[1:] > i[:-1])) for _, i in jobs)
+
+    def run(job: tuple[Slot, np.ndarray]) -> list[list[tuple[str, np.ndarray, np.ndarray]]]:
+        slot, index = job
+        values = slot.values(index)
+        if not sorted_ok:  # no row ranges: every target sees every element
+            return [[(t["param"], *_slow(t, mapping, slot, index, values)) for t in mapping["tensors"][slot.name]]
+                    for mapping in maps]
+        return _tensor_job(maps, slot, index, values)
+
+    workers = threads if threads is not None else min(16, os.cpu_count() or 1)
+    if workers > 1 and len(jobs) > 1:
+        with ThreadPoolExecutor(workers) as pool:
+            results = list(pool.map(run, jobs))
+    else:
+        results = [run(job) for job in jobs]
     summary = []
-    for rank, mapping in enumerate(maps):
+    split = len(changes)
+
+    def write_rank(rank: int) -> dict[str, Any]:
         writes: dict[str, _Writes] = {}
         samples: dict[str, _Writes] = {}
-        for name, index in changes.items():
-            _tensor_writes(writes, mapping, slots[name], index, values[name])
-        for name, index in checks.items():
-            _tensor_writes(samples, mapping, slots[name], index, expected[name])
+        for j, ((slot, _), result) in enumerate(zip(jobs, results)):
+            table = writes if j < split else samples
+            for param, pos, val in result[rank]:
+                _add(table, param, slot.itemsize, pos, val)
         directory = out / f"rank{rank}"
         directory.mkdir(parents=True)
         params, elements = _write(directory, "", writes)
         check_records, checked = _write(directory, "check_", samples)
         (directory / PATCH_FILE).write_text(json.dumps({**dict(meta), "rank": rank, "params": params,
                                                         "checks": check_records}), encoding="utf-8")
-        summary.append({"dir": str(directory), "elements": elements, "params": len(params), "checks": checked})
+        return {"dir": str(directory), "elements": elements, "params": len(params), "checks": checked}
+
+    if workers > 1 and len(maps) > 1:
+        with ThreadPoolExecutor(min(workers, len(maps))) as pool:
+            summary = list(pool.map(write_rank, range(len(maps))))
+    else:
+        summary = [write_rank(rank) for rank in range(len(maps))]
     return summary
+
+
+def _slow(target: Mapping[str, Any], mapping: Mapping[str, Any], slot: Slot, index: np.ndarray,
+          values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    pos, valid = target_positions(target, slot.shape, mapping["params"][target["param"]]["shape"], index)
+    return pos, values[valid]
 
 
 def pick_checks(rng: np.random.Generator, slots: Mapping[str, Slot], mapped: Iterable[str],
