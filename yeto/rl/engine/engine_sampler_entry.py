@@ -285,7 +285,7 @@ def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = No
     store = str(_require(spec, "store"))
     releases = PolicyReleaseStore(store_for(store, environ=environ),
                                   release_dir=str(spec.get("release_dir") or RELEASE_DIR),
-                                  mirror=default_mirror(environ))  # delta releases
+                                  mirror=default_mirror(environ, store=store))  # delta releases
     buffer_store = store_for(str(spec.get("buffer_root") or store), environ=environ)
     sampler_id = str(_require(spec, "sampler_id"))
     shards = [str(s) for s in spec.get("buffer_shards") or ()]

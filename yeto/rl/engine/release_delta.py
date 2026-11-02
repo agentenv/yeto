@@ -59,6 +59,7 @@ import os
 import shutil
 import struct
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -300,10 +301,15 @@ def apply_chain(base: Path, deltas: Sequence[Path], out: Path) -> str:
             if int(footer["base_size"]) != size or int(footer["chunk_words"]) != int(footers[0]["chunk_words"]):
                 raise ReleaseDeltaError(f"{Path(delta).name}: the base has another size or chunking")
             size = int(footer["target_size"])
+        chunks = len(footers[0]["chunks"])
+        for footer, delta in zip(footers, deltas):
+            if len(footer["chunks"]) != chunks:
+                raise ReleaseDeltaError(f"{Path(delta).name}: {len(footer['chunks'])} chunks, "
+                                        f"the chain's first delta has {chunks}")
         chunk_words, words = int(footers[0]["chunk_words"]), size // 2
         digest = hashlib.sha256()
         old, sink = stack.enter_context(Path(base).open("rb")), stack.enter_context(Path(out).open("wb"))
-        for number in range(len(footers[0]["chunks"])):
+        for number in range(chunks):
             chunk = _read_words(old, min(chunk_words, words - number * chunk_words))
             for footer, patch, delta in zip(footers, patches, deltas):
                 _apply_chunk(chunk, footer["chunks"][number], patch, Path(delta).name)
@@ -423,7 +429,7 @@ MIRROR_STAMP = ".yeto-mirror.json"  # in a rebuilt release's directory: which re
 
 
 def mirror_stamp(release: Any) -> dict[str, Any]:
-    """What identifies a release in a mirror (S30 D34): its name alone does not
+    """What identifies a release in a mirror: its name alone does not
     (every run's store has an ``r7-v12``); its sequence, version, policy hash and
     release time together do."""
     return {"path": str(release.path), "seq": int(release.seq), "version": int(release.version),
@@ -446,28 +452,39 @@ class DeltaMirror:
     rebuilt releases stay (the engines may still read the one they serve)."""
 
     def __init__(self, root: str | os.PathLike[str], *, keep: int = 2,
-                 workers: int = DEFAULT_WORKERS) -> None:
+                 workers: int = DEFAULT_WORKERS, scope: str | None = None) -> None:
         self.root = Path(root).expanduser()
         self.keep = max(1, int(keep))
         self.workers = int(workers)
+        # the store this mirror rebuilds for: written into every stamp, and pruning
+        # only removes directories stamped with it, so another run's copies survive
+        self.scope = None if scope is None else str(scope)
+
+    def _stamp(self, release: Any) -> dict[str, Any]:
+        stamp = mirror_stamp(release)
+        if self.scope is not None:
+            stamp["scope"] = self.scope
+        return stamp
+
+    def _read_stamp(self, directory: Path) -> dict[str, Any] | None:
+        try:
+            stamp = json.loads((directory / MIRROR_STAMP).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return stamp if isinstance(stamp, dict) else None
 
     def holds(self, path: str, release: Any = None) -> bool:
         """The mirror holds ``path``; with ``release``: a copy rebuilt for that very
-        release (its stamp, :data:`MIRROR_STAMP`, names the same record). S30 D34:
-        the mirror root is shared by every run on a host (default under the
-        system temp directory) and keyed by release name only, so ``r7-v12`` of
-        another store or an earlier run is not this store's ``r7-v12``; a
-        directory without a matching stamp is not used as a base."""
+        release (its stamp, :data:`MIRROR_STAMP`, names the same record). A
+        directory is keyed by release name only, so ``r7-v12`` of another store or
+        an earlier run is not this store's ``r7-v12``; a directory without a
+        matching stamp is not used as a base."""
         directory = self.root / path
         if not directory.is_dir():
             return False
         if release is None:
             return True
-        try:
-            stamp = json.loads((directory / MIRROR_STAMP).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        return stamp == mirror_stamp(release)
+        return self._read_stamp(directory) == self._stamp(release)
 
     def materialize(self, release: Any, *, record_of: Callable[[str], Any],
                     weights_dir: Callable[[Any], Path], from_store: bool = False) -> Path:
@@ -483,36 +500,59 @@ class DeltaMirror:
         if not chain:
             return base
         self.root.mkdir(parents=True, exist_ok=True)
-        partial = self.root / f".{release.path}.partial"
-        shutil.rmtree(partial, ignore_errors=True)
+        # unique per process and call: two rebuilds of one name never share a scratch directory
+        partial = self.root / f".{release.path}.{os.getpid()}.{uuid.uuid4().hex}.partial"
         try:
             apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
                             partial, workers=self.workers)
-            (partial / MIRROR_STAMP).write_text(json.dumps(mirror_stamp(release), sort_keys=True),
+            (partial / MIRROR_STAMP).write_text(json.dumps(self._stamp(release), sort_keys=True),
                                                 encoding="utf-8")
         except BaseException:
             shutil.rmtree(partial, ignore_errors=True)
             raise
         target = self.root / release.path
-        if target.exists():  # a stale copy of another release with this name (D34)
-            shutil.rmtree(target, ignore_errors=True)
-        partial.replace(target)
+        if not from_store and self.holds(release.path, release):  # another rebuild of it won
+            shutil.rmtree(partial, ignore_errors=True)
+        else:
+            if target.exists():  # a stale copy of another release with this name: move aside first
+                aside = self.root / f".{release.path}.{os.getpid()}.{uuid.uuid4().hex}.stale"
+                try:
+                    target.replace(aside)
+                except OSError:
+                    pass
+                shutil.rmtree(aside, ignore_errors=True)
+            try:
+                partial.replace(target)
+            except OSError:
+                shutil.rmtree(partial, ignore_errors=True)
+                if not self.holds(release.path, release):
+                    raise
         self._prune(newest=release.path)
-        return self.root / release.path
+        return target
 
     def _prune(self, newest: str) -> None:
-        def seq(path: Path) -> int:
-            head = path.name.split("-", 1)[0]
-            return int(head[1:]) if head[1:].isdigit() else -1
-
-        kept = sorted((p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                      key=seq)[-self.keep:]
+        """Keep the newest ``keep`` copies stamped for this mirror's scope; directories
+        stamped for another scope (or unstamped) belong to someone else and stay."""
+        mine = []
         for path in self.root.iterdir():
-            if path.is_dir() and path not in kept and path.name != newest:
+            if not path.is_dir() or path.name.startswith("."):
+                continue
+            stamp = self._read_stamp(path)
+            if stamp is not None and stamp.get("scope") == self.scope:
+                mine.append((int(stamp.get("seq", -1)), path))
+        kept = {path for _, path in sorted(mine, key=lambda item: item[0])[-self.keep:]}
+        for _, path in mine:
+            if path not in kept and path.name != newest:
                 shutil.rmtree(path, ignore_errors=True)
 
 
-def default_mirror(environ: Mapping[str, str] | None = None) -> DeltaMirror:
-    """A sampler's mirror: :data:`MIRROR_ENV`, else under the system temp directory."""
+def default_mirror(environ: Mapping[str, str] | None = None, *, store: str | None = None) -> DeltaMirror:
+    """A sampler's mirror: :data:`MIRROR_ENV`, else under the system temp directory.
+    The root is shared by every run on a host, so with ``store`` the mirror lives in a
+    subdirectory named by a hash of the store and only prunes its own copies."""
     env = os.environ if environ is None else environ
-    return DeltaMirror(env.get(MIRROR_ENV) or Path(tempfile.gettempdir()) / "yeto-release-mirror")
+    root = Path(env.get(MIRROR_ENV) or Path(tempfile.gettempdir()) / "yeto-release-mirror")
+    if store is None:
+        return DeltaMirror(root)
+    key = hashlib.sha256(str(store).encode("utf-8")).hexdigest()[:16]
+    return DeltaMirror(root / f"store-{key}", scope=str(store))

@@ -709,7 +709,7 @@ def test_v2_delta_chain_rebuilds_byte_exact_through_every_link(tmp_path, monkeyp
 
 @needs_zstd
 def test_a_stale_mirror_copy_with_the_same_name_is_not_used_as_a_base(tmp_path, monkeypatch):
-    """S30 D34: the host-wide mirror held another run's ``r<seq>-v<version>``; the
+    """The host-wide mirror held another run's ``r<seq>-v<version>``; the
     rebuild started from it and failed its digest check. Unstamped or foreign
     copies are skipped; the chain is rebuilt from the full release in the store."""
     _trainer, releases, words = _v2_chain(tmp_path, monkeypatch, versions=4)
@@ -744,3 +744,109 @@ def test_a_failed_rebuild_leaves_no_partial_and_a_retry_from_the_store_replaces_
     with pytest.raises(rd.ReleaseDeltaError):
         sampler.resolve(releases[-1], from_store=True)
     assert not [p for p in (tmp_path / "mirror").iterdir() if p.name.endswith(".partial")]
+
+
+def test_chain_apply_refuses_deltas_with_another_chunk_count(tmp_path):
+    words = [_words(30_001)]
+    for v in range(1, 3):
+        words.append(_changed(words[-1], 0.02, seed=v))
+    paths = [_write(tmp_path / f"v{v}", w) for v, w in enumerate(words)]
+    for v in range(1, 3):
+        rd.encode_file(paths[v - 1], paths[v], tmp_path / f"d{v}", chunk_words=4096)
+    # rewrite the second footer with one chunk record dropped (same size and chunking)
+    delta = tmp_path / "d2"
+    with delta.open("rb") as handle:
+        footer = rd._footer(handle, delta)
+        end = handle.seek(0, 2)
+    raw = delta.read_bytes()
+    trailer = rd._FOOTER.size + len(rd.MAGIC)
+    (length,) = rd._FOOTER.unpack(raw[end - trailer:end - trailer + rd._FOOTER.size])
+    body = raw[:end - trailer - length]
+    footer["chunks"] = footer["chunks"][:-1]
+    text = json.dumps(footer, separators=(",", ":")).encode()
+    delta.write_bytes(body + text + rd._FOOTER.pack(len(text)) + raw[-len(rd.MAGIC):])
+    with pytest.raises(rd.ReleaseDeltaError, match="chunks"):
+        rd.apply_chain(paths[0], [tmp_path / "d1", delta], tmp_path / "x")
+
+
+def test_default_mirror_puts_each_store_in_its_own_directory(tmp_path):
+    env = {rd.MIRROR_ENV: str(tmp_path / "mirror")}
+    a, b = rd.default_mirror(env, store="s3://bucket/run-a"), rd.default_mirror(env, store="s3://bucket/run-b")
+    assert a.root != b.root and a.root.parent == b.root.parent == tmp_path / "mirror"
+    assert rd.default_mirror(env, store="s3://bucket/run-a").root == a.root
+    assert rd.default_mirror(env).root == tmp_path / "mirror"
+
+
+@needs_zstd
+def test_two_stores_sharing_a_mirror_root_do_not_touch_each_other(tmp_path, monkeypatch):
+    """Two runs on one host with the same mirror root and the same release names:
+    one run's rebuilds and pruning leave the copy the other one serves alone."""
+    _t, mine, words = _v2_chain(tmp_path, monkeypatch, versions=4)
+    _o, theirs, other_words = _v2_chain(tmp_path, monkeypatch, versions=4, root="other", seed=7)
+    env = {rd.MIRROR_ENV: str(tmp_path / "mirror")}
+    a = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                           mirror=rd.default_mirror(env, store=str(tmp_path / "store")))
+    b = PolicyReleaseStore(CheckpointStore(tmp_path / "other"),
+                           mirror=rd.default_mirror(env, store=str(tmp_path / "other")))
+    a.mirror.keep = b.mirror.keep = 1
+    served = b.resolve(theirs[1])
+    for release in mine[1:]:
+        rebuilt = a.resolve(release)
+        assert (rebuilt / "model.safetensors").read_bytes() == words[mine.index(release)].astype("<u2").tobytes()
+    a.resolve(mine[1], from_store=True)  # a stale same-named copy in a's own directory is replaced
+    assert served.is_dir() and served.name == mine[1].path
+    assert (served / "model.safetensors").read_bytes() == other_words[1].astype("<u2").tobytes()
+
+
+@needs_zstd
+def test_prune_skips_copies_stamped_for_another_scope(tmp_path, monkeypatch):
+    _t, mine, _words_a = _v2_chain(tmp_path, monkeypatch, versions=4)
+    root = tmp_path / "mirror"
+    foreign = root / "r99-v99"
+    foreign.mkdir(parents=True)
+    (foreign / rd.MIRROR_STAMP).write_text(json.dumps({"path": "r99-v99", "seq": 99, "scope": "other"}))
+    unstamped = root / "r98-v98"
+    unstamped.mkdir()
+    mirror = rd.DeltaMirror(root, keep=1, workers=1, scope="store")
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=mirror)
+    for release in mine[1:]:
+        sampler.resolve(release)
+    left = sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    assert left == sorted([mine[-1].path, "r99-v99", "r98-v98"])
+
+
+@needs_zstd
+def test_concurrent_rebuilds_of_one_release_both_succeed(tmp_path, monkeypatch):
+    """Two processes of one run rebuild the same delta at once: each works in its own
+    partial directory, neither deletes the other's, both end on a correct copy."""
+    import threading
+
+    _t, releases, words = _v2_chain(tmp_path, monkeypatch, versions=3)
+    root = tmp_path / "mirror"
+    gate = threading.Barrier(2)
+    real = rd.apply_directory
+
+    def slow_apply(base, chain, out, **kw):
+        result = real(base, chain, out, **kw)
+        gate.wait(timeout=10)  # both partials exist at the same time
+        return result
+
+    monkeypatch.setattr(rd, "apply_directory", slow_apply)
+    out, errors = [], []
+
+    def rebuild():
+        try:
+            store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                       mirror=rd.DeltaMirror(root, workers=1, scope="store"))
+            out.append(store.resolve(releases[-1]))
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=rebuild) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors and len(out) == 2 and out[0] == out[1]
+    assert (out[0] / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    assert not [p for p in root.iterdir() if p.name.startswith(".")]

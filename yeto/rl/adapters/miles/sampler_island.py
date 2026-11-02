@@ -533,7 +533,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             # S27 G-EM: every relay item names the cut that generated it
             buffer.cut_of = releases.cut_identity
         if releases is None:
-            releases = release_store(config, environ, scheme=scheme, mirror=default_mirror(environ))
+            releases = release_store(config, environ, scheme=scheme, mirror=default_mirror(environ, store=str(config.store)))
         follower = PolicyFollower(releases,
                                   loader if scheme == BF16 else scope_checked(loader),
                                   version=BASE_POLICY_VERSION, scheme=scheme)
