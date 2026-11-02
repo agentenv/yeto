@@ -1,4 +1,4 @@
-"""S29-next P0-c c1/c2 and P1-5 (CPU): the incarnation lease fences a superseded
+"""The incarnation lease fences a superseded
 engine sampler and the buffer feed refuses its late groups; the verl round reports
 nonzero advantages and per-group uniform rewards; infra failures before the policy
 ran are classified for a retry."""
@@ -238,7 +238,7 @@ def test_driver_stats_carry_the_nonzero_advantage_count():
     assert _nonzero_advantage_count(SimpleNamespace(groups=groups)) is None
 
 
-# --------------------------------------------------------------------------- P1-5 classification
+# --------------------------------------------------------------------------- infra failure classification
 
 @pytest.mark.parametrize("reason, verdict_exc, turns, expected", [
     ("RuntimeError", None, (), "RuntimeError"),  # the harness raised before the agent ran

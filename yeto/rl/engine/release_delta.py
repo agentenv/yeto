@@ -25,7 +25,7 @@ length as uint64 and :data:`MAGIC`. Writing and reading are sequential, chunk by
 chunk; the sha256 of the target is computed while it is read (trainer) or
 written (sampler), so no file is read twice.
 
-Format v2 (:data:`MAGIC_V2`, S30 P0-b; ``YETO_RL_DELTA_FORMAT=v2``): every chunk
+Format v2 (:data:`MAGIC_V2`, ``YETO_RL_DELTA_FORMAT=v2``): every chunk
 that changed is one ``zstd`` frame of the changed word indexes as gaps (uint32,
 first gap from 0), then the changed words XOR the base word (uint16), each array
 byte-plane shuffled (all low bytes, then the next byte plane, ...), so the many

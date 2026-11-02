@@ -317,7 +317,7 @@ class BufferFeed:
         (``rl_buffer_drop_rate_high``) and ``drop_stall_warn_s`` seconds of drops
         without a trainable group (``rl_buffer_feed_starved``); the thresholds
         default to :data:`DROP_WINDOW_ENV` / :data:`DROP_WARN_RATIO_ENV` /
-        :data:`DROP_STALL_WARN_ENV`. ``incarnation_gate`` (S29-next c1): an
+        :data:`DROP_STALL_WARN_ENV`. ``incarnation_gate``: an
         ``incarnation_lease.IncarnationGate``; a group of a superseded sampler
         incarnation written after the new one claimed the lease is dropped as
         ``stale_incarnation``; ``"auto"`` builds it over the buffer's store
@@ -402,7 +402,7 @@ class BufferFeed:
             if item is None:
                 return None
             stale = None if self.gate is None else self.gate.verdict(item.entry, int(item.position))
-            if stale is not None:  # S29-next c1: never trained, never read
+            if stale is not None:  # never trained, never read
                 self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
                              "kept": False, "dropped": STALE_REASON, "detail": stale,
                              "source": (item.entry.provenance or {}).get("sampler_id")})

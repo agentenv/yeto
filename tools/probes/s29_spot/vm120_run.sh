@@ -20,7 +20,7 @@ if [ -n "${MODAL_TOKEN_ID:-}" ] && [ ! -f /root/.modal.toml ]; then
   (umask 077; printf '[s29]\ntoken_id = "%s"\ntoken_secret = "%s"\nactive = true\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > /root/.modal.toml)
 fi
 "$PY" -c "import modal" 2>/dev/null || "$PY" -m pip install -q modal==1.2.6
-# S30 P0-b: delta format v2 needs zstd on the island; releases come from S3 (s3_delivery.py pull-loop)
+# Delta format v2 needs zstd on the island; releases come from S3 (s3_delivery.py pull-loop)
 "$PY" -c "import zstandard" 2>/dev/null || "$PY" -m pip install -q zstandard==0.25.0
 if [ ! -x /root/bin/rclone ]; then
   mkdir -p /root/bin && curl -fsSL -o /tmp/rclone.zip https://downloads.rclone.org/v1.75.2/rclone-v1.75.2-linux-amd64.zip &&
@@ -68,7 +68,7 @@ exec(compile(src, "agentic_sampler_app", "exec"), ns)
 cfg = {**ns["DEFAULTS"], "store": "$STORE", "base_dir": "$R1", "groups_per_round": int(os.environ.get("GROUPS", "4")), "samples_per_group": 4,
        "max_in_flight": int(os.environ.get("MAX_IN_FLIGHT", "16")), "max_backlog_groups": int(os.environ.get("MAX_BACKLOG", "8")), "num_rollouts": 64, "mem_fraction": 0.85}
 sp = ns["spec"]("$STORE", "$OUT", engine_version="$SGL", cfg=cfg)
-isl = os.environ.get("ISLAND", "spot-0")  # S30 AB: a second island writes its own shard
+isl = os.environ.get("ISLAND", "spot-0")  # a second island writes its own shard
 sp["sampler_id"] = isl; sp["buffer_shards"] = [isl]
 sp["agentic"]["weight_switch"] = os.environ.get("WEIGHT_SWITCH", "auto")
 json.dump(sp, open("$OUT/spec.json", "w"), indent=1)

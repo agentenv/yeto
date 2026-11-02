@@ -827,8 +827,8 @@ def test_d3_relay_ports_forward_group_size():
     from yeto.rl.adapters.verl.relay_trainer import install_relay_ports
 
     assert "group_size" in inspect.signature(install_relay_ports).parameters
-def test_d31_both_buffer_trainer_paths_pass_group_size_to_the_feed():
-    """S30 D31: only the relay path forwarded group_size, so a 120B store trainer
+def test_both_buffer_trainer_paths_pass_group_size_to_the_feed():
+    """Only the relay path forwarded group_size, so a 120B store trainer
     (install_buffer_ports) trained a 3-sample group and verl asserted 15 % 16."""
     import ast
 

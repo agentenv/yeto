@@ -192,7 +192,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # S27 G-EQ3: a trainer without a lane keeps its own cursor,
                                         # so a restart continues after the groups it already trained
                                         cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
-                                        # S30 D31: the store path drops short groups like the relay
+                                        # The store path drops short groups like the relay
                                         group_size=int(plan.get("samples_per_group") or 0) or None,
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),

@@ -1,4 +1,4 @@
-"""Incarnation lease of a sampler island: fence a superseded incarnation (S29-next P0-c c1).
+"""Incarnation lease of a sampler island: fence a superseded incarnation.
 
 A spot sampler island can outlive its own replacement: a VM that was taken for
 preempted (stopped, unreachable, deleted from the console too late) may still

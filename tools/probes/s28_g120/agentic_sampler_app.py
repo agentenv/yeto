@@ -59,7 +59,7 @@ SHARD = "modal-0"
 # "H200", "B200" or "H100"; the nvidia-smi self-check and the engine spec follow it.
 GPU_KIND = os.environ.get("YETO_G120_GPU", "H200").upper()
 GPU_NAME = f"NVIDIA {GPU_KIND}"
-TP = int(os.environ.get("YETO_G120_TP", "8"))  # S29-next P1-1: configurable tensor parallel
+TP = int(os.environ.get("YETO_G120_TP", "8"))  # configurable tensor parallel
 PROXY_PORT = 31600
 SECRET_PATH = "/root/.yeto-records-proxy-secret"
 MIRROR_DIR = "/dev/shm/yeto-release-mirror"

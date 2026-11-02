@@ -2,11 +2,11 @@
 # S29 120B mirror on the dev machine (npu1 <-> dev machine <-> Nebius VM / Modal volume, no proxy).
 #
 #   cut120_mirror.sh samples          # once: VM sample-buffer -> npu1 trainer store (+ read heartbeat back)
-#   cut120_mirror.sh read-position    # only the npu1 read heartbeat -> VM (S30 D29)
+#   cut120_mirror.sh read-position    # only the npu1 read heartbeat -> VM
 #   cut120_mirror.sh release r2-v2    # npu1 release -> Modal volume; manifest digest -> VM; VM places it
 #   cut120_mirror.sh place r2-v2      # only the VM half (a VM that came back after the upload)
 #
-# S30 P0-b: DELIVERY=s3 (default) keeps the dev machine out of the data path: npu1 uploads the
+# DELIVERY=s3 (default) keeps the dev machine out of the data path: npu1 uploads the
 # release to S3 through its proxy (tools/probes/s29_spot/s3_delivery.py publish) and the VM pulls it
 # (s3_delivery.py pull, manifest + digest from S3, cut_manifest place). The steady state is the two
 # resident loops (npu1 `publish-loop`, VM `pull-loop`, started by vm120_run.sh with S3_DELIVERY=1);
@@ -34,7 +34,7 @@ S3_PREFIX=${S3_PREFIX:?set S3_PREFIX}
 S3_REGION=${S3_REGION:?set S3_REGION}
 S3_TRANSFERS=${S3_TRANSFERS:-4}
 NPU1_S3_ENV="S3_PREFIX=$S3_PREFIX S3_REGION=$S3_REGION S3_TRANSFERS=$S3_TRANSFERS S3_BUCKET=${S3_BUCKET:?set S3_BUCKET} S3_PROXY=${S3_PROXY:-} RCLONE=${NPU1_RCLONE:-rclone}"
-ISLAND=${ISLAND:-spot-0}  # S30 AB: one mirror per island (its shard and temp names)
+ISLAND=${ISLAND:-spot-0}  # one mirror per island (its shard and temp names)
 mkdir -p "$LOCAL"
 
 samples() {
@@ -58,9 +58,9 @@ print(len(have) + len(new), 'lines', len(new), 'new')
 }
 
 read_position() {
-  # S30 D29: the trainer's read heartbeat back to the VM, so the sampler's backlog follows what the
+  # The trainer's read heartbeat back to the VM, so the sampler's backlog follows what the
   # trainer read, not only the read position of its last (sparse / slow) release. Missing on npu1
-  # (a trainer before D29, nothing read yet): skipped, the sampler keeps the release position.
+  # (a trainer without the heartbeat, nothing read yet): skipped, the sampler keeps the release position.
   scp -q "$NPU1:$STORE/sample-buffer/read-position.json" "$LOCAL/read-position.json" 2>/dev/null ||
     { echo "[mirror] no read-position.json on npu1 (skipped)"; return 0; }
   vmsh "mkdir -p /root/store/sample-buffer && cat > /root/store/sample-buffer/read-position.json.tmp && \

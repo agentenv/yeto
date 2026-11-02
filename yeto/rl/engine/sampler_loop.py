@@ -276,7 +276,7 @@ class SamplerLoop:
             done += 1
             self._throttle(started, last=rollout_id == (self.num_rollouts or 0) - 1)
         flush = getattr(self.generate, "flush", None)
-        if callable(flush):  # S29: groups of a streaming round still in flight
+        if callable(flush):  # groups of a streaming round still in flight
             with self.follower.generating(), self._live_refresh():
                 flush()
             self.buffer.refresh()

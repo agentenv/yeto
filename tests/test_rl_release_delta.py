@@ -587,7 +587,7 @@ def test_a_full_release_with_file_digests_is_checked_before_it_loads(tmp_path, m
     assert follower.counters.rebuild_failures == 1 and follower.rebuild_failures == 0
 
 
-# ---------------------------------------------------------------- format v2 (S30 P0-b)
+# ---------------------------------------------------------------- format v2
 needs_zstd = pytest.mark.skipif(not rd.zstd_available(), reason="no zstd (Python < 3.14 without zstandard)")
 
 
@@ -675,7 +675,7 @@ def test_delta_format_parsing():
         rd.delta_format({rd.FORMAT_ENV: "v3"})
 
 
-# ---------------------------------------------------------------- S30 D34
+# ---------------------------------------------------------------- mirror identity
 def _v2_chain(tmp_path, monkeypatch, versions: int = 4, *, root: str = "store", seed: int = 0):
     """A trainer that releases a full v0, then v2 deltas, each against the release
     before it; returns (store, the releases, the staged words of each)."""

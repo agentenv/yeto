@@ -319,7 +319,7 @@ class RecordingBackend:
         (group,) = await asyncio.to_thread(self.engine.generate_tokens, [prompt], params,
                                            stop_token_ids=self.template.stop_token_ids)
         completion = group[0]
-        if updates_during_generation(self.engine):  # S29: a live reload may fall inside the call
+        if updates_during_generation(self.engine):  # a live reload may fall inside the call
             version = completion_version(completion, version, live=True)  # its first token's version
         elif self.engine.served_version() != version:  # a reload during the call: version unknown
             raise RecordsMismatch(f"served version changed from {version} during the turn; "

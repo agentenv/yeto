@@ -158,7 +158,7 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
         try:
             directory = releases.resolve(latest)
         except ReleaseDeltaError as first:
-            # S30 D34: a rebuild that fails its digest check may have started from a
+            # A rebuild that fails its digest check may have started from a
             # stale copy in the mirror (shared by every run on the host); rebuild once
             # more from the full release in the store, as a sampler does, before the
             # next release falls back to a whole-checkpoint upload.

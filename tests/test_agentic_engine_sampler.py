@@ -168,7 +168,7 @@ def test_aborted_trials_are_left_out_counted_and_small_groups_dropped(tmp_path, 
 
 
 def test_infra_failed_trial_is_run_again_and_its_group_written_whole(tmp_path, qwen):
-    """S29-next P1-5: a trial that lost its sandbox before calling the model runs again."""
+    """A trial that lost its sandbox before calling the model runs again."""
     agent = Agent([1.0] * 5, fail={0})  # the first attempt of group 0's slot 0 fails
     island, store, events, recorder, engine = _island(tmp_path, qwen, agent, min_samples=2, infra_retries=2)
     try:

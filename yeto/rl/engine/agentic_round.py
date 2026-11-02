@@ -23,7 +23,7 @@ and verl's ``isolate_rows``). A group with fewer than ``min_samples`` kept
 trials is not written. The round event carries the counts (``agentic``:
 trials, kept, lost by reason, loss rate, reward and response-length means).
 
-Streaming (S29): the round is no barrier. The island keeps up to
+Streaming: the round is no barrier. The island keeps up to
 ``max_in_flight`` trials running; a call ``round(rollout_id)`` registers the
 round's tasks (each task's ``n`` trials together, one group) and returns as
 soon as every registered trial has started and a slot is free, so the sampler
@@ -180,7 +180,7 @@ def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance:
 
 
 def infra_failure(result: Any) -> str | None:
-    """S29-next P1-5: the failure name when ``result`` (a finished trial) is an
+    """The failure name when ``result`` (a finished trial) is an
     infrastructure failure *before the policy produced anything* -- ABORTED with no
     model call recorded (sandbox start, image pull, agent install, a harness error)
     -- else None. Such a trial is unbiased to run again; a trial that called the
@@ -227,7 +227,7 @@ class _Group:
     drain_at_start: float = 0.0
     utilization: float | None = None  # mean trials in flight / max_in_flight over its life
     drain_s: float = 0.0  # drain waits during its life
-    retry_slots: deque = dataclasses.field(default_factory=deque)  # slots to run again (P1-5)
+    retry_slots: deque = dataclasses.field(default_factory=deque)  # slots to run again
     retries: list[int] = dataclasses.field(default_factory=list)  # infra retries per slot
     retry_reasons: list[str] = dataclasses.field(default_factory=list)
     abandoned: bool = False  # a drain timed out on it: no slot of it runs again
@@ -271,7 +271,7 @@ class _Tally:
     finish: Counter[str] = dataclasses.field(default_factory=Counter)
     rewards: list[float] = dataclasses.field(default_factory=list)
     lengths: list[int] = dataclasses.field(default_factory=list)
-    retried: Counter[str] = dataclasses.field(default_factory=Counter)  # infra retries (P1-5)
+    retried: Counter[str] = dataclasses.field(default_factory=Counter)  # infra retries
     refilled: int = 0  # groups written whole only thanks to a retry
 
 
@@ -284,14 +284,14 @@ class AgenticRound(EngineRound):
     version, model name, budget); ``sampling_params``: what each recorder
     session is opened with (checked against the proxy's signed sampling).
 
-    Streaming (S29, module doc): ``weight_switch`` ``auto`` (default: ``live``
+    Streaming (module doc): ``weight_switch`` ``auto`` (default: ``live``
     when the engine updates during a generation, else ``drain``), ``drain`` or
     ``live``; ``drain_timeout_s``: the longest drain before the trials still
     running are cancelled (None: wait for them; each is capped by its
     ``AgentBudget``); ``release_poll_s``: how often a drain-mode call reads the
     pending release; ``wait_s``: the calling thread's wake-up period.
 
-    ``infra_retries`` (S29-next P1-5): a trial that failed on infrastructure before
+    ``infra_retries``: a trial that failed on infrastructure before
     the policy produced anything (:func:`infra_failure`) runs again in its slot
     with a new session, at most this many times per slot, so its group is still
     written whole instead of short (dropped by a trainer that trains whole
@@ -505,7 +505,7 @@ class AgenticRound(EngineRound):
         self._wake.set()
 
     def _retry(self, group: _Group, j: int, result: Any) -> bool:
-        """P1-5: put slot ``j`` back in the stream when ``result`` is an infrastructure
+        """Put slot ``j`` back in the stream when ``result`` is an infrastructure
         failure before the policy ran and the slot has retries left (loop thread)."""
         name = infra_failure(result)
         if name is None or self._error is not None or self.reclaimed():
@@ -682,7 +682,7 @@ class AgenticRound(EngineRound):
             reason = "unchecked_weights_in_flight"
         elif self.reclaimed():  # leaving: the replacement owns the shard from now on
             reason = "reclaimed"
-        elif self.write_fenced():  # S29-next c1: a newer incarnation holds the lease
+        elif self.write_fenced():  # a newer incarnation holds the lease
             reason = "fenced"
         if reason is not None and reason != "below_min_samples":
             self.dropped_groups += 1
@@ -815,7 +815,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
       the path secret come from ``YETO_RECORDS_PROXY_PUBLIC_BASE`` and
       ``YETO_RECORDS_PROXY_SECRET_FILE`` (the Modal tunnel, written in the container);
     * ``infra_retries``: runs again of a trial that failed on infrastructure before
-      the policy ran, per slot (default 2; 0 = off; P1-5);
+      the policy ran, per slot (default 2; 0 = off);
     * ``task_defaults``: :meth:`AgentTask.from_mapping` defaults; ``provider``
       falls back to ``HARBOR_ENV_TYPE``.
 

@@ -1,4 +1,4 @@
-"""S29-next P0-c c4: the 120B patrol reads tapes / usage offline and plans the stop-loss."""
+"""The 120B patrol reads tapes / usage offline and plans the stop-loss."""
 
 from __future__ import annotations
 

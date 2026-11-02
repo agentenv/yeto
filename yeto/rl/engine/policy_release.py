@@ -916,7 +916,7 @@ class PolicyFollower:
     (the engines take new weights during a generation and stamp each sample with
     the version that produced it). A refused refresh is counted and the release
     is loaded at the next refresh outside the round. ``hold()`` extends the rule
-    past the round (S29: a streaming agentic round keeps trials running between
+    past the round (a streaming agentic round keeps trials running between
     the loop's rounds; while it returns True and ``live_update`` is off, a
     refresh loads nothing either).
 

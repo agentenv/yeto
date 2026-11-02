@@ -39,7 +39,7 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``rollout_quant``: optional ``{"tier", "apply"}`` (S26 E6), applied first
   (:func:`apply_rollout_quant`);
 * ``incarnation_lease``: optional (default on, in the buffer store): ``false``, or
-  ``{"store", "poll_s", "write_check_s"}`` (S29-next c1, :mod:`.incarnation_lease`):
+  ``{"store", "poll_s", "write_check_s"}`` (:mod:`.incarnation_lease`):
   the incarnation claims the island's lease at join and leaves FENCED, writing no
   more groups, once another incarnation holds it;
 * ``event_tape``: the JSONL tape file of the island's events; each
@@ -482,7 +482,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
-        if lease is not None:  # S29-next c1: this incarnation now owns the island's shard
+        if lease is not None:  # this incarnation now owns the island's shard
             claimed = lease.claim(buffer.entries(), earlier=resume.incarnations)
             emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
                  superseded=claimed["superseded"], sealed=claimed["sealed"])
@@ -546,7 +546,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
 
 def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str, default_store: Any,
                       environ: Mapping[str, str] | None = None) -> tuple[Any, float]:
-    """S29-next c1: ``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
+    """``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
     absent or ``true`` = on, in the buffer store; ``false`` = off; a mapping may name
     ``store`` (another store path every incarnation reads, e.g. a shared bucket mount),
     ``poll_s`` (watcher period, default 30) and ``write_check_s`` (the longest a group

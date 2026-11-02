@@ -370,7 +370,7 @@ UNIFORM_REWARD_EPS = 1e-6  # a group whose rewards differ by less has GRPO advan
 
 
 def advantage_stats(collector: RoundCollector) -> dict[str, Any]:
-    """S29-next c2: per kept group whether its rewards are all the same (``group_reward_uniform``,
+    """Per kept group whether its rewards are all the same (``group_reward_uniform``,
     in kept order; GRPO gives every sample of such a group a 0 advantage), how many are
     (``uniform_reward_groups``) and the samples with a nonzero group-relative advantage
     (``nonzero_advantages``: reward differs from its group mean). None for the count

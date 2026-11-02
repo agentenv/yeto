@@ -1,4 +1,4 @@
-"""S30 P0-b: tools/probes/s29_spot/s3_delivery.py publish/pull against a local fake bucket."""
+"""``tools/probes/s29_spot/s3_delivery.py`` publish/pull against a local fake bucket."""
 from __future__ import annotations
 
 import importlib.util

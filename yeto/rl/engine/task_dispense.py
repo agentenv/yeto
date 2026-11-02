@@ -1099,8 +1099,8 @@ class DispensedRows:
         the dispenser's answer. Every other position of the round that is still
         taken becomes a drop candidate (dropped at the next draw unless Miles put
         its group back into its buffer, as for a training island). ``keep``:
-        taken positions whose groups are still generating (a streaming sampler,
-        S29): neither released nor drop candidates."""
+        taken positions whose groups are still generating (a streaming
+        sampler): neither released nor drop candidates."""
         with self._lock:
             done = {int(p) for p in positions} & self.tasks.taken()
             self._pending = {r: kept - done for r, kept in self._pending.items()

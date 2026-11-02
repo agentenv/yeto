@@ -448,7 +448,7 @@ def test_a_restarted_trainer_rebuilds_a_delta_release_as_its_base(tmp_path):
 
 
 def test_resumed_trainer_retries_a_failed_rebuild_from_the_store(tmp_path, monkeypatch):
-    """S30 D34: a restarted buffer trainer whose first rebuild of the store's newest
+    """A restarted buffer trainer whose first rebuild of the store's newest
     (delta) release fails its digest check -- a stale same-named copy in the
     host-wide mirror -- rebuilds once more from the full release in the store and
     adopts it, so its next release is a delta again (sha256 equal to the record)."""

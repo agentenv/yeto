@@ -1,4 +1,4 @@
-"""S29: the agentic round streams groups instead of waiting for the round (CPU).
+"""The agentic round streams groups instead of waiting for the round (CPU).
 
 Real pieces: ``AgenticRound`` (the outer layer ``run_agent_task`` and
 ``finish_sample``, ``GroupWriter``, ``FileSampleBuffer``, ``RoundGuard`` /

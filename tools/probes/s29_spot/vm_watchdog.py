@@ -1,4 +1,4 @@
-"""S29-next P0-c3 / P1-1 / P1-7: launch and keep one Nebius rollout island VM alive.
+"""Launch and keep one Nebius rollout island VM alive.
 
 One process owns one island (one sky cluster name at a time). It
 
@@ -6,16 +6,16 @@ One process owns one island (one sky cluster name at a time). It
   H100 first (the user's standing choice for the resident island), then every
   spot candidate (H100 and H200, all regions) cheapest first, and on-demand H200
   last if ``--allow-ondemand-h200``;
-* never ``stop``s or ``start``s a VM (S29 D23: a restarted spot VM sat in
+* never ``stop``s or ``start``s a VM (a restarted spot VM once sat in
   STARTING for 30 min and then failed on capacity): a VM that is stopped,
   preempted, missing, or stuck in STARTING/launch for more than
   ``--launch-timeout-s`` (30 min) is deleted and the next candidate is created;
-* stops when the manual stop marker exists (D23: an operator who cuts losses
+* stops when the manual stop marker exists (an operator who cuts losses
   touches ``--stop-file`` first; the watchdog then leaves the VM as it is and
   exits) or when the spend estimate reaches ``--budget-usd`` (then it deletes
   its VM);
 * after the VM has been gone for ``--orphan-sweep-min`` minutes without a new
-  one up, deletes the island's boat sandboxes (P1-7, ``boat_labels sweep``);
+  one up, deletes the island's boat sandboxes (``boat_labels sweep``);
 * appends every event (launch phases, preemption time, cold start, spend) to a
   JSONL log; the spend total survives a watchdog restart (``--state``).
 
@@ -191,7 +191,7 @@ class Config:
     log: str
     state: str
     stop_file: str
-    launch_timeout_s: float = 1800.0  # S30 D33: an on-demand 8 x H100 took 15 min to come up
+    launch_timeout_s: float = 1800.0  # an on-demand 8 x H100 took 15 min to come up
     starting_timeout_s: float = 600.0
     ready_timeout_s: float = 3600.0
     ready_cmd: str = ""
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--yaml", default=str(HERE / "sky_spot120.yaml"))
     p.add_argument("--env", action="append", default=[], help="KEY=VALUE passed to sky launch (CARD is set per candidate)")
     p.add_argument("--secret", action="append", default=[])
-    p.add_argument("--launch-timeout-s", type=float, default=1800)  # S30 D33
+    p.add_argument("--launch-timeout-s", type=float, default=1800)
     p.add_argument("--starting-timeout-s", type=float, default=600)
     p.add_argument("--ready-cmd", default="", help="ssh <cluster> CMD exit 0 = sampler ready (cold-start end)")
     p.add_argument("--ready-timeout-s", type=float, default=3600)

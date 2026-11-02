@@ -104,7 +104,7 @@ def sample_record(item: PromptItem, completion: Completion, *, reward: float, ve
     }
 
 
-_completion_version = completion_version  # moved to sampler_engine (S29: the records proxy uses it)
+_completion_version = completion_version  # moved to sampler_engine (the records proxy uses it)
 
 
 class EngineRound:
@@ -140,7 +140,7 @@ class EngineRound:
         self.reclaimed = reclaimed
         self.unchecked_in_flight = unchecked_in_flight
         self.dropped_groups = 0  # groups not written because the island is leaving
-        # S29-next c1: read right before every group write; True = another incarnation
+        # Read right before every group write; True = another incarnation
         # holds the island's lease (incarnation_lease), so nothing more is written
         self.write_fenced: Callable[[], bool] = lambda: False
 
@@ -297,7 +297,7 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     writing the current round's groups (default: ``should_stop``). ``make_round``:
     builds the round instead of :class:`EngineRound` with the same arguments
     (S28 G-120: :class:`~.agentic_round.AgenticRound`, bound to its own settings).
-    A round with ``streams`` True (S29: trials run across the loop's rounds)
+    A round with ``streams`` True (trials run across the loop's rounds)
     sets the follower's ``live_update`` (its ``live``), holds loads while its
     trials run (``holds_weights``) and reads pending releases (``release_pending``)."""
     sampling = config.sampling.check()
@@ -321,7 +321,7 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                                loop_guard=config.loop_guard, incarnation=incarnation,
                                resume=resume, data_cursor=data_cursor,
                                reclaimed=should_stop if reclaimed is None else reclaimed)
-    if getattr(engine_round, "streams", False):  # S29: a streaming agentic round
+    if getattr(engine_round, "streams", False):  # a streaming agentic round
         follower.live_update = engine_round.live
         follower.hold = engine_round.holds_weights
         engine_round.release_pending = follower.pending_seq

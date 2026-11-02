@@ -11,7 +11,7 @@ proxy on the VM's public IP.
 Boat budget (S29: 22 creations left for the UTC day): VM reuse is on
 (``YETO_BOAT_POOL``), so a sandbox VM serves the next trial instead of a new
 create; each island keeps at most ``max_in_flight`` (4) active sandboxes and
-starts at most ``starts_per_hour`` per hour (default 24, S29 D18-1).
+starts at most ``starts_per_hour`` per hour (default 24).
 
 The VM itself (GPU kind x Nebius region x on-demand/spot) is chosen and kept alive by
 ``vm_watchdog.py`` (``candidates()``); ``--card-model`` and ``--tp`` follow that VM.

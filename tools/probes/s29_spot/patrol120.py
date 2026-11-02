@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S29-next P0-c c4: patrol (and stop-loss) for the 120B spot RL run.
+"""Patrol (and stop-loss) for the 120B spot RL run.
 
 Reads, all optional:
 
