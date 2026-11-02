@@ -268,6 +268,8 @@ class Watchdog:
             while not self.ops.ready(self.cluster, self.cfg.ready_cmd):
                 if self.stopped_by_hand():  # S30 D35: the marker also ends a ready wait
                     return True  # the VM stays; the caller's next stop check exits
+                if self.reclaimed_while_waiting():  # reclaimed during cold start
+                    return True  # cluster is None: the caller relaunches at once
                 if self.clock() - t1 > self.cfg.ready_timeout_s:
                     self.event("ready_timeout", cand=cand.key)
                     self.delete("sampler not ready")
@@ -278,6 +280,20 @@ class Watchdog:
                        cold_start_s=round(self.clock() - t0, 1),
                        outage_s=round(t0 - self.gone_since, 1) if self.gone_since else None)
         self.gone_since, self.swept = None, False
+        return True
+
+    def reclaimed_while_waiting(self) -> bool:
+        """True (and the VM deleted) when the instance left RUNNING/STARTING during the ready wait."""
+        try:
+            st = self.ops.state(self.cluster, self.cand.region)
+        except Exception as e:  # noqa: BLE001 - an API hiccup is not a preemption
+            self.event("state_error", err=str(e)[:200])
+            return False
+        if st in ("RUNNING", "STARTING", "CREATING", "UPDATING"):
+            return False
+        self.gone_since = self.clock()
+        self.event("preempted", state=st, cand=self.cand.key, during="ready_wait")
+        self.delete(f"state {st} during ready wait")
         return True
 
     def maybe_sweep(self) -> None:

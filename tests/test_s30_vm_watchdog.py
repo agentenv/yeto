@@ -198,3 +198,22 @@ def test_d35_the_stop_marker_ends_a_ready_wait(tmp_path):
                       clock=clock, sleep=clock.sleep)
     assert dog.run() == "manual_stop"
     assert ("down", dog.cluster) not in ops.calls  # the VM is left as is
+
+
+def test_d39_a_vm_reclaimed_during_the_ready_wait_is_relaunched(tmp_path):
+    """A spot VM reclaimed before its sampler came up kept the watchdog
+    probing ssh until the ready timeout; the ready wait now checks the instance state."""
+    clock = Clock()
+
+    class NeverReady(FakeOps):
+        def ready(self, cluster, cmd):
+            return False
+
+    ops = NeverReady(clock, launch={"H100:8@eu-north1/od": [True, True]}, states=["RUNNING", "STOPPING"])
+    dog = wd.Watchdog(_cfg(tmp_path, ready_cmd="test -s x", ready_timeout_s=10_000.0), wd.candidates(), ops,
+                      clock=clock, sleep=clock.sleep)
+    assert dog.acquire() is None and dog.cluster is None
+    assert ("down", "s30t-h100-1") in ops.calls
+    ev = [e for e in _events(tmp_path) if e["event"] == "preempted"]
+    assert ev and ev[0]["state"] == "STOPPING" and ev[0]["during"] == "ready_wait"
+    assert clock() - 1_000_000.0 < 1000  # well before the ready timeout
