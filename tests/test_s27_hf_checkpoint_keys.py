@@ -445,3 +445,58 @@ def test_a_restarted_trainer_rebuilds_a_delta_release_as_its_base(tmp_path):
     for name in sorted(p.name for p in staged.iterdir() if p.name.endswith(".safetensors")):
         assert _bytes(Path(adopted.directory) / name) == _bytes(staged / name), name
     assert v0 is not None
+
+
+def test_resumed_trainer_retries_a_failed_rebuild_from_the_store(tmp_path, monkeypatch):
+    """A restarted buffer trainer whose first rebuild of the store's newest
+    (delta) release fails its digest check -- a stale same-named copy in the
+    host-wide mirror -- rebuilds once more from the full release in the store and
+    adopts it, so its next release is a delta again (sha256 equal to the record)."""
+    from yeto.rl.adapters.verl.buffer_ports import delta_chain_for
+    from yeto.rl.engine import release_delta as rd
+    from yeto.rl.engine.policy_release import DeltaChain, PolicyReleaseStore
+    from yeto.rl.engine.resume import CheckpointStore
+
+    if not rd.zstd_available():
+        pytest.skip("no zstd")
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    monkeypatch.setenv(rd.FORMAT_ENV, "v2")
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=2)
+    chain = DeltaChain(64)
+    words = rng.integers(0, 1 << 16, size=40_000, dtype=np.uint16)
+    released = []
+    for version in range(4):
+        if version:
+            words = words.copy()
+            words[rng.choice(words.size, 800, replace=False)] ^= 1
+        staged = tmp_path / "staging" / f"v{version}"
+        staged.mkdir(parents=True)
+        (staged / "model.safetensors").write_bytes(words.astype("<u2").tobytes())
+        (staged / "config.json").write_text("{}")
+        release = store.release_staged(version, f"h{version}", staged, position=lambda: (0, None),
+                                       delta_base=chain.base())
+        chain.advance(release, staged)
+        released.append(release)
+    latest = released[-1]
+    assert latest.delta is not None and latest.delta["base_path"] == released[-2].path
+
+    # the host-wide mirror holds a same-named copy of the base from an earlier run
+    mirror_root = tmp_path / "mirror"
+    stale = mirror_root / released[-2].path
+    stale.mkdir(parents=True)
+    (stale / "model.safetensors").write_bytes(rng.integers(0, 1 << 16, size=40_000, dtype=np.uint16)
+                                              .astype("<u2").tobytes())
+    (stale / "config.json").write_text("{}")
+    (stale / rd.MIRROR_STAMP).write_text(json.dumps(rd.mirror_stamp(released[-2])))  # even stamped
+
+    events: list[dict] = []
+    resumed = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=rd.DeltaMirror(mirror_root))
+    adopted = delta_chain_for(resumed, 64, emit=lambda n, **f: events.append(f)).base()
+    assert events[-1]["adopted"] is True and events[-1]["rebuilt"] is True
+    assert events[-1]["retried_from_store"] is True and "rebuilt sha256" in events[-1]["first_error"]
+    assert adopted is not None and adopted.release.path == latest.path
+    want = latest.delta["files"]["model.safetensors"]["sha256"]
+    assert rd.file_sha256(Path(adopted.directory) / "model.safetensors") == want

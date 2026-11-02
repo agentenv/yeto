@@ -180,9 +180,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         # S27 G-EQ3 (gap 20): the mirror lets this trainer rebuild the store's newest
         # release when that one is a delta, so a restarted island can still make its
         # next release a delta against it instead of uploading a whole checkpoint.
-        releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
-                                                environ=environ),
-                                      mirror=default_mirror(environ))
+        release_root = str(section.get("release_store") or section["store"])
+        releases = PolicyReleaseStore(store_for(release_root, environ=environ),
+                                      mirror=default_mirror(environ, store=release_root))
 
         def ports(island):
             return install_buffer_ports(island, buffer=buffer, releases=releases, shape=shape,
@@ -192,6 +192,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # S27 G-EQ3: a trainer without a lane keeps its own cursor,
                                         # so a restart continues after the groups it already trained
                                         cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
+                                        # The store path drops short groups like the relay
+                                        group_size=int(plan.get("samples_per_group") or 0) or None,
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),
                                         delta_full_every=int(section.get("release_delta_full_every") or 0),

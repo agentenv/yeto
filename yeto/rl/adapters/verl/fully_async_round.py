@@ -366,6 +366,33 @@ class RoundCollector:
             GATE_GRANULARITY: GRANULARITY_TRAJECTORY,
         }
 
+UNIFORM_REWARD_EPS = 1e-6  # a group whose rewards differ by less has GRPO advantages of 0
+
+
+def advantage_stats(collector: RoundCollector) -> dict[str, Any]:
+    """Per kept group whether its rewards are all the same (``group_reward_uniform``,
+    in kept order; GRPO gives every sample of such a group a 0 advantage), how many are
+    (``uniform_reward_groups``) and the samples with a nonzero group-relative advantage
+    (``nonzero_advantages``: reward differs from its group mean). None for the count
+    when a reward is unknown (NaN)."""
+    uniform: list[bool] = []
+    nonzero: int | None = 0
+    for verdict in collector.kept:
+        rewards = list(verdict.meta.rewards)
+        if any(math.isnan(r) for r in rewards):
+            nonzero = None
+            known = [r for r in rewards if not math.isnan(r)]
+            uniform.append(bool(known) and max(known) - min(known) <= UNIFORM_REWARD_EPS)
+            continue
+        same = not rewards or max(rewards) - min(rewards) <= UNIFORM_REWARD_EPS
+        uniform.append(same)
+        if nonzero is not None and not same:
+            mean = sum(rewards) / len(rewards)
+            nonzero += sum(1 for r in rewards if abs(r - mean) > UNIFORM_REWARD_EPS)
+    return {"group_reward_uniform": uniform, "uniform_reward_groups": sum(uniform),
+            "nonzero_advantages": nonzero}
+
+
 def group_metadata(collector: RoundCollector, rollout_id: int, published: Mapping[int, str]):
     """Kept groups as :class:`GroupMetadata`; the policy token names the oldest version
     (the driver checks it against the hashes it published within the window)."""

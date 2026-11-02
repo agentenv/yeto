@@ -76,7 +76,7 @@ class Agent:
 
 
 def _island(tmp_path: Path, template, agent: Agent, *, n: int = 2, groups: int = 2, rounds: int = 1,
-            min_samples: int = 2, script_turns: int = 3):
+            min_samples: int = 2, script_turns: int = 3, infra_retries: int = 0):
     from test_records_proxy import engine_for
 
     store = CheckpointStore(tmp_path)
@@ -97,7 +97,8 @@ def _island(tmp_path: Path, template, agent: Agent, *, n: int = 2, groups: int =
     def make(engine_, writer, **kw):
         return AgenticRound(engine_, writer, recorder=recorder, harness=agent, max_in_flight=1,
                             max_response_len=4096, max_prompt_len=4096, min_samples=min_samples,
-                            task_defaults={"provider": "boat", "model_name": "policy"}, **kw)
+                            task_defaults={"provider": "boat", "model_name": "policy"},
+                            infra_retries=infra_retries, **kw)
 
     island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer,
                                   emit=lambda name, **f: events.append((name, f)), prompts=prompts,
@@ -166,6 +167,41 @@ def test_aborted_trials_are_left_out_counted_and_small_groups_dropped(tmp_path, 
     assert agentic["outcomes"]["harness_outcome_aborted_total"] == 1
 
 
+def test_infra_failed_trial_is_run_again_and_its_group_written_whole(tmp_path, qwen):
+    """A trial that lost its sandbox before calling the model runs again."""
+    agent = Agent([1.0] * 5, fail={0})  # the first attempt of group 0's slot 0 fails
+    island, store, events, recorder, engine = _island(tmp_path, qwen, agent, min_samples=2, infra_retries=2)
+    try:
+        assert island.run() == 1
+    finally:
+        island.round.close()
+    _, entries = _entries(store)
+    assert len(entries) == 2  # both groups whole
+    (retry,) = [f for n, f in events if n == "rl_agentic_trial_retry"]
+    assert retry["reason"] == "RuntimeError" and retry["attempt"] == 1 and retry["slot"] == 0
+    (round_event,) = [f for n, f in events if n == "rl_sampler_engine_round"]
+    agentic = round_event["agentic"]
+    assert agentic["lost"] == {} and agentic["groups_below_min"] == 0
+    assert agentic["infra_retries"] == {"RuntimeError": 1} and agentic["groups_refilled"] == 1
+    groups = [f for n, f in events if n == "rl_agentic_group"]
+    assert sorted(g["infra_retries"] for g in groups) == [[0, 0], [1, 0]]
+
+
+def test_infra_retries_stop_at_the_limit(tmp_path, qwen):
+    agent = Agent([1.0] * 6, fail={0, 1, 2})  # slot 0 of group 0 fails 3 times; limit 2
+    island, store, events, recorder, engine = _island(tmp_path, qwen, agent, min_samples=2, infra_retries=2)
+    try:
+        assert island.run() == 1
+    finally:
+        island.round.close()
+    _, entries = _entries(store)
+    assert len(entries) == 1
+    (round_event,) = [f for n, f in events if n == "rl_sampler_engine_round"]
+    agentic = round_event["agentic"]
+    assert agentic["infra_retries"] == {"RuntimeError": 2} and agentic["lost"] == {"RuntimeError": 1}
+    assert agentic["infra_retries_exhausted_total"] == 1
+
+
 def test_trial_served_by_another_version_is_lost(tmp_path, qwen):
     from yeto.rl.agentic import TokenTurn
 
@@ -195,15 +231,16 @@ def test_trial_served_by_another_version_is_lost(tmp_path, qwen):
     events = []
     rnd = AgenticRound(engine, GroupWriter(FileSampleBuffer(store, batch_size=1), "s"), recorder=Recorder(),
                        harness=Harness(), max_in_flight=4, max_response_len=64, min_samples=1,
-                       task_defaults={"provider": "docker"},
+                       task_defaults={"provider": "docker"}, weight_switch="drain",  # the drain-mode rule
                        prompts=lambda r: [PromptItem("p", "t", metadata={"agent_task": dict(TASK)})],
                        sampling=SamplingParams(max_tokens=8, n=2), provenance=_provenance(engine),
                        emit=lambda n, **f: events.append((n, f)))
     try:
         rnd(0)
+        rnd.flush()  # streaming: the call returns once the stream wants more tasks; flush settles the group
     finally:
         rnd.close()
-    agentic = [f for n, f in events if n == "rl_sampler_engine_round"][0]["agentic"]
+    agentic = [f for n, f in events if n == "rl_sampler_engine_round"][-1]["agentic"]
     assert agentic["lost"] == {LOST_VERSION: 1} and agentic["kept"] == 1
 
 

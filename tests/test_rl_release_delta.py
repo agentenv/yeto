@@ -585,3 +585,268 @@ def test_a_full_release_with_file_digests_is_checked_before_it_loads(tmp_path, m
     weights.write_bytes(good)
     assert follower.refresh().version == 1 and [v for v, _ in loads] == [1]
     assert follower.counters.rebuild_failures == 1 and follower.rebuild_failures == 0
+
+
+# ---------------------------------------------------------------- format v2
+needs_zstd = pytest.mark.skipif(not rd.zstd_available(), reason="no zstd (Python < 3.14 without zstandard)")
+
+
+def _bf16_step(words: np.ndarray, fraction: float, seed: int) -> np.ndarray:
+    """A trainer-like update: a fraction of the words move by +-1 bf16 step."""
+    out = words.copy()
+    rng = np.random.default_rng(seed)
+    index = rng.choice(words.size, size=int(words.size * fraction), replace=False)
+    out[index] = (out[index].astype(np.int32) + rng.choice([-1, 1], size=index.size)).astype(np.uint16)
+    return out
+
+
+@needs_zstd
+@pytest.mark.parametrize("fraction", [0.0, 0.001, 0.05, 0.5, 1.0])
+@pytest.mark.parametrize("tail", [b"", b"\x07"])
+def test_v2_round_trip_is_byte_exact_with_the_same_digest(tmp_path, fraction, tail):
+    base_words = _words(70_001)
+    base = _write(tmp_path / "base", base_words, tail)
+    target = _write(tmp_path / "new", _bf16_step(base_words, fraction, 3), tail)
+    c1, d1 = rd.encode_file(base, target, tmp_path / "d1", chunk_words=4096)
+    c2, d2 = rd.encode_file(base, target, tmp_path / "d2", chunk_words=4096, fmt=2)
+    assert (c1, d1) == (c2, d2) and d2 == _sha(target)
+    assert (tmp_path / "d2").read_bytes().endswith(rd.MAGIC_V2)
+    assert rd.apply_file(base, tmp_path / "d2", tmp_path / "out") == d2
+    assert (tmp_path / "out").read_bytes() == target.read_bytes()
+
+
+@needs_zstd
+def test_v2_is_smaller_than_v1_on_sparse_bf16_steps(tmp_path):
+    base_words = _words(1 << 20)
+    base = _write(tmp_path / "a", base_words)
+    target = _write(tmp_path / "b", _bf16_step(base_words, 0.012, 4))
+    rd.encode_file(base, target, tmp_path / "d1", chunk_words=1 << 18)
+    rd.encode_file(base, target, tmp_path / "d2", chunk_words=1 << 18, fmt=2)
+    assert (tmp_path / "d2").stat().st_size < 0.6 * (tmp_path / "d1").stat().st_size
+
+
+@needs_zstd
+def test_a_chain_mixes_v1_and_v2_deltas(tmp_path):
+    words = [_words(30_001)]
+    for v in range(1, 5):
+        words.append(_bf16_step(words[-1], 0.02, seed=v))
+    paths = [_write(tmp_path / f"v{v}", w, b"\x05") for v, w in enumerate(words)]
+    deltas = []
+    for v in range(1, 5):
+        rd.encode_file(paths[v - 1], paths[v], tmp_path / f"d{v}", chunk_words=4096, fmt=1 + v % 2)
+        deltas.append(tmp_path / f"d{v}")
+    assert rd.apply_chain(paths[0], deltas, tmp_path / "out") == _sha(paths[4])
+    assert (tmp_path / "out").read_bytes() == paths[4].read_bytes()
+
+
+@needs_zstd
+def test_v2_refuses_a_corrupt_frame_and_a_wrong_magic(tmp_path):
+    base = _write(tmp_path / "a", _words(10_000))
+    target = _write(tmp_path / "b", _bf16_step(_words(10_000), 0.1, 5))
+    rd.encode_file(base, target, tmp_path / "d", fmt=2)
+    raw = bytearray((tmp_path / "d").read_bytes())
+    raw[10] ^= 0xFF
+    (tmp_path / "bad").write_bytes(bytes(raw))
+    with pytest.raises(rd.ReleaseDeltaError):
+        rd.apply_file(base, tmp_path / "bad", tmp_path / "x")
+    good = (tmp_path / "d").read_bytes()
+    (tmp_path / "v1magic").write_bytes(good[:-len(rd.MAGIC)] + rd.MAGIC)
+    with pytest.raises(rd.ReleaseDeltaError, match="format does not match"):
+        rd.apply_file(base, tmp_path / "v1magic", tmp_path / "x")
+
+
+@needs_zstd
+def test_directory_delta_takes_the_format_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    v0 = {"a.safetensors": _words(20_000, 1)}
+    v1 = {"a.safetensors": _bf16_step(v0["a.safetensors"], 0.01, 2)}
+    d0, d1 = (_release_dir(tmp_path / f"v{i}", v) for i, v in enumerate((v0, v1)))
+    monkeypatch.setenv(rd.FORMAT_ENV, "v2")
+    result = rd.encode_directory(d0, d1, tmp_path / "d")
+    assert (tmp_path / "d" / "a.safetensors.ydelta").read_bytes().endswith(rd.MAGIC_V2)
+    rd.apply_directory(d0, [(tmp_path / "d", result.entries)], tmp_path / "out")
+    assert (tmp_path / "out" / "a.safetensors").read_bytes() == (d1 / "a.safetensors").read_bytes()
+
+
+def test_delta_format_parsing():
+    assert rd.delta_format({}) == 1
+    assert rd.delta_format({rd.FORMAT_ENV: "V2"}) == 2 and rd.delta_format({rd.FORMAT_ENV: "1"}) == 1
+    with pytest.raises(ValueError):
+        rd.delta_format({rd.FORMAT_ENV: "v3"})
+
+
+# ---------------------------------------------------------------- mirror identity
+def _v2_chain(tmp_path, monkeypatch, versions: int = 4, *, root: str = "store", seed: int = 0):
+    """A trainer that releases a full v0, then v2 deltas, each against the release
+    before it; returns (store, the releases, the staged words of each)."""
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    monkeypatch.setenv(rd.FORMAT_ENV, "v2")
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / root), keep=2)
+    chain = DeltaChain(full_every=64)
+    words = [_words(60_000, seed)]
+    staging = tmp_path / f"staging-{root}"
+    releases = [_release(trainer, chain, _stage(staging, 0, words[0]), 0)]
+    for version in range(1, versions):
+        words.append(_changed(words[-1], 0.02, seed=seed * 100 + version))
+        releases.append(_release(trainer, chain, _stage(staging, version, words[-1]), version))
+    return trainer, releases, words
+
+
+@needs_zstd
+def test_v2_delta_chain_rebuilds_byte_exact_through_every_link(tmp_path, monkeypatch):
+    _trainer, releases, words = _v2_chain(tmp_path, monkeypatch, versions=5)
+    assert [r.delta["base_path"] for r in releases[1:]] == [r.path for r in releases[:-1]]
+    for release in releases[1:]:
+        delta = tmp_path / "store" / "policy-releases" / release.path / "model.safetensors.ydelta"
+        with delta.open("rb") as handle:
+            assert rd._footer(handle, delta).get("format") == 2
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                 mirror=rd.DeltaMirror(tmp_path / "mirror", workers=1))
+    rebuilt = sampler.resolve(sampler.latest())
+    assert (rebuilt / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    assert json.loads((rebuilt / rd.MIRROR_STAMP).read_text()) == rd.mirror_stamp(releases[-1])
+
+
+@needs_zstd
+def test_a_stale_mirror_copy_with_the_same_name_is_not_used_as_a_base(tmp_path, monkeypatch):
+    """The host-wide mirror held another run's ``r<seq>-v<version>``; the
+    rebuild started from it and failed its digest check. Unstamped or foreign
+    copies are skipped; the chain is rebuilt from the full release in the store."""
+    _trainer, releases, words = _v2_chain(tmp_path, monkeypatch, versions=4)
+    _other, foreign, _ = _v2_chain(tmp_path, monkeypatch, versions=4, root="other", seed=7)
+    assert foreign[-2].path == releases[-2].path  # same names, other weights
+    mirror = rd.DeltaMirror(tmp_path / "mirror", workers=1)
+    other = PolicyReleaseStore(CheckpointStore(tmp_path / "other"), mirror=mirror)
+    stale = other.resolve(foreign[-2])  # a stamped copy of the other store's release
+    assert stale == tmp_path / "mirror" / releases[-2].path
+    assert rd.mirror_stamp(foreign[-2]) != rd.mirror_stamp(releases[-2])
+    assert mirror.holds(releases[-2].path) and not mirror.holds(releases[-2].path, releases[-2])
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=mirror)
+    rebuilt = sampler.resolve(sampler.latest())
+    assert (rebuilt / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    # a copy from before the stamp (no stamp file) is not trusted either
+    (stale / rd.MIRROR_STAMP).unlink(missing_ok=True)
+    assert not mirror.holds(releases[-2].path, releases[-2])
+
+
+@needs_zstd
+def test_a_failed_rebuild_leaves_no_partial_and_a_retry_from_the_store_replaces_the_copy(tmp_path, monkeypatch):
+    _trainer, releases, words = _v2_chain(tmp_path, monkeypatch, versions=3)
+    mirror = rd.DeltaMirror(tmp_path / "mirror", workers=1)
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=mirror)
+    first = sampler.resolve(releases[-1])
+    second = sampler.resolve(releases[-1], from_store=True)  # the target directory exists already
+    assert first == second
+    assert (second / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    real = rd.apply_directory
+    monkeypatch.setattr(rd, "apply_directory", lambda *a, **k: (real(*a, **k), (_ for _ in ()).throw(
+        rd.ReleaseDeltaError("boom", file="model.safetensors")))[0])
+    with pytest.raises(rd.ReleaseDeltaError):
+        sampler.resolve(releases[-1], from_store=True)
+    assert not [p for p in (tmp_path / "mirror").iterdir() if p.name.endswith(".partial")]
+
+
+def test_chain_apply_refuses_deltas_with_another_chunk_count(tmp_path):
+    words = [_words(30_001)]
+    for v in range(1, 3):
+        words.append(_changed(words[-1], 0.02, seed=v))
+    paths = [_write(tmp_path / f"v{v}", w) for v, w in enumerate(words)]
+    for v in range(1, 3):
+        rd.encode_file(paths[v - 1], paths[v], tmp_path / f"d{v}", chunk_words=4096)
+    # rewrite the second footer with one chunk record dropped (same size and chunking)
+    delta = tmp_path / "d2"
+    with delta.open("rb") as handle:
+        footer = rd._footer(handle, delta)
+        end = handle.seek(0, 2)
+    raw = delta.read_bytes()
+    trailer = rd._FOOTER.size + len(rd.MAGIC)
+    (length,) = rd._FOOTER.unpack(raw[end - trailer:end - trailer + rd._FOOTER.size])
+    body = raw[:end - trailer - length]
+    footer["chunks"] = footer["chunks"][:-1]
+    text = json.dumps(footer, separators=(",", ":")).encode()
+    delta.write_bytes(body + text + rd._FOOTER.pack(len(text)) + raw[-len(rd.MAGIC):])
+    with pytest.raises(rd.ReleaseDeltaError, match="chunks"):
+        rd.apply_chain(paths[0], [tmp_path / "d1", delta], tmp_path / "x")
+
+
+def test_default_mirror_puts_each_store_in_its_own_directory(tmp_path):
+    env = {rd.MIRROR_ENV: str(tmp_path / "mirror")}
+    a, b = rd.default_mirror(env, store="s3://bucket/run-a"), rd.default_mirror(env, store="s3://bucket/run-b")
+    assert a.root != b.root and a.root.parent == b.root.parent == tmp_path / "mirror"
+    assert rd.default_mirror(env, store="s3://bucket/run-a").root == a.root
+    assert rd.default_mirror(env).root == tmp_path / "mirror"
+
+
+@needs_zstd
+def test_two_stores_sharing_a_mirror_root_do_not_touch_each_other(tmp_path, monkeypatch):
+    """Two runs on one host with the same mirror root and the same release names:
+    one run's rebuilds and pruning leave the copy the other one serves alone."""
+    _t, mine, words = _v2_chain(tmp_path, monkeypatch, versions=4)
+    _o, theirs, other_words = _v2_chain(tmp_path, monkeypatch, versions=4, root="other", seed=7)
+    env = {rd.MIRROR_ENV: str(tmp_path / "mirror")}
+    a = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                           mirror=rd.default_mirror(env, store=str(tmp_path / "store")))
+    b = PolicyReleaseStore(CheckpointStore(tmp_path / "other"),
+                           mirror=rd.default_mirror(env, store=str(tmp_path / "other")))
+    a.mirror.keep = b.mirror.keep = 1
+    served = b.resolve(theirs[1])
+    for release in mine[1:]:
+        rebuilt = a.resolve(release)
+        assert (rebuilt / "model.safetensors").read_bytes() == words[mine.index(release)].astype("<u2").tobytes()
+    a.resolve(mine[1], from_store=True)  # a stale same-named copy in a's own directory is replaced
+    assert served.is_dir() and served.name == mine[1].path
+    assert (served / "model.safetensors").read_bytes() == other_words[1].astype("<u2").tobytes()
+
+
+@needs_zstd
+def test_prune_skips_copies_stamped_for_another_scope(tmp_path, monkeypatch):
+    _t, mine, _words_a = _v2_chain(tmp_path, monkeypatch, versions=4)
+    root = tmp_path / "mirror"
+    foreign = root / "r99-v99"
+    foreign.mkdir(parents=True)
+    (foreign / rd.MIRROR_STAMP).write_text(json.dumps({"path": "r99-v99", "seq": 99, "scope": "other"}))
+    unstamped = root / "r98-v98"
+    unstamped.mkdir()
+    mirror = rd.DeltaMirror(root, keep=1, workers=1, scope="store")
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=mirror)
+    for release in mine[1:]:
+        sampler.resolve(release)
+    left = sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    assert left == sorted([mine[-1].path, "r99-v99", "r98-v98"])
+
+
+@needs_zstd
+def test_concurrent_rebuilds_of_one_release_both_succeed(tmp_path, monkeypatch):
+    """Two processes of one run rebuild the same delta at once: each works in its own
+    partial directory, neither deletes the other's, both end on a correct copy."""
+    import threading
+
+    _t, releases, words = _v2_chain(tmp_path, monkeypatch, versions=3)
+    root = tmp_path / "mirror"
+    gate = threading.Barrier(2)
+    real = rd.apply_directory
+
+    def slow_apply(base, chain, out, **kw):
+        result = real(base, chain, out, **kw)
+        gate.wait(timeout=10)  # both partials exist at the same time
+        return result
+
+    monkeypatch.setattr(rd, "apply_directory", slow_apply)
+    out, errors = [], []
+
+    def rebuild():
+        try:
+            store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                       mirror=rd.DeltaMirror(root, workers=1, scope="store"))
+            out.append(store.resolve(releases[-1]))
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=rebuild) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors and len(out) == 2 and out[0] == out[1]
+    assert (out[0] / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    assert not [p for p in root.iterdir() if p.name.startswith(".")]
