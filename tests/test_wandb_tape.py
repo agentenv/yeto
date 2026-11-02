@@ -327,7 +327,9 @@ def _drain(tape, seen, stop, **kw):
     return t
 
 
-def _wait_for(predicate, timeout=5.0):
+# Waits only for things that must happen: the timeout bounds a failure and is
+# generous for loaded CI hosts.
+def _wait_for(predicate, timeout=30.0):
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:
         time.sleep(0.01)

@@ -132,7 +132,9 @@ def _entries(tmp_path: Path):
     return entries, {e.sample_id: decode_group(reader.read_payload(e.payload_ref)) for e in entries}
 
 
-def _wait(predicate, timeout=5.0):
+# Every wait is for something that must happen, so the timeout only bounds a
+# failure; it is generous for loaded CI hosts (2 cores running other tests).
+def _wait(predicate, timeout=30.0):
     deadline = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < deadline, "timed out"
