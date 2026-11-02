@@ -193,3 +193,27 @@ def test_validate_kernel_request_chunked_any_device():
     with pytest.raises(ValueError):
         validate_kernel_request("chunked", "cross_entropy", torch.device("cpu"), torch.float32,
                                 shard="fsdp")
+
+
+@pytest.mark.parametrize(
+    "backend, expected",
+    [
+        ("native", "torch-cross-entropy"),
+        ("liger", "liger-fused-linear-cross-entropy"),
+        ("chunked", chunked_ce.CHUNKED_LOSS_IMPLEMENTATION),
+    ],
+)
+def test_kernel_recipe_names_the_loss_that_runs(backend, expected):
+    from yeto.learner import loss_implementation_for
+
+    assert loss_implementation_for(backend) == expected
+
+
+def test_every_kernel_backend_has_a_recipe_loss_name():
+    from yeto.causal_kernels import KERNEL_BACKENDS
+    from yeto.learner import loss_implementation_for
+
+    names = {loss_implementation_for(b) for b in KERNEL_BACKENDS}
+    assert len(names) == len(KERNEL_BACKENDS)
+    with pytest.raises(ValueError):
+        loss_implementation_for("bogus")

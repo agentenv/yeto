@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 DEFAULT_LOSS_CHUNK_TOKENS = 4096
+CHUNKED_LOSS_IMPLEMENTATION = "chunked-linear-cross-entropy"
 
 # Config attributes that change how HF turns hidden states into logits.
 # The chunked lane applies only a plain linear head, so it refuses these.

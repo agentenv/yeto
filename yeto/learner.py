@@ -48,6 +48,7 @@ from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from .finalization import finalize_torch_island
 from .fragments import build_layout
 from .chunked_ce import (
+    CHUNKED_LOSS_IMPLEMENTATION,
     DEFAULT_LOSS_CHUNK_TOKENS,
     chunked_sft_forward,
     require_chunked_ce_support,
@@ -485,11 +486,7 @@ def load_model_and_tokenizer(args, device):
                 f"failed to bind the isolated fused-linear-CE loss to {model_id!r}"
             ) from exc
     resolved_attention = resolved_attention_backend(model, attention_backend)
-    loss_implementation = (
-        FUSED_LINEAR_CE_IMPLEMENTATION
-        if kernel_backend == "liger"
-        else NATIVE_LOSS_IMPLEMENTATION
-    )
+    loss_implementation = loss_implementation_for(kernel_backend)
     log.info(
         "causal kernel recipe: attention requested=%s resolved=%s; "
         "layers=%s; loss=%s%s",
@@ -535,6 +532,24 @@ def load_model_and_tokenizer(args, device):
                  require_chunked_ce_support(model),
                  getattr(args, "loss_chunk_tokens", DEFAULT_LOSS_CHUNK_TOKENS))
     return model, tokenizer
+
+
+def loss_implementation_for(kernel_backend: str) -> str:
+    """Name of the loss kernel a ``--kernel-backend`` value actually runs.
+
+    This is what the ``causal kernel recipe`` log line records, so every
+    backend must map to its own implementation; an unknown value is an error
+    rather than a silent fallback to the native name.
+    """
+    implementations = {
+        "native": NATIVE_LOSS_IMPLEMENTATION,
+        "liger": FUSED_LINEAR_CE_IMPLEMENTATION,
+        "chunked": CHUNKED_LOSS_IMPLEMENTATION,
+    }
+    try:
+        return implementations[kernel_backend]
+    except KeyError:
+        raise ValueError(f"unknown kernel backend {kernel_backend!r}") from None
 
 
 # Attention projection names across the architectures we run (Llama/Qwen/
