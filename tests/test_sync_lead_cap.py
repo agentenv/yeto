@@ -128,6 +128,51 @@ async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_it
 
 
 @pytest.mark.asyncio
+async def test_the_wait_also_covers_rounds_trained_before_the_next_pull_arrives():
+    """After a merge and before the syncer's next PULL nothing is in flight,
+    but a round trained then lands in the next push all the same: with K = 1
+    the island waits until it pushed from its current cut and that merged."""
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
+    assert await pairing.wait_for_lead() == 0.0  # pushed from this round's cut
+    pairing.local_round = 2  # trained one more round; the next PULL is late
+    assert pairing.lead_blockers() == [] and pairing.lead_unpushed()
+    served = []
+
+    async def serve():
+        served.append(time.monotonic())
+        if len(served) == 3:
+            role.candidates.append(_candidate(3, 2))  # the next PULL arrives
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert len(served) >= 4 and ("actor", 3, True) in role.events
+    assert pairing.inflight == {} and role.fragment_versions == (3, 0)
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout():
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    pairing.local_round = 2
+    started = time.monotonic()
+    await pairing.wait_for_lead()
+    assert 0.1 <= time.monotonic() - started < 0.4
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
+    pairing.local_round = 3
+    assert await pairing.wait_for_lead() > 0  # past the give-up time: one poll, then trains on
+    assert pairing.lead_wait_escapes == 2
+
+
+@pytest.mark.asyncio
 async def test_no_wait_in_the_terminal_phase_or_without_blockers():
     role = _PairedRole("actor", [_candidate(1, 1)], [], release_broadcasts=False)
     pairing = _pairing(role, max_local_rounds_ahead=2)
@@ -413,6 +458,11 @@ def _run_two_islands(binary, tmp_path, monkeypatch, *, cap, fast_s=0.005, slow_s
         with lock:
             log.append((time.monotonic(), kind, learner, value))
 
+    # The clients dial for 10 s; a loaded machine can take longer to start the syncer.
+    deadline = time.monotonic() + 60
+    while "syncer listening" not in log_file.read_text():
+        assert process.poll() is None and time.monotonic() < deadline, "the syncer did not start"
+        time.sleep(0.05)
     clients = [harness._client(learner, port, profile_hash) for learner in (0, 1)]
     errors: list[BaseException] = []
     roles: dict[int, _WireRole] = {}
@@ -520,14 +570,25 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
         syncer_binary, tmp_path, monkeypatch):  # noqa: F811 - the imported fixture
     capped = _run_two_islands(syncer_binary, tmp_path / "capped", monkeypatch, cap=1)
     _check_merges(capped)
-    assert _max_lead(capped.log) <= 1
-    fast = _pushes(capped.log, 0)
-    slow = _pushes(capped.log, 1)
-    # Bounded local progress per push: the fast island trains at most K + 1
-    # rounds on a fragment before it pushes it, so its merge weight
-    # (c_steps * T^2) stays within (K + 1)x of the slow island's.
-    assert max(c for c, _ in fast.values()) <= 2
-    assert max(c for c, _ in slow.values()) <= 2
+    # With K = 1 a fast island starts round r + 1 only once every push it
+    # made from a cut <= r was merged, so the slow island pushed the same
+    # step (both islands join every merge).
+    fast_pushes: dict[int, int] = {}
+    slow_steps: set[int] = set()
+    for _, kind, who, value in sorted(capped.log, key=lambda item: item[0]):
+        if kind == "push" and who == 0:
+            fast_pushes[value[0]] = value[2]
+        elif kind == "push":
+            slow_steps.add(value[0])
+        elif kind == "start" and who == 0:
+            unmerged = [step for step, cut in fast_pushes.items() if cut < value and step not in slow_steps]
+            assert not unmerged, (value, unmerged)
+            # ... and only after it pushed from its newest cut (round r).
+            assert value == 1 or value - 1 in fast_pushes.values(), (value, fast_pushes)
+    # So it stays close to the slow island: one round ahead, or two when
+    # the slow island itself waited under the cap at a boundary while its
+    # push from an older cut completed the fast island's merge.
+    assert _max_lead(capped.log) <= 2
     waits = [fields for _, kind, who, (name, fields) in
              ((t, k, w, v) for t, k, w, v in capped.log if k == "event")
              if who == 0 and name == "rl_full_parameter_round"]
