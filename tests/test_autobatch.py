@@ -298,3 +298,67 @@ def test_probe_preserves_cpu_and_cuda_rng():
 
     assert torch.equal(torch.get_rng_state(), cpu_rng)
     assert torch.equal(torch.cuda.get_rng_state(device), cuda_rng)
+
+
+def test_probe_backs_off_on_a_message_only_npu_oom(monkeypatch):
+    """torch_npu raises a bare RuntimeError; the probe must treat it as OOM."""
+    from yeto import accel
+
+    sizes = []
+
+    def probe(model, params, opt, seq_len, vocab, device, mb, *, loss_forward=None):
+        sizes.append(mb)
+        if mb > 2:
+            raise RuntimeError(
+                "NPU out of memory. Tried to allocate 37.09 GiB (NPU 0; 60.96 GiB total capacity)"
+            )
+
+    monkeypatch.setattr(autobatch, "_probe_once", probe)
+    monkeypatch.setattr(accel, "backend", lambda _device: SimpleNamespace(empty_cache=lambda: None))
+    micro_batch = autobatch.resolve_micro_batch_size(
+        _args(grad_accum=8), None, {}, None, Tok(), SimpleNamespace(type="npu"), 1
+    )
+
+    assert sizes == [1, 2, 4]
+    assert micro_batch == 2
+    assert autobatch.exact_grad_accum(8, micro_batch) == 4
+
+
+def test_probe_reraises_a_non_oom_runtime_error(monkeypatch):
+    from yeto import accel
+
+    def probe(*a, **k):
+        raise RuntimeError("HCCL communicator was aborted")
+
+    monkeypatch.setattr(autobatch, "_probe_once", probe)
+    monkeypatch.setattr(accel, "backend", lambda _device: SimpleNamespace(empty_cache=lambda: None))
+    with pytest.raises(RuntimeError, match="HCCL communicator was aborted"):
+        autobatch.resolve_micro_batch_size(
+            _args(), None, {}, None, Tok(), SimpleNamespace(type="npu"), 1
+        )
+
+
+def test_native_probe_runs_the_real_loss_not_a_surrogate():
+    """The probe must measure sft_loss itself: F.cross_entropy keeps a
+    second full-size f32 tensor alive that a logits-copy stand-in misses."""
+    model = TinyCausalLM()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=False, fused=False)
+    params = dict(model.named_parameters())
+    seen = {}
+    real = autobatch.sft_loss
+
+    def spy(logits, labels, loss_function="cross_entropy", weights=None):
+        seen["loss_function"] = loss_function
+        seen["logits_shape"] = tuple(logits.shape)
+        seen["weights_all_ones"] = weights is not None and bool((weights == 1).all())
+        return real(logits, labels, loss_function, weights)
+
+    autobatch.sft_loss = spy
+    try:
+        autobatch._probe_once(model, params, opt, 6, 30, torch.device("cpu"), 2)
+    finally:
+        autobatch.sft_loss = real
+
+    assert seen["loss_function"] == "cross_entropy"
+    assert seen["logits_shape"] == (2, 6, 32)
+    assert seen["weights_all_ones"]

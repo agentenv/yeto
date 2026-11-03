@@ -208,6 +208,28 @@ def oom_error(device: torch.device) -> type[BaseException]:
     return getattr(backend(device), "OutOfMemoryError", torch.cuda.OutOfMemoryError)
 
 
+# torch_npu's caching allocator raises a bare RuntimeError ("NPU out of
+# memory. Tried to allocate ...") and `torch.npu` exports no
+# `OutOfMemoryError`, so an `except oom_error(device)` written for CUDA never
+# matches on Ascend and an allocator OOM escapes as a hard failure. Probes
+# must ask `is_oom` instead of naming an exception class.
+_OOM_MESSAGE = "out of memory"
+
+
+def is_oom(exc: BaseException, device: torch.device) -> bool:
+    """Whether ``exc`` is ``device``'s allocator refusing an allocation.
+
+    Covers the vendor exception class where one exists, torch's generic
+    ``OutOfMemoryError``, and the message-only form that torch_npu raises.
+    """
+    if isinstance(exc, oom_error(device)):
+        return True
+    generic = getattr(torch, "OutOfMemoryError", None)
+    if generic is not None and isinstance(exc, generic):
+        return True
+    return isinstance(exc, RuntimeError) and _OOM_MESSAGE in str(exc).lower()
+
+
 def loss_metric_dtype(device: torch.device) -> torch.dtype:
     """Highest-precision loss telemetry dtype supported by its collective.
 

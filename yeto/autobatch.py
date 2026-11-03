@@ -26,6 +26,7 @@ import torch
 import torch.distributed as dist
 
 from . import accel
+from .losses import sft_loss
 
 log = logging.getLogger("learner")
 
@@ -145,9 +146,21 @@ def _probe_once(
             ids = torch.randint(0, vocab, (micro_batch, seq_len), device=device)
             if loss_forward is None:
                 out = model(input_ids=ids)
-                # Mirror native sft_loss's memory peak: the shifted f32
-                # logits copy dominates the loss computation.
-                loss = out.logits[:, :-1].float().sum()
+                # Run the native loss itself rather than a surrogate for it.
+                # A hand-rolled stand-in underestimates the peak: the f32
+                # logits copy is not the only full-size tensor, because
+                # F.cross_entropy keeps its log_softmax output alive for the
+                # backward. On a 151k-token vocabulary that missing tensor is
+                # another ~20 GB at micro-batch 4 x 8k tokens, enough for the
+                # probe to admit a size whose first real step then OOMs.
+                # All-ones weights make every position a target, which is the
+                # worst case over real packed blocks.
+                loss, _ = sft_loss(
+                    out.logits,
+                    ids,
+                    "cross_entropy",
+                    torch.ones_like(ids, dtype=out.logits.dtype),
+                )
             else:
                 # Optimized backends can have a materially different peak
                 # (notably fused linear CE, which never materializes logits).
@@ -219,7 +232,9 @@ def resolve_micro_batch_size(
                 size,
                 loss_forward=loss_forward,
             )
-        except accel.oom_error(device):
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is an OOM
+            if not accel.is_oom(exc, device):
+                raise
             ok = False
         accel.empty_cache(device)
         if world > 1:
