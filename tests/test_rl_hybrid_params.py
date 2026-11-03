@@ -213,3 +213,38 @@ def test_hybrid_flops_of_the_vl_config_counts_the_language_model():
     assert hf.forward_flops(vl, [512, 7]) == hf.forward_flops(llm, [512, 7])
     # ~12B active parameters per token (model card: 120B total, 12B active)
     assert 11e9 < hf.forward_flops(vl, [1]) / 2 < 14e9
+
+
+def test_ascend_peak_and_unknown_devices():
+    from yeto.rl import hybrid_flops as hf
+
+    assert hf.peak_flops("910B3") == pytest.approx(313e12)
+    assert hf.mfu(NANO, [1000], 1.0, 24, gpu="910B3") == pytest.approx(
+        hf.train_flops(NANO, [1000]) / (24 * 313e12))
+    with pytest.raises(ValueError, match="no BF16 peak"):
+        hf.peak_flops("910B")
+
+
+def test_round_mfu_separates_the_train_step_from_the_round_wall(tmp_path):
+    import json
+
+    from yeto.rl import hybrid_flops as hf
+
+    events = [
+        {"event": "rl_round_trained", "rollout_id": 0, "step_seconds": 100.0, "tok_per_s": 3800.0},
+        {"event": "rl_round_phases", "rollout_id": 0, "wall_seconds": 400.0, "trained_tokens": 380_000,
+         "phase_seconds": {"generate": 30.0, "train": 100.0, "publish": 270.0}},
+        {"event": "rl_round_trained", "rollout_id": 1, "step_seconds": 50.0, "tok_per_s": 1000.0},
+    ]
+    rows = hf.round_mfu(events, flops_per_token=7.34e10, n_gpus=24, gpu="910B3")
+    peak = 24 * 313e12
+    assert rows[0]["step_mfu"] == pytest.approx(380_000 * 7.34e10 / (100 * peak))
+    assert rows[0]["wall_mfu"] == pytest.approx(rows[0]["step_mfu"] / 4)
+    assert rows[0]["phase_seconds"]["publish"] == 270.0
+    # an older tape without rl_round_phases: tokens from tok_per_s, no wall MFU
+    assert rows[1]["tokens"] == pytest.approx(50_000) and rows[1]["wall_mfu"] is None
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text("\n".join(json.dumps(e) for e in events))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(NANO))
+    assert hf.main([str(tape), "--config", str(cfg), "--gpus", "24", "--gpu", "910B3"]) == 0

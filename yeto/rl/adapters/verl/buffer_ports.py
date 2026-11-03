@@ -77,7 +77,7 @@ from typing import Any
 from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.merged_release import (BufferLane, MergedReleaseGuard, ResumedReleases, is_publisher,
                                            merged_version, resumed_releases)
-from yeto.rl.engine.policy_release import FULL, PolicyReleaseStore
+from yeto.rl.engine.policy_release import FULL, BackgroundReleaser, PolicyReleaseStore
 from yeto.rl.engine.sample_buffer import buffer_dir, write_read_position
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 
@@ -233,7 +233,7 @@ class BufferReleasePublisher:
                  weights: Callable[[Any], ReleaseWeights] | None = None,
                  staging: str | Path | None = None, delta: Any = None,
                  resumed: ResumedReleases | None = None, no_release: bool = False,
-                 release_only: Iterable[int] | None = None) -> None:
+                 release_only: Iterable[int] | None = None, background: bool = False) -> None:
         """``no_release`` (``--rl-measure-no-release``): a measurement run
         (memory, MFU) writes no policy release at all. One release of the 120B is about
         225 GB written and a dozen minutes per round, which answers nothing such a run
@@ -251,9 +251,20 @@ class BufferReleasePublisher:
         writing it into the store (module doc, delta releases); ``delta``: the
         :class:`~yeto.rl.engine.policy_release.DeltaChain` those staged releases
         follow (:func:`delta_chain_for`), which needs ``staging``; ``resumed``: the
-        version account this process continues (module doc, relaunch)."""
+        version account this process continues (module doc, relaunch).
+
+        ``background`` (``--rl-release-background``): a staged release writes its
+        weights on the training thread, as before (the next optimizer step changes
+        them), but encodes, digests and uploads them on a worker thread while the
+        next rounds train. One release is in flight at most: the next publication
+        that releases (or :meth:`close`) waits for it first and then puts its
+        record, events and heartbeat on the tape. A failed background release
+        raises there. Single trainer only (a synced trainer's peers wait for
+        the release)."""
         if delta is not None and staging is None:
             raise ValueError("delta releases need a staging directory")
+        if background and (staging is None or lane is not None):
+            raise ValueError("--rl-release-background needs staged releases on a single trainer")
         self.resumed = resumed
         self.staging = None if staging is None else Path(staging)
         self.delta = delta
@@ -273,6 +284,12 @@ class BufferReleasePublisher:
                              "peers wait for its releases")
         self.no_release = bool(no_release)
         self.release_only = None if release_only is None else frozenset(int(v) for v in release_only)
+        self.background = bool(background)
+        self.releaser = BackgroundReleaser("verl-policy-release") if self.background else None
+        # the release in flight: (its record so far, its start, the worker's result)
+        self._pending: tuple[dict[str, Any], float, dict[str, Any]] | None = None
+        # publication records that came after the release in flight (committed by flush)
+        self._deferred: list[tuple[dict[str, Any], Any, dict[str, Any]]] = []
 
     def bind(self, driver: Any) -> None:
         """The island's driver (synced trainers read its outer version; a resumed
@@ -339,31 +356,35 @@ class BufferReleasePublisher:
         """Write the release into a staging directory and publish it from there,
         as the delta against the chain's base when it has one (module doc).
         The staged directory stays only while it is the next delta's base."""
-        import shutil
-        import tempfile
+        staged = self._write_staged(version, write)
+        return self._upload_staged(version, digest, staged, position, shards, self._origin(state))
 
-        self.staging.mkdir(parents=True, exist_ok=True)
-        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+    def _upload_staged(self, version: int, digest: str, staged: Path, position: int | None,
+                       shards: dict[str, int] | None, origin: dict[str, Any] | None):
+        """The part of a staged release after the weights are written: the delta,
+        the digests and the upload (on the worker thread under ``background``).
+        Returns ``(release, delta event fields)``; the caller emits the event."""
+        import shutil
+
         base = None if self.delta is None else self.delta.base()
         kept = False
         try:
-            write(staged)
             release = self.releases.release_staged(
                 version, digest, staged, position=lambda: (position, shards),
-                weights=FULL, origin=self._origin(state), delta_base=base,
+                weights=FULL, origin=origin, delta_base=base,
                 digest_full=self.delta is not None)
             kept = self.delta is not None and self.delta.advance(release, staged)
         finally:
             if not kept:
                 shutil.rmtree(staged, ignore_errors=True)
         delta = None if release is None else release.delta
-        self.island.emit("rl_policy_release_delta", policy_version=int(version),
-                         base_seq=None if delta is None else delta["base_seq"],
-                         base_version=None if delta is None else delta["base_version"],
-                         ratio=None if delta is None else delta["ratio"],
-                         bytes=None if release is None else sum(int(v) for v in (release.files or {}).values()),
-                         timings=self.releases.last_timings)
-        return release
+        event = dict(policy_version=int(version),
+                     base_seq=None if delta is None else delta["base_seq"],
+                     base_version=None if delta is None else delta["base_version"],
+                     ratio=None if delta is None else delta["ratio"],
+                     bytes=None if release is None else sum(int(v) for v in (release.files or {}).values()),
+                     timings=dict(self.releases.last_timings))
+        return release, event
 
     def _origin(self, state: Any) -> dict[str, Any] | None:
         # A release whose policy hash is an identity label (an unverified round
@@ -392,16 +413,89 @@ class BufferReleasePublisher:
         position = self.feed.read_cursor()
         shards = self.feed.read_shards()
         released = self._release_version(state)
-        if released is not None and not weights.is_base(released):
+        releasing = released is not None and not weights.is_base(released)
+        if releasing:
+            self.flush()  # the release in flight first: the store and the delta chain are serial
             def write(directory: Path) -> None:
                 merge.update(weights.write(directory))
 
-            if self.staging is not None:
-                release = self._release_from_staging(released, digest, write, position, shards, state)
+            if self.staging is not None and self.background:
+                staged = self._write_staged(released, write)
+                written = round(self.clock() - started, 3)
+                record = self._record(state, version, param_version, digest, position, shards,
+                                      None, merge, started)
+                record.update(released="pending", write_seconds=written)
+                result: dict[str, Any] = {}
+                origin = self._origin(state)  # on this thread: the worker never reads ``state``
+
+                def upload() -> None:
+                    result["release"], result["event"] = self._upload_staged(
+                        released, digest, staged, position, shards, origin)
+
+                self.releaser.submit(upload)
+                self._pending = (record, started, result)
+                isl.emit("rl_policy_release_background", policy_version=int(released),
+                         write_seconds=written)
+                return self._finish_publication(version, param_version, digest, None, weights)
+            elif self.staging is not None:
+                release, event = self._release_from_staging(released, digest, write, position, shards, state)
+                isl.emit("rl_policy_release_delta", **event)
             else:
                 release = self.releases.release(released, digest, write, buffer_selected=position,
                                                 buffer_shards=shards, weights=FULL,
                                                 origin=self._origin(state))
+        record = self._record(state, version, param_version, digest, position, shards, release,
+                              merge, started)
+        if self._pending is not None:  # after the release in flight: the log stays in version order
+            self._deferred.append((record, release, merge))
+        else:
+            self._commit_record(record, release, merge)
+        return self._finish_publication(version, param_version, digest, record.get("path"), weights,
+                                        record.get("payload_bytes"))
+
+    # -- background releases ------------------------------------------------
+    def _write_staged(self, version: int, write: Callable[[Path], None]) -> Path:
+        import shutil
+        import tempfile
+
+        self.staging.mkdir(parents=True, exist_ok=True)
+        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging))
+        try:
+            write(staged)
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+        return staged
+
+    def flush(self) -> None:
+        """Wait for the background release in flight (if any) and put its record,
+        events and heartbeat on the tape; its error, if it failed, raises here."""
+        if self._pending is None:
+            return
+        record, started, result = self._pending
+        self._pending = None
+        waited = self.releaser.wait()
+        release = result["release"]
+        self.island.emit("rl_policy_release_delta", **result["event"])
+        # seconds: publication start to upload end; wait_seconds: how long the
+        # training thread blocked on it (0 when the upload hid behind training)
+        record.update(released=release is not None, seconds=round(self.clock() - started, 3),
+                      wait_seconds=round(waited, 3))
+        self._commit_record(record, release, record.get("merge") or {})
+        deferred, self._deferred = self._deferred, []
+        for args in deferred:
+            self._commit_record(*args)
+
+    def close(self) -> None:
+        """The end of the run: the release in flight goes out before the island reports done."""
+        self.flush()
+
+    # -- records ------------------------------------------------------------
+    def _record(self, state: Any, version: int, param_version: int, digest: str,
+                position: int | None, shards: dict[str, int] | None, release: Any,
+                merge: dict[str, Any], started: float) -> dict[str, Any]:
+        """The publication log line (``RELEASE_LOG``) before the release fields."""
+        isl = self.island
         # Under --rl-verify-every N a round the driver does not verify carries
         # an identity label (policy_digest.unverified_identity), not a content hash. Say
         # which one this is, so nothing downstream takes the label for the weights' hash.
@@ -414,6 +508,14 @@ class BufferReleasePublisher:
         if self.lane is not None:
             record.update(merged_version=merged_version(self.driver, state),
                           merged_versions=self.feed.merged.to_dict())
+        return record
+
+    def _commit_record(self, record: dict[str, Any], release: Any, merge: dict[str, Any]) -> None:
+        """The release event, the publication log line and the heartbeat release."""
+        isl = self.island
+        version, digest = int(record["policy_version"]), record["policy_hash"]
+        position = record["buffer_selected"]
+        verified = bool(record["policy_hash_verified"])
         if release is not None:
             record.update(seq=release.seq, path=release.path, release_version=release.version,
                           payload_bytes=sum(int(v) for v in (release.files or {}).values()))
@@ -425,17 +527,23 @@ class BufferReleasePublisher:
                      max_relative_change=merge.get("max_relative_change"),
                      seconds=record["seconds"])
         isl.append_jsonl(RELEASE_LOG.format(learner=isl.learner_id), record)
+        if release is not None:
+            isl.heartbeat_release = {"seq": int(release.seq), "policy_hash": str(release.policy_hash)}
+
+    def _finish_publication(self, version: int, param_version: int, digest: str,
+                            path: str | None, weights: ReleaseWeights,
+                            payload_bytes: int | None = None) -> PublicationResult:
+        isl = self.island
         isl.emit("rl_verl_version_map", param_version=param_version, outer_version=version)
         isl.published = (version, digest)
         isl.hashes[version] = digest
-        if release is not None:
-            isl.heartbeat_release = {"seq": int(release.seq), "policy_hash": str(release.policy_hash)}
         manifest = InferencePublicationManifest(
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),
-            payload_hash=_sha(json.dumps({"release": record.get("path"), "hash": digest})),
-            # the release's files, or (nothing released) the weights' fallback size
-            payload_bytes=int(record.get("payload_bytes") or weights.fallback_bytes),
+            payload_hash=_sha(json.dumps({"release": path, "hash": digest})),
+            # the release's files, or (nothing released, or still uploading) the
+            # weights' fallback size
+            payload_bytes=int(payload_bytes or weights.fallback_bytes),
             complete=True)
         return PublicationResult(manifest, frozenset({MEMBER}))
 
@@ -455,7 +563,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          weights: Callable[[Any], ReleaseWeights] | None = None,
                          staging: str | Path | None = None, delta_full_every: int = 0,
                          resume_versions: bool = False, no_release: bool = False,
-                         release_only: Iterable[int] | None = None,
+                         release_only: Iterable[int] | None = None, release_background: bool = False,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -530,5 +638,5 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                                        weights=weights,
                                        staging=staging if int(delta_full_every) > 0 else None,
                                        delta=delta, resumed=resumed, no_release=no_release,
-                                       release_only=release_only)
+                                       release_only=release_only, background=release_background)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

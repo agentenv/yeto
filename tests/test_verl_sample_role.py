@@ -405,3 +405,37 @@ def test_without_verify_every_every_release_is_verified(tmp_path, verl_trainer):
     assert not [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_verify_every_wired"]
     releases = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
     assert all(r["policy_hash_verified"] for r in releases)
+
+
+def test_a_failing_run_still_closes_the_buffer_publisher(tmp_path, verl_trainer, monkeypatch):
+    """A background release in flight is flushed (record, events) even when the
+    driver raises; a close error goes on the tape and the run's own error is raised."""
+    from yeto.rl.adapters.verl import round_cuts
+
+    actor = FullBufferActor(seed=0)
+    base = _full_base(tmp_path, actor.model)
+    store = CheckpointStore(tmp_path / "store")
+    plan = _plan(tmp_path, base, rounds=1, groups=1)
+    closed = []
+
+    def ports(island):
+        rollout, publisher, placement = install_buffer_ports(
+            island, buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+            releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
+            tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, weights=release_weights_for(island, plan))
+
+        def close():
+            closed.append(True)
+            raise RuntimeError("upload failed")
+
+        publisher.close = close
+        return rollout, publisher, placement
+
+    def boom(driver, resume, **kw):
+        raise KeyboardInterrupt("cut")
+
+    monkeypatch.setattr(round_cuts, "run_driver", boom)
+    with pytest.raises(KeyboardInterrupt):
+        verl_trainer.run_fully_async_island(actor, None, plan, {}, buffer_ports=ports)
+    assert closed == [True]
+    assert [e for e in _lines(tmp_path / "tape.jsonl") if e["event"] == "rl_policy_release_close_failed"]

@@ -30,7 +30,9 @@ from typing import Any
 from .hybrid_params import hybrid_pattern, language_model_config
 
 # Dense BF16 peak, no sparsity (NVIDIA H100/H200 SXM datasheets: 989.4 TFLOPS).
-PEAK_BF16_TFLOPS = {"H100": 989.4, "H200": 989.4}
+# Ascend 910B3: 313 TFLOPS FP16/BF16 cube peak, the denominator every Ascend MFU
+# figure of this project uses (SFT 18.6%, RL 11-14%), so the numbers stay comparable.
+PEAK_BF16_TFLOPS = {"H100": 989.4, "H200": 989.4, "910B3": 313.0}
 
 
 def _get(cfg: Mapping[str, Any], key: str, default: Any = None) -> Any:
@@ -83,6 +85,82 @@ def train_flops(cfg: Mapping[str, Any], seqlens: Iterable[int]) -> float:
     return 3.0 * forward_flops(cfg, seqlens)
 
 
+def peak_flops(gpu: str) -> float:
+    """Dense BF16 peak FLOP/s of one device (``PEAK_BF16_TFLOPS``)."""
+    try:
+        return PEAK_BF16_TFLOPS[gpu] * 1e12
+    except KeyError:
+        raise ValueError(f"no BF16 peak for device {gpu!r}; known: {sorted(PEAK_BF16_TFLOPS)}") from None
+
+
 def mfu(cfg: Mapping[str, Any], seqlens: Iterable[int], seconds: float, n_gpus: int, gpu: str = "H200") -> float:
     """Model FLOPs utilization of a training phase that processed ``seqlens`` in ``seconds``."""
-    return train_flops(cfg, seqlens) / (seconds * n_gpus * PEAK_BF16_TFLOPS[gpu] * 1e12)
+    return train_flops(cfg, seqlens) / (seconds * n_gpus * peak_flops(gpu))
+
+
+def round_mfu(events: Iterable[Mapping[str, Any]], *, flops_per_token: float, n_gpus: int,
+              gpu: str) -> list[dict[str, Any]]:
+    """Per-round MFU of a trainer tape, two ways.
+
+    ``step_mfu`` divides the round's training FLOPs by the train step alone
+    (``rl_round_trained.step_seconds``: forward, backward, the old-log-prob pass and
+    the optimizer); ``wall_mfu`` divides them by the whole round
+    (``rl_round_phases.wall_seconds``: also the wait for samples, the sync, the
+    export and the publication), which is what the cards actually delivered.
+    ``flops_per_token``: training FLOPs per token (``train_flops(cfg, [L]) / L`` at
+    the batch's typical length). A round without ``rl_round_phases`` (older
+    tapes) has ``wall_mfu`` None."""
+    peak = peak_flops(gpu) * int(n_gpus)
+    trained: dict[int, Mapping[str, Any]] = {}
+    phases: dict[int, Mapping[str, Any]] = {}
+    for event in events:
+        name, rid = event.get("event"), event.get("rollout_id")
+        if rid is None:
+            continue
+        if name == "rl_round_trained":
+            trained[int(rid)] = event
+        elif name == "rl_round_phases":
+            phases[int(rid)] = event
+    out = []
+    for rid in sorted(trained):
+        row = trained[rid]
+        step = row.get("step_seconds")
+        tokens = phases.get(rid, {}).get("trained_tokens")
+        if tokens is None and step and row.get("tok_per_s") is not None:
+            tokens = float(row["tok_per_s"]) * float(step)
+        wall = phases.get(rid, {}).get("wall_seconds")
+        flops = None if tokens is None else float(tokens) * float(flops_per_token)
+        out.append({
+            "rollout_id": rid, "tokens": tokens, "step_seconds": step, "wall_seconds": wall,
+            "step_mfu": flops / (float(step) * peak) if flops is not None and step else None,
+            "wall_mfu": flops / (float(wall) * peak) if flops is not None and wall else None,
+            "phase_seconds": phases.get(rid, {}).get("phase_seconds"),
+        })
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m yeto.rl.hybrid_flops TAPE --config config.json --gpus 24 --gpu 910B3``:
+    one JSON line per trained round (``round_mfu``)."""
+    import argparse
+    import json
+    from pathlib import Path
+
+    p = argparse.ArgumentParser(description=main.__doc__)
+    p.add_argument("tape")
+    p.add_argument("--config", required=True, help="the model's HF config.json")
+    p.add_argument("--gpus", type=int, required=True)
+    p.add_argument("--gpu", required=True, choices=sorted(PEAK_BF16_TFLOPS))
+    p.add_argument("--seq-len", type=int, default=16384,
+                   help="typical sample length for the attention term (default 16384)")
+    args = p.parse_args(argv)
+    cfg = json.loads(Path(args.config).read_text())
+    per_token = train_flops(cfg, [args.seq_len]) / args.seq_len
+    events = [json.loads(line) for line in Path(args.tape).read_text().splitlines() if line.strip()]
+    for row in round_mfu(events, flops_per_token=per_token, n_gpus=args.gpus, gpu=args.gpu):
+        print(json.dumps(row, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

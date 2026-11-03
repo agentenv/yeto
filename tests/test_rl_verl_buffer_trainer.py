@@ -235,7 +235,7 @@ class FakeBufferActor:
 
 
 def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None, limit=1,
-             releases=None, resume_versions=False, no_release=False, release_only=None):
+             releases=None, resume_versions=False, no_release=False, release_only=None, **ports):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -258,7 +258,7 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None,
         island, buffer=buffer,
         releases=releases or PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
         tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, resume_versions=resume_versions,
-        no_release=no_release, release_only=release_only)
+        no_release=no_release, release_only=release_only, **ports)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
     driver = IslandDriver(
         learner_id=0, rollout=rollout, trainer=FullyAsyncTrainerGroup(island), policy_state=VerlPolicyState(island),
@@ -266,6 +266,7 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None,
         capabilities=verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1),
         algorithm=TOLERANT, sync=LocalOnlySync(rounds), events=tape, profile=profile)
     publisher.bind(driver)  # as trainer.run_fully_async_island does for a buffer trainer
+    driver.round_phases = True  # as trainer.run_fully_async_island does
     return driver, island, publisher
 
 
@@ -769,6 +770,109 @@ def test_a_run_releases_only_the_listed_versions(tmp_path):
     assert beat["release"] is None  # no release existed when it last read
 
 
+def _staged_run(tmp_path, *, background):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i in range(4):
+        writer.write([_sample(0, index=0), _sample(0, index=1)], group_key=f"g{i}")
+    driver, island, publisher = _trainer(
+        tmp_path, store_dir, FakeBufferActor(), rounds=2, required=2, base=base,
+        buffer=FileSampleBuffer(store, batch_size=1, create_index=False), releases=releases,
+        staging=tmp_path / "staging", delta_full_every=4, release_background=background)
+    state = driver.run()
+    publisher.close()  # as trainer.run_fully_async_island does after the driver returns
+    return driver, state, releases, _lines(tmp_path / "tape.jsonl"), _lines(island.out / RELEASE_LOG.format(learner=0))
+
+
+def test_background_releases_match_the_inline_ones(tmp_path):
+    """--rl-release-background: the training thread writes each staged release and
+    returns; the upload runs on a worker and its record lands at the next release
+    (or close). Same releases, same order, same log lines as the inline path."""
+    inline = _staged_run(tmp_path / "inline", background=False)
+    background = _staged_run(tmp_path / "background", background=True)
+    for driver, state, releases, events, log in (inline, background):
+        assert driver.rounds_completed == 2 and state.policy_version == 2
+        assert [r.version for r in releases.records()] == [1, 2]
+        assert [e["policy_version"] for e in events if e["event"] == "rl_policy_released"] == [1, 2]
+        assert [e["policy_version"] for e in events if e["event"] == "rl_policy_release_delta"] == [1, 2]
+        assert [r["released"] for r in log if r["policy_version"] > 0] == [True, True]
+    keys = ("policy_version", "policy_hash", "released", "seq", "path", "payload_bytes")
+    assert ([{k: r.get(k) for k in keys} for r in inline[4]]
+            == [{k: r.get(k) for k in keys} for r in background[4]])
+    bg_events = background[3]
+    assert [e["policy_version"] for e in bg_events if e["event"] == "rl_policy_release_background"] == [1, 2]
+    assert not [e for e in inline[3] if e["event"] == "rl_policy_release_background"]
+    # v1's record is put when v2's publication waits for it, before v2 starts its upload
+    order = [(e["event"], e["policy_version"]) for e in bg_events
+             if e["event"] in ("rl_policy_released", "rl_policy_release_background")]
+    assert order == [("rl_policy_release_background", 1), ("rl_policy_released", 1),
+                     ("rl_policy_release_background", 2), ("rl_policy_released", 2)]
+    assert all("wait_seconds" in r and "write_seconds" in r for r in background[4] if r["policy_version"] > 0)
+
+
+def test_a_failed_background_release_raises_at_the_next_one(tmp_path):
+    from yeto.rl.engine.policy_release import PolicyReleaseError
+
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i in range(4):
+        writer.write([_sample(0, index=0), _sample(0, index=1)], group_key=f"g{i}")
+    calls = []
+    original = releases.release_staged
+
+    def flaky(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 1:
+            raise OSError("store unreachable")
+        return original(*args, **kwargs)
+
+    releases.release_staged = flaky
+    driver, _island, _publisher = _trainer(
+        tmp_path, store_dir, FakeBufferActor(), rounds=2, required=2, base=base,
+        buffer=FileSampleBuffer(store, batch_size=1, create_index=False), releases=releases,
+        staging=tmp_path / "staging", delta_full_every=4, release_background=True)
+    with pytest.raises(PolicyReleaseError, match="store unreachable"):
+        driver.run()
+    assert calls == [1]  # v2 was never uploaded over a failed v1
+    assert releases.latest() is None
+
+
+def test_background_releases_need_staging_on_a_single_trainer(tmp_path):
+    with pytest.raises(ValueError, match="--rl-release-background"):
+        BufferReleasePublisher(SimpleNamespace(), None, None, base_dir=tmp_path, background=True)
+
+
+def test_release_background_is_planned_from_the_flag():
+    from yeto.rl.adapters.verl.island_entry import sample_buffer_section
+
+    common = ("--rl-sample-role", "trainer", "--rl-resume-store", "/s", "--rl-single-island-no-sync",
+              "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60")
+    assert "release_background" not in sample_buffer_section(_entry_args(*common))
+    assert sample_buffer_section(_entry_args(*common, "--rl-release-background"))["release_background"] is True
+
+
+def test_every_round_puts_its_time_breakdown_on_the_tape(tmp_path):
+    """rl_round_phases: the wall seconds of each driver phase per round (the wait for
+    samples, train, sync, publish), and the trained tokens, for MFU per round."""
+    _driver, _state, _releases, events, _log = _staged_run(tmp_path, background=False)
+    rounds = [e for e in events if e["event"] == "rl_round_phases"]
+    trained = {e["rollout_id"]: e for e in events if e["event"] == "rl_round_trained"}
+    assert [e["rollout_id"] for e in rounds] == sorted(trained) == [0, 1]
+    for row in rounds:
+        phases = row["phase_seconds"]
+        assert {"train", "publish"} <= set(phases)
+        assert row["wall_seconds"] == pytest.approx(sum(phases.values()), abs=0.01)
+        assert phases["train"] >= row["train_seconds"] - 0.01
+        assert row["trained_tokens"] > 0 and 0 < row["train_fraction"] <= 1.0
+
+
 def test_release_only_versions_is_planned_from_the_flag():
     from yeto.rl.adapters.verl.island_entry import sample_buffer_section
 
@@ -939,3 +1043,36 @@ def test_the_default_feed_emitter_prints_a_yeto_rl_event(capsys):
     bf.print_feed_event("rl_buffer_group_dropped", island_id=1, reason="short_group", count=1)
     line = capsys.readouterr().out.strip()
     assert line.startswith(PREFIX) and '"event":"rl_buffer_group_dropped"' in line
+
+
+def test_background_release_log_stays_in_version_order_and_the_worker_never_reads_state(tmp_path, monkeypatch):
+    """A publication that releases nothing while a background release is in flight
+    puts its log line after that release's (flush); the release origin is computed
+    on the training thread."""
+    import threading
+
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i in range(6):  # the last round's groups come from v1 (policy-age window 1)
+        writer.write([_sample(i // 4, index=0), _sample(i // 4, index=1)], group_key=f"g{i}")
+    driver, island, publisher = _trainer(
+        tmp_path, store_dir, FakeBufferActor(), rounds=3, required=2, base=base,
+        buffer=FileSampleBuffer(store, batch_size=1, create_index=False), releases=releases,
+        release_only=[1, 3], staging=tmp_path / "staging", delta_full_every=4, release_background=True)
+    origin_threads = []
+    original = publisher._origin
+
+    def origin(state):
+        origin_threads.append(threading.current_thread() is threading.main_thread())
+        return original(state)
+
+    monkeypatch.setattr(publisher, "_origin", origin)
+    driver.run()
+    publisher.close()
+    log = _lines(island.out / RELEASE_LOG.format(learner=0))
+    assert [r["policy_version"] for r in log] == sorted(r["policy_version"] for r in log)
+    assert [r["policy_version"] for r in log if r["released"] is True] == [1, 3]
+    assert origin_threads and all(origin_threads)
