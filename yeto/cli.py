@@ -265,12 +265,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     tune.add_argument(
         "--kernel-backend",
-        choices=["native", "liger"],
+        choices=["native", "liger", "chunked"],
         default="native",
-        help="causal SFT loss kernel: native (default) or the pinned, "
-        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
-        "model layers remain native; the fused lane currently requires "
-        "--tuning lora --shard ddp",
+        help="causal SFT loss kernel: native (default), the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane "
+        "(CUDA, --tuning lora --shard ddp), or chunked: a device-agnostic "
+        "linear+CE that never materializes full-sequence logits "
+        "(any device including Ascend, --shard ddp); model layers remain native",
+    )
+    tune.add_argument(
+        "--gradient-checkpointing",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="learner activation recomputation; 'auto' (default) enables it "
+        "when the loaded base occupies more than half of VRAM; long-context "
+        "runs on small models usually need 'on'",
+    )
+    tune.add_argument(
+        "--loss-chunk-tokens",
+        type=int,
+        default=4096,
+        help="tokens per logits chunk for --kernel-backend chunked; peak "
+        "loss memory is about chunk * vocab * 12 bytes",
     )
 
     def int_or_auto(value: str):

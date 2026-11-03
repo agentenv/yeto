@@ -47,6 +47,11 @@ from .data import StreamingPackedBlocks, build_packed_dataset
 from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from .finalization import finalize_torch_island
 from .fragments import build_layout
+from .chunked_ce import (
+    DEFAULT_LOSS_CHUNK_TOKENS,
+    chunked_sft_forward,
+    require_chunked_ce_support,
+)
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .wandb_logger import TELEMETRY_EVERY
 from .models import MODEL_ALIASES as MODEL_ALIASES
@@ -121,10 +126,18 @@ def parse_args(argv=None):
         "--kernel-backend",
         choices=KERNEL_BACKENDS,
         default="native",
-        help="causal SFT loss kernel: native (default) or the pinned, "
-        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
-        "model layers remain native; the fused lane currently requires "
-        "--tuning lora --shard ddp",
+        help="causal SFT loss kernel: native (default), the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane "
+        "(CUDA, --tuning lora --shard ddp), or chunked: a device-agnostic "
+        "linear+CE that never materializes full-sequence logits "
+        "(any device, --shard ddp); model layers remain native",
+    )
+    p.add_argument(
+        "--loss-chunk-tokens",
+        type=int,
+        default=DEFAULT_LOSS_CHUNK_TOKENS,
+        help="tokens per logits chunk for --kernel-backend chunked; peak "
+        "loss memory is about chunk * vocab * 12 bytes",
     )
     p.add_argument(
         "--train-on",
@@ -517,6 +530,10 @@ def load_model_and_tokenizer(args, device):
         model.to(device)
     if kernel_backend == "liger":
         validate_lora_production_envelope(model)
+    if kernel_backend == "chunked":
+        log.info("chunked linear-CE loss: %s chunk_tokens=%d",
+                 require_chunked_ce_support(model),
+                 getattr(args, "loss_chunk_tokens", DEFAULT_LOSS_CHUNK_TOKENS))
     return model, tokenizer
 
 
@@ -963,6 +980,12 @@ def main(argv=None) -> None:
             weights = torch.ones_like(input_ids, dtype=torch.float32)
             loss, _ = liger_sft_forward(probe_model, input_ids, weights)
             return loss
+    elif getattr(args, "kernel_backend", "native") == "chunked":
+        def probe_loss_forward(probe_model, input_ids):
+            loss, _ = chunked_sft_forward(
+                probe_model, input_ids, chunk_tokens=args.loss_chunk_tokens
+            )
+            return loss
 
     args.micro_batch_size = resolve_micro_batch_size(
         args,
@@ -1225,7 +1248,7 @@ def run_inner_loop(
     # c_tokens uses tokens_total, which advances by the exact island-global
     # raw-token count accepted into each optimizer step.
     kernel_backend = getattr(args, "kernel_backend", "native")
-    if kernel_backend == "liger":
+    if kernel_backend in ("liger", "chunked"):
         compute_loss = None
     elif args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(
@@ -1304,6 +1327,11 @@ def run_inner_loop(
                 if kernel_backend == "liger":
                     loss, batch_target_tokens = liger_sft_forward(
                         model, input_ids, weights
+                    )
+                elif kernel_backend == "chunked":
+                    loss, batch_target_tokens = chunked_sft_forward(
+                        model, input_ids, weights,
+                        chunk_tokens=args.loss_chunk_tokens,
                     )
                 else:
                     out = model(input_ids=input_ids)
